@@ -28,10 +28,17 @@ jobs:
         with:
           version: 0.4.3
 
-      # The actual coverage gate. `duvet report --ci` only diffs the committed
+      # The coverage gate. `duvet report --ci` only diffs the committed
       # snapshot — duvet skips its own coverage enforcement whenever a snapshot
       # path is configured — so without this step a requirement with no citing
       # annotation would pass CI unnoticed.
+      #
+      # ⚠️ This step is VACUOUS until specs are registered in
+      # .duvet/config.toml. With no [[specification]] entries duvet loads 0
+      # specifications and exits 0 having checked nothing, so a green run here
+      # is not evidence that any requirement is traced. See the header comment
+      # in .duvet/config.toml for why they are deliberately unregistered and
+      # when to register them.
       - name: Verify every requirement is implemented
         run: duvet query -c implementation
 
