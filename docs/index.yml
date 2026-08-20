@@ -1,0 +1,143 @@
+# Documentation Index
+# Auto-updated by /spec-writer and /project-management skills
+
+specs:
+  - name: architecture
+    path: specs/architecture/
+    description: Workspace layout, tooling, versioning, CI gates, testing conventions, repository hygiene and documentation conventions
+    status: active
+  - name: robot-link
+    path: specs/robot-link/
+    description: The wire contract between robot and groundstation — session, capability negotiation, framing, backpressure and reconnection
+    status: active
+  - name: groundstation
+    path: specs/groundstation/
+    description: The off-robot service hosting heavy computation as pluggable capabilities
+    status: active
+  - name: perception
+    path: specs/perception/
+    description: Face and gesture detection — model licensing, detection semantics and accuracy requirements
+    status: active
+  - name: ha-satellite
+    path: specs/ha-satellite/
+    description: The robot-side ESPHome voice satellite for Home Assistant
+    status: active
+  - name: reachyctl
+    path: specs/reachyctl/
+    description: The command-line tool for deploying, configuring and diagnosing a robot
+    status: active
+  - name: provisioning
+    path: specs/provisioning/
+    description: Idempotent Ansible provisioning from a stock robot image to a configured state
+    status: active
+  - name: benchmarks
+    path: specs/benchmarks/
+    description: The performance suite, its recorded baseline and the regression gates
+    status: active
+
+changes:
+  - id: "0001"
+    name: workspace-skeleton
+    path: changes/0001-workspace-skeleton.md
+    description: uv workspace, pinned toolchain, task surface and agent documentation entry points
+    spec: architecture
+    status: draft
+    depends_on: []
+  - id: "0002"
+    name: ci-and-hygiene-gates
+    path: changes/0002-ci-and-hygiene-gates.md
+    description: Quality gates, generic leak detection, secret scanning and release version derivation
+    spec: architecture
+    status: draft
+    depends_on: ["0001"]
+  - id: "0003"
+    name: contracts-package
+    path: changes/0003-contracts-package.md
+    description: Shared wire types, golden fixtures and schema generation
+    spec: robot-link
+    status: draft
+    depends_on: ["0001"]
+  - id: "0004"
+    name: groundstation-session
+    path: changes/0004-groundstation-session.md
+    description: Transport, session layer, capability registry, pipeline and observability
+    spec: groundstation
+    status: draft
+    depends_on: ["0003"]
+  - id: "0005"
+    name: perception-capability
+    path: changes/0005-perception-capability.md
+    description: Model runtime, pinned model store, YuNet face detection with parity test, and gesture recognition
+    spec: perception
+    status: draft
+    depends_on: ["0004"]
+  - id: "0006"
+    name: groundstation-images
+    path: changes/0006-groundstation-images.md
+    description: Multi-architecture container images with a CUDA variant, published to GHCR
+    spec: groundstation
+    status: draft
+    depends_on: ["0004"]
+  - id: "0007"
+    name: reachyctl-probe
+    path: changes/0007-reachyctl-probe.md
+    description: CLI skeleton and the shared session client behind probe
+    spec: reachyctl
+    status: draft
+    depends_on: ["0003", "0004"]
+  - id: "0008"
+    name: reachyctl-doctor
+    path: changes/0008-reachyctl-doctor.md
+    description: End-to-end diagnosis built on a check registry shared with provisioning
+    spec: reachyctl
+    status: draft
+    depends_on: ["0007"]
+  - id: "0009"
+    name: reachyctl-deploy-and-config
+    path: changes/0009-reachyctl-deploy-and-config.md
+    description: Verified deployment, configuration management with preview, and application lifecycle
+    spec: reachyctl
+    status: draft
+    depends_on: ["0008"]
+  - id: "0010"
+    name: provisioning-ansible
+    path: changes/0010-provisioning-ansible.md
+    description: Ansible roles with an enforced idempotency gate and shared verification checks
+    spec: provisioning
+    status: draft
+    depends_on: ["0009"]
+  - id: "0011"
+    name: satellite-esphome-vendoring
+    path: changes/0011-satellite-esphome-vendoring.md
+    description: Vendor the Apache-2.0 ESPHome satellite core with per-file provenance and cut the audio seams
+    spec: ha-satellite
+    status: draft
+    depends_on: ["0001"]
+  - id: "0012"
+    name: satellite-ports-and-adapters
+    path: changes/0012-satellite-ports-and-adapters.md
+    description: Audio, motion and perception ports with their Reachy adapters and test fakes
+    spec: ha-satellite
+    status: draft
+    depends_on: ["0003", "0011"]
+  - id: "0013"
+    name: satellite-behaviour-and-ui
+    path: changes/0013-satellite-behaviour-and-ui.md
+    description: Pure behaviour layer, settings interface, configuration handling and wheel packaging
+    spec: ha-satellite
+    status: draft
+    depends_on: ["0012"]
+  - id: "0014"
+    name: benchmarks-and-gates
+    path: changes/0014-benchmarks-and-gates.md
+    description: Benchmark suite, committed baseline and relative performance regression gates
+    spec: benchmarks
+    status: draft
+    depends_on: ["0005", "0006"]
+  - id: "0015"
+    name: docs-and-runbooks
+    path: changes/0015-docs-and-runbooks.md
+    description: Executed setup and operations runbooks, generated contracts and completed agent documentation
+    spec: architecture
+    status: draft
+    depends_on: ["0013", "0014"]

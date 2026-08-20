@@ -1,0 +1,37 @@
+name: Requirements traceability
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  duvet:
+    name: Requirements traceability
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Two independent pins. The action ref must be immutable like every other
+      # `uses:`; v0.4.2 is the newest tag awslabs/duvet has — there is no
+      # v0.4.3 tag even though crate 0.4.3 exists on crates.io. The action is a
+      # thin wrapper that installs the duvet crate at `version:`, so its own ref
+      # does not constrain that version. Pin `version:` explicitly: the action's
+      # default input is a stale 0.3.0.
+      - name: Install duvet
+        uses: awslabs/duvet@v0.4.2
+        with:
+          version: 0.4.3
+
+      # The actual coverage gate. `duvet report --ci` only diffs the committed
+      # snapshot — duvet skips its own coverage enforcement whenever a snapshot
+      # path is configured — so without this step a requirement with no citing
+      # annotation would pass CI unnoticed.
+      - name: Verify every requirement is implemented
+        run: duvet query -c implementation
+
+      # Re-derives the report and diffs it against the committed snapshot,
+      # failing if annotations and .duvet/snapshot.txt disagree.
+      - name: Verify requirement coverage snapshot
+        run: duvet report --ci
