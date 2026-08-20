@@ -70,12 +70,6 @@ What implementing them requires of this change:
   [REQ-059](../specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output),
   including the verbose and error paths where secrets usually escape.
 
-#### Scenario: Verbose output is requested with a credential configured
-
-- **GIVEN** a probe run with a credential configured and verbose output enabled
-- **WHEN** the session is established and traffic is logged
-- **THEN** the credential appears nowhere in the output
-
 ## Design
 
 ### Approach

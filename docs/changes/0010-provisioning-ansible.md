@@ -71,12 +71,6 @@ change's acceptance criteria. What implementing them requires of this change:
 - A removal path undoes everything the roles applied and restores stock
   behaviour.
 
-#### Scenario: The playbook runs against a container standing in for a robot
-
-- **GIVEN** a container image approximating the stock robot filesystem layout
-- **WHEN** CI applies the playbook twice
-- **THEN** the first application reports changes and the second reports none
-
 ## Design
 
 ### Approach

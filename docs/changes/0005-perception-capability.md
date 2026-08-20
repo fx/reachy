@@ -71,14 +71,6 @@ acceptance criteria. What implementing them requires of this change:
 - Detectors are independently switchable at run time, and disabling one produces
   ordinary results from the others rather than an error.
 
-#### Scenario: The pinned face model is swapped for a differently licensed one
-
-- **GIVEN** a change that repoints the face model registry entry at a model
-  whose recorded licence is copyleft
-- **WHEN** the licence check runs
-- **THEN** the check fails, because the recorded licence is not on the permitted
-  list
-
 ## Design
 
 ### Approach

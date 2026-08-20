@@ -70,20 +70,6 @@ implementing them requires of this change:
 - `.example` siblings are added for every untracked local file the repository
   will use, so the tracked tree documents their shape.
 
-#### Scenario: A private address appears only in a commit message
-
-- **GIVEN** a pull request whose file changes are clean but one commit message
-  contains an RFC 1918 address
-- **WHEN** the leak scan runs
-- **THEN** the check fails and names the offending commit
-
-#### Scenario: A documentation example uses a reserved address
-
-- **GIVEN** a runbook that documents a command using a documentation-reserved
-  address range
-- **WHEN** the leak scan runs
-- **THEN** the check passes
-
 ## Design
 
 ### Approach

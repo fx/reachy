@@ -64,13 +64,6 @@ implementing them requires of this change:
 - The published image is verified by starting it in CI and running a real
   session against it.
 
-#### Scenario: The image is started with no network access to the model source
-
-- **GIVEN** a built image on a host that cannot reach the model source
-- **WHEN** the container starts
-- **THEN** the service reaches readiness, because the models are already in the
-  image
-
 ## Design
 
 ### Approach

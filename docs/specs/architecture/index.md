@@ -92,16 +92,24 @@ tracked `.example` sibling documenting its shape.
 
 ### REQ-004: Automated leak detection on every change
 
-Continuous integration MUST reject a change whose diff matches a generic
-environment-leak pattern, where the pattern set describes shapes such as private
-IP ranges, internal hostname suffixes, and email addresses rather than any
-specific name.
+Continuous integration MUST reject a change whose diff or commit messages match
+a generic environment-leak pattern, where the pattern set describes shapes such
+as private IP ranges, internal hostname suffixes, and email addresses rather
+than any specific name.
 
 #### Scenario: A private address is committed
 
 - **GIVEN** a pull request that adds a line containing an RFC 1918 address
 - **WHEN** the leak scan runs
 - **THEN** the check fails and names the file and line
+
+#### Scenario: A private address appears only in a commit message
+
+- **GIVEN** a pull request whose file changes are clean but one commit message
+  contains an RFC 1918 address
+- **WHEN** the leak scan runs
+- **THEN** the check fails and names the offending commit, because a value in a
+  message cannot be retracted by a later file edit
 
 #### Scenario: A public address is committed
 

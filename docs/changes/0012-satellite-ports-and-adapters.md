@@ -73,13 +73,6 @@ implementing them requires of this change:
 - Frames are taken as hardware-encoded JPEG from the media interface and passed
   through without re-encoding.
 
-#### Scenario: The perception source is switched from remote to local
-
-- **GIVEN** a running application tracking a face through the groundstation
-- **WHEN** the detection source is switched to local
-- **THEN** tracking continues using the robot's own detector, and the reported
-  detections are of the same kind, because both paths run the same model
-
 ## Design
 
 ### Approach

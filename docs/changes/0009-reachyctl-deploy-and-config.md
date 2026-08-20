@@ -80,13 +80,6 @@ implementing them requires of this change:
 - Every command reuses the check registry from 0008 rather than reimplementing
   reachability or version probes.
 
-#### Scenario: The install succeeds but the running version does not change
-
-- **GIVEN** a deploy where the wheel installs into an environment the daemon is
-  not using
-- **WHEN** the deploy completes its steps and verifies
-- **THEN** it reports failure and names the version actually running
-
 ## Design
 
 ### Approach

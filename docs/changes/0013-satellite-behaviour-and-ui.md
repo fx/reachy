@@ -82,22 +82,6 @@ implementing them requires of this change:
 - Publishing is a wheel on GitHub Releases. No Hugging Face Space is created or
   referenced.
 
-#### Scenario: The application is deployed over a differently named predecessor
-
-- **GIVEN** a Home Assistant installation with automations referencing the
-  existing device's entities
-- **WHEN** this application is deployed configured with the predecessor's
-  announced identity
-- **THEN** Home Assistant continues to address the same device, entity
-  identifiers are unchanged, and no automation breaks
-
-#### Scenario: An unrecognised environment variable is set
-
-- **GIVEN** a daemon environment containing a misspelled variable under the
-  application's prefix
-- **WHEN** the application starts
-- **THEN** startup fails naming the variable, rather than running on the default
-
 ## Design
 
 ### Approach
