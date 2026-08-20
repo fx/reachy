@@ -78,10 +78,11 @@ string, derived from a single repository-wide version.
 
 ### REQ-003: No environment-specific values in version control
 
-Hostnames, IP addresses, account names, credentials, and deployment-target
-identifiers MUST NOT appear in tracked files, and each such value MUST be
-supplied at run time from an untracked local file or a repository secret with a
-tracked `.example` sibling documenting its shape.
+Identifiers belonging to a deployment environment or to private infrastructure —
+its hostnames, addresses, accounts, credentials, and target names — MUST NOT
+appear in tracked files, and each such value MUST be supplied at run time from
+an untracked local file or a repository secret with a tracked `.example` sibling
+documenting its shape.
 
 #### Scenario: A developer configures a robot address
 
@@ -89,6 +90,14 @@ tracked `.example` sibling documenting its shape.
 - **WHEN** they copy the tracked example inventory and fill in a real address
 - **THEN** the filled-in file is ignored by version control and the example
   remains the only tracked copy
+
+#### Scenario: A public dependency is cited
+
+- **GIVEN** a workflow pinning a third-party action, or a spec citing an
+  upstream project by its public repository name
+- **WHEN** the change is reviewed
+- **THEN** it is accepted, because the identifier describes a public dependency
+  rather than anyone's environment
 
 ### REQ-004: Automated leak detection on every change
 
@@ -278,9 +287,10 @@ section refers back to.
   a fake, which is what makes REQ-005 achievable.
 - Integration tests exercise real transports in-process rather than mocking
   them, so wire behaviour is genuinely covered.
-- Contract tests run the shared golden fixtures from
-  [`reachy-contracts`](../robot-link/) against both the producing and consuming
-  side of every wire type.
+- Contract tests run the shared golden fixtures against both the producing and
+  consuming side of every wire type. The fixtures live in the shared contracts
+  package, and the wire types they pin are owned by the
+  [robot-link spec](../robot-link/).
 - Coverage is gated on the diff rather than on the whole tree, so a large
   untested legacy area cannot mask an untested new one, and new code cannot land
   uncovered.

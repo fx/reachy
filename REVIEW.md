@@ -4,12 +4,23 @@
 
 ### This repository is public
 
-Reject any change introducing a hostname, IP address, account name, username,
-internal URL, credential, or email address into a tracked file — including
-commit messages, which no later edit can retract. Environment-specific values
-belong in a repository secret or an untracked local file with a tracked
-`.example` sibling. Documentation examples use reserved ranges (RFC 5737) and
-placeholder names, never real ones.
+Reject any change introducing an identifier that belongs to **someone's
+environment or private infrastructure** — a hostname, IP address, account name,
+username, internal URL, credential, or email address — into a tracked file,
+including commit messages, which no later edit can retract. Such values belong
+in a repository secret or an untracked local file with a tracked `.example`
+sibling, and documentation examples use reserved ranges (RFC 5737) and
+placeholder names.
+
+This does **not** forbid public identifiers of third-party dependencies. A
+pinned action (`actions/checkout@…`), an upstream project cited by its public
+repository name, or a link to a standard are all fine — they describe a
+dependency, not an environment.
+
+Note that the automated leak scan matches **shapes** and cannot catch this whole
+class: a private tool or account name has no distinguishing shape, and a
+denylist of the real names would itself publish them. That residue is caught
+here, at review time, which is why this rule is first.
 
 ### Pin GitHub Actions by commit SHA
 
