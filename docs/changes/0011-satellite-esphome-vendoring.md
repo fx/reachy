@@ -137,16 +137,22 @@ the vendored code used the library directly.
   - [ ] Define the capture interface at the point capture was performed
   - [ ] Define the playback interface at the point playback was performed
   - [ ] Verify the module imports and its tests pass with both seams unfilled
+- [ ] Gate the shipped assets on licence
+  - [ ] Record every wake-word model and sound asset's source and licence, in
+        the same shape as the model registry in 0005
+  - [ ] Extend the licence-allowlist test to cover shipped assets, so an asset
+        with unacceptable terms fails CI rather than shipping in a wheel
 - [ ] Enforce the boundary
   - [ ] Lint rule forbidding Reachy imports inside the vendored directory
   - [ ] Scheduled job reporting upstream drift in the derived files
 
 ## Open Questions
 
-- [ ] Which wake-word assets ship in the wheel. Upstream carries a set under its
-      own terms and each needs confirming against the licence bar the models are
-      held to. Current lean: the smallest set that makes the application usable,
-      each with its terms documented.
+- [ ] Which wake-word assets ship in the wheel. Current lean: the smallest set
+      that makes the application usable. Which ones those are is open; *whether*
+      an asset may ship without acceptable terms is not — the licence gate in
+      the tasks above decides that mechanically, so this question cannot resolve
+      into shipping something unlicensed.
 - [ ] Whether the entity model is trimmed to what this robot exposes or carried
       whole. Trimming reduces surface; carrying whole reduces divergence from
       upstream. Current lean: carry whole, expose selectively in 0013.

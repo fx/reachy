@@ -60,6 +60,14 @@ implementing them requires of this change:
   documentation-reserved ranges excluded.
 - The scan runs over the pull request diff **and** over commit messages in the
   range, because a message cannot be corrected by a later file edit.
+- The scan also runs on **direct pushes to the default branch**, not only on
+  pull requests. Leaving that path unscanned would let a private identifier
+  reach public history and stay there, since history is not practically
+  rewritable once pushed.
+- Branch protection is what actually prevents the direct-push path, and it is a
+  repository setting rather than a file. This change cannot apply it, so it
+  MUST report the exact settings to enable — required checks, and no direct
+  pushes to the default branch — as part of its completion.
 - CI workflow steps call `Justfile` recipes rather than restating commands.
 - Release automation derives one version from conventional commits and applies
   it to every artifact. No artifact is published by this change; the machinery
@@ -125,9 +133,13 @@ implementation of the requirements it satisfies — this is what the
 - [ ] Add the hygiene workflow
   - [ ] Generic leak-pattern scan over the diff
   - [ ] Extend the scan to commit messages in the pull request range
+  - [ ] Run the scan on direct pushes to the default branch as well as on pull
+        requests
   - [ ] Fixtures for a caught string and an allowed string, with a test
   - [ ] Secret scanning on pull requests
   - [ ] One-off full-history secret scan, with the result recorded
+  - [ ] Report the branch-protection settings to enable, since this change
+        cannot apply them
 - [ ] Add release automation
   - [ ] Conventional-commit version derivation producing one repository version
   - [ ] Tag creation; no publishing steps yet
@@ -135,11 +147,10 @@ implementation of the requirements it satisfies — this is what the
 
 ## Open Questions
 
-- [ ] Whether the leak scan should also run on pushes to the default branch, or
-      only on pull requests. Direct pushes are possible until branch protection
-      is configured. Current lean: both.
-- [ ] Which checks become required — a repository setting this change can
-      recommend but not apply.
+- [ ] Which checks become required, and whether direct pushes to the default
+      branch are disabled outright — both are repository settings this change
+      can recommend but not apply. Until they are applied, the push scan detects
+      a leak rather than preventing it.
 
 ## References
 

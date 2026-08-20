@@ -93,9 +93,10 @@ tracked `.example` sibling documenting its shape.
 ### REQ-004: Automated leak detection on every change
 
 Continuous integration MUST reject a change whose diff or commit messages match
-a generic environment-leak pattern, where the pattern set describes shapes such
-as private IP ranges, internal hostname suffixes, and email addresses rather
-than any specific name.
+a generic environment-leak pattern — on pull requests and on direct pushes to
+the default branch alike — where the pattern set describes shapes such as
+private IP ranges, internal hostname suffixes, and email addresses rather than
+any specific name.
 
 #### Scenario: A private address is committed
 
@@ -110,6 +111,14 @@ than any specific name.
 - **WHEN** the leak scan runs
 - **THEN** the check fails and names the offending commit, because a value in a
   message cannot be retracted by a later file edit
+
+#### Scenario: A commit reaches the default branch without a pull request
+
+- **GIVEN** a commit containing a private hostname pushed directly to the
+  default branch
+- **WHEN** the leak scan runs on that push
+- **THEN** the check fails, so the leak surfaces immediately rather than on
+  whichever later pull request happens to touch the file
 
 #### Scenario: A public address is committed
 
@@ -302,6 +311,19 @@ hostnames and accounts to be kept out of the repository would itself publish
 them, which is why the requirement is written in terms of generic patterns.
 Secret scanning runs alongside it, over each pull request and over the full
 history once at set-up.
+
+REQ-004 covers direct pushes as well as pull requests, and it is worth being
+precise about what that buys. A scan on push runs *after* the commit exists, so
+it detects rather than prevents — on a public repository the content is already
+visible, and history is not practically rewritable once pushed. What the push
+scan gives is immediacy: the leak surfaces within a minute of arriving instead
+of on whichever later pull request happens to touch the file.
+
+Prevention is branch protection, which makes the pull-request scan
+unavoidable by removing the direct-push path altogether. That is a repository
+setting rather than a file, so no requirement here can assert it; it is
+recommended by the change that wires the gates, and it is the control that
+actually closes the hole.
 
 ### Decision Records
 
