@@ -120,19 +120,26 @@ producer.
 - **THEN** the oldest queued frame is dropped, a drop is counted, and the most
   recent frame is still processed
 
-### REQ-016: Results carry the age of the frame they describe
+### REQ-016: Results return the capture timestamp unaltered
 
-Every result MUST carry the time at which its frame was captured, expressed on a
-clock the receiver can compare against without depending on the two machines
-agreeing on wall-clock time.
+Every result MUST carry the capture timestamp of the frame it derives from,
+byte-for-byte as the capturing side supplied it, so that the capturing side can
+compute the result's age against the same clock that produced it.
 
-#### Scenario: The consumer judges freshness
+#### Scenario: The capturing side judges freshness
 
 - **GIVEN** a result whose frame was captured well in the past because of a
   network stall
-- **WHEN** the app receives it
-- **THEN** the app can determine the result's age without consulting the
-  groundstation's clock
+- **WHEN** the app receives it back
+- **THEN** the app subtracts the returned timestamp from its own clock — the
+  same clock that produced the timestamp — and obtains the true age
+
+#### Scenario: The groundstation handles a timestamp it cannot interpret
+
+- **GIVEN** a frame carrying a capture timestamp from the robot's clock
+- **WHEN** the groundstation processes it and emits a result
+- **THEN** the timestamp is copied through untouched, because the groundstation
+  never compares it against a clock of its own
 
 ### REQ-017: Stale results stop being acted on
 
@@ -242,11 +249,22 @@ REQ-021 hold across the resolution changes that capture-side tuning produces.
 
 ### Clocks
 
-Frame timestamps are taken from a monotonic clock on the capture side and
-carried through unchanged. The consumer compares the returned timestamp against
-its own monotonic clock, so freshness never depends on the two machines agreeing
-on wall-clock time — which, on a robot whose clock is set over the network at
-boot, they sometimes do not.
+A frame's capture timestamp is read from a monotonic clock on the capturing
+side, and every component downstream treats it as **an opaque token**. The
+groundstation copies it from the frame onto the result and never inspects,
+adjusts or compares it — it has no clock that could be compared against another
+machine's monotonic epoch, and it needs none.
+
+The only party that interprets the value is the one that produced it. The robot
+stamps a frame, the stamp round-trips, and the robot subtracts it from the same
+clock it came from. Age is therefore a single-clock measurement despite crossing
+two machines, and it survives a robot whose wall clock jumps when the network
+sets it at boot.
+
+Nothing in the protocol asks the two machines to share a time base, and nothing
+should be added that does. Where the groundstation needs its own notion of
+recency — deciding which queued frame to drop, for instance — it uses arrival
+order and its own clock, both of which are purely local.
 
 ### Decision Records
 

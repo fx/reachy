@@ -8,7 +8,7 @@ controlling the application lifecycle.
 
 **Spec:** [reachyctl](../specs/reachyctl/)
 **Status:** draft
-**Depends On:** 0008
+**Depends On:** 0002, 0008
 
 ## Motivation
 
@@ -58,6 +58,11 @@ on preview, and
 on validation. Those scenarios are this change's acceptance criteria. What
 implementing them requires of this change:
 
+- This change completes the tool's operator-facing surface, so it is also the
+  one that **publishes the `reachyctl` wheel** to GitHub Releases — the artifact
+  the [architecture spec](../specs/architecture/index.md#versioning-and-distribution)
+  requires but that no earlier change owned. That is why it depends on 0002 for
+  the repository-wide version.
 - `deploy` operates on a wheel identified either by workspace member name or by
   path. It does not hard-code the satellite, so it is implementable and testable
   before 0013 exists and remains useful for any application the daemon can run.
@@ -160,6 +165,11 @@ rather than as two behaviours.
 - [ ] Implement `app`
   - [ ] `start`, `stop` via the daemon interface
   - [ ] `logs` streaming from the robot journal, filtered to the application
+- [ ] Publish the tool
+  - [ ] Publish the `reachyctl` wheel to GitHub Releases on a version tag, using
+        the repository-wide version from 0002
+  - [ ] Record the wheel's size as a release output, for 0014 to gate on
+  - [ ] Verify the published wheel installs and runs as a standalone tool
 
 ## Open Questions
 

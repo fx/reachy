@@ -8,7 +8,7 @@ after a release.
 
 **Spec:** [Benchmarks](../specs/benchmarks/)
 **Status:** draft
-**Depends On:** 0006, 0013
+**Depends On:** 0006, 0009, 0013
 
 ## Motivation
 
@@ -58,8 +58,10 @@ acceptance criteria. What implementing them requires of this change:
 - The regression gate compares against a baseline measured on the same class of
   runner, with a stated tolerance, and updating that baseline is a reviewable
   change rather than an automatic one.
-- Image and wheel sizes are recorded from the 0006 build outputs and gated on
-  growth.
+- Artifact sizes are collected from the change that produces each artifact, not
+  from a single build: the container image from 0006, the `reachyctl` wheel from
+  0009, and the satellite wheel from 0013. Each is gated on growth against the
+  committed baseline.
 - The thread-count curve is reproduced rather than a single configured value
   measured, because the knee moves with the host — it was at four threads on the
   hardware originally measured, with 93 ms, 51 ms and 55 ms at one, four and six.
@@ -140,7 +142,9 @@ as everything else in the repository.
   - [ ] `detect` across a thread-count sweep
   - [ ] `pipeline` per stage
   - [ ] `session` round-trip and reconnection cost
-  - [ ] `footprint` image, wheel and resident memory, from the 0006 outputs
+  - [ ] `footprint` resident memory, plus artifact sizes collected from each
+        producing change — image from 0006, `reachyctl` wheel from 0009,
+        satellite wheel from 0013
   - [ ] Committed fixture frames with recorded licences
 - [ ] Implement the hardware benchmarks
   - [ ] `photon-to-head`, invoked deliberately

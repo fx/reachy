@@ -98,7 +98,7 @@ changes:
     description: Verified deployment, configuration management with preview, and application lifecycle
     spec: reachyctl
     status: draft
-    depends_on: ["0008"]
+    depends_on: ["0002", "0008"]
   - id: "0010"
     name: provisioning-ansible
     path: changes/0010-provisioning-ansible.md
@@ -119,7 +119,7 @@ changes:
     description: Audio, motion and perception ports with their Reachy adapters and test fakes
     spec: ha-satellite
     status: draft
-    depends_on: ["0003", "0011"]
+    depends_on: ["0007", "0011"]
   - id: "0013"
     name: satellite-behaviour-and-ui
     path: changes/0013-satellite-behaviour-and-ui.md
@@ -133,7 +133,7 @@ changes:
     description: Benchmark suite, committed baseline and relative performance regression gates
     spec: benchmarks
     status: draft
-    depends_on: ["0006", "0013"]
+    depends_on: ["0006", "0009", "0013"]
   - id: "0015"
     name: docs-and-runbooks
     path: changes/0015-docs-and-runbooks.md

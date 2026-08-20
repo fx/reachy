@@ -181,7 +181,9 @@ time as a parameter, and never sleeps.
 - [ ] Whether the settings interface writes changes that survive a reinstall.
       Settings held only in the daemon environment survive; settings held in the
       application's own state may not. Current lean: write through to the
-      environment via the same managed region 0009 and 0010 own.
+      environment via the same managed region 0009 and 0010 own — note that
+      resolving it that way would add a dependency on 0009, which is why this
+      change does not declare one while the question is open.
 
 ## References
 

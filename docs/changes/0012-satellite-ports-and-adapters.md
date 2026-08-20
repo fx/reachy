@@ -8,7 +8,7 @@ over the robot-link session, and local perception over the SDK's own detector.
 
 **Spec:** [HA Satellite](../specs/ha-satellite/)
 **Status:** draft
-**Depends On:** 0003, 0011
+**Depends On:** 0007, 0011
 
 ## Motivation
 
