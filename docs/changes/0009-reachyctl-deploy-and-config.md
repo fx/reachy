@@ -19,8 +19,10 @@ that installs successfully into an environment the running daemon is not using
 looks identical to success at every step.
 
 This change is deliberately sequenced before the satellite rewrite, because it
-is the tooling used *during* that rewrite — and it works against the application
-running today.
+is the tooling used *during* that rewrite. That ordering only works if `deploy`
+is defined over **a wheel** rather than over the finished satellite: it builds a
+named workspace member or accepts a path, so it neither waits for 0013 nor
+assumes anything about what the wheel contains.
 
 ## Requirements
 
@@ -56,6 +58,9 @@ on preview, and
 on validation. Those scenarios are this change's acceptance criteria. What
 implementing them requires of this change:
 
+- `deploy` operates on a wheel identified either by workspace member name or by
+  path. It does not hard-code the satellite, so it is implementable and testable
+  before 0013 exists and remains useful for any application the daemon can run.
 - Deployment verifies by asking the daemon what version is running after the
   restart, not by trusting the install step's exit status.
 - Configuration values are validated locally against the shared contracts before
@@ -110,6 +115,14 @@ rather than as two behaviours.
   - **Why**: Appending settings without pruning means removing one from the
     declaration leaves it on the robot, and the robot diverges from the thing
     that describes it.
+- **Decision**: `deploy` is defined over a wheel, not over the satellite.
+  - **Why**: Hard-coding the satellite would make this change depend on 0013,
+    inverting the build order and removing the reason `reachyctl` is sequenced
+    early — that it is the tooling used during the rewrite. A wheel-shaped
+    command is also testable against a trivial fixture wheel, with no
+    application at all.
+  - **Alternatives considered**: Depending on 0013 and moving the CLI into phase
+    three, which delays every diagnostic until the largest change has landed.
 - **Decision**: No rollback.
   - **Why**: Retaining previous wheels costs space on a device that has little,
     and redeploying a known-good version is the recovery path.
@@ -126,12 +139,13 @@ rather than as two behaviours.
 
 ## Tasks
 
+- [ ] Build a fixture wheel for testing deployment with no application present
 - [ ] Implement robot access
   - [ ] In-process remote shell and file transfer
   - [ ] Daemon interface client reusing the 0008 check registry
   - [ ] Structured error reporting for both
 - [ ] Implement `deploy`
-  - [ ] Build the satellite wheel from the workspace
+  - [ ] Build a wheel from a named workspace member, or accept one by path
   - [ ] Transfer and install into the robot's application environment
   - [ ] Restart the daemon and start the application
   - [ ] Verify the running version and fail on mismatch

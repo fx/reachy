@@ -56,6 +56,10 @@ change's acceptance criteria. What implementing them requires of this change:
   pruning settings that were previously declared and no longer are.
 - The role encodes that the drop-in attaches to the daemon unit and that
   applying it restarts the daemon, rather than leaving either as documentation.
+- The `app_install` role installs a wheel from a configured source — a release
+  artifact or a local path — rather than hard-coding the satellite. That is what
+  keeps this change implementable before 0013 exists, matching the same choice
+  in [0009](./0009-reachyctl-deploy-and-config.md).
 - The verification role consumes the check registry from 0008. It does not
   define its own checks and does not shell out to the CLI, since that would
   require a CLI installation on the control machine.
@@ -134,7 +138,8 @@ which is the property that rots as roles are edited.
   - [ ] Pruning of withdrawn settings
   - [ ] Daemon restart on change, and only on change
 - [ ] Implement `app_install` and `groundstation_link`
-  - [ ] Wheel installation into the robot's application environment
+  - [ ] Install a wheel from a configured source into the robot's application
+        environment, without hard-coding which application it is
   - [ ] Groundstation endpoint and credential configuration
 - [ ] Implement `verify`
   - [ ] Invoke the shared check registry from 0008

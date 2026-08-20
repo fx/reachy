@@ -56,7 +56,7 @@ changes:
     description: Shared wire types, golden fixtures and schema generation
     spec: robot-link
     status: draft
-    depends_on: ["0001"]
+    depends_on: ["0001", "0002"]
   - id: "0004"
     name: groundstation-session
     path: changes/0004-groundstation-session.md
@@ -77,7 +77,7 @@ changes:
     description: Multi-architecture container images with a CUDA variant, published to GHCR
     spec: groundstation
     status: draft
-    depends_on: ["0004"]
+    depends_on: ["0002", "0005"]
   - id: "0007"
     name: reachyctl-probe
     path: changes/0007-reachyctl-probe.md
@@ -126,14 +126,14 @@ changes:
     description: Pure behaviour layer, settings interface, configuration handling and wheel packaging
     spec: ha-satellite
     status: draft
-    depends_on: ["0012"]
+    depends_on: ["0002", "0012"]
   - id: "0014"
     name: benchmarks-and-gates
     path: changes/0014-benchmarks-and-gates.md
     description: Benchmark suite, committed baseline and relative performance regression gates
     spec: benchmarks
     status: draft
-    depends_on: ["0005", "0006"]
+    depends_on: ["0006", "0013"]
   - id: "0015"
     name: docs-and-runbooks
     path: changes/0015-docs-and-runbooks.md

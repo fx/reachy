@@ -8,7 +8,7 @@ the published contract honest.
 
 **Spec:** [Robot Link](../specs/robot-link/)
 **Status:** draft
-**Depends On:** 0001
+**Depends On:** 0001, 0002
 
 ## Motivation
 
@@ -69,7 +69,9 @@ requires of this change:
 ### Approach
 
 Message types are declared with a validating model library, which gives both
-run-time validation and schema generation from one declaration.
+run-time validation and schema generation from one declaration. The dependency
+on 0002 is the contract-drift job: this change is what gives that job something
+to compare, so it edits a job 0002 created rather than adding its own.
 
 The package splits into: the session envelope types (negotiation, framing,
 errors), the per-capability payload types, and the fixture loader shared by the

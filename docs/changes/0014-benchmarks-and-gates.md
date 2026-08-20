@@ -8,7 +8,7 @@ after a release.
 
 **Spec:** [Benchmarks](../specs/benchmarks/)
 **Status:** draft
-**Depends On:** 0005, 0006
+**Depends On:** 0006, 0013
 
 ## Motivation
 
@@ -85,6 +85,11 @@ and reports per-measurement deltas.
 CI runs the hardware-free benchmarks on every pull request and gates on the
 comparison. Hardware benchmarks are invoked deliberately through
 `reachyctl bench` against a real installation.
+
+That second group is why this change depends on 0013 rather than only on the
+groundstation work: `photon-to-head` and `robot-load` measure a robot running
+the satellite, so neither is implementable until the satellite exists. The
+hardware-free group needs only the groundstation and its image.
 
 Fixture frames are committed so detection benchmarks are reproducible; they are
 small, synthetic or permissively licensed, and subject to the same licence bar

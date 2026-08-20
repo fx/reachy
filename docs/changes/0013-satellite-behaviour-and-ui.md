@@ -8,7 +8,7 @@ it deployable to a robot.
 
 **Spec:** [HA Satellite](../specs/ha-satellite/)
 **Status:** draft
-**Depends On:** 0012
+**Depends On:** 0002, 0012
 
 ## Motivation
 

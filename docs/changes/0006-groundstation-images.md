@@ -8,7 +8,7 @@ it runnable without an orchestrator.
 
 **Spec:** [Groundstation](../specs/groundstation/)
 **Status:** draft
-**Depends On:** 0004
+**Depends On:** 0002, 0005
 
 ## Motivation
 
@@ -74,6 +74,11 @@ implementing them requires of this change:
 ## Design
 
 ### Approach
+
+This change depends on 0005 rather than only on the service in 0004, because
+there is nothing to bake in until the model registry exists and nothing to drive
+a session through until a capability does. It depends on 0002 for the
+repository-wide version the published tags carry.
 
 A multi-stage build: dependencies and models resolved in a builder stage, then
 copied into a slim runtime stage containing no compiler and no package manager.
