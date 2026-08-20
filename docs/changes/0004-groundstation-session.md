@@ -121,7 +121,10 @@ That is what makes this change independently verifiable.
 ## Tasks
 
 - [ ] Implement configuration and observability
-  - [ ] Settings with prefix validation, unknown-variable rejection, boot dump
+  - [ ] Settings with prefix validation, unknown-variable rejection, and a boot
+        dump that redacts every value marked secret
+  - [ ] A single place that marks which settings are secret, so redaction cannot
+        be applied in the log and forgotten at the endpoint
   - [ ] Structured logging carrying session identifier and sequence number
   - [ ] Metrics registry and per-stage timing instrumentation
   - [ ] Tracing spans across pipeline stages

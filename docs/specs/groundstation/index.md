@@ -134,7 +134,8 @@ expose those durations as metrics.
 ### REQ-030: The effective configuration is retrievable at run time
 
 The service MUST expose its fully resolved configuration over its own interface
-while running.
+while running, with every value marked secret replaced by a redacted
+placeholder.
 
 #### Scenario: An operator doubts a setting took effect
 
@@ -143,6 +144,13 @@ while running.
 - **WHEN** the operator queries the configuration endpoint
 - **THEN** the value in effect is returned, without restarting the service or
   reading its startup log
+
+#### Scenario: The configuration includes a secret
+
+- **GIVEN** a running groundstation holding a credential in its configuration
+- **WHEN** the configuration endpoint is queried
+- **THEN** the credential is reported as set but its value is not returned,
+  because the endpoint is reachable by anything that can reach the service
 
 ### REQ-031: Images are published for both robot-adjacent architectures
 

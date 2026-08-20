@@ -115,6 +115,14 @@ the vendored code used the library directly.
 - **Decision**: The lint rule on import direction ships with the vendoring.
   - **Why**: The boundary erodes the first time something is convenient, and it
     is much harder to restore than to establish.
+- **Decision**: The asset licence gate is owned by this change, not shared with
+  the model registry in 0005.
+  - **Why**: Sharing the registry would make the satellite's vendoring wait on
+    the whole groundstation line, which it is otherwise independent of. The two
+    registries deliberately take the same shape so they can be unified later if
+    that is ever worth a dependency; today it is not.
+  - **Alternatives considered**: Depending on 0005 for its allowlist test, which
+    orders phase-three work behind phase-one work for no benefit.
 
 ### Non-Goals
 
@@ -138,10 +146,10 @@ the vendored code used the library directly.
   - [ ] Define the playback interface at the point playback was performed
   - [ ] Verify the module imports and its tests pass with both seams unfilled
 - [ ] Gate the shipped assets on licence
-  - [ ] Record every wake-word model and sound asset's source and licence, in
-        the same shape as the model registry in 0005
-  - [ ] Extend the licence-allowlist test to cover shipped assets, so an asset
-        with unacceptable terms fails CI rather than shipping in a wheel
+  - [ ] Record every wake-word model and sound asset's source and licence in an
+        asset registry owned by this change
+  - [ ] Add a licence-allowlist test over that registry, so an asset with
+        unacceptable terms fails CI rather than shipping in a wheel
 - [ ] Enforce the boundary
   - [ ] Lint rule forbidding Reachy imports inside the vendored directory
   - [ ] Scheduled job reporting upstream drift in the derived files

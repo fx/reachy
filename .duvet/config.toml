@@ -26,10 +26,10 @@
 
 '$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
 
-# No [[specification]] entries yet: this repo has no traced specs. fx-dev:spec-writer
-# reports the stanza to add for each new spec — `source` plus a MANDATORY
+# Register each spec here as it is written: a `source` path plus a MANDATORY
 # `format = "markdown"`, without which duvet applies its default IETF parser and
-# silently extracts zero requirements.
+# silently extracts zero requirements while exiting 0 — a failure that looks
+# exactly like success.
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses
 # annotations only from matched files, so a config without one reports every

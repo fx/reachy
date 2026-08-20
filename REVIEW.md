@@ -62,6 +62,23 @@ an artifact its tasks consume, and MUST agree with `docs/index.yml` and
 `docs/index.md`. A change that cannot meet its own acceptance criteria from its
 declared dependencies is unimplementable as sequenced.
 
+The check is mechanical: every four-digit change number appearing in a
+**work-specifying** section — Summary, Motivation, Requirements, Design
+Approach, Tasks — MUST lie inside that change's transitive dependency closure.
+`### Decisions`, `### Non-Goals`, `## Open Questions` and `## References` are
+excluded, because a change number appears there precisely to record that
+something is *not* a dependency, or is deferred. A reference in an excluded
+section that is in fact consumed by a task is still a defect — read the task,
+not the section heading.
+
+### Secrets never appear in self-reported configuration
+
+Components emit their resolved configuration at startup and expose it at run
+time, which is deliberate — silently-inert configuration is a defect class this
+project has already been bitten by. Every such surface MUST report a secret as
+set or unset without its value. Request changes on any requirement, task, or
+implementation that would log, return, or display a credential in full.
+
 ---
 
 ## Task Cross-Reference

@@ -149,7 +149,8 @@ time as a parameter, and never sleeps.
 - [ ] Implement the settings interface
   - [ ] Serve the settings page from the application
   - [ ] Read and write every operator-facing setting
-  - [ ] Show the resolved configuration, including defaults
+  - [ ] Show the resolved configuration, including defaults, with secrets
+        reported as set or unset rather than by value
 - [ ] Package and publish
   - [ ] Register the daemon application entry point
   - [ ] Include wake-word assets and sounds as package data

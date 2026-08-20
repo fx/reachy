@@ -161,8 +161,9 @@ pose.
 
 ### REQ-049: Settings are changeable without a shell
 
-Every operator-facing setting MUST be viewable and changeable through the
-application's own web interface.
+Every operator-facing setting MUST be changeable through the application's own
+web interface, and MUST be readable there except where the setting is marked
+secret, which is reported as set or unset without its value.
 
 #### Scenario: An operator changes the groundstation address
 
@@ -170,6 +171,14 @@ application's own web interface.
 - **WHEN** the operator opens the settings interface and enters another
 - **THEN** the change takes effect without connecting to the robot over a remote
   shell
+
+#### Scenario: An operator replaces a credential
+
+- **GIVEN** a running application configured with a groundstation credential
+- **WHEN** the operator opens the settings interface
+- **THEN** the credential shows as set without revealing it, and entering a new
+  one replaces it — so the interface is usable for rotation without becoming a
+  way to read the current value
 
 ### REQ-050: Shutdown is graceful and leaves the robot safe
 

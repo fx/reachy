@@ -180,7 +180,8 @@ committed copy.
 
 Every component that reads configuration from its environment MUST fail to start
 when it encounters a variable matching its own prefix that it does not
-recognise, and MUST emit its fully resolved configuration at startup.
+recognise, and MUST emit its fully resolved configuration at startup with every
+value marked secret replaced by a redacted placeholder.
 
 #### Scenario: A variable is misspelled
 
@@ -195,6 +196,13 @@ recognise, and MUST emit its fully resolved configuration at startup.
 - **WHEN** the operator reads its startup log
 - **THEN** every configuration value in effect is present, including those left
   at their defaults
+
+#### Scenario: A credential is configured
+
+- **GIVEN** a component configured with a credential for its upstream
+- **WHEN** it emits its resolved configuration at startup
+- **THEN** the credential's presence is visible but its value is not, so the log
+  answers "is it set?" without answering "what is it?"
 
 ## Design
 
