@@ -142,6 +142,18 @@ copy that will drift. Every change document MUST open `## Requirements` with
 `### Testing Requirements`. Renaming a `### REQ-NNN:` heading is breaking — it
 is the anchor annotations cite.
 
+**`### Testing Requirements` is not a restatement, and neither is a Functional
+requirements list that delegates.** The first is mandatory above and every one of
+the 15 change documents carries it in the same shape: it cites
+[Testing conventions](docs/specs/architecture/index.md#testing-conventions) and
+then says which of those standing rules this change's pull request is judged
+against, which is sequencing rather than a second normative copy. The second is
+the documented shape too — the section names the spec that owns the behaviour,
+says its scenarios are the acceptance criteria, and lists what implementing them
+requires *of this change*. Do not report either as a violation of this rule. What
+IS a violation is a change document stating a behavioural rule the spec does not,
+or contradicting one the spec does.
+
 ### Change dependencies must cover what the tasks consume
 
 Every change number in a **work-specifying** section — Summary, Motivation,
