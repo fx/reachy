@@ -1092,6 +1092,91 @@ class TestTheMicrophoneSettings:
         assert list(streamed) == [0] * 160
 
     @pytest.mark.asyncio
+    async def test_the_volume_never_touches_the_echo_reference(self) -> None:
+        """Channel 1 is not quieter microphone audio, and scaling it is a defect.
+
+        It is the speaker reference a server-side echo canceller subtracts, and
+        the subtraction works on the gain relationship between the two
+        channels. Attenuating the reference while the speaker played at full
+        level leaves the canceller under-cancelling or adapting to the wrong
+        filter — the robot hears its own voice and talks over itself. It fails
+        silently, and only on a device that has a second channel, so nothing
+        but this test would say it had happened.
+        """
+        speech = np.full(160, 1000, dtype="<i2").tobytes()
+        reference = np.full(160, 800, dtype="<i2").tobytes()
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[speech, reference]]),
+        )
+        state.mic_volume = 50
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        streamed, sent_reference = satellite.chunks[0]
+        assert list(np.frombuffer(streamed, dtype="<i2")) == [500] * 160
+        assert sent_reference == reference
+
+    @pytest.mark.asyncio
+    async def test_the_reference_is_passed_through_rather_than_rebuilt(self) -> None:
+        """The default path allocates for neither channel."""
+        speech = np.full(160, 1000, dtype="<i2").tobytes()
+        reference = np.full(160, 800, dtype="<i2").tobytes()
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[speech, reference]]),
+        )
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert satellite.chunks[0][0] is speech
+        assert satellite.chunks[0][1] is reference
+
+    @pytest.mark.asyncio
+    async def test_the_detector_is_only_ever_handed_channel_zero(self) -> None:
+        """The reference channel reaching a wake-word model is the same defect.
+
+        A model fed the speaker's own output would hear the robot rather than
+        the room. The queue between the pump and the detector carries `bytes`
+        rather than a sequence of channels, so this is structural — the test
+        pins that it stays so.
+        """
+        from satellite_support import vendored_server_state
+
+        speech = np.full(160, 1000, dtype="<i2").tobytes()
+        reference = np.full(160, 800, dtype="<i2").tobytes()
+        model = FakeMicroWakeWord("okay_nabu")
+        state = vendored_server_state(
+            wake_words={model.id: model},
+            active_wake_words={model.id},
+            available_wake_words={model.id: available_wake_word(model.id)},
+            stop_word=FakeMicroWakeWord("stop"),
+        )
+        service, _state = _esphome_service(
+            [],
+            capture=FakeCapture([[speech, reference]]),
+            state=state,
+            detector=WakeWordDetector(
+                state,
+                micro_features=FakeWakeWordFeatures,
+                open_features=FakeWakeWordFeatures,
+            ),
+        )
+        state.satellite = cast("VoiceSatelliteProtocol", _RecordingSatellite())
+        await service.start()
+
+        service.pump()
+        service.detect()
+
+        assert [inputs.tobytes() for inputs in model.inputs] == [speech]
+
+    @pytest.mark.asyncio
     async def test_the_default_volume_leaves_the_audio_exactly_alone(self) -> None:
         """Which is every chunk on a robot nobody has touched that slider on."""
         chunk = np.full(160, 1000, dtype="<i2").tobytes()

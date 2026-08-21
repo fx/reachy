@@ -654,7 +654,7 @@ class EsphomeService:
                 conditioned = self._condition(chunk)
                 if conditioned is None:
                     continue
-                primary, second = conditioned
+                primary, reference = conditioned
                 satellite = self._state.satellite
                 if satellite is not None:
                     # Streaming first, always, and before anything that could be
@@ -664,7 +664,7 @@ class EsphomeService:
                     # rather than queued: Home Assistant transcribes live audio,
                     # and a backlog replayed at connection time would be a
                     # conversation that already happened.
-                    satellite.handle_audio(primary, second)
+                    satellite.handle_audio(primary, reference)
                 # Detection runs whether or not Home Assistant is there, and
                 # that is REQ-044 rather than a nicety. `connection_lost` sets
                 # `state.satellite` to `None`, so a robot whose network has
@@ -674,6 +674,8 @@ class EsphomeService:
                 # models besides: one fed only the audio that arrived while a
                 # connection happened to be up has no window to judge the first
                 # word after a reconnection against.
+                # Channel 0 only, and the queue's own `bytes` type is what
+                # keeps it that way: the reference channel has no route here.
                 self._offer(primary)
         finally:
             # However the pump ended, the detector is owed the news: `detect`
@@ -785,17 +787,32 @@ class EsphomeService:
         entity took a value, persisted it and changed nothing audible, because
         the loop that read them was the loop that was never carried.
 
+        **Every one of them applies to channel 0 and to nothing else.** Channel
+        1 is not quieter microphone audio — `esphome/seams.py` says what it is
+        at `AudioCapture`, and it is the speaker reference a server-side echo
+        canceller subtracts from the microphone signal. That subtraction works
+        on the *gain relationship* between the two, so attenuating the
+        reference while the speaker physically played at full level leaves the
+        canceller either under-cancelling or adapting to a filter that is
+        wrong: the robot hears its own voice and talks over itself. It fails
+        silently, only on a device that has a second channel, and it looks like
+        flaky barge-in rather than like a setting.
+
+        A uniform comprehension over `chunk` would be tidier and would be that
+        bug, which is why the two channels are spelled separately here.
+
         Args:
             chunk: One `bytes` per channel, as the capture port produced it.
 
         Returns:
-            Channel 0 and the reference channel, or `None` when the conditioner
-            has swallowed this block into its own frame buffer and there is
-            nothing yet to forward.
+            Channel 0 conditioned and the reference channel exactly as it was
+            captured, or `None` when the conditioner has swallowed this block
+            into its own frame buffer and there is nothing yet to forward.
         """
-        scalar = _mic_volume_scalar(self._state.mic_volume)
-        channels = [_scaled(part, scalar) for part in chunk]
-        primary = channels[0]
+        primary = _scaled(chunk[0], _mic_volume_scalar(self._state.mic_volume))
+        # Untouched, and not merely unscaled: the same object, so the default
+        # path allocates nothing for either channel.
+        reference = chunk[1] if len(chunk) > 1 else None
 
         gain = self._state.preferences.mic_auto_gain or 0
         noise = self._state.preferences.mic_noise_suppression or 0
@@ -808,7 +825,7 @@ class EsphomeService:
             if not primary:
                 return None
 
-        return primary, channels[1] if len(channels) > 1 else None
+        return primary, reference
 
     def _offer(self, chunk: bytes) -> None:
         """Hand one chunk to the detection thread, or drop it.
