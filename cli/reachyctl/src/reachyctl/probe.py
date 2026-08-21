@@ -38,6 +38,7 @@ from reachy_session_client import (
     SessionClient,
     SessionClientError,
     open_websocket,
+    redact_url,
 )
 from reachyctl.errors import ConfigurationError, UnreachableError
 from reachyctl.output import Report
@@ -269,8 +270,9 @@ async def run_probe(
         # The cancellation `wait_for` delivers unwinds through `_establish`,
         # which closes the connection it had opened on its way out.
         message = (
-            f"the groundstation at {plan.url} accepted the connection but did "
-            f"not finish opening a session within {plan.timeout}s"
+            f"the groundstation at {redact_url(plan.url)} accepted the "
+            f"connection but did not finish opening a session within "
+            f"{plan.timeout}s"
         )
         raise UnreachableError(message) from error
     try:
@@ -280,7 +282,7 @@ async def run_probe(
             if agreement is None
             else tuple(named.name for named in agreement.capabilities)
         )
-        reporter.detail(f"session established at {plan.url}")
+        reporter.detail(f"session established at {redact_url(plan.url)}")
         reporter.detail(f"agreed capabilities: {', '.join(agreed) or 'none'}")
         if not agreed:
             return ProbeOutcome(
@@ -508,7 +510,11 @@ def report_for(outcome: ProbeOutcome, plan: ProbePlan, description: str) -> Repo
     """
     stats = outcome.stats
     data: dict[str, object] = {
-        "url": plan.url,
+        # Rendered rather than repeated. The configured address has been
+        # validated and carries nothing to hide, so this changes no output
+        # an operator sees -- it makes the report safe by construction
+        # rather than by the validator having run first.
+        "url": redact_url(plan.url),
         "source": description,
         "offered": tuple(named.name for named in plan.capabilities),
         "agreed": outcome.agreed,
@@ -567,7 +573,7 @@ def execute(
             client's own tests pin that. It is scrubbed again on the way out
             regardless.
     """
-    reporter.detail(f"probing {plan.url} with {source.description}")
+    reporter.detail(f"probing {redact_url(plan.url)} with {source.description}")
     try:
         outcome = asyncio.run(
             run_probe(plan, source, credential, reporter, open_transport),

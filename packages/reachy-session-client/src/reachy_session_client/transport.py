@@ -21,6 +21,7 @@ from websockets.asyncio.client import connect as _connect
 from websockets.exceptions import WebSocketException
 
 from reachy_session_client.errors import ConnectionFailedError
+from reachy_session_client.urls import redact_url
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -186,6 +187,11 @@ async def open_websocket(url: str) -> ClientTransport:
         # connection never being made. `str` is empty on some of them, so the
         # type name stands in rather than a message that says nothing.
         detail = str(error) or type(error).__name__
-        message = f"could not open a session at {url}: {detail}"
+        # The address is rendered rather than quoted. This function is public
+        # API and nothing here has validated the URL it was handed, so a
+        # credential in the user information or the query would otherwise land
+        # in an error message -- which is precisely what reachyctl REQ-059
+        # forbids, and the error path is where it would happen.
+        message = f"could not open a session at {redact_url(url)}: {detail}"
         raise ConnectionFailedError(message) from error
     return WebSocketTransport(connection)

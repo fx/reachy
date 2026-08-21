@@ -300,9 +300,11 @@ async def test_closing_stops_a_reconnection_loop_that_is_already_running() -> No
 
     Reconnection is unbounded by design — REQ-018 asks for a delay that stops
     growing, not for attempts that stop happening — so the only thing that ends
-    it is the consumer. A reconnection holds the client's lock across its delay,
-    which is why closing marks the client before it takes that lock: a close
-    that queued for the lock would wait out however long the delay had grown to.
+    it is the consumer.
+
+    This drives the loop with a sleep that returns at once, so what it pins is
+    that the loop stops. The two tests below hold a delay open instead, which is
+    where closing *during* one is decided.
     """
     first = StubTransport()
     first.push(agreement(FACE))
@@ -331,3 +333,187 @@ async def test_closing_stops_a_reconnection_loop_that_is_already_running() -> No
     assert collected == []
     assert retries_before_closing > 0
     assert factory.attempts == attempts_when_it_stopped
+
+
+class GatedSleep:
+    """A delay the test opens by hand, so a close can land in the middle of one.
+
+    The recorded sleep every other test here uses returns at once, which is what
+    makes those tests fast — and it is also why they cannot see this: the
+    interleaving that matters is a client being closed *while* the retry loop is
+    waiting, and a delay that is over immediately is never waited in.
+
+    Nothing here sleeps either. The loop blocks on an event the test sets, so
+    the wait is as long as the test needs it to be and costs no wall time.
+    """
+
+    def __init__(self) -> None:
+        """Create a delay that has not been entered and will not end."""
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.delays: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        """Wait until the test says the delay is over.
+
+        Args:
+            seconds: How long the policy asked for, recorded rather than waited.
+        """
+        self.delays.append(seconds)
+        self.entered.set()
+        await self.release.wait()
+
+
+async def reconnecting() -> tuple[SessionClient, GatedSleep, ScriptedTransports]:
+    """Build a client and leave it waiting out a reconnection delay.
+
+    Returns:
+        The client, the delay it is currently held in, and the factory.
+    """
+    first = StubTransport()
+    first.push(agreement(FACE))
+    gate = GatedSleep()
+    factory = ScriptedTransports(first, *([None] * 20))
+    client = SessionClient(
+        url=URL,
+        credential=credential(),
+        capabilities=(FACE,),
+        open_transport=factory,
+        backoff=BACKOFF,
+        sleep=gate,
+    )
+    await client.connect()
+    first.drop("the groundstation went away")
+    return client, gate, factory
+
+
+#:= docs/specs/robot-link/index.md#req-018-reconnection-is-automatic-and-rate-limited
+#:% A client MUST re-establish a dropped session automatically, and MUST increase
+#:% the delay between successive failed attempts up to a bound.
+@pytest.mark.asyncio
+async def test_closing_during_a_delay_does_not_wait_the_delay_out() -> None:
+    """A robot asked to stop cannot spend thirty seconds deciding to.
+
+    The delay grows to its bound, and closing takes the same lock the retry
+    loop holds. Held across the wait, that lock makes `aclose` queue behind
+    however long the delay had grown to — half a minute with the default
+    policy, on the shutdown path, where change 0012's adapter runs this from a
+    termination signal.
+
+    Asserted in event-loop turns rather than in seconds: the delay here never
+    ends at all, so a close that waited for it would still be pending after any
+    number of turns, and one that does not is done after a handful.
+    """
+    client, gate, _factory = await reconnecting()
+
+    async def drain() -> None:
+        """Iterate until the client stops, which is what closing does."""
+        async for _result in client.results():
+            pass  # pragma: no cover - nothing arrives here
+
+    task = asyncio.create_task(drain(), name="drain")
+    await hand_control_to_the_event_loop(5)
+    assert gate.entered.is_set()
+
+    closing = asyncio.create_task(client.aclose(), name="closing")
+    await hand_control_to_the_event_loop(10)
+
+    # The delay is still open, and closing is already finished.
+    assert not gate.release.is_set()
+    assert closing.done()
+
+    gate.release.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+
+#:= docs/specs/robot-link/index.md#req-018-reconnection-is-automatic-and-rate-limited
+#:% A client MUST re-establish a dropped session automatically, and MUST increase
+#:% the delay between successive failed attempts up to a bound.
+@pytest.mark.asyncio
+async def test_a_client_closed_during_a_delay_opens_nothing_when_it_ends() -> None:
+    """The flag is read after the wait, not only before it.
+
+    `aclose` sets the flag and then takes the lock, so a loop that only tested
+    it on the way into the delay wakes up and connects anyway — opening a
+    session on a client that has already said goodbye. The connection counter
+    is the observable form of that: it must not move across the close, and it
+    must not move when the delay finally ends either.
+    """
+    client, gate, factory = await reconnecting()
+
+    async def drain() -> None:
+        """Iterate until the client stops."""
+        async for _result in client.results():
+            pass  # pragma: no cover - nothing arrives here
+
+    task = asyncio.create_task(drain(), name="drain")
+    await hand_control_to_the_event_loop(5)
+    attempts_while_waiting = factory.attempts
+
+    await client.aclose()
+    gate.release.set()
+    await asyncio.wait_for(task, timeout=5.0)
+    await hand_control_to_the_event_loop(10)
+
+    assert factory.attempts == attempts_while_waiting
+    assert client.stats.connection_attempts == attempts_while_waiting
+    assert not client.connected
+
+
+#:= docs/specs/robot-link/index.md#req-011-one-session-carries-every-exchange
+#:% All frames, results, and control messages for a running app MUST travel over a
+#:% single session, established once and reused for the lifetime of that session.
+@pytest.mark.asyncio
+async def test_a_session_established_during_a_delay_is_not_replaced() -> None:
+    """Waiting out a delay is not a claim on the session that follows it.
+
+    `connect` takes the same lock the retry loop takes, so it can establish a
+    session while that loop is sleeping. A loop which then connected anyway
+    would leave two sessions where REQ-011 allows one, and the frames already
+    going out on the first would be going out on a transport nothing was
+    reading. So the loop looks before it connects, and finding a session
+    already there is a reason to stop rather than to replace it.
+    """
+    first, second = StubTransport(), StubTransport()
+    first.push(agreement(FACE))
+    second.push(agreement(FACE))
+    gate = GatedSleep()
+    factory = ScriptedTransports(first, second)
+    client = SessionClient(
+        url=URL,
+        credential=credential(),
+        capabilities=(FACE,),
+        open_transport=factory,
+        backoff=BACKOFF,
+        sleep=gate,
+    )
+    await client.connect()
+    first.drop("the groundstation went away")
+
+    async def drain() -> None:
+        """Iterate, which is what runs the reconnection loop."""
+        async for _result in client.results():
+            pass  # pragma: no cover - nothing arrives here
+
+    task = asyncio.create_task(drain(), name="drain")
+    await hand_control_to_the_event_loop(5)
+    assert gate.entered.is_set()
+
+    # Somebody else establishes the session while the loop is still waiting.
+    await client.connect()
+    attempts_after_connecting = factory.attempts
+
+    gate.release.set()
+    await hand_control_to_the_event_loop(10)
+
+    # The loop found a session and left it alone rather than opening a second.
+    assert factory.attempts == attempts_after_connecting
+    assert client.connected
+    assert client.stats.reconnections == 0
+
+    # Unblock the read the drain is now sitting in, so the task ends rather
+    # than the test leaving one behind. Closing first means the drop is met by
+    # a client that has already finished, so it does not retry.
+    await client.aclose()
+    second.drop("the test is over")
+    await asyncio.wait_for(task, timeout=5.0)

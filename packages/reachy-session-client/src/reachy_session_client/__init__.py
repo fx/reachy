@@ -53,6 +53,7 @@ from reachy_session_client.transport import (
     WebSocketTransport,
     open_websocket,
 )
+from reachy_session_client.urls import redact_url
 
 __all__ = [
     "DEFAULT_BACKOFF",
@@ -79,6 +80,7 @@ __all__ = [
     "encode_control",
     "encode_frame",
     "open_websocket",
+    "redact_url",
     "result_model_for",
     "validate_session_url",
 ]

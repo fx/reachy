@@ -19,6 +19,7 @@ from reachy_session_client import (
     MonotonicStamps,
     count_detections,
     describe_validation,
+    redact_url,
     result_model_for,
 )
 
@@ -232,3 +233,41 @@ def test_an_attempt_count_too_large_to_be_a_float_still_answers() -> None:
     exception ends the session for good.
     """
     assert Backoff().delay(10**1000) == Backoff().maximum_seconds
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+@pytest.mark.parametrize(
+    "url",
+    [
+        "wss://someone:example-secret@198.51.100.10/v1/session",
+        "ws://198.51.100.10:8080/v1/session?credential=example-secret",
+        "wss://198.51.100.10/v1/session#example-secret",
+    ],
+)
+def test_an_address_is_rendered_without_the_parts_a_secret_fits_in(url: str) -> None:
+    """The rendering has to be safe on its own, not because a caller validated.
+
+    `validate_session_url` refuses these, so the configured address never
+    reaches here carrying one — but that is a property of the caller, and
+    `open_websocket` is public API that formats a URL into a connection failure
+    without having validated anything. A guarantee that holds only because the
+    one caller happens to sanitise first is not a guarantee.
+
+    Args:
+        url: An address carrying a secret in one of its three hiding places.
+    """
+    rendered = redact_url(url)
+
+    assert "example-secret" not in rendered
+    assert "someone" not in rendered
+    # Still says where the connection was to, which is the whole job.
+    assert "198.51.100.10" in rendered
+
+
+def test_an_address_that_cannot_be_taken_apart_is_replaced_entirely() -> None:
+    """Echoing back the string that failed to parse is how one reaches a log."""
+    assert redact_url("ws://198.51.100.10:not-a-port/v1/session") == REDACTED
+    assert redact_url("not an address at all") == REDACTED
+    assert redact_url("") == REDACTED

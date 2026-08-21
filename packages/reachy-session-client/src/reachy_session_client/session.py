@@ -347,10 +347,12 @@ class SessionClient:
         Closing is idempotent, and it stops `results()` reconnecting: a
         consumer that has finished is not a session that dropped.
         """
-        # Set before the lock is taken, not after. A reconnection in progress
-        # holds the lock across its delay, and this is what it reads when the
-        # delay is over — otherwise closing a client that happened to be
-        # retrying would wait out the retry first.
+        # Set before the lock is taken, not after, and that ordering is what
+        # makes closing during a reconnection work. `_reconnect` waits out its
+        # delay with the lock released and re-reads this flag once it has the
+        # lock again, so setting it first means the retry loop sees it and
+        # stops rather than opening one more connection on a client that is
+        # leaving. Setting it after would be a race the other way round.
         self._closed = True
         async with self._lock:
             transport = self._transport
@@ -530,6 +532,13 @@ class SessionClient:
         capability set to have changed, so caching would break exactly the case
         it was meant to speed up.
 
+        **The delay is waited out with the lock released.** Holding it across
+        the sleep makes `aclose` wait for the delay before it can do anything,
+        because closing takes the same lock — so a consumer shutting down while
+        the link happened to be retrying would block for up to the bound, which
+        is thirty seconds by default. A robot asked to stop cannot spend that
+        long deciding to.
+
         Raises:
             ProtocolError: If the groundstation answers with something this
                 protocol does not describe. Not retried.
@@ -539,10 +548,34 @@ class SessionClient:
         """
         async with self._lock:
             await self._discard()
-            attempt = 0
-            while not self._closed:
-                attempt += 1
-                await self._sleep(self._backoff.delay(attempt))
+        attempt = 0
+        # Re-read into a local on each pass rather than tested as
+        # `while not self._closed`. Both spellings are the same check twice,
+        # but the attribute form makes mypy narrow the flag to false for the
+        # rest of the loop — it cannot see that an `await` hands control to the
+        # task which sets it — and it then reports the second test as
+        # unreachable. That is the one test which has to be here, so the
+        # narrowing would delete the fix and call it dead code.
+        closed = self._closed
+        while not closed:
+            attempt += 1
+            await self._sleep(self._backoff.delay(attempt))
+            async with self._lock:
+                # The check that matters, rather than the one at the top of the
+                # loop. `aclose` sets the flag and then waits for this lock, so
+                # a client closed while this was sleeping arrives with the flag
+                # already true — and without this, the loop would wake and open
+                # a connection on a client that has already said goodbye.
+                closed = self._closed
+                if closed:
+                    return
+                if self._transport is not None:
+                    # Somebody else got there first: `connect` runs under this
+                    # same lock and may have established a session while this
+                    # was sleeping. Replacing it would leave two sessions where
+                    # the protocol allows one, and drop the frames already
+                    # being sent on that one.
+                    return
                 try:
                     await self._establish()
                 except ConnectionFailedError:
