@@ -40,10 +40,18 @@ the change that makes REQ-057 false.
   observable through `SessionStats` and through the results themselves, so the
   consumer decides what to say and where.
 - **The credential never reaches a string.** It is held in `Credential`, whose
-  `repr` and `str` are redacted, and it is revealed at exactly one call site —
-  building the offer. No exception raised here embeds a pydantic validation
-  message from a model that carries one; `describe_validation` is what those
-  paths report instead.
+  `repr` and `str` are redacted, and **inside this package** it is revealed at
+  exactly one call site — building the offer. No exception raised here embeds a
+  pydantic validation message from a model that carries one;
+  `describe_validation` is what those paths report instead.
+
+  A consumer may have one reveal site of its own, and exactly one reason for it:
+  handing the value to whatever scrubs its output, which cannot remove a string
+  it was never given. `reachyctl` does this once, in
+  `cli/reachyctl/src/reachyctl/cli.py`, to seed its `Redactor`. That call is what
+  makes reachyctl REQ-059 hold on the paths nobody controls — the text of an
+  exception raised three libraries down — so it is not a leak to be tidied away,
+  and deleting it would silently remove the protection rather than tighten it.
 - **`framing.py` mirrors the groundstation's.** The two ends of one transport
   need the same packing, and the groundstation's copy predates this package.
   `test_session_client_framing.py` pins them together by asserting that both

@@ -82,13 +82,9 @@ def test_the_delay_survives_an_outage_of_any_length() -> None:
         assert Backoff().delay(attempt) == Backoff().maximum_seconds
 
 
-def test_a_policy_that_never_grows_is_a_constant_delay() -> None:
-    """A multiplier of one is allowed, and reaches its bound in no steps."""
-    flat = Backoff(initial_seconds=1.0, multiplier=1.0, maximum_seconds=5.0)
-
-    assert [flat.delay(attempt) for attempt in (1, 2, 1_000)] == [1.0, 1.0, 1.0]
-
-
+#:= docs/specs/robot-link/index.md#req-018-reconnection-is-automatic-and-rate-limited
+#:% A client MUST re-establish a dropped session automatically, and MUST increase
+#:% the delay between successive failed attempts up to a bound.
 @pytest.mark.parametrize(
     ("initial", "multiplier", "maximum"),
     [
@@ -96,6 +92,12 @@ def test_a_policy_that_never_grows_is_a_constant_delay() -> None:
         (-1.0, 2.0, 30.0),
         (0.5, 0.5, 30.0),
         (0.5, 2.0, 0.25),
+        # The two ways of writing a delay that never increases. REQ-018 asks
+        # for one that grows as well as one that is bounded, so a policy which
+        # cannot grow is refused where it is built rather than reached by a
+        # robot that retries at the same interval for an afternoon.
+        (1.0, 1.0, 5.0),
+        (5.0, 2.0, 5.0),
     ],
 )
 def test_a_policy_that_would_not_grow_or_would_not_wait_is_refused(
@@ -103,7 +105,7 @@ def test_a_policy_that_would_not_grow_or_would_not_wait_is_refused(
     multiplier: float,
     maximum: float,
 ) -> None:
-    """A bound below the first delay is a policy, not a bound.
+    """A bound below or equal to the first delay is a policy, not a bound.
 
     Args:
         initial: What the first retry would wait.

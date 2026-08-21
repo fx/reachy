@@ -103,6 +103,21 @@ deliberate, because silently-inert configuration is a defect class this project
 has already been bitten by. Every such surface MUST report a secret as set or
 unset, never by value.
 
+### Seeding a redactor is the one legitimate reveal outside the offer
+
+A credential is held in `Credential`, whose `repr` and `str` render a
+placeholder. Inside `reachy-session-client` it is revealed at exactly one call
+site — building the session offer — and a second reveal there IS a finding.
+
+A **consumer** may have one of its own, for one reason: handing the value to
+whatever scrubs its output. A redactor cannot remove a string it was never
+given, so that call is what makes reachyctl REQ-059 hold on the paths nobody
+controls — the text of an exception raised three libraries down. `reachyctl`
+does it once, in `cli/reachyctl/src/reachyctl/cli.py`, seeding its `Redactor`.
+Do not report it as a leak or as a second reveal site; deleting it removes the
+protection rather than tightening it. A reveal that feeds anything other than a
+redactor or the offer is still a finding.
+
 ### Pin GitHub Actions by commit SHA
 
 Every `uses:` MUST name an immutable commit SHA with the release in a trailing

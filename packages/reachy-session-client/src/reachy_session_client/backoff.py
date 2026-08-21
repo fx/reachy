@@ -41,20 +41,31 @@ class Backoff:
 
         Raises:
             ValueError: If the delays are not positive, if the multiplier would
-                shrink the delay rather than grow it, or if the bound is below
-                the first delay — which would mean the first attempt already
-                exceeded the maximum.
+                not grow the delay, or if the bound leaves it no room to grow
+                into — a bound below the first delay would mean the first
+                attempt already exceeded the maximum, and a bound equal to it
+                means every attempt waits the same.
         """
         if self.initial_seconds <= 0:
             message = f"the first delay must be positive, not {self.initial_seconds}"
             raise ValueError(message)
-        if self.multiplier < 1:
-            message = f"the multiplier must not shrink the delay: {self.multiplier}"
+        # Both of the checks below reject the same thing — a policy whose delay
+        # never increases — approached from its two sides, and REQ-018 asks for
+        # a delay that grows as well as one that is bounded. A multiplier of
+        # exactly one is the obvious way to write a constant delay; a bound
+        # equal to the first delay is the non-obvious one, because the growth
+        # is clamped away on the very first attempt. Neither is reachable from
+        # this tool's own surface today, but `Backoff` is public API and the
+        # robot adapter that will construct one is a later change, so a policy
+        # that cannot satisfy the requirement is refused where it is built
+        # rather than discovered as a robot that never retries any faster.
+        if self.multiplier <= 1:
+            message = f"the multiplier must grow the delay: {self.multiplier}"
             raise ValueError(message)
-        if self.maximum_seconds < self.initial_seconds:
+        if self.maximum_seconds <= self.initial_seconds:
             message = (
-                f"the bound {self.maximum_seconds} is below the first delay "
-                f"{self.initial_seconds}"
+                f"the bound {self.maximum_seconds} leaves the first delay "
+                f"{self.initial_seconds} no room to grow"
             )
             raise ValueError(message)
 
@@ -91,15 +102,15 @@ class Backoff:
         requirement's second scenario describes. The exception would leave the
         reconnection loop, leave `results()`, and end the session for good.
 
+        `__post_init__` has already refused a multiplier of one and a bound
+        equal to the first delay, so the logarithm below has a base above one
+        and an argument above one and needs no special case for either.
+
         Returns:
             The number of growth steps after which the delay is already at its
             bound, so that clamping the exponent there changes no value the
             policy would otherwise have produced.
         """
-        if self.multiplier == 1:
-            # A policy that does not grow reaches its bound in no steps at all,
-            # and `log` to base one is undefined.
-            return 0
         return math.ceil(
             math.log(self.maximum_seconds / self.initial_seconds, self.multiplier),
         )
