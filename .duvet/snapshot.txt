@@ -77,26 +77,53 @@ SPECIFICATION: [Groundstation](docs/specs/groundstation/index.md)
     TEXT[!MUST,implication]: architectures under the same tag.
 
 SPECIFICATION: [HA Satellite](docs/specs/ha-satellite/index.md)
+  SECTION: [REQ-040: The announced device identity is configuration](#req-040-the-announced-device-identity-is-configuration)
+    TEXT[!MUST,implementation]: The identity the satellite announces to Home Assistant MUST be read from
+    TEXT[!MUST,implementation]: configuration rather than derived from the package name, the host name, or any
+    TEXT[!MUST,implementation]: other value that changes when the software is repackaged.
+
+  SECTION: [REQ-041: The application is discoverable by the robot daemon](#req-041-the-application-is-discoverable-by-the-robot-daemon)
+    TEXT[!MUST,implementation,implication]: The application MUST advertise itself through the daemon's application entry
+    TEXT[!MUST,implementation,implication]: point mechanism so that installing the wheel is sufficient for the daemon to
+    TEXT[!MUST,implementation,implication]: find it.
+
   SECTION: [REQ-042: Decision logic is free of input and output](#req-042-decision-logic-is-free-of-input-and-output)
-    TEXT[implementation]: The logic that maps voice-pipeline events and detections to motion intents MUST
-    TEXT[implementation]: be implemented without performing input or output.
+    TEXT[!MUST,implementation]: The logic that maps voice-pipeline events and detections to motion intents MUST
+    TEXT[!MUST,implementation]: be implemented without performing input or output.
 
   SECTION: [REQ-043: Hardware access goes through the daemon's media layer](#req-043-hardware-access-goes-through-the-daemon-s-media-layer)
-    TEXT[implementation]: Microphone capture and audio playback MUST be performed through the robot
-    TEXT[implementation]: daemon's media interface rather than by opening audio devices directly.
+    TEXT[!MUST,implementation]: Microphone capture and audio playback MUST be performed through the robot
+    TEXT[!MUST,implementation]: daemon's media interface rather than by opening audio devices directly.
+
+  SECTION: [REQ-044: Wake-word detection runs on the robot](#req-044-wake-word-detection-runs-on-the-robot)
+    TEXT[!MUST,implementation]: Wake-word detection MUST run locally on the robot, without depending on the
+    TEXT[!MUST,implementation]: groundstation or on Home Assistant.
+
+  SECTION: [REQ-045: Speech and intent processing stay in Home Assistant](#req-045-speech-and-intent-processing-stay-in-home-assistant)
+    TEXT[!MUST,implementation]: The application MUST NOT perform speech-to-text, text-to-speech, or intent
+    TEXT[!MUST,implementation]: resolution locally.
+
+  SECTION: [REQ-046: Voice pipeline state is expressed through movement](#req-046-voice-pipeline-state-is-expressed-through-movement)
+    TEXT[!MUST,implementation]: The application MUST produce a distinct, observable movement for entering
+    TEXT[!MUST,implementation]: listening, for processing, and for responding.
 
   SECTION: [REQ-047: Detection source is selectable](#req-047-detection-source-is-selectable)
-    TEXT[implementation]: The source of face detections MUST be selectable between the groundstation, the
-    TEXT[implementation]: robot's own detector, and the groundstation with local fallback.
+    TEXT[!MUST,implementation]: The source of face detections MUST be selectable between the groundstation, the
+    TEXT[!MUST,implementation]: robot's own detector, and the groundstation with local fallback.
 
   SECTION: [REQ-048: The head returns to neutral when tracking data goes stale](#req-048-the-head-returns-to-neutral-when-tracking-data-goes-stale)
-    TEXT[implementation]: When results stop arriving within the staleness window, the application MUST
-    TEXT[implementation]: return the head to its neutral position rather than holding its last commanded
-    TEXT[implementation]: pose.
+    TEXT[!MUST,implementation]: When results stop arriving within the staleness window, the application MUST
+    TEXT[!MUST,implementation]: return the head to its neutral position rather than holding its last commanded
+    TEXT[!MUST,implementation]: pose.
+
+  SECTION: [REQ-049: Settings are changeable without a shell](#req-049-settings-are-changeable-without-a-shell)
+    TEXT[!MUST,implementation]: Every operator-facing setting MUST be changeable through the application's own
+    TEXT[!MUST,implementation]: web interface, and MUST be readable there except where the setting is marked
+    TEXT[!MUST,implementation]: secret, which is reported as set or unset without its value.
 
   SECTION: [REQ-050: Shutdown is graceful and leaves the robot safe](#req-050-shutdown-is-graceful-and-leaves-the-robot-safe)
-    TEXT[implementation]: On receiving a termination signal the application MUST stop commanding movement,
-    TEXT[implementation]: release the media interface, and exit.
+    TEXT[!MUST,implementation]: On receiving a termination signal the application MUST stop commanding movement,
+    TEXT[!MUST,implementation]: release the media interface, and exit.
 
 SPECIFICATION: [Perception](docs/specs/perception/index.md)
   SECTION: [REQ-032: Detection models are permissively licensed](#req-032-detection-models-are-permissively-licensed)

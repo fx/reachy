@@ -31,9 +31,171 @@ test:
     {{ uv }} pytest
 
 # Check formatting and lint rules. Fails without modifying anything.
-lint: lint-boundary lint-capability-boundary
+lint: lint-boundary lint-behaviour-boundary lint-capability-boundary
     {{ uv }} ruff check .
     {{ uv }} ruff format --check .
+
+# Prove the satellite behaviour layer's purity boundary still fires.
+#
+# ha-satellite REQ-042 says the logic that maps voice-pipeline events and
+# detections to motion intents performs no input or output. What makes that true
+# rather than merely intended is that `behaviour/` cannot reach anything that
+# does any: not an adapter, not the vendored protocol layer, not the composition
+# root, not the settings interface, not the daemon entry point — which is the one
+# module that imports the SDK, so reaching it would import the SDK by another
+# name — and not the SDK itself. Time is a parameter to every method that needs
+# it, so the layer never reads a clock and never sleeps either.
+#
+# The mechanism is ruff's `flake8-tidy-imports` `banned-api`, configured on the
+# invocation rather than in `pyproject.toml` — exactly as the groundstation's
+# capability boundary is, and for the same reason. `banned-api` is a single
+# global list and `pyproject.toml` spends it on the vendored ESPHome boundary,
+# whose negated `per-file-ignores` entry switches TID251 off everywhere outside
+# that directory; an entry added there would therefore be dead in the one package
+# it needs to guard. TID253 is spent on the pydantic ban. So the ban lives here,
+# with its scope, and this recipe is what runs it.
+#
+# Four checks, and the first two are what make it real. The failing case is a
+# committed fixture full of the imports and the clock reads the boundary forbids,
+# fed to ruff on standard input under a pretended path — `--stdin-filename` only
+# tells ruff which per-file rules apply, so no probe file is ever left in the
+# tree. The same fixture is then run under a path inside `adapters/`, where all
+# of it is ordinary, which proves the ban is scoped to `behaviour/` rather than
+# global. Only then is the real tree checked.
+#
+# The last two are the backstops TID251 cannot be. It inspects import statements
+# only, so a dynamic import slips past it, and it says nothing whatever about a
+# clock. Two greps close both, and the fixture carries a dynamic import and a
+# clock read so each half is proved to fire.
+#
+# TID251 does more of the first half than it looks. It resolves a *relative*
+# import against the file's own path, so `from ..adapters import daemon` inside
+# `behaviour/` trips it exactly as the absolute spelling does; that shape needs
+# no grep and the fixture does not carry one.
+#
+# What the grep half owns is every import the name of which is a string rather
+# than a token, and there the pattern is written for the class rather than for
+# a spelling — the same decision the clock grep makes below:
+#
+#   * The dynamic branch matches the SDK's **bare** module name as well as its
+#     submodules. `import_module("reachy_mini")` is the sharpest form of the
+#     hole, not a corner of it: importing the SDK's top level alone executes its
+#     `__init__`, which transitively imports `reachy_mini.vision.face_tracking`,
+#     which does `import gi` — so the one spelling a `reachy_mini\.` prefix
+#     missed is the spelling that drags in the whole GStreamer stack. The quote
+#     character is part of the match, which is also what keeps
+#     `reachy_mini_ha_satellite.behaviour` — this layer importing itself, which
+#     is fine — from colliding with it.
+#   * `importlib` is banned outright, not just its `import_module`. A layer that
+#     is handed everything it needs has no use for the module at all, so banning
+#     it costs nothing and closes `importlib.util.spec_from_file_location`,
+#     `importlib.machinery` and whatever else it grows next. The
+#     `spec_from_file_location` name is matched on its own as well, because it
+#     is importable directly from `importlib.util` and this repository loads a
+#     module by path elsewhere on purpose — so the name is one somebody here has
+#     a habit of reaching for.
+#
+# Two shapes remain out of reach of a grep, and they are named here rather than
+# left for somebody to discover: an import whose module name is computed at run
+# time (`__import__(name)`), and one reached through an alias bound earlier
+# (`imp = import_module` then `imp("reachy_mini")`). Both need the name to be a
+# value rather than a literal. Banning `importlib` shrinks the second to
+# `__import__` alone, which is a builtin and cannot be taken away; neither has a
+# reason to appear in a layer that computes nothing but poses, and both are
+# review's to catch. That is the documented edge of this rule, not a gap in it.
+#
+# The clock grep bans `asyncio` outright, not just `asyncio.sleep`, and that is
+# the difference between the rule and a rule about one spelling. `from asyncio
+# import sleep` followed by `await sleep(...)` reads no attribute called
+# `asyncio.sleep` and would have slipped past; so would a clock read through
+# `loop.time()`. Banning the module closes the whole class at once, and it costs
+# nothing: this layer is synchronous by construction — it is handed a moment and
+# hands back intents, and there is nothing in it for an event loop to do.
+#
+# The greps are restricted to `*.py`. Left unrestricted they also read `.pyc`
+# files under `__pycache__`, where they report `Binary file … matches` and fail
+# the recipe over stale bytecode — and a boundary check that fails for reasons
+# that have nothing to do with the boundary is one people learn to route around.
+lint-behaviour-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    probe='apps/ha-satellite/tests/fixtures/behaviour_boundary_probe.py.txt'
+    src='apps/ha-satellite/src/reachy_mini_ha_satellite'
+    guarded="$src/behaviour"
+    reached='^[[:space:]]*(from|import)[[:space:]]+(reachy_mini[[:space:].]|reachy_mini$|importlib[[:space:].]|importlib$|reachy_mini_ha_satellite\.(adapters|daemon_app|esphome|main|web))|(import_module|__import__)[[:space:]]*\([[:space:]]*[\"'"'"'](reachy_mini[\"'"'"'.]|reachy_mini_ha_satellite\.(adapters|daemon_app|esphome|main|web))|spec_from_file_location'
+    clock='^[[:space:]]*(from|import)[[:space:]]+(time|datetime|asyncio)[[:space:].]|^[[:space:]]*(from|import)[[:space:]]+(time|datetime|asyncio)$|(time|datetime)\.(monotonic|perf_counter|time|now|utcnow|sleep)|asyncio\.sleep'
+    ban='lint.flake8-tidy-imports.banned-api = { "reachy_mini_ha_satellite.adapters" = { msg = "The behaviour layer decides; adapters act. Everything it needs arrives as an argument. See ha-satellite REQ-042." }, "reachy_mini_ha_satellite.esphome" = { msg = "The behaviour layer has no opinions about protobuf; pipeline events reach it through adapters/pipeline_events.py. See ha-satellite REQ-042." }, "reachy_mini_ha_satellite.main" = { msg = "The composition root imports the behaviour layer, never the reverse." }, "reachy_mini_ha_satellite.daemon_app" = { msg = "daemon_app is the one module that imports the Reachy Mini SDK; reaching it from the behaviour layer would import the SDK by another name." }, "reachy_mini_ha_satellite.web" = { msg = "The settings interface reads the behaviour layer through the application; the behaviour layer does not know it exists." }, "reachy_mini" = { msg = "The behaviour layer must not import the Reachy Mini SDK; the robot is reached through the ports it is handed." } }'
+    scope='lint.per-file-ignores = { "!apps/ha-satellite/src/reachy_mini_ha_satellite/behaviour/**" = ["TID251"] }'
+
+    if [ ! -f "$probe" ]; then
+        echo "lint-behaviour-boundary: FAILED — the fixture $probe is missing, so the rule is not proved to fire." >&2
+        exit 1
+    fi
+    if [ ! -d "$guarded" ]; then
+        echo "lint-behaviour-boundary: FAILED — $guarded is not a directory. The layout moved and this recipe no longer checks it." >&2
+        exit 1
+    fi
+
+    # `--isolated` is what makes this a check rather than a formality: the root
+    # configuration switches TID251 off outside the vendored directory, so a run
+    # that loaded it would pass over any input at all.
+    check=({{ uv }} ruff check --no-cache --isolated --select TID251 --output-format concise --config "$ban" --config "$scope")
+
+    # ruff exits non-zero both when the rule fires and when the invocation is
+    # broken, so the output has to actually name TID251 for this to prove anything.
+    fired="$("${check[@]}" --stdin-filename "$guarded/probe.py" - < "$probe" 2>&1)" && status=0 || status=$?
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$fired"
+        echo 'lint-behaviour-boundary: FAILED — an adapter import inside behaviour/ did not trip TID251.' >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$fired" | grep -q 'TID251'; then
+        printf '%s\n' "$fired"
+        echo "lint-behaviour-boundary: FAILED — ruff exited $status without reporting TID251, so it failed for some other reason and proves nothing." >&2
+        exit 1
+    fi
+    printf '%s\n' "$fired" | sed 's/^/    /'
+
+    if ! "${check[@]}" --stdin-filename "$src/adapters/probe.py" - < "$probe"; then
+        echo 'lint-behaviour-boundary: FAILED — the same imports are banned outside behaviour/, so the rule is not scoped to it.' >&2
+        exit 1
+    fi
+
+    if ! "${check[@]}" "$guarded"; then
+        echo 'lint-behaviour-boundary: FAILED — the behaviour layer imports something that performs input or output.' >&2
+        exit 1
+    fi
+
+    if ! grep -qE "$reached" "$probe"; then
+        echo 'lint-behaviour-boundary: FAILED — the fixture no longer reaches past the boundary, so the grep half proves nothing.' >&2
+        exit 1
+    fi
+
+    # Matching the fixture *somewhere* proves only that one line still reaches,
+    # and the fixture has many. Each shape only the grep can see is checked on
+    # its own line, so a widened pattern cannot quietly stop covering one of
+    # them and an edited fixture cannot quietly stop proving it. The bare SDK
+    # name is here because a `reachy_mini\.` prefix missed exactly this.
+    for shape in 'import_module("reachy_mini")' '__import__("reachy_mini")' 'import_module("reachy_mini_ha_satellite.adapters' 'spec_from_file_location'; do
+        if ! grep -F -- "$shape" "$probe" | grep -qE "$reached"; then
+            echo "lint-behaviour-boundary: FAILED — the fixture no longer proves the grep fires on: $shape" >&2
+            exit 1
+        fi
+    done
+    if grep -rnE --include='*.py' "$reached" "$guarded"; then
+        echo 'lint-behaviour-boundary: FAILED — the behaviour layer reaches an adapter, the vendored protocol, the entry point, the settings interface or the SDK.' >&2
+        exit 1
+    fi
+
+    if ! grep -qE "$clock" "$probe"; then
+        echo 'lint-behaviour-boundary: FAILED — the fixture no longer reads a clock, so the second grep proves nothing.' >&2
+        exit 1
+    fi
+    if grep -rnE --include='*.py' "$clock" "$guarded"; then
+        echo 'lint-behaviour-boundary: FAILED — the behaviour layer reads a clock or sleeps. Time is a parameter to it.' >&2
+        exit 1
+    fi
+    echo 'lint-behaviour-boundary: TID251 fires inside behaviour/ and nowhere else, and no adapter import, dynamic import or clock read survives there.'
 
 # Prove the groundstation's capability boundary still fires.
 #
@@ -532,9 +694,9 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
 
     docker logs "$name"
 
-# Build the `reachyctl` wheel and the wheels it needs to install anywhere else.
+# Build every wheel this repository releases.
 #
-# Four members, and the other three are not padding. `reachyctl` declares
+# Five members, and three of them are not padding. `reachyctl` declares
 # `reachy-contracts`, `reachy-checks` and `reachy-session-client` as
 # requirements and nothing publishes them to an index, so a wheel released on
 # its own installs nowhere: the resolver looks for three distributions that do
@@ -542,13 +704,20 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
 # `just wheel-verify` installs the set into an empty environment to prove that
 # is enough.
 #
+# The fifth is the robot application. It is released for a different reason —
+# the daemon installs it and discovers it through the `reachy_mini_apps` entry
+# point, ha-satellite REQ-041 — and it is built here rather than by a recipe of
+# its own so that one command produces everything a release carries and
+# `just wheel-size` reports on all of it in one format.
+#
 # One version for the whole repository, so every wheel here carries the same one
 # — see the root AGENTS.md.
 wheels out_dir="dist":
     #!/usr/bin/env bash
     set -euo pipefail
     rm --recursive --force '{{ out_dir }}'
-    for member in reachy-contracts reachy-checks reachy-session-client reachyctl; do
+    for member in reachy-contracts reachy-checks reachy-session-client reachyctl \
+                  reachy-mini-ha-satellite; do
         uv build --package "$member" --wheel --out-dir '{{ out_dir }}'
     done
     ls -1 '{{ out_dir }}'
@@ -623,6 +792,20 @@ wheel-verify out_dir="dist":
     assert document["data"]["skipped"] == document["data"]["checks"], document
     print(f"wheel-verify: doctor reported {document['data']['checks']} checks, all skipped")
     PYTHON
+
+    # The satellite wheel is released by the same job and asked a different
+    # question: not "does this install" but "does it carry what makes the daemon
+    # find it". A missing `reachy_mini_apps` entry point installs perfectly and
+    # never appears in the daemon's application list, and an asset shipping
+    # without its registry entry ships somebody else's file under terms nobody
+    # agreed to. Neither is visible to a build that merely succeeded.
+    cd - >/dev/null
+    satellite=("$wheels"/reachy_mini_ha_satellite-*.whl)
+    if [ "${#satellite[@]}" -ne 1 ] || [ ! -f "${satellite[0]}" ]; then
+        echo "wheel-verify: expected exactly one satellite wheel in $wheels" >&2
+        exit 1
+    fi
+    {{ uv }} python scripts/verify_satellite_wheel.py "${satellite[0]}"
 
 # Redraw the committed perception fixture images.
 #

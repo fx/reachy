@@ -14,6 +14,7 @@ one-line import of this file and holds no content of its own.
 | Path | What it is |
 |---|---|
 | `docs/` | Specs, change documents, runbooks and generated contracts. `docs/ops/managed-daemon-environment.md` is the byte-level contract for the robot's managed drop-in, which `reachyctl config` and the Ansible `daemon_env` role both write |
+| `docs/ops/satellite-deployment.md` | Installing, configuring and reading the robot application — leads with the identity-pinning hazard |
 | `packages/reachy-contracts/` | Shared wire types and golden fixtures (`reachy_contracts`) |
 | `packages/reachy-checks/` | The one definition of what a healthy installation is (`reachy_checks`) |
 | `packages/reachy-session-client/` | The one client half of the robot link (`reachy_session_client`) |
@@ -105,11 +106,12 @@ and the robot application's wheel arrives with the change that builds it.
 `just test`, `just lint`, `just typecheck`, `just check`, plus `just fmt`,
 `just sync`, `just coverage-diff`, `just duvet`, `just leak-scan`,
 `just secret-scan`, `just contracts`, `just contracts-check`,
-`just lint-boundary`, `just check-assets`, `just vendored-drift` and the wheel
-trio `just wheels`, `just wheel-size` and `just wheel-verify`. Continuous
-integration calls these recipes rather than restating the commands. A command
-worth running twice belongs in the `Justfile`, not in workflow YAML and not in
-prose here.
+`just lint-boundary`, `just lint-behaviour-boundary`,
+`just lint-capability-boundary`, `just check-assets`, `just vendored-drift` and
+the wheel trio `just wheels`, `just wheel-size` and `just wheel-verify`.
+Continuous integration calls these recipes rather than restating the commands. A
+command worth running twice belongs in the `Justfile`, not in workflow YAML and
+not in prose here.
 
 ### Behaviour is testable without hardware
 
@@ -227,8 +229,8 @@ its step.
 | `checks.yml` | pull requests, pushes to `main` | `Lint`, `Type check`, `Test` (diff-scoped coverage), `Contract drift` | `just check`, `just contracts-check` |
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
-| `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, the `reachyctl` wheel and the three unpublished wheels it needs — built, installed into an empty environment, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — four specs registered so far, see below | `just duvet` |
+| `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, every released wheel — the `reachyctl` set and the robot application — built, installed into an empty environment, verified, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — five specs registered so far, see below | `just duvet` |
 
 `release.yml` never runs on a pull request, which is why it is not in the set of
 checks to require below. Its two jobs never run on each other's event: version
@@ -243,18 +245,21 @@ completion notes of
 
 ## Requirements traceability
 
-⚠️ **The "Requirements traceability" check covers four specs so far.**
+⚠️ **The "Requirements traceability" check covers five specs so far.**
 `.duvet/config.toml` registers `docs/specs/perception/index.md`,
 `docs/specs/groundstation/index.md`, `docs/specs/robot-link/index.md` and
-`docs/specs/reachyctl/index.md` and nothing else, so a green run is evidence that
-those 39 requirements are traced and is evidence of nothing about the other 4
-specs — duvet does not load them. A spec is registered by the change that
-implements it, in that change's pull request, alongside the annotations that make
-it pass. Robot-link was registered by change 0012, which is the change that
-closed its set: the contract has three consumers and the robot was the last of
-them to exist. Reachyctl was registered by 0009, which completed the tool's
-operator-facing surface. The header comment in that file explains why the rest
-are deliberately unregistered.
+`docs/specs/reachyctl/index.md` and `docs/specs/ha-satellite/index.md`, and
+nothing else, so a green run is evidence that those 50 requirements are traced
+and is evidence of nothing about the other 3 specs — duvet does not load them. A
+spec is registered by the change that implements it, in that change's pull
+request, alongside the annotations that make it pass. Robot-link was registered
+by change 0012, which is the change that closed its set: the contract has three
+consumers and the robot was the last of them to exist. Reachyctl was registered
+by 0009, which completed the tool's operator-facing surface. ha-satellite was
+registered by 0013, which added the behaviour layer, the configuration, the
+settings interface and the packaging to the ports and adapters 0011 and 0012 had
+already built. The header comment in that file explains why the rest are
+deliberately unregistered.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and

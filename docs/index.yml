@@ -125,7 +125,7 @@ changes:
     path: changes/0013-satellite-behaviour-and-ui.md
     description: Pure behaviour layer, settings interface, configuration handling and wheel packaging
     spec: ha-satellite
-    status: draft
+    status: complete
     depends_on: ["0002", "0012"]
   - id: "0014"
     name: benchmarks-and-gates

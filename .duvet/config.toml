@@ -101,6 +101,17 @@ format = "markdown"
 source = "docs/specs/reachyctl/index.md"
 format = "markdown"
 
+# --- HA satellite: implemented across 0011, 0012 and 0013 --------------------
+# Registered by 0013, which is the change that completes it. REQ-042, REQ-043,
+# REQ-047, REQ-048 and REQ-050 were annotated as 0011 and 0012 built the ports
+# and the adapters; 0013 adds the behaviour layer, the configuration, the
+# settings interface and the packaging, which is what makes REQ-040, REQ-041,
+# REQ-044, REQ-045, REQ-046 and REQ-049 true. Registering the spec is what turns
+# all eleven annotations from documentation into a gate.
+[[specification]]
+source = "docs/specs/ha-satellite/index.md"
+format = "markdown"
+
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses
 # annotations only from matched files, so a config without one reports every
 # requirement as "Not implemented" and can never pass `duvet query -c

@@ -57,7 +57,29 @@ dependencies = [
     # declared here so the feature is actually present rather than accidentally
     # disabled.
     "websockets>=12,<14",
+    # Validated configuration. `pydantic_settings` is deliberately outside the
+    # TID253 ban: a settings model is configuration, not a wire type.
+    "pydantic-settings>=2.5",
+    # The settings interface ha-satellite REQ-049 requires, and the server that
+    # runs it. The same pair the groundstation uses, deliberately: a second web
+    # framework in this repository would be a second set of conventions for
+    # rendering a redacted configuration, and this one is already on the robot —
+    # the daemon's own dashboard is built on it.
+    "starlette>=0.41",
+    "uvicorn>=0.32",
 ]
+
+# How the Reachy Mini daemon finds this application. ha-satellite REQ-041: the
+# wheel being installed is the whole of registering it, and the daemon
+# enumerates this entry-point group at startup.
+#
+# ⚠️ The value points at `daemon_app`, which is the ONLY module in this package
+# that imports the Reachy Mini SDK — see its docstring. The entry point has to
+# resolve to a subclass of the SDK's application base class, and that class
+# cannot be reached without importing the SDK, so the import is confined to the
+# one file the daemon loads rather than admitted into the package's import graph.
+[project.entry-points.reachy_mini_apps]
+reachy-mini-ha-satellite = "reachy_mini_ha_satellite.daemon_app:ReachyMiniHaSatellite"
 
 # Running face detection on the robot itself, which ha-satellite REQ-047 makes
 # one of the three selectable sources. An extra rather than a dependency, and

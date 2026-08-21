@@ -382,6 +382,26 @@ enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
 module = ["onnxruntime.*"]
 ignore_missing_imports = true
 
+# --- The Reachy Mini SDK ----------------------------------------------------
+# The distribution ships no `py.typed` marker, so mypy cannot follow it. Exactly
+# one module in this repository imports it — `reachy_mini_ha_satellite.daemon_app`,
+# which subclasses the daemon's application base class because that is what the
+# `reachy_mini_apps` entry point has to resolve to — and the relaxation is
+# therefore as narrow as it can be: the distribution alone, and the one module
+# that names it. Everything else reaches the SDK through the protocols in
+# `adapters/daemon.py`, which are this repository's own and stay strict.
+[[tool.mypy.overrides]]
+module = ["reachy_mini.*"]
+ignore_missing_imports = true
+
+# The base class above is `Any` to mypy for the same reason, so subclassing it
+# trips `disallow_subclassing_any`. Relaxed for this module alone; the two
+# methods it defines are annotated and are checked, and the alternative is
+# writing stubs for somebody else's package.
+[[tool.mypy.overrides]]
+module = ["reachy_mini_ha_satellite.daemon_app"]
+disallow_subclassing_any = false
+
 # --- Vendored third-party code ----------------------------------------------
 # The one recorded exception to strict mode. These modules are derived from the
 # Home Assistant project's Linux voice assistant (see the NOTICE beside them);

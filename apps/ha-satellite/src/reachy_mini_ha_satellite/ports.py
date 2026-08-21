@@ -426,8 +426,12 @@ class Detections:
 
     An empty `faces` with `fresh` true is an ordinary answer: nobody is in the
     room. It is not the same event as the results having stopped, and the two
-    must stay distinguishable — one leaves the head where it is, the other
-    returns it to neutral.
+    must stay distinguishable — REQ-048 mandates the neutral head for the second
+    and says nothing about the first, so a consumer that folded them together
+    could not tell an operator which of the two it is acting on.
+    `behaviour.tracking` reports them as `NOBODY` and `STALE` and returns the
+    head to neutral for both, for reasons it records; what this type owes it is
+    the ability to tell them apart.
 
     Attributes:
         faces: Every face currently visible, possibly none.
