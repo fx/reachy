@@ -40,7 +40,7 @@ runner = CliRunner()
 
 
 def test_the_help_lists_every_command_the_tool_has() -> None:
-    """Including `bench`, whose name is registered before its body exists."""
+    """Every verb the spec describes, `bench` included."""
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == ExitCode.OK
@@ -163,7 +163,7 @@ def test_probe_with_an_address_that_is_not_a_session_url() -> None:
 @pytest.mark.parametrize(
     ("arguments", "command"),
     [
-        (["bench"], "bench"),
+        (["bench", "--benchmark", "nope"], "bench"),
         (["probe", "--url", URL], "probe"),
     ],
 )
@@ -185,17 +185,22 @@ def test_a_failure_is_a_parsable_document_when_structured_output_was_asked_for(
     assert document["summary"]
 
 
-def test_bench_is_a_registered_name_with_nothing_behind_it_yet() -> None:
-    """Registered so the change that implements it adds a body, not a command."""
-    result = runner.invoke(app, ["bench"], env=CONFIGURED)
+def test_bench_refuses_a_name_that_is_not_a_benchmark() -> None:
+    """Before it measures anything, so a typo costs a message rather than a run.
 
-    assert result.exit_code == ExitCode.FAILURE
-    assert "not implemented" in result.stdout
+    Every invocation of `bench` in this module names a benchmark that does not
+    exist, and that is deliberate: `bench` with no names takes real
+    measurements, which is `just bench`'s job and not a command-surface test's.
+    """
+    result = runner.invoke(app, ["bench", "--benchmark", "nope"], env=CONFIGURED)
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "no such benchmark: nope" in result.stdout
 
 
 def test_the_plain_rendering_is_what_a_script_gets_without_asking() -> None:
     """Click's runner is not a terminal, and neither is a pipe."""
-    result = runner.invoke(app, ["bench"], env=CONFIGURED)
+    result = runner.invoke(app, ["bench", "--benchmark", "nope"], env=CONFIGURED)
 
     assert "\t" in result.stdout
     assert "\x1b[" not in result.stdout

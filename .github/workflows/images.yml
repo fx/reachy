@@ -163,6 +163,22 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The size gate, run where the artifact is built rather than beside the
+      # benchmarks: rebuilding an image somewhere else to weigh it would weigh a
+      # different build. It compares this variant's `size_bytes` against the
+      # recorded one and fails on growth beyond the stated tolerance, which is
+      # benchmarks REQ-073's scenario — a dependency that pulls in a large
+      # transitive tree is reported and prompts a decision rather than passing
+      # unnoticed.
+      #
+      #:= docs/specs/benchmarks/index.md#req-073-artifact-size-is-measured-as-a-tracked-quantity
+      #:% The suite MUST record the size of each published artifact and treat growth
+      #:% beyond a stated tolerance as a regression.
+      - name: Fail if the image has grown beyond its recorded size
+        env:
+          SLUG: ${{ matrix.variant }}-${{ matrix.arch }}
+        run: just bench-sizes --artifact-size "image-size/${SLUG}.json"
+
       - name: Publish the size as an artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

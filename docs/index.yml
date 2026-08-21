@@ -132,7 +132,7 @@ changes:
     path: changes/0014-benchmarks-and-gates.md
     description: Benchmark suite, committed baseline and relative performance regression gates
     spec: benchmarks
-    status: draft
+    status: complete
     depends_on: ["0006", "0009", "0013"]
   - id: "0015"
     name: docs-and-runbooks

@@ -26,9 +26,9 @@
 
 '$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
 
-# TWO SPECS ARE STILL UNREGISTERED, AND THAT IS DELIBERATE.
+# ONE SPEC IS STILL UNREGISTERED, AND THAT IS DELIBERATE.
 #
-# `docs/specs/` holds 8 specs carrying 73 requirements. Six of them are
+# `docs/specs/` holds 8 specs carrying 73 requirements. Seven of them are
 # registered below:
 #
 #   - perception, whose 8 requirements are implemented and annotated by
@@ -53,19 +53,24 @@
 #     0010 and registered by it. There was no partial implementation to
 #     register earlier: the roles, the removal path and the idempotency gate
 #     arrive together, and REQ-061 is satisfied by the workflow job that runs
-#     the gate.
+#     the gate;
+#   - benchmarks, whose 7 — REQ-067 to REQ-073 — are implemented in full by
+#     0014, which is the only change that touches them. There is no partial
+#     state to wait out either: the suite, the committed baseline and the gate
+#     arrive together, because a gate without a baseline gates nothing and a
+#     baseline without a suite is prose.
 #
-# For those six specs, and only those six, `duvet query -c implementation`
+# For those seven specs, and only those seven, `duvet query -c implementation`
 # and `duvet report --ci` mean what they appear to mean.
 #
-# The other 2 are unregistered because not all of their requirements have an
+# The remaining one is unregistered because not all of its requirements have an
 # implementation to annotate yet. Architecture already carries some annotations
 # — they show up in the snapshot, because duvet loads a specification an
 # annotation points at whether or not it is registered — but registering it
 # turns the job red immediately on the requirements no change has reached, and
 # it stays red until the implementing change lands. A spec is registered by the
 # change that completes it, in that change's pull request, alongside the
-# annotations that make it pass. Nothing outside those six is evidence of
+# annotations that make it pass. Nothing outside those seven is evidence of
 # anything today.
 #
 # Each entry takes a `source` path plus a MANDATORY `format = "markdown"`:
@@ -132,6 +137,19 @@ format = "markdown"
 # artifact to point at.
 [[specification]]
 source = "docs/specs/provisioning/index.md"
+format = "markdown"
+
+# --- Benchmarks: implemented by change 0014 ---------------------------------
+# Registered by the change that implements it, which is the only change that
+# touches it. Its seven requirements do not arrive in stages: REQ-067 to
+# REQ-070 are the result document and what it has to carry, REQ-071 and REQ-073
+# are the two gates, and REQ-072 is what keeps the hardware benchmarks out of a
+# runner's way — and a gate registered before its baseline exists would be a
+# green check over a comparison against nothing. REQ-071 is additionally cited
+# from `.github/workflows/bench.yml` under the `implication` block below, for
+# the same reason REQ-061 is: the job IS the gate.
+[[specification]]
+source = "docs/specs/benchmarks/index.md"
 format = "markdown"
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses

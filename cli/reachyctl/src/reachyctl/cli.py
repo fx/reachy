@@ -24,9 +24,11 @@ Three conventions are set here and inherited by every command added later:
   afterwards undoes either. A secret setting reaches the robot through
   `config apply --declaration`, which reads a file.
 
-`bench` is registered and does nothing. The name is reserved here so that the
-change which implements it adds a body rather than a command, and so that
-`reachyctl --help` does not imply the tool has fewer parts than the spec says.
+`bench` is the one command whose implementation is not in this package.
+`reachyctl.bench` imports the benchmark suite, which is a workspace member this
+repository never publishes, and does so inside the command rather than at module
+level — so an installed `reachyctl` is a tool that says the suite is not
+installed, rather than one that will not start.
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ import typer
 from reachy_contracts import SettingError, validate_settings
 from reachy_session_client import validate_session_url
 from reachyctl.application import execute_logs, execute_start, execute_stop
+from reachyctl.bench import BenchPlan
+from reachyctl.bench import execute as execute_bench
 from reachyctl.configure import (
     execute_apply,
     execute_diff,
@@ -81,7 +85,7 @@ from reachyctl.frames import (
     open_camera,
 )
 from reachyctl.managed import DEFAULT_DAEMON_UNIT
-from reachyctl.output import OutputFormat, Report, Reporter, build_reporter
+from reachyctl.output import OutputFormat, Reporter, build_reporter
 from reachyctl.probe import DEFAULT_CAPABILITIES, ProbePlan, execute, parse_capability
 from reachyctl.provision import DIRECTORY_VARIABLE as PROVISIONING_DIRECTORY_VARIABLE
 from reachyctl.provision import ProvisionPlan
@@ -102,7 +106,7 @@ from reachyctl.wheels import Wheel, build_wheel, read_wheel
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from reachyctl.robot import Closer
+    from reachyctl.robot import Closer, RemoteAccess
 
 __all__ = ["app", "main"]
 
@@ -1556,29 +1560,152 @@ def app_logs(
 
 
 @app.command()
-def bench(ctx: typer.Context) -> None:
-    """Run the benchmark suite against a live installation.
+def bench(
+    ctx: typer.Context,
+    benchmark: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--benchmark",
+            help=(
+                "A benchmark to run. Repeatable. Naming one is what selects "
+                "it, including the two that need a robot; without any, the "
+                "default selection runs and those two are reported as "
+                "excluded."
+            ),
+        ),
+    ] = None,
+    robot: RobotOption = None,
+    identity_file: IdentityOption = None,
+    known_hosts: KnownHostsOption = None,
+    sudo: SudoOption = True,
+    repository: Annotated[
+        Path | None,
+        typer.Option(
+            "--repository",
+            help=(
+                "The checkout to read the committed fixtures and the baseline "
+                "from. Found from the working directory when not given."
+            ),
+        ),
+    ] = None,
+    models_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--models-dir",
+            envvar=MODELS_DIR_VARIABLE,
+            help="The directory holding the pinned model files.",
+        ),
+    ] = None,
+    output: Annotated[
+        Path,
+        typer.Option("--output", help="Where to write the result document."),
+    ] = Path("bench-results.json"),
+    network: Annotated[
+        str,
+        typer.Option(
+            "--network",
+            help=(
+                "How the link behaved, recorded with the result. The suite "
+                "records the network rather than controlling it, so a "
+                "comparison is only meaningful when this is comparable."
+            ),
+        ),
+    ] = "",
+    observation: Annotated[
+        list[float] | None,
+        typer.Option(
+            "--observation",
+            help=(
+                "A manually recorded photon-to-head interval, in milliseconds. "
+                "Repeatable. There is no automated stimulus, so that "
+                "measurement is taken by hand and arrives here."
+            ),
+        ),
+    ] = None,
+    frame_rate: Annotated[
+        float,
+        typer.Option(
+            "--frame-rate",
+            min=0.0,
+            help=(
+                "The frame rate the robot is already tracking at, as you know "
+                "it to be. REQUIRED by `robot-load`, which refuses to report "
+                "anything while this is left at its default of 0 — it reads "
+                "the robot's processors and does not set the robot tracking, "
+                "so a rate it defaulted would be a condition nothing "
+                "established. Ignored by every other benchmark."
+            ),
+        ),
+    ] = 0.0,
+    sample_seconds: Annotated[
+        float,
+        typer.Option(
+            "--sample-seconds",
+            min=0.1,
+            help="How long to sample the robot's processors for.",
+        ),
+    ] = 10.0,
+) -> None:
+    """Run the benchmark suite, and the parts of it that need a robot.
 
-    Not implemented. The name is registered so that the change which implements
-    it adds a body rather than a command, and so that this tool's help does not
-    describe a smaller thing than the spec does.
+    Without `--robot` this measures what a container can measure and reports
+    the two hardware benchmarks as excluded, which is what `just bench` does.
+    With one, `robot-load` reads the robot's own processor time over an
+    interval — it does not start the robot tracking, so `--frame-rate` declares
+    what it is already doing and the command refuses without it.
+    `photon-to-head` reports the intervals given with `--observation`, for the
+    same reason: there is no automated stimulus, and the measurement is taken by
+    hand.
+
+    The result is one JSON document. `just bench-compare` judges it against the
+    baseline committed in the repository.
 
     Args:
         ctx: The invocation, carrying the reporter.
+        benchmark: Which benchmarks to run.
+        robot: The robot, when one is to be measured.
+        identity_file: A private key to offer.
+        known_hosts: A host-key file to verify against.
+        sudo: Whether privileged commands are elevated.
+        repository: The checkout to read from.
+        models_dir: Where the pinned model files are.
+        output: Where to write the result document.
+        network: How the link behaved.
+        observation: Manually recorded photon-to-head intervals.
+        frame_rate: The frame rate the robot is already tracking at.
+        sample_seconds: How long to sample the robot's processors for.
 
     Raises:
-        typer.Exit: Always, with the status a command that did nothing earns.
+        typer.Exit: Always, carrying the exit status the run earned.
     """
     reporter = _reporter(ctx)
-    raise typer.Exit(
-        reporter.emit(
-            Report(
-                command="bench",
-                ok=False,
-                summary="the benchmark suite is not implemented yet",
+    close: Closer | None = None
+    access: RemoteAccess | None = None
+    try:
+        if robot is not None:
+            target = _target(robot, identity_file, known_hosts, sudo)
+            access = _build_access(target)
+            close = access.aclose
+        code = execute_bench(
+            BenchPlan(
+                benchmarks=tuple(benchmark or ()),
+                repository=repository,
+                models_dir=models_dir,
+                output=output,
+                network=network,
+                observations_ms=tuple(observation or ()),
+                frame_rate=frame_rate,
+                sample_seconds=sample_seconds,
             ),
-        ),
-    )
+            access,
+            reporter,
+            close,
+        )
+    except CommandError as error:
+        raise typer.Exit(
+            reporter.failure("bench", str(error), error.exit_code),
+        ) from error
+    raise typer.Exit(code)
 
 
 def _environ() -> dict[str, str]:

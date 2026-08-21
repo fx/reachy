@@ -7,7 +7,7 @@ control, and turn performance into a merge gate rather than something noticed
 after a release.
 
 **Spec:** [Benchmarks](../specs/benchmarks/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0006, 0009, 0013
 
 ## Motivation
@@ -129,40 +129,139 @@ as everything else in the repository.
 
 ## Tasks
 
-- [ ] Build the harness
-  - [ ] Result structure recording hardware, versions and configuration
-  - [ ] Distribution statistics reporting median and a high percentile
-  - [ ] Structured result output
-  - [ ] Comparison against a committed baseline with tolerances
-  - [ ] Tests for statistics, serialisation and comparison
-- [ ] Commit the baseline
-  - [ ] Machine-readable baseline from the spec's recorded table
-  - [ ] Document what updating it means
-- [ ] Implement the hardware-free benchmarks
-  - [ ] `detect` across a thread-count sweep
-  - [ ] `pipeline` per stage
-  - [ ] `session` round-trip and reconnection cost
-  - [ ] `footprint` resident memory, plus artifact sizes collected from each
+- [x] Build the harness
+  - [x] Result structure recording hardware, versions and configuration
+  - [x] Distribution statistics reporting median and a high percentile
+  - [x] Structured result output
+  - [x] Comparison against a committed baseline with tolerances
+  - [x] Tests for statistics, serialisation and comparison
+- [x] Commit the baseline
+  - [x] Machine-readable baseline from the spec's recorded table
+  - [x] Document what updating it means
+- [x] Implement the hardware-free benchmarks
+  - [x] `detect` across a thread-count sweep
+  - [x] `pipeline` per stage
+  - [x] `session` round-trip and reconnection cost
+  - [x] `footprint` resident memory, plus artifact sizes collected from each
         producing change — image from 0006, `reachyctl` wheel from 0009,
         satellite wheel from 0013
-  - [ ] Committed fixture frames with recorded licences
-- [ ] Implement the hardware benchmarks
-  - [ ] `photon-to-head`, invoked deliberately
-  - [ ] `robot-load` at a configured frame rate
-  - [ ] Exclusion from the default selection, reported as excluded
-- [ ] Wire the gate and settle the model question
-  - [ ] Per-pull-request benchmark job gating on the comparison
-  - [ ] Run the YuNet-versus-baseline face comparison
-  - [ ] Record the result in the perception spec changelog
+  - [x] Committed fixture frames with recorded licences
+- [x] Implement the hardware benchmarks
+  - [x] `photon-to-head`, invoked deliberately
+  - [x] `robot-load` at a configured frame rate
+  - [x] Exclusion from the default selection, reported as excluded
+- [x] Wire the gate and settle the model question
+  - [x] Per-pull-request benchmark job gating on the comparison
+  - [x] Run the YuNet-versus-baseline face comparison
+  - [x] Record the result in the perception spec changelog
+
+## Completion notes
+
+- **`complete` here means implemented, tested and gated in continuous
+  integration.** It does not mean validated on a robot. `photon-to-head` and
+  `robot-load` are implemented and were never run: nothing in this repository
+  has a Reachy Mini attached, so they are excluded from the default selection
+  and reported as excluded — which is REQ-072 rather than a shortcut. The
+  session that runs them is sequenced by
+  [0015](./0015-docs-and-runbooks.md).
+- **The spec is registered in `.duvet/config.toml`.** All seven of its
+  requirements are annotated and traced. It is registered by this change because
+  this change is the only one that touches it, and because a gate registered
+  before its baseline existed would be a green check over a comparison against
+  nothing.
+- **The numbers this repository actually has**, measured on a
+  `linux-x86_64-32c` host over a 640 by 480 committed fixture, beside the
+  predecessor's hand-measured figures:
+
+  | Measurement | This build | Predecessor |
+  |---|---:|---:|
+  | Face pass, four threads | 1.9 ms | 51 ms on the curve, 38 ms as the headline face pass |
+  | Face pass, one thread | 7.8 ms | 93 ms |
+  | Frame decode | 0.46 ms | 2 ms |
+  | Result round trip | 4.2 ms | 54 ms |
+  | Establishing a session | 1.0 ms | 378 ms |
+  | Service resident memory | 119 MiB | 205 MiB |
+  | Service image, amd64 | 437.3 MiB | "483 MB" |
+
+  Two of those rows are not like-for-like and the result document says so in a
+  note: the round trip and the connection crossed a loopback interface here and
+  a 2.4 GHz WLAN there, and the predecessor's 205 MiB was its robot
+  application's rather than a groundstation's. The face figures are the same
+  amount of work on different hardware.
+- **The thread-count curve was reproduced and the knee did not move.** 7.8, 3.0,
+  1.9, 2.5 and 2.7 ms at one, two, four, six and eight threads: four is still
+  the knee, on a machine with thirty-two cores rather than four. That is worth
+  knowing precisely because it was not assumed.
+- **The spec records two four-thread figures and does not reconcile them** — 38
+  ms for the face pass off the robot, and 51 ms as the curve's four-thread
+  point. Both are committed, under `detect.face.off-robot` and
+  `detect.face.threads.4`, rather than one being chosen: choosing would be
+  inventing a reconciliation the source does not have. Neither is gated.
+- **No gesture timing is reported at all**, and the result carries a note saying
+  why. This build wires no gesture model — the perception spec's recorded
+  decision — so the capability answers every frame with an empty payload in
+  microseconds, and putting that beside the predecessor's 5 ms would report an
+  absent model as a three-order improvement.
+- **The gate's timing half covers the runner class, from one run.** The
+  committed baseline holds a profile for the machine these numbers were measured
+  on and a second for `github-ubuntu-latest`, recorded from the first real run of
+  `bench.yml` — which is the only way to get figures for a pool nobody can run on
+  locally. It is one run rather than the median of ten the development host
+  carries, so it is a starting point the first runs on the default branch confirm
+  or correct, and the job passes `--require-profile` so the class cannot quietly
+  stop being recorded. The *size* half gates regardless, in `images.yml` and
+  `release.yml`, since a size does not depend on the machine that weighed it.
+- **The knee moved with the host, which is the whole reason the curve is
+  measured.** Four threads on the development machine; **two** on the four-core
+  runner, where six and eight threads cost 14.4 and 16.8 ms against 4.9 ms at
+  two, because asking for more threads than the machine has is contention rather
+  than parallelism. A suite that measured only the configured value would have
+  reported one number and revealed none of that.
+- **A latent import cycle in the groundstation was fixed here**, because this
+  change is what tripped over it. `reachy_groundstation.pipeline` could not be
+  imported before `reachy_groundstation.session`: `pipeline.runner` imports
+  `MessageKind` from `session.framing`, which initialises the session package,
+  which imports `session.runner`, which came back for `FramePipeline` while
+  `pipeline.runner` was still running its own imports. Every path through the
+  service itself reaches session first, so the cycle was invisible until the
+  benchmarks imported the pipeline directly. `session/runner.py` now binds the
+  module rather than the class, and says why.
+- **The benchmarks spec's Overview still says "Nothing is implemented yet."**
+  Editing it is out of scope here — a spec change is its own proposal — but it
+  is now false, and correcting it belongs in the next pass over that spec.
 
 ## Open Questions
 
-- [ ] How photon-to-head is stimulated repeatably. A person moving is not
-      reproducible; a screen showing a moving face is, and measures something
-      slightly different. Current lean: unresolved, manual until settled.
-- [ ] What tolerance the detection gate uses. Too tight and CI variance fails
-      honest changes; too loose and it catches nothing. Current lean: set it
-      from observed run-to-run variance once there is some.
+- [x] **How photon-to-head is stimulated repeatably.** Resolved as: it is not
+      automated, and the benchmark owns the *reporting* rather than the
+      stimulus. Both candidates measure slightly different things and building
+      either is disproportionate to the project as it stands, so the
+      measurement stays an operator's: `photon-to-head` validates the intervals
+      it is given, reports them as a distribution, records the method in the
+      result's configuration, and refuses to report anything without them —
+      because a number it invented would be worse than no number. Recording the
+      method is what makes "two runs are only comparable when the same method
+      produced both" checkable rather than hoped for.
+- [x] **What tolerance the detection gate uses.** Resolved from measured
+      variance rather than chosen, and revised once when the first choice fired
+      on an unchanged tree. Ten consecutive runs of the whole default selection
+      on an idle machine moved every artifact size and the resident memory not
+      at all, moved five latency figures by under a tenth, and moved one — the
+      sweep point at the knee — by 89%. The five stable ones were given a
+      tighter bar of 35%; an eleventh run, taken while the machine was also
+      running the test suite, moved one of them by 72% and every other latency
+      figure with it. A shared machine
+      moves every latency figure together, which is the condition a continuous
+      integration runner is permanently in, so the tighter bar was removed. The
+      answer is: sizes 2%, resident memory 10%, latency 100% uniformly, and
+      200% on `pipeline.emit` alone, whose four microseconds are within an order
+      of the clock's own granularity. Robot processor load is 25% and is the one
+      number still a judgement — nothing has run on a robot yet, and it is
+      re-argued from data the first time `robot-load` does. The tolerance is
+      loose on purpose: a threefold regression in the detection pass reports
+      every sweep point at between +191% and +227%, and every delta is printed
+      whether it failed or not, so drift towards the bar is visible on a pull
+      request that passed. The observations are tabulated in `bench/README.md`.
 
 ## References
 

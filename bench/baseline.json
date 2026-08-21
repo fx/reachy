@@ -1,0 +1,269 @@
+{
+  "schema": 1,
+  "tolerances": {
+    "ms": 1.0,
+    "MiB": 0.1,
+    "bytes": 0.02,
+    "cores": 0.25
+  },
+  "artifacts": {
+    "footprint.image.cpu.linux-amd64": {
+      "value": 458535567,
+      "unit": "bytes",
+      "note": "437.3 MiB, from `just image-size` on the image the cpu variant builds for linux/amd64. Collected from the image workflow, which is the change that produces it"
+    },
+    "footprint.image.cpu.linux-arm64": {
+      "value": 371182939,
+      "unit": "bytes",
+      "note": "354.0 MiB, from `just image-size` on the image the cpu variant builds for linux/arm64. Collected from the image workflow, which is the change that produces it"
+    },
+    "footprint.image.cuda.linux-amd64": {
+      "value": 3659931059,
+      "unit": "bytes",
+      "note": "3490.4 MiB, from `just image-size` on the image the cuda variant builds for linux/amd64. Collected from the image workflow, which is the change that produces it"
+    },
+    "footprint.wheel.reachy-checks": {
+      "value": 30034,
+      "unit": "bytes",
+      "note": "29.3 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it"
+    },
+    "footprint.wheel.reachy-contracts": {
+      "value": 26850,
+      "unit": "bytes",
+      "note": "26.2 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it"
+    },
+    "footprint.wheel.reachy-mini-ha-satellite": {
+      "value": 635957,
+      "unit": "bytes",
+      "note": "621.1 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it"
+    },
+    "footprint.wheel.reachy-session-client": {
+      "value": 31984,
+      "unit": "bytes",
+      "note": "31.2 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it"
+    },
+    "footprint.wheel.reachyctl": {
+      "value": 110929,
+      "unit": "bytes",
+      "note": "108.3 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it. It is the first recorded figure for this wheel, and it is the size the tree has now \u2014 change 0010 added `reachyctl provision` and change 0014 added `reachyctl bench`, and the 2% tolerance is against future growth rather than against either of them"
+    }
+  },
+  "profiles": {
+    "github-ubuntu-latest": {
+      "gated": true,
+      "description": "The GitHub-hosted ubuntu-latest runner pool: four cores, 16 GiB. Recorded from a SINGLE run rather than from the median of ten that the development-host profile carries, because it takes a run on the pool to get one at all \u2014 so these figures are a starting point that the first runs on the default branch will confirm or correct, not a variance measurement. The millisecond tolerance is the document's 100%, which is wider than anything a single run can justify tightening.",
+      "measurements": {
+        "detect.face.threads.1": {
+          "value": 10.696,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "detect.face.threads.2": {
+          "value": 4.941,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "detect.face.threads.4": {
+          "value": 5.134,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "detect.face.threads.6": {
+          "value": 14.382,
+          "unit": "ms",
+          "tolerance": 2.0,
+          "note": "one run on a four-core runner. This sweep point asks for more threads than the machine has, so it is contended by construction \u2014 it is 2.8x the two-thread figure here where it is 0.8x on the development host \u2014 and it carries twice the millisecond tolerance because that contention is the runner's, not this repository's"
+        },
+        "detect.face.threads.8": {
+          "value": 16.762,
+          "unit": "ms",
+          "tolerance": 2.0,
+          "note": "one run on a four-core runner. This sweep point asks for more threads than the machine has, so it is contended by construction \u2014 it is 2.8x the two-thread figure here where it is 0.8x on the development host \u2014 and it carries twice the millisecond tolerance because that contention is the runner's, not this repository's"
+        },
+        "footprint.resident_memory": {
+          "value": 116.0,
+          "unit": "MiB",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "pipeline.capability.face": {
+          "value": 5.461,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "pipeline.decode": {
+          "value": 0.955,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "pipeline.emit": {
+          "value": 0.009,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "pipeline.end_to_end": {
+          "value": 6.82,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "session.connect": {
+          "value": 2.205,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "session.reconnect": {
+          "value": 2.018,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "session.round_trip": {
+          "value": 8.757,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        }
+      }
+    },
+    "linux-x86_64-32c": {
+      "gated": true,
+      "description": "AMD Ryzen 9 7945HX3D, 32 logical processors, 128 GiB, Linux 6.18. Figures are the median of ten consecutive runs on an idle machine; each note records the worst deviation any single run showed, which is what the tolerances are argued from.",
+      "measurements": {
+        "detect.face.threads.1": {
+          "value": 7.833,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 4.3% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "detect.face.threads.2": {
+          "value": 3.003,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 3.0% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "detect.face.threads.4": {
+          "value": 1.933,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 88.9% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "detect.face.threads.6": {
+          "value": 2.527,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 38.1% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "detect.face.threads.8": {
+          "value": 2.695,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 17.4% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "footprint.resident_memory": {
+          "value": 119.0,
+          "unit": "MiB",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 0.0% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "pipeline.capability.face": {
+          "value": 2.155,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 75.7% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "pipeline.decode": {
+          "value": 0.459,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 9.6% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "pipeline.emit": {
+          "value": 0.004,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 50.0% from it. Four microseconds is within an order of the clock's own granularity, so this figure moves by half its value over a difference of one tick \u2014 it carries twice the millisecond tolerance because what is being measured is smaller than what is measuring it",
+          "tolerance": 2.0
+        },
+        "pipeline.end_to_end": {
+          "value": 2.92,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 58.2% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "session.connect": {
+          "value": 1.048,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 9.8% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "session.reconnect": {
+          "value": 0.964,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 9.4% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        },
+        "session.round_trip": {
+          "value": 4.208,
+          "unit": "ms",
+          "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 36.3% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        }
+      }
+    },
+    "predecessor": {
+      "gated": false,
+      "description": "The stack this one replaces, measured once by hand on hardware that no longer exists. Never gated against: a comparison would be between two machines as much as between two implementations. It is committed because the rebuild is accountable to it.",
+      "measurements": {
+        "detect.face.off-robot": {
+          "value": 38.0,
+          "unit": "ms",
+          "note": "the face pass off the robot, at four threads. This is the headline figure the YuNet model change has to defend, and it is recorded apart from the curve because the spec records it apart from the curve. No benchmark here produces it under this name: the comparable measurement is `detect.face.threads.4`"
+        },
+        "detect.face.on-robot": {
+          "value": 1199.0,
+          "unit": "ms",
+          "note": "face pass on the robot, the original arrangement before offloading. No benchmark here produces it: this architecture has no on-robot detection path"
+        },
+        "detect.face.threads.1": {
+          "value": 93.0,
+          "unit": "ms",
+          "note": "the thread-count curve at one thread"
+        },
+        "detect.face.threads.4": {
+          "value": 51.0,
+          "unit": "ms",
+          "note": "the thread-count curve at four threads, which is where it turned. The spec records a second four-thread figure \u2014 the 38 ms face pass in `detect.face.off-robot` below \u2014 and does not say why the two differ. Both are recorded here rather than one being chosen, because choosing would be inventing a reconciliation the source does not have"
+        },
+        "detect.face.threads.6": {
+          "value": 55.0,
+          "unit": "ms",
+          "note": "the thread-count curve at six threads, which is where it turned back upwards"
+        },
+        "footprint.image.cpu.linux-amd64": {
+          "value": 483000000,
+          "unit": "bytes",
+          "note": "recorded as '483 MB' against roughly 2 GB for the alternative packaging. The unit convention was not stated; on either reading this build's image is smaller"
+        },
+        "footprint.resident_memory": {
+          "value": 205.0,
+          "unit": "MiB",
+          "note": "the robot application's resident set, with no training framework ever imported. What this suite measures is the groundstation, which is where this architecture puts the model runtime, so the two are recorded beside each other rather than compared"
+        },
+        "photon-to-head.stimulus_to_motion": {
+          "value": 200.0,
+          "unit": "ms",
+          "note": "recorded as a 150-250 ms range end to end; 200 is its midpoint, and the range is what a comparison should be read against"
+        },
+        "pipeline.capability.gesture": {
+          "value": 5.0,
+          "unit": "ms",
+          "note": "gesture pass, sampled every fourth frame. This build wires no gesture model, so nothing here measures it and there is deliberately no counterpart"
+        },
+        "pipeline.decode": {
+          "value": 2.0,
+          "unit": "ms",
+          "note": "frame decode"
+        },
+        "robot-load.cpu_cores": {
+          "value": 1.52,
+          "unit": "cores",
+          "note": "of four cores, while tracking at 10 frames per second with detection offloaded"
+        },
+        "session.connect": {
+          "value": 378.0,
+          "unit": "ms",
+          "note": "a cold connection to the robot at p50, over the same WLAN. This is the measurement that drove the robot-link design"
+        },
+        "session.round_trip": {
+          "value": 54.0,
+          "unit": "ms",
+          "note": "result delivery per request, with connection reuse enabled, over a 2.4 GHz WLAN at 100-170 ms idle round-trip"
+        }
+      }
+    }
+  }
+}

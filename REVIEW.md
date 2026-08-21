@@ -11,18 +11,18 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** Six specs are
+**`.duvet/snapshot.txt` records annotations, not coverage.** Seven specs are
 registered in `.duvet/config.toml` — perception, groundstation, robot-link,
-reachyctl, ha-satellite and provisioning — so `duvet report --ci` and
-`duvet query -c implementation` check those 57 requirements and nothing else. The
-snapshot is nonetheless larger than that: duvet loads a specification an
-annotation points at whether or not it is registered, so the file lists the
+reachyctl, ha-satellite, provisioning and benchmarks — so `duvet report --ci`
+and `duvet query -c implementation` check those 64 requirements and nothing
+else. The snapshot is nonetheless larger than that: duvet loads a specification
+an annotation points at whether or not it is registered, so the file lists the
 requirement text every annotation cites — including the annotations that already
-point at architecture, which is not registered. Regeneration is
-byte-identical, so CI is deterministic — and a green run is evidence about those
-six specs only. A spec is registered by the change that implements it. See
-`.duvet/config.toml` for why the rest are unregistered, and for why annotations
-are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
+point at architecture, which is not registered. Regeneration is byte-identical,
+so CI is deterministic — and a green run is evidence about those seven specs
+only. A spec is registered by the change that implements it. See
+`.duvet/config.toml` for why the one remaining spec is unregistered, and for why
+annotations are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
 
 An anchor duvet resolves is **not** always the anchor GitHub renders. Duvet
 derives its section identifier from the heading with its own rules, and an
@@ -103,6 +103,13 @@ the delay; a unit test that configures a timeout already expired by the time the
 event loop looks at it is not, because nothing waits and no outcome can turn on
 how loaded the runner is. The groundstation's three such tests use
 `_ALREADY_ELAPSED`.
+
+**A changelog row in a spec can be authorised by a change document.** The rule
+against editing `docs/specs/` while implementing a change has one exception: a
+`## Changelog` row in the spec that change settles, where its task list asks for
+one — a measurement deciding a question the spec argued for is what a decision
+record is for. Do not report such a row. Any other edit under `docs/specs/` is
+still a finding.
 
 **Specs are written in duvet mode.** RFC 2119 keywords appear **only** inside
 `### REQ-NNN:` sections; their absence from Overview, Background, Design,
