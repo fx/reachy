@@ -20,9 +20,17 @@ Two rules about reading its output:
   ran. `doctor` with no `--robot` reports the three daemon checks as skipped and
   exits 0, with a summary line saying *nothing failed, but not everything was
   checked*. Collapsing the two would make the output worth ignoring.
-- **Later checks skip when an earlier one failed**, saying which one to read.
+- **Every check runs, whatever the ones before it did.** A failure does not stop
+  the run and does not change another check's outcome, so an operator whose
+  groundstation is down still learns whether the daemon is healthy. Do not read a
+  failure as a reason the checks below it were not attempted — they were.
+- **The three groundstation checks are the one exception, because they share one
+  session.** If the session never opened there is nothing to negotiate and
+  nothing to measure, so the two below it skip and say which check to read:
   `groundstation.round-trip` skipped with *no session was established, so there
-  was nothing to measure* is not a second problem.
+  was nothing to measure* is not a second problem. Nothing else in the chain
+  works that way — a `daemon.reachable` failure leaves `application.installed`
+  running and reporting on its own terms.
 
 ## How this page stays true
 
@@ -64,8 +72,12 @@ Two mechanisms hold it:
 
 ### daemon.reachable
 
-**What it means.** Nothing further up the chain can be asked anything. Every
-robot-side check below it will report itself skipped.
+**What it means.** Nothing on the robot can be asked anything. The three
+robot-side checks still run — they are independent — so expect
+`application.installed`, `application.running` and, if a declaration was given,
+`configuration.effective` and `home-assistant.identity` to fail alongside it,
+each naming its own transport failure. **Fix this one first**: they are all the
+same fault reported four more times.
 
 **Where to look.** The robot is off, the address is wrong, the account or the key
 is wrong, or the daemon unit is not running. `doctor` reaches the robot over SSH
@@ -211,17 +223,29 @@ silently out of the agreed set rather than failing the session. Ask the service
 what it is offering:
 
 ```
-curl --silent --show-error http://127.0.0.1:8080/capabilities
+curl --silent --show-error http://127.0.0.1:8080/capabilities | python3 -m json.tool
 ```
 
 ```json
 {
-  "ready": true,
-  "offered": ["face"],
-  "capabilities": [
-    {"name": "face", "version": 1, "state": "ready", "detail": ""},
-    {"name": "gesture", "version": null, "state": "disabled", "detail": ""}
-  ]
+    "ready": true,
+    "offered": [
+        "face"
+    ],
+    "capabilities": [
+        {
+            "name": "face",
+            "version": 1,
+            "state": "ready",
+            "detail": ""
+        },
+        {
+            "name": "gesture",
+            "version": null,
+            "state": "disabled",
+            "detail": ""
+        }
+    ]
 }
 ```
 
@@ -256,15 +280,18 @@ and produced nothing.
 The service's own metrics answer whether frames are arriving at all:
 
 ```
-curl --silent --show-error http://127.0.0.1:8080/metrics | grep -E '^groundstation_(frames|results|errors)'
+curl --silent --show-error http://127.0.0.1:8080/metrics | grep -E '^groundstation_[a-z_]+_total'
 ```
 
-**Executed:**
+**Executed**, after five frames through a probe and one session refused for a
+wrong credential:
 
 ```
-groundstation_frames_received_total 6.0
+groundstation_sessions_total{outcome="going_away"} 1.0
+groundstation_sessions_total{outcome="unauthenticated"} 1.0
+groundstation_frames_received_total 5.0
 groundstation_frames_dropped_total 0.0
-groundstation_results_emitted_total{capability="face"} 6.0
+groundstation_results_emitted_total{capability="face"} 5.0
 groundstation_errors_total{code="unauthenticated"} 1.0
 ```
 

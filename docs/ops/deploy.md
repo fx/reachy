@@ -164,24 +164,40 @@ in memory and the model files are in the image.
 Every release publishes a `SHA256SUMS` file beside its wheels, written by the
 release job over everything it publishes.
 
+**Keep the published file name.** The release job writes `SHA256SUMS` with
+`sha256sum ./*.whl`, so every line in it names a versioned wheel relative to the
+directory you are checking from. Rename the download and
+`sha256sum --check --ignore-missing` matches nothing and says
+`no file was verified` — which is not the same as a failure and is easy to read
+past. So fetch with `--remote-name`, never `--output`:
+
 ```
-curl --location --output reachy_mini_ha_satellite.whl \
+curl --location --remote-name \
   https://github.com/<owner>/<repository>/releases/download/v<version>/reachy_mini_ha_satellite-<version>-py3-none-any.whl
 curl --location --remote-name \
   https://github.com/<owner>/<repository>/releases/download/v<version>/SHA256SUMS
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-Expect one `OK` line naming the wheel. Anything else means the file you have is
-not the file that was published, and **it must not be installed**: the wheel goes
-into the environment the daemon runs applications from, so it runs with the
-daemon's access.
+**Executed** — against a `SHA256SUMS` produced the way the release job produces
+it, over a locally built wheel, with only that wheel in the directory:
+
+```
+./reachy_mini_ha_satellite-0.1.0-py3-none-any.whl: OK
+```
+
+One `OK` line per wheel present. Anything else means the file you have is not the
+file that was published, and **it must not be installed**: the wheel goes into
+the environment the daemon runs applications from, so it runs with the daemon's
+access.
 
 ### 2. Deploy it
 
 ```
-reachyctl deploy --robot reachy@192.0.2.20 --wheel reachy_mini_ha_satellite.whl --preview
-reachyctl deploy --robot reachy@192.0.2.20 --wheel reachy_mini_ha_satellite.whl
+reachyctl deploy --robot reachy@192.0.2.20 \
+  --wheel reachy_mini_ha_satellite-<version>-py3-none-any.whl --preview
+reachyctl deploy --robot reachy@192.0.2.20 \
+  --wheel reachy_mini_ha_satellite-<version>-py3-none-any.whl
 ```
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No expected output is recorded for either

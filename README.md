@@ -3,11 +3,13 @@
 A Home Assistant voice satellite for the Reachy Mini, with the heavy computation
 moved off the robot.
 
-The robot listens, speaks, and looks at whoever is talking to it. It runs a
-wake word and a voice pipeline locally, and opens **one long-lived session** to a
-groundstation service that does face detection on a machine with cores to spare —
-because a robot with four of them running motion control, audio and a wake-word
-model has none left for inference.
+The robot listens, speaks, and looks at whoever is talking to it. **Home
+Assistant runs the voice pipeline** — speech to text, intent, text to speech —
+and the robot is its satellite: it detects the wake word locally, streams the
+audio up, and plays the response back. Face detection is offloaded too, over
+**one long-lived session** to a groundstation service on a machine with cores to
+spare, because a robot with four of them running motion control, audio and a
+wake-word model has none left for inference.
 
 ## What is here
 

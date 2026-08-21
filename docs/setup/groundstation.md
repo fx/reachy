@@ -11,7 +11,9 @@ next step will fail in a way that describes the wrong problem.
 **Every transcript on this page was produced by running the command.** The
 addresses are loopback or RFC 5737 documentation ranges; substitute your own.
 
-- **You need:** a host with Docker and about 1 GB of disk for the image.
+- **You need:** a host with Docker and room for the image — the default variant
+  is 437 MiB on x86-64 and 354 MiB on 64-bit ARM, uncompressed. The accelerated
+  variant is 3.4 GiB, which is what a CUDA runtime plus cuDNN costs.
 - **You get:** a service answering `/readyz` and accepting authenticated
   sessions, with a Prometheus scraping it.
 - **Then go to:** [the robot](robot.md), which points the satellite at it.
@@ -74,11 +76,16 @@ GROUNDSTATION_IMAGE=reachy-groundstation:dev
 > groundstation is this?" sets a version tag, and every release publishes one.
 
 Everything else in `.env` is at the service's own default, and the file doubles
-as the list of what the service resolves. Two settings are deliberately
-commented out — `REACHY_GROUNDSTATION_MODELS_DIR` and
-`REACHY_GROUNDSTATION_INFERENCE_PROVIDERS` — because compose's `env_file`
-overrides the image's own `ENV`, and uncommenting the provider list would turn
-an accelerated image into a slower CPU one without saying so.
+as the list of what the service resolves. Four settings are deliberately
+commented out — `REACHY_GROUNDSTATION_HOST`, `REACHY_GROUNDSTATION_PORT`,
+`REACHY_GROUNDSTATION_MODELS_DIR` and `REACHY_GROUNDSTATION_INFERENCE_PROVIDERS`
+— because compose's `env_file` **overrides the image's own `ENV`**, so a line
+repeating what the image already sets replaces the image's answer with this
+file's. Uncommenting the provider list is the one that does real damage: on the
+accelerated variant it would replace `CUDAExecutionProvider,CPUExecutionProvider`
+with the CPU provider alone, and the image would run on the CPU without saying
+so. A test asserts that the commented set is exactly the set the Dockerfile's
+`ENV` names.
 
 ## 3. Start it
 
@@ -169,21 +176,32 @@ than running on the default — see
 
 ## 5. Ask it whether it is ready
 
+The service emits one line; `python3 -m json.tool` is what makes it readable, and
+every JSON transcript below goes through it.
+
 ```
-curl --silent --show-error http://127.0.0.1:8080/readyz
+curl --silent --show-error http://127.0.0.1:8080/readyz | python3 -m json.tool
 ```
 
 ```json
 {
-  "ready": true,
-  "capabilities": [
-    {"name": "face", "version": 1, "state": "ready", "detail": ""},
-    {"name": "gesture", "version": null, "state": "disabled", "detail": ""}
-  ]
+    "ready": true,
+    "capabilities": [
+        {
+            "name": "face",
+            "version": 1,
+            "state": "ready",
+            "detail": ""
+        },
+        {
+            "name": "gesture",
+            "version": null,
+            "state": "disabled",
+            "detail": ""
+        }
+    ]
 }
 ```
-
-(Reformatted for reading; the service emits one line.)
 
 `ready` is true when every enabled capability finished warming up. A disabled one
 does not hold readiness back, and has no version because nothing was built.
@@ -191,17 +209,29 @@ does not hold readiness back, and has no version because nothing was built.
 Two more endpoints answer the questions that come next:
 
 ```
-curl --silent --show-error http://127.0.0.1:8080/capabilities
+curl --silent --show-error http://127.0.0.1:8080/capabilities | python3 -m json.tool
 ```
 
 ```json
 {
-  "ready": true,
-  "offered": ["face"],
-  "capabilities": [
-    {"name": "face", "version": 1, "state": "ready", "detail": ""},
-    {"name": "gesture", "version": null, "state": "disabled", "detail": ""}
-  ]
+    "ready": true,
+    "offered": [
+        "face"
+    ],
+    "capabilities": [
+        {
+            "name": "face",
+            "version": 1,
+            "state": "ready",
+            "detail": ""
+        },
+        {
+            "name": "gesture",
+            "version": null,
+            "state": "disabled",
+            "detail": ""
+        }
+    ]
 }
 ```
 
@@ -209,32 +239,32 @@ curl --silent --show-error http://127.0.0.1:8080/capabilities
 nothing will answer a frame however healthy the service looks.
 
 ```
-curl --silent --show-error http://127.0.0.1:8080/config
+curl --silent --show-error http://127.0.0.1:8080/config | python3 -m json.tool
 ```
 
 ```json
 {
-  "credential": "<set>",
-  "host": "0.0.0.0",
-  "port": 8080,
-  "queue_bound": 2,
-  "capability_timeout_seconds": 5.0,
-  "handshake_timeout_seconds": 10.0,
-  "warm_up_timeout_seconds": 60.0,
-  "max_message_bytes": 4194304,
-  "log_level": "info",
-  "log_format": "json",
-  "service_name": "reachy-groundstation",
-  "models_dir": "/opt/reachy/models",
-  "inference_intra_op_threads": 4,
-  "inference_inter_op_threads": 1,
-  "inference_providers": "CPUExecutionProvider",
-  "face_enabled": true,
-  "face_score_threshold": 0.6,
-  "face_nms_threshold": 0.3,
-  "gesture_enabled": false,
-  "gesture_score_threshold": 0.6,
-  "gesture_sample_interval": 4
+    "credential": "<set>",
+    "host": "0.0.0.0",
+    "port": 8080,
+    "queue_bound": 2,
+    "capability_timeout_seconds": 5.0,
+    "handshake_timeout_seconds": 10.0,
+    "warm_up_timeout_seconds": 60.0,
+    "max_message_bytes": 4194304,
+    "log_level": "info",
+    "log_format": "json",
+    "service_name": "reachy-groundstation",
+    "models_dir": "/opt/reachy/models",
+    "inference_intra_op_threads": 4,
+    "inference_inter_op_threads": 1,
+    "inference_providers": "CPUExecutionProvider",
+    "face_enabled": true,
+    "face_score_threshold": 0.6,
+    "face_nms_threshold": 0.3,
+    "gesture_enabled": false,
+    "gesture_score_threshold": 0.6,
+    "gesture_sample_interval": 4
 }
 ```
 
@@ -432,18 +462,18 @@ curl --silent --show-error http://127.0.0.1:8080/metrics | head -14
 ```
 # HELP groundstation_sessions_total Sessions that reached a terminal state, by how they ended.
 # TYPE groundstation_sessions_total counter
-groundstation_sessions_total{outcome="going_away"} 2.0
+groundstation_sessions_total{outcome="going_away"} 1.0
 groundstation_sessions_total{outcome="unauthenticated"} 1.0
 # HELP groundstation_sessions_created Sessions that reached a terminal state, by how they ended.
 # TYPE groundstation_sessions_created gauge
-groundstation_sessions_created{outcome="going_away"} 1.7873400402159584e+09
-groundstation_sessions_created{outcome="unauthenticated"} 1.7873400591173377e+09
+groundstation_sessions_created{outcome="going_away"} 1.7873420225198042e+09
+groundstation_sessions_created{outcome="unauthenticated"} 1.7873420228297086e+09
 # HELP groundstation_sessions_active Sessions currently established.
 # TYPE groundstation_sessions_active gauge
 groundstation_sessions_active 0.0
 # HELP groundstation_frames_received_total Frames accepted from a client.
 # TYPE groundstation_frames_received_total counter
-groundstation_frames_received_total 6.0
+groundstation_frames_received_total 5.0
 ```
 
 The `unauthenticated` row above is real: it is the session refused during
