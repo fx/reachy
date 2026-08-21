@@ -129,10 +129,12 @@ the file with what it covers: `test_contracts_version.py`, not `test_version.py`
 
 ## Toolchain
 
-`mise.toml` pins `python`, `uv`, `rust`, `duvet` and `gitleaks`. Python 3.12 is
-the floor, matching the robot image, and the robot itself is an aarch64
-Raspberry Pi CM4 — anything shipped to it is built and tested for that
-architecture.
+`mise.toml` pins `python`, `uv`, `just`, `rust`, `duvet` and `gitleaks`, and it
+is the only place any of them is pinned: continuous integration reads the first
+three out of that file rather than restating them, so a runner and a contributor
+cannot end up on versions that merely look alike. Python 3.12 is the floor,
+matching the robot image, and the robot itself is an aarch64 Raspberry Pi CM4 —
+anything shipped to it is built and tested for that architecture.
 
 ```
 mise install     # once, to get the pinned versions

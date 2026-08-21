@@ -3,6 +3,11 @@ rust = "1.97.1"
 "cargo:duvet" = "0.4.3"
 python = "3.12.14"
 uv = "0.12.5"
+# The task surface itself. Pinned here rather than assumed present, because
+# continuous integration reads these three pins out of this file — see
+# .github/actions/setup-workspace — and a version it cannot find is a version
+# a contributor and a runner can disagree about.
+just = "1.58.0"
 # The secret scanner `just secret-scan` runs. Pinned to the same release the
 # hygiene workflow uses, so a finding reproduces locally rather than depending
 # on whichever build happens to be on a contributor's machine.

@@ -9,6 +9,16 @@ The diff is taken with three dots — `base...head` — so a branch is judged on
 what it added since it diverged rather than on everything that landed on the
 base in the meantime. The commit list uses two dots, which is the same set of
 commits.
+
+Output is captured as bytes and decoded here rather than by `subprocess`, whose
+text mode would use the runner's locale encoding. Undecodable bytes are an input
+this scanner must expect, not an edge case: git imposes no encoding on a commit
+message or on a file it diffs, so a message written on a machine with a
+different locale, or a diff of a file that is not text at all, arrives as bytes
+no locale decodes. Raising there would fail the gate for a reason that has
+nothing to do with leaks — a red check saying nothing about whether anything
+leaked — so the decode is lossy and the scan proceeds over the parts that
+survive it.
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ from reachy_hygiene.scan import Commit
 __all__ = [
     "Runner",
     "commits_in_range",
+    "decode_git_output",
     "diff_of_range",
     "parse_commit_log",
     "run_git",
@@ -38,6 +49,20 @@ Runner = Callable[[Sequence[str]], str]
 _RECORD_SEPARATOR: Final = "\0"
 
 
+def decode_git_output(raw: bytes) -> str:
+    """Decode bytes from `git` as UTF-8, replacing anything undecodable.
+
+    Args:
+        raw: The bytes `git` wrote.
+
+    Returns:
+        The decoded text, with every undecodable byte replaced by U+FFFD. The
+        replacement character matches no rule, so a leak beside one is still
+        found and the byte that could not be read is not mistaken for content.
+    """
+    return raw.decode("utf-8", errors="replace")
+
+
 def run_git(arguments: Sequence[str]) -> str:  # pragma: no cover - process boundary
     """Run `git` with the given arguments and return its standard output.
 
@@ -45,7 +70,7 @@ def run_git(arguments: Sequence[str]) -> str:  # pragma: no cover - process boun
         arguments: The arguments to pass to `git`, without the program name.
 
     Returns:
-        The command's standard output.
+        The command's standard output, decoded leniently.
 
     Raises:
         subprocess.CalledProcessError: If `git` exits non-zero.
@@ -55,13 +80,17 @@ def run_git(arguments: Sequence[str]) -> str:  # pragma: no cover - process boun
     # S607: `git` is resolved from PATH on purpose — the scanner runs against
     # whichever git the checkout was made with, on a runner and on a laptop
     # alike, and hard-coding a path would break one of them.
+    #
+    # Deliberately NOT `text=True`: that decodes with the runner's locale
+    # encoding and raises on anything it cannot read. `decode_git_output` is
+    # where the decoding lives, so it is a pure function a test can drive with
+    # real bytes rather than behaviour buried in a subprocess call.
     completed = subprocess.run(  # noqa: S603  # a list, never a shell
         ["git", *arguments],  # noqa: S607  # the checkout's git, from PATH
         capture_output=True,
         check=True,
-        text=True,
     )
-    return completed.stdout
+    return decode_git_output(completed.stdout)
 
 
 def diff_of_range(base: str, head: str, *, run: Runner = run_git) -> str:

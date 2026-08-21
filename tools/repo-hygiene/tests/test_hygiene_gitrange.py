@@ -5,8 +5,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from reachy_hygiene.corpus import MUST_BE_CAUGHT
-from reachy_hygiene.gitrange import commits_in_range, diff_of_range, parse_commit_log
-from reachy_hygiene.scan import scan_commits
+from reachy_hygiene.gitrange import (
+    commits_in_range,
+    decode_git_output,
+    diff_of_range,
+    parse_commit_log,
+)
+from reachy_hygiene.scan import scan_commits, scan_text
 
 _SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -68,3 +73,32 @@ def test_the_commit_list_is_requested_nul_terminated() -> None:
 
     assert commit.sha == _SHA
     assert seen == [["log", "-z", "--format=%H%n%B", "main..HEAD"]]
+
+
+def test_undecodable_bytes_do_not_stop_the_scan() -> None:
+    """Git imposes no encoding on a message, so this is an input, not an edge.
+
+    Raising here would fail the gate for a reason unrelated to leak detection,
+    which is a red check that says nothing about whether anything leaked.
+    """
+    raw = f"{_SHA}\nfix: seen at {MUST_BE_CAUGHT[0]}".encode() + b" \xff\xfe\x80\n\0"
+
+    (commit,) = parse_commit_log(decode_git_output(raw))
+
+    assert MUST_BE_CAUGHT[0] in commit.message
+    assert scan_commits([commit]) != []
+
+
+def test_an_undecodable_byte_becomes_the_replacement_character() -> None:
+    """Lossy, and lossy in a shape no rule matches, so it cannot mask a leak."""
+    decoded = decode_git_output(b"host \xff\xfe end")
+
+    assert decoded == "host \ufffd\ufffd end"
+    assert scan_text(decoded, "notes.md") == []
+
+
+def test_valid_utf8_survives_the_decode_intact() -> None:
+    """Lenient decoding must not mangle text that was fine to begin with."""
+    text = "résumé: 半角 ✓"
+
+    assert decode_git_output(text.encode()) == text
