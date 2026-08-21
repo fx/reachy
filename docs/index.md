@@ -22,7 +22,7 @@
 | 0003 | [contracts-package](changes/0003-contracts-package.md) | [robot-link](specs/robot-link/) | complete | 0001, 0002 |
 | 0004 | [groundstation-session](changes/0004-groundstation-session.md) | [groundstation](specs/groundstation/) | complete | 0003 |
 | 0005 | [perception-capability](changes/0005-perception-capability.md) | [perception](specs/perception/) | complete | 0004 |
-| 0006 | [groundstation-images](changes/0006-groundstation-images.md) | [groundstation](specs/groundstation/) | draft | 0002, 0005 |
+| 0006 | [groundstation-images](changes/0006-groundstation-images.md) | [groundstation](specs/groundstation/) | complete | 0002, 0005 |
 | 0007 | [reachyctl-probe](changes/0007-reachyctl-probe.md) | [reachyctl](specs/reachyctl/) | complete | 0003, 0004 |
 | 0008 | [reachyctl-doctor](changes/0008-reachyctl-doctor.md) | [reachyctl](specs/reachyctl/) | draft | 0007 |
 | 0009 | [reachyctl-deploy-and-config](changes/0009-reachyctl-deploy-and-config.md) | [reachyctl](specs/reachyctl/) | draft | 0002, 0008 |

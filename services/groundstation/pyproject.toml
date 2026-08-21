@@ -42,6 +42,27 @@ dependencies = [
     "opentelemetry-sdk>=1.27",
 ]
 
+# The accelerated image variant, and nothing else installs this.
+#
+# The CUDA variant is meant to differ from the default only in its base image and
+# its provider preference, and it very nearly does — but the stock `onnxruntime`
+# wheel carries no CUDA execution provider at all, so a variant that changed only
+# the provider list would have `resolve_providers` drop `CUDAExecutionProvider`
+# as unavailable and fall back to the CPU provider without saying anything. This
+# extra is what makes the accelerated variant accelerated.
+#
+# It is an extra rather than a second dependency because both distributions
+# install the module `onnxruntime` and each would overwrite the other's files.
+# The image build asks for this extra and leaves the CPU wheel out of that one
+# build; see `--no-install-package` in the Dockerfile.
+#
+# Upper-bounded at the major version for the same reason the parity reference is:
+# a new major is where the provider names and the CUDA version it links against
+# could change, and that is a deliberate edit rather than something a resolver
+# does quietly.
+[project.optional-dependencies]
+cuda = ["onnxruntime-gpu>=1.19,<2"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

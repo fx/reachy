@@ -1,0 +1,43 @@
+# What never enters the build context.
+#
+# BuildKit reads `<dockerfile>.dockerignore` in preference to the context root's
+# `.dockerignore`, so this file belongs to this Dockerfile alone and no other
+# build in the repository is affected by it.
+#
+# Two things are being kept out. The large working directories — a virtual
+# environment, the fetched weights, the upstream drift clone — would be uploaded
+# to the daemon on every build and are rebuilt inside it in any case. And
+# anything carrying local values: `.env` is gitignored precisely because it holds
+# an environment's real settings, and a build that copied one would bake it into
+# a public image.
+
+# Version control and local tooling state.
+.git
+.github
+.claude
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/__pycache__
+**/*.py[cod]
+
+# Working directories that are rebuilt rather than carried.
+.venv
+**/.venv
+.models
+.upstream-drift
+.duvet/reports
+.duvet/requirements
+
+# Coverage output.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov
+
+# Local values. The tracked `.example` sibling documents the shape; the real
+# file never leaves the host it was written on.
+.env
+.env.*
+!.env.example
+provisioning/ansible/inventory.ini

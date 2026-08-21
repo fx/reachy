@@ -7,7 +7,7 @@ the GitHub Container Registry, with a CUDA variant and a compose file that makes
 it runnable without an orchestrator.
 
 **Spec:** [Groundstation](../specs/groundstation/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0002, 0005
 
 ## Motivation
@@ -112,32 +112,102 @@ selection, so it is a build argument rather than a second Dockerfile.
 
 ## Tasks
 
-- [ ] Write the image build
-  - [ ] Multi-stage Dockerfile with a toolchain-free runtime stage
-  - [ ] Build-time model fetch with hash verification
-  - [ ] Non-root runtime user
-  - [ ] CUDA variant as a build argument over the same definition
-- [ ] Publish from CI
-  - [ ] Multi-architecture build for 64-bit ARM and x86
-  - [ ] Push both variants to the registry on a version tag
-  - [ ] Record image size as a build output
-- [ ] Verify the artifact
-  - [ ] Start the built image in CI, wait for readiness
-  - [ ] Drive a real session through the running container
-  - [ ] Assert the service starts with the model source unreachable
-- [ ] Ship the standalone deployment
-  - [ ] Compose file running the service with sane defaults
-  - [ ] Metrics scrape configuration alongside it
-  - [ ] `.env.example` documenting every setting the compose file reads
+- [x] Write the image build
+  - [x] Multi-stage Dockerfile with a toolchain-free runtime stage
+  - [x] Build-time model fetch with hash verification
+  - [x] Non-root runtime user
+  - [x] CUDA variant as a build argument over the same definition
+- [x] Publish from CI
+  - [x] Multi-architecture build for 64-bit ARM and x86
+  - [x] Push both variants to the registry on a version tag
+  - [x] Record image size as a build output
+- [x] Verify the artifact
+  - [x] Start the built image in CI, wait for readiness
+  - [x] Drive a real session through the running container
+  - [x] Assert the service starts with the model source unreachable
+- [x] Ship the standalone deployment
+  - [x] Compose file running the service with sane defaults
+  - [x] Metrics scrape configuration alongside it
+  - [x] `.env.example` documenting every setting the compose file reads
 
 ## Open Questions
 
-- [ ] Whether the CUDA variant is built on every release or only on demand. It
+- [x] Whether the CUDA variant is built on every release or only on demand. It
       roughly doubles build time and nothing currently deploys it. Current lean:
       every release, so it cannot rot unnoticed.
-- [ ] Whether ARM images are built natively or by emulation. Emulation is
+      **Resolved: every release, and every pull request as well.** The lean was
+      right and understated. Building it only on release would have shipped a
+      CUDA image that is not accelerated: the model runtime wheel in the
+      lockfile links `libcublasLt.so.13` and needs a CUDA 13 base, and the
+      obvious 12.6 base produced an image that builds, starts, serves and
+      silently falls back to the CPU provider. That was caught by running the
+      artifact, so the variant is verified on every pull request too, and the
+      check is specifically that the provider library loads rather than that the
+      container starts.
+- [x] Whether ARM images are built natively or by emulation. Emulation is
       simpler and slow enough to be irritating for a model-heavy build. Current
       lean: emulation until it becomes painful.
+      **Resolved: emulation.** It is one action against a second runner pool, a
+      second cache and a manifest assembled by hand, and the emulated work is
+      dependency installation rather than compilation — every dependency
+      resolves to an `aarch64` wheel, so nothing is built from source under
+      QEMU. Revisit when the ARM leg becomes the slowest merge gate; the change
+      is confined to the two workflow jobs that name `--platform`.
+
+## Completion notes
+
+**The image.** `services/groundstation/Dockerfile`, built from the repository
+root by `just image [variant] [tag] [buildx arguments…]`. Dependencies and the
+models are resolved in a builder stage; the runtime stage is
+`gcr.io/distroless/cc-debian12` with no shell, no package manager and no
+compiler, running as uid 65532. Python is a self-contained interpreter uv
+installs into the builder and both stages copy, which is what makes the runtime
+base a free variable — NVIDIA's CUDA image ships no Python, and installing one
+into it would put a package manager back.
+
+**Measured sizes**, `linux/amd64`, uncompressed, as `just image-size` reports
+them:
+
+| Variant | Bytes | |
+|---|---:|---|
+| default (CPU) | 458,501,043 | 437.3 MiB |
+| accelerated (CUDA) | 3,659,895,758 | 3,490.3 MiB |
+
+The default variant is under the predecessor's 483 MB, which was the packaging
+property worth keeping. The accelerated variant is what a CUDA 13 runtime plus
+cuDNN plus a 202 MB `onnxruntime-gpu` wheel costs; nothing about it is
+compressible by choosing differently, which is the reason CPU is the default
+tag.
+
+**How the size is recorded**, since change 0014 gates on its growth:
+`just image-size <tag> <variant>` prints one line of JSON —
+`{"image": …, "variant": …, "platform": …, "size_bytes": …, "size_mib": …}` —
+read from `docker image inspect .Size`, the uncompressed on-disk size a host
+needs room for. The `Images` workflow writes it to the job summary and uploads
+it as the artifact `groundstation-image-size-<variant>`, one JSON file named
+`<variant>.json`.
+
+**What the CUDA variant actually is:** the same Dockerfile with three build
+arguments — `RUNTIME_BASE`, `RUNTIME_EXTRA=cuda` and `INFERENCE_PROVIDERS`. The
+extra is `onnxruntime-gpu`, declared as an optional dependency of
+`reachy-groundstation`; the build asks for it and leaves the CPU wheel out with
+`--no-install-package onnxruntime`, because both distributions install the same
+module.
+
+**Verification** is `just image-verify <tag> [isolated|bridge] [variant]`. It
+starts the image on an `--internal` Docker network with no route off the host,
+proves the isolation by resolving every model source out of the registry inside
+the container and failing if any answers, asserts the runtime stage carries no
+toolchain, asserts it does not run as root, and then drives a real session from
+a sibling container: negotiate, send a committed one-face fixture as a frame,
+and require a face back. The service answered with one face at 0.909 confidence
+on both variants.
+
+**What has not been exercised on hardware.** No GPU was available, so the
+accelerated variant is verified as far as "its CUDA provider library's
+dependencies all resolve, apart from the driver the container runtime injects".
+Whether inference on it is faster than the CPU path is change 0014's question,
+and the measurements that made CPU the default say it may well not be.
 
 ## References
 

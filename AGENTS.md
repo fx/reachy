@@ -27,7 +27,7 @@ one-line import of this file and holds no content of its own.
 | `uv.lock` | One lockfile for every member |
 | `mise.toml` | The pinned toolchain |
 | `Justfile` | The task surface |
-| `.github/workflows/` | The merge gates: checks, hygiene, release, traceability |
+| `.github/workflows/` | The merge gates: checks, hygiene, images, release, traceability |
 | `release-please-config.json` | Where the derived version is written, artifact by artifact |
 
 Every member but `bench` has an implementation today. `bench` is still a
@@ -194,6 +194,8 @@ mise install     # once, to get the pinned versions
 just sync        # install the workspace exactly as uv.lock describes it
 just models      # fetch and hash-verify the pinned model weights, never committed
 just check       # lint, typecheck, test — three of the merge gates
+just image       # build the groundstation container image (needs docker)
+just image-verify  # start it with no network and drive a real session through it
 ```
 
 Model weights are not in the repository: `just models` fetches them into
@@ -205,7 +207,7 @@ missing is not a merge gate.
 
 ## Merge gates
 
-Four workflows, and they do not all run on the same events. Each job calls a
+Five workflows, and they do not all run on the same events. Each job calls a
 `Justfile` recipe, so every one of them reproduces locally with the command in
 its step.
 
@@ -213,8 +215,9 @@ its step.
 |---|---|---|---|
 | `checks.yml` | pull requests, pushes to `main` | `Lint`, `Type check`, `Test` (diff-scoped coverage), `Contract drift` | `just check`, `just contracts-check` |
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
+| `images.yml` | pull requests, pushes to `main`, version tags | `Verify cpu`, `Verify cuda`, `Build for both architectures`; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main` only | Version derivation and tag creation; publishes nothing | — |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — one spec registered so far, see below | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — two specs registered so far, see below | `just duvet` |
 
 `release.yml` never runs on a pull request, which is why it is not in the set of
 checks to require below.
@@ -227,13 +230,14 @@ completion notes of
 
 ## Requirements traceability
 
-⚠️ **The "Requirements traceability" check covers one spec so far.**
-`.duvet/config.toml` registers `docs/specs/perception/index.md` and nothing else,
-so a green run is evidence that perception's 8 requirements are traced and is
-evidence of nothing about the other 7 specs — duvet does not load them. A spec is
-registered by the change that implements it, in that change's pull request,
-alongside the annotations that make it pass. The header comment in that file
-explains why the rest are deliberately unregistered.
+⚠️ **The "Requirements traceability" check covers two specs so far.**
+`.duvet/config.toml` registers `docs/specs/perception/index.md` and
+`docs/specs/groundstation/index.md` and nothing else, so a green run is evidence
+that those 18 requirements are traced and is evidence of nothing about the other
+6 specs — duvet does not load them. A spec is registered by the change that
+implements it, in that change's pull request, alongside the annotations that make
+it pass. The header comment in that file explains why the rest are deliberately
+unregistered.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and

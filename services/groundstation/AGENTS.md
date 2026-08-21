@@ -6,10 +6,11 @@ Distribution `reachy-groundstation`, import name `reachy_groundstation`.
 **Spec:** [groundstation](../../docs/specs/groundstation/), with
 [perception](../../docs/specs/perception/) for the first capability.
 **Filled in by:** [0004](../../docs/changes/0004-groundstation-session.md) —
-transport, session layer, capability registry, pipeline and observability — and
+transport, session layer, capability registry, pipeline and observability —
 [0005](../../docs/changes/0005-perception-capability.md), which added the model
-runtime, the pinned model store and the perception capabilities. The container
-image is [0006](../../docs/changes/0006-groundstation-images.md).
+runtime, the pinned model store and the perception capabilities, and
+[0006](../../docs/changes/0006-groundstation-images.md), which added the
+container image, its verification and the standalone deployment.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -29,6 +30,13 @@ src/reachy_groundstation/
 ├─ ports.py        # the seam: the decoded frame and the two interfaces
 ├─ config.py       # settings, read once by a function the entry point calls
 └─ service.py      # the composition root
+
+Dockerfile         # the image: one definition, two variants, two architectures
+Dockerfile.dockerignore
+deploy/
+├─ compose.yaml    # the service and a Prometheus that actually scrapes it
+├─ prometheus.yml  # the scrape configuration
+└─ .env.example    # every variable compose reads, checked against config.py
 ```
 
 ## Local rules
@@ -78,3 +86,16 @@ src/reachy_groundstation/
   raises `CapabilityDisabledError` from its factory and the registry records
   `CapabilityState.DISABLED`. An operator has to be able to tell a setting from
   a fault.
+- **The image is verified by being run, never by being read.** `just image`
+  builds it from the repository root; `just image-verify` starts it on a Docker
+  network with no route off the host, proves the model source really is
+  unreachable from inside, asserts the runtime stage carries no toolchain and
+  does not run as root, and drives a real session with a committed fixture frame
+  through it from a sibling container. A build that succeeds and produces a
+  service that cannot start is a passing build and a broken release.
+- **A setting added here is a setting added to `deploy/.env.example`.** The two
+  are compared by `tests/test_groundstation_deployment.py`, which also checks
+  that every documented value is the default the model carries, that everything
+  compose interpolates is documented, and that the scrape configuration targets
+  the port the example sets. Deployment documentation that can rot is
+  deployment documentation that has.

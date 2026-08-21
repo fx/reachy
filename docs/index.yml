@@ -76,7 +76,7 @@ changes:
     path: changes/0006-groundstation-images.md
     description: Multi-architecture container images with a CUDA variant, published to GHCR
     spec: groundstation
-    status: draft
+    status: complete
     depends_on: ["0002", "0005"]
   - id: "0007"
     name: reachyctl-probe
