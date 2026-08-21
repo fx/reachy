@@ -275,15 +275,21 @@ class Reporter:
         """
         if report.columns:
             self._write(
-                self._out, _SEPARATOR.join(_plain(name) for name in report.columns)
+                self._out,
+                _SEPARATOR.join(self._plain(name) for name in report.columns),
             )
             for row in report.rows:
                 self._write(self._out, self._plain_row(report.columns, row))
         for name, value in report.data.items():
-            self._write(self._out, f"{_plain(name)}{_SEPARATOR}{_plain(value)}")
+            self._write(
+                self._out, f"{self._plain(name)}{_SEPARATOR}{self._plain(value)}"
+            )
         status = "ok" if report.ok else "failed"
-        summary = f"{_SEPARATOR}{_plain(report.summary)}" if report.summary else ""
-        self._write(self._out, f"{_plain(report.command)}{_SEPARATOR}{status}{summary}")
+        summary = f"{_SEPARATOR}{self._plain(report.summary)}" if report.summary else ""
+        self._write(
+            self._out,
+            f"{self._plain(report.command)}{_SEPARATOR}{status}{summary}",
+        )
 
     def _plain_row(self, columns: Sequence[str], row: Mapping[str, object]) -> str:
         """Render one row of the plain table.
@@ -295,7 +301,7 @@ class Reporter:
         Returns:
             The line to write.
         """
-        return _SEPARATOR.join(_plain(row.get(name)) for name in columns)
+        return _SEPARATOR.join(self._plain(row.get(name)) for name in columns)
 
     def _emit_rich(self, report: Report) -> None:
         """Write the result for a person at a terminal.
@@ -309,14 +315,50 @@ class Reporter:
                 table.add_column(self._safe(name))
             for row in report.rows:
                 table.add_row(
-                    *(self._safe(_render(row.get(name))) for name in report.columns),
+                    *(_markup(self._field(row.get(name))) for name in report.columns),
                 )
             self._console.print(table)
         for name, value in report.data.items():
-            self._print(f"{self._safe(name)}: {self._safe(_render(value))}")
+            self._print(f"{self._safe(name)}: {_markup(self._field(value))}")
         status = "[green]ok[/green]" if report.ok else "[red]failed[/red]"
         summary = f" — {self._safe(report.summary)}" if report.summary else ""
         self._print(f"{self._safe(report.command)}: {status}{summary}")
+
+    def _field(self, value: object) -> str:
+        """Render a field for a text rendering, scrubbed inside and out.
+
+        The inner scrub is not belt-and-braces. `_render` falls back to `str`
+        for a value it has no rule for, and `str` of a container is a `repr` —
+        which escapes a backslash, a tab and a newline exactly as the
+        transformations below do. So a credential nested inside a mapping is
+        already rewritten by the time a scrub of the rendered line sees it, and
+        that scrub matches nothing. Scrubbing the structure first puts
+        `<redacted>` in before anything can repr it.
+
+        Args:
+            value: The field's value, of whatever shape a report allows.
+
+        Returns:
+            Its text form, with every known secret gone from it.
+        """
+        return self._scrub(_render(self._scrub_field(value)))
+
+    def _plain(self, value: object) -> str:
+        """Scrub a field and then escape it for the tab-separated rendering.
+
+        The same order, and for the same reason, as `_safe` on the rich path:
+        the escaping rewrites exactly the characters a credential may contain,
+        so a value escaped first is one the redactor can no longer recognise —
+        and it goes out escaped rather than redacted, with the scrubber
+        reporting that it found nothing.
+
+        Args:
+            value: The field's value.
+
+        Returns:
+            The value rendered, scrubbed, and safe to put between tabs.
+        """
+        return _escape_plain(self._field(value))
 
     def _safe(self, text: str) -> str:
         r"""Scrub a command's string and then escape it, in that order.
@@ -409,8 +451,8 @@ def _markup(text: str) -> str:
     return escape(text)
 
 
-def _plain(value: object) -> str:
-    """Render one field so that it cannot add a column or a row.
+def _escape_plain(text: str) -> str:
+    """Escape a rendered field so that it cannot add a column or a row.
 
     The plain rendering is the one REQ-058 promises a script can read without
     screen-scraping, and it separates fields with a tab and rows with a
@@ -423,16 +465,21 @@ def _plain(value: object) -> str:
     backslash first, so an escape this function produces is distinguishable
     from one the value already contained.
 
+    **Takes already-scrubbed text, and that is not an implementation detail.**
+    Every character escaped here is one a credential may contain, so escaping
+    an unscrubbed value rewrites the bytes the redactor is looking for and it
+    then matches nothing — reporting success while the secret goes out in
+    escaped form. `Reporter._plain` is the only caller and it scrubs first.
+
     Args:
-        value: The field's value.
+        text: The field, already rendered and already scrubbed.
 
     Returns:
-        Its text form, with the separator and any line break shown rather than
+        The same text, with the separator and any line break shown rather than
         acted on.
     """
     return (
-        _render(value)
-        .replace("\\", "\\\\")
+        text.replace("\\", "\\\\")
         .replace(_SEPARATOR, "\\t")
         .replace("\r", "\\r")
         .replace("\n", "\\n")

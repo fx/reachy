@@ -503,3 +503,93 @@ def test_a_field_carrying_a_tab_or_a_newline_does_not_move_the_columns() -> None
         assert len(line.split("\t")) == 2
     assert "\\t" in lines[1]
     assert "\\n" in lines[2]
+
+
+# A credential holding every character a rendering transforms: the backslash and
+# the tab and the newline the plain path escapes, the bracket rich markup reads,
+# and the quote JSON escapes. Any path that transforms before it scrubs hands the
+# redactor a string these are no longer in, and it matches nothing.
+AWKWARD: Final = 'a\\b\tc\nd[e]f"g'
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+@pytest.mark.parametrize(
+    ("output_format", "terminal"),
+    [
+        (OutputFormat.TEXT, False),
+        (OutputFormat.TEXT, True),
+        (OutputFormat.JSON, False),
+    ],
+)
+def test_no_rendering_lets_a_credential_out_in_any_transformed_form(
+    output_format: OutputFormat,
+    terminal: bool,
+) -> None:
+    """Scrubbing goes first on every path, because escaping defeats it.
+
+    Each of the three renderings transforms what it is given — the plain one
+    escapes tabs and newlines and backslashes, the rich one escapes brackets,
+    the structured one escapes quotes and backslashes. Every one of those
+    characters can be in a credential, so a path that transforms first is
+    handing the redactor a string the secret is no longer literally in: it
+    matches nothing, reports success, and the value goes out transformed rather
+    than redacted.
+
+    The second assertion is the one that matters. Checking only for the raw
+    secret passes against exactly the bug this is about, because the raw form
+    is precisely what is no longer there.
+
+    Args:
+        output_format: Which rendering to drive.
+        terminal: Whether to render as though attached to a terminal.
+    """
+    reporter, streams = reporter_for(
+        output_format=output_format,
+        terminal=terminal,
+        verbose=True,
+        secrets=[AWKWARD],
+    )
+
+    reporter.emit(
+        Report(
+            command="probe",
+            ok=False,
+            summary=f"the groundstation refused {AWKWARD}",
+            data={"url": AWKWARD, "nested": {"credential": AWKWARD}},
+            columns=("value",),
+            rows=({"value": AWKWARD},),
+        ),
+    )
+    reporter.detail(f"credential resolved: {AWKWARD}")
+
+    written = streams.result + streams.diagnostics
+    assert AWKWARD not in written
+    for transformed in _every_rendering_of(AWKWARD):
+        assert transformed not in written, f"leaked as {transformed!r}"
+
+
+def _every_rendering_of(secret: str) -> tuple[str, ...]:
+    """Build the forms a secret takes on its way through each renderer.
+
+    Args:
+        secret: The value that must not appear however it is written.
+
+    Returns:
+        The transformed spellings to look for, minus any that are the value
+        itself — an assertion on those would be the raw check again.
+    """
+    plain = (
+        secret.replace("\\", "\\\\")
+        .replace("\t", "\\t")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
+    # What `rich.markup.escape` does to a bracket, and what `json.dumps` does to
+    # a quote and a backslash. Both are applied to the value, not to a document.
+    rich_markup = secret.replace("[", "\\[")
+    structured = json.dumps(secret)[1:-1]
+    return tuple(
+        {plain, rich_markup, structured} - {secret},
+    )
