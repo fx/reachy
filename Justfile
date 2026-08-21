@@ -341,6 +341,19 @@ image variant="cpu" tag="reachy-groundstation:dev" *buildx_args:
 # one.
 #
 # JSON on standard output rather than a table, because the consumer is a gate.
+#
+# ⚠️ `{{{{` below is not a typo and the braces are not unbalanced. `docker
+# --format` takes a Go template, whose delimiters are the same `{{ }}` this file
+# interpolates its own parameters with — so a literal `{{` has to be escaped as
+# `{{{{`, while `}}` outside an interpolation is already literal and is written
+# once. `'{{{{ .Size }}'` therefore reaches the shell as `'{{ .Size }}'`, quoted
+# and balanced. Check with `just --dry-run image-size`, which prints what will
+# actually run. The same escape appears in `image-verify` below, twice.
+#
+# This comment sits ABOVE the recipe rather than inside it, and that is forced: a
+# comment inside a recipe body is a template line like any other, so writing an
+# unescaped doubled brace in one opens an interpolation that never closes and the
+# whole file stops parsing.
 image-size tag="reachy-groundstation:dev" variant="cpu":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -465,6 +478,8 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
     # something that reads like a network fault. Say what actually happened
     # instead, and say it in a second rather than after the readiness deadline.
     sleep 5
+    # The quadrupled brace below is just's escape for the doubled brace a Go
+    # template needs — see the note above `image-size`.
     if [ "$(docker inspect "$name" --format '{{{{ .State.Running }}')" != 'true' ]; then
         echo "just image-verify: the container exited instead of starting; its log follows" >&2
         exit 1
@@ -489,7 +504,8 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
     docker exec "$name" /opt/reachy/venv/bin/python \
         /verify/scripts/probe_groundstation_container.py "${probe[@]}"
 
-    # It must not run as root, whatever the base image's own default is.
+    # It must not run as root, whatever the base image's own default is. The
+    # brace escape below is the one explained above `image-size`.
     user="$(docker inspect "$name" --format '{{{{ .Config.User }}')"
     case "$user" in
         ''|0|0:0|root|root:*)
