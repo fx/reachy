@@ -20,9 +20,12 @@ from typing import Final
 __all__ = ["VERSION", "SemanticVersion", "__version__"]
 
 # Deliberately a bare assignment: the build backend reads this line with a
-# regular expression to derive the distribution version, and an annotation on it
-# stops that regular expression matching.
-__version__ = "0.1.0"
+# regular expression to derive the distribution version, and a type annotation
+# on it stops that regular expression matching. The trailing comment is what
+# release automation looks for when it writes the derived version here; it sits
+# after the closing quote, where the build backend's expression has already
+# stopped reading.
+__version__ = "0.1.0"  # x-release-please-version
 
 # MAJOR.MINOR.PATCH with no leading zeros. Pre-release and build metadata are
 # deliberately rejected: this repository releases from conventional commits and

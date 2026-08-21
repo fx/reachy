@@ -12,6 +12,7 @@ members = [
     "reachy-bench",
     "reachy-contracts",
     "reachy-groundstation",
+    "reachy-hygiene",
     "reachy-mini-ha-satellite",
     "reachyctl",
 ]
@@ -591,6 +592,7 @@ dependencies = [
     { name = "reachy-bench" },
     { name = "reachy-contracts" },
     { name = "reachy-groundstation" },
+    { name = "reachy-hygiene" },
     { name = "reachy-mini-ha-satellite" },
     { name = "reachyctl" },
 ]
@@ -611,6 +613,7 @@ requires-dist = [
     { name = "reachy-bench", editable = "bench" },
     { name = "reachy-contracts", editable = "packages/reachy-contracts" },
     { name = "reachy-groundstation", editable = "services/groundstation" },
+    { name = "reachy-hygiene", editable = "tools/repo-hygiene" },
     { name = "reachy-mini-ha-satellite", editable = "apps/ha-satellite" },
     { name = "reachyctl", editable = "cli/reachyctl" },
 ]
@@ -651,6 +654,11 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [{ name = "reachy-contracts", editable = "packages/reachy-contracts" }]
+
+[[package]]
+name = "reachy-hygiene"
+version = "0.1.0"
+source = { editable = "tools/repo-hygiene" }
 
 [[package]]
 name = "reachy-mini-ha-satellite"

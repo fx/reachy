@@ -1,0 +1,59 @@
+name: Release
+
+# Version derivation only. Nothing is published here: the image, the wheels and
+# the workflows that push them belong to the changes that create those
+# artifacts. What this workflow owns is the single version every one of them
+# will carry, and the tag that names the combination.
+#
+# release-please maintains a release pull request on the default branch,
+# accumulating conventional commits and the version they imply. Merging that
+# pull request is the release: the action then creates the tag and the GitHub
+# release. Nothing happens on a merge that is not the release pull request
+# except the release pull request being updated.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  #= docs/specs/architecture/index.md#req-002-one-version-for-the-whole-repository
+  #% Every artifact published from this repository MUST carry the same version
+  #% string, derived from a single repository-wide version.
+  release-please:
+    name: Release please
+    runs-on: ubuntu-latest
+    permissions:
+      # Writing the release pull request, the tag and the release, plus the
+      # labels release-please puts on its own pull request to track its state.
+      # Narrowed to this job rather than granted to the workflow, so the
+      # workflow-level default stays read-only.
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      # The version it derives is written to every place that declares one —
+      # see release-please-config.json, where the list is spelled out. One
+      # derivation, applied to every artifact, is what makes "which app goes
+      # with which groundstation" answerable from the tag alone.
+      #
+      # ⚠️ The token matters. GitHub does not start a workflow run for an event
+      # raised by the default GITHUB_TOKEN, so a release pull request opened
+      # with it shows no Checks or Hygiene results at all — and once those are
+      # required, it can never be merged. RELEASE_PLEASE_TOKEN is a repository
+      # secret holding a token whose events do trigger workflows; the fallback
+      # keeps this job working before that secret exists, at the cost of a
+      # release pull request whose checks have to be re-run by hand. See the
+      # completion notes in docs/changes/0002-ci-and-hygiene-gates.md.
+      - name: Derive the version and maintain the release
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

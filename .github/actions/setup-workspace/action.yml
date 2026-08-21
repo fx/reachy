@@ -1,0 +1,40 @@
+name: Set up the workspace
+description: >-
+  Install the pinned toolchain and the locked workspace environment, so a job
+  can call a Justfile recipe and get the same result a contributor gets.
+
+# Every job in every workflow here needs the same four steps, and repeating them
+# is how one of them ends up on a different uv or a different Python without
+# anybody noticing. The versions are the ones mise.toml pins; the toolchain
+# itself is not installed with mise, because mise.toml also pins a Rust
+# toolchain and a duvet build that only the requirements-traceability workflow
+# needs and that would be compiled from source on every job here.
+runs:
+  using: composite
+  steps:
+    # Pinned by commit SHA, not by tag. A tag is a mutable ref: retargeting it
+    # upstream would run changed third-party code here with no diff in this
+    # repository to review. The trailing comment records which release the SHA
+    # corresponds to, since the SHA alone is unreadable.
+    - name: Install Python
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        version: "0.12.5"
+        enable-cache: true
+
+    - name: Install just
+      uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      with:
+        just-version: "1.58.0"
+
+    # `just sync` installs exactly what uv.lock describes and fails when the
+    # lockfile no longer matches the manifests, which is where a dependency
+    # added without relocking is caught.
+    - name: Install the workspace
+      shell: bash
+      run: just sync

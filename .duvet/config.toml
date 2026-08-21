@@ -77,6 +77,10 @@ comment-style = { meta = "#=", content = "#%" }
 pattern = "bench/**/*.py"
 comment-style = { meta = "#=", content = "#%" }
 
+[[source]]
+pattern = "tools/**/*.py"
+comment-style = { meta = "#=", content = "#%" }
+
 # --- Ansible: the provisioning roles ----------------------------------------
 [[source]]
 pattern = "provisioning/ansible/**/*.yml"

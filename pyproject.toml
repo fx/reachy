@@ -8,6 +8,7 @@ dependencies = [
     "reachy-bench",
     "reachy-contracts",
     "reachy-groundstation",
+    "reachy-hygiene",
     "reachy-mini-ha-satellite",
     "reachyctl",
 ]
@@ -37,6 +38,7 @@ members = [
     "services/groundstation",
     "cli/reachyctl",
     "bench",
+    "tools/repo-hygiene",
 ]
 
 # Members resolve to each other by path, never by version range, so there is no
@@ -45,6 +47,7 @@ members = [
 reachy-bench = { workspace = true }
 reachy-contracts = { workspace = true }
 reachy-groundstation = { workspace = true }
+reachy-hygiene = { workspace = true }
 reachy-mini-ha-satellite = { workspace = true }
 reachyctl = { workspace = true }
 
@@ -62,6 +65,7 @@ src = [
     "services/groundstation/src",
     "cli/reachyctl/src",
     "bench/src",
+    "tools/repo-hygiene/src",
 ]
 
 [tool.ruff.lint]
@@ -112,8 +116,9 @@ mypy_path = [
     "services/groundstation/src",
     "cli/reachyctl/src",
     "bench/src",
+    "tools/repo-hygiene/src",
 ]
-files = ["packages", "apps", "services", "cli", "bench"]
+files = ["packages", "apps", "services", "cli", "bench", "tools"]
 # `ignore-without-code` is how the "a suppression carries its rule identifier"
 # rule is enforced for mypy; ruff's PGH003/PGH004 enforce the same for lint.
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
@@ -145,7 +150,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=xml",
 ]
-testpaths = ["packages", "apps", "services", "cli", "bench"]
+testpaths = ["packages", "apps", "services", "cli", "bench", "tools"]
 filterwarnings = ["error"]
 
 [tool.coverage.run]
@@ -158,6 +163,7 @@ source = [
     "services/groundstation/src",
     "cli/reachyctl/src",
     "bench/src",
+    "tools/repo-hygiene/src",
 ]
 # Relative paths so the XML report is readable from any checkout root, which is
 # what diff-cover needs to line results up against a diff.

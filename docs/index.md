@@ -18,7 +18,7 @@
 | # | Change | Spec | Status | Depends On |
 |---|--------|------|--------|------------|
 | 0001 | [workspace-skeleton](changes/0001-workspace-skeleton.md) | [architecture](specs/architecture/) | complete | — |
-| 0002 | [ci-and-hygiene-gates](changes/0002-ci-and-hygiene-gates.md) | [architecture](specs/architecture/) | draft | 0001 |
+| 0002 | [ci-and-hygiene-gates](changes/0002-ci-and-hygiene-gates.md) | [architecture](specs/architecture/) | complete | 0001 |
 | 0003 | [contracts-package](changes/0003-contracts-package.md) | [robot-link](specs/robot-link/) | draft | 0001, 0002 |
 | 0004 | [groundstation-session](changes/0004-groundstation-session.md) | [groundstation](specs/groundstation/) | draft | 0003 |
 | 0005 | [perception-capability](changes/0005-perception-capability.md) | [perception](specs/perception/) | draft | 0004 |

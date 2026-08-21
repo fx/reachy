@@ -3,3 +3,7 @@ rust = "1.97.1"
 "cargo:duvet" = "0.4.3"
 python = "3.12.14"
 uv = "0.12.5"
+# The secret scanner `just secret-scan` runs. Pinned to the same release the
+# hygiene workflow uses, so a finding reproduces locally rather than depending
+# on whichever build happens to be on a contributor's machine.
+"github:gitleaks/gitleaks" = "8.30.1"

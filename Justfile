@@ -44,16 +44,48 @@ fmt:
 typecheck:
     {{ uv }} mypy
 
-# Everything that gates a merge.
+# The three gates a contributor runs before pushing. Not every merge gate: the
+# contract-drift check writes to the index and the leak scan needs a commit
+# range, so both stay their own recipe rather than making this one mutate
+# anything or guess what to compare against.
 check: lint typecheck test
 
 # Coverage of the lines this branch changed, rather than of the whole tree, so
 # a large untested area cannot mask a new one. Requires `just test` to have
-# written coverage.xml first; the continuous integration job that enforces the
-# threshold on pull requests is wired in change 0002.
+# written coverage.xml first.
 coverage-diff base="origin/main":
     {{ uv }} diff-cover coverage.xml --compare-branch={{ base }} --fail-under=90
 
 # Verify that every requirement annotation still agrees with the specs.
 duvet:
     duvet report --ci
+
+# Reject values belonging to somebody's environment in a range's diff and in
+# its commit messages alike. Shapes only — a list of the real hostnames and
+# accounts would itself publish them. `head` defaults to the working revision,
+# so `just leak-scan` checks the branch against the default branch.
+leak-scan base="origin/main" head="HEAD":
+    {{ uv }} python -m reachy_hygiene --base {{ base }} --head {{ head }}
+
+# Scan for committed secrets. `log-opts` is passed to `git log`, so the default
+# is the whole history and a range narrows it: `just secret-scan "main..HEAD"`.
+# Needs `gitleaks` on PATH — `mise install` provides the pinned version. On a
+# runner the pull request scan is the gitleaks action instead, which carries its
+# own binary; this recipe is what reproduces a finding locally and what produced
+# the full-history baseline in docs/ops/secret-scan-baseline.md.
+secret-scan log-opts="":
+    gitleaks git --no-banner --redact --log-opts="{{ log-opts }}" .
+
+# Regenerate every published schema and interface description from source. The
+# generators are registered in `reachy_contracts.contracts_export`; the registry
+# is empty until the wire types exist, and the index it writes records that.
+contracts:
+    {{ uv }} python -m reachy_contracts.contracts_export docs/contracts
+
+# Fail when the regenerated contracts differ from the committed copies. The
+# `--intent-to-add` is what makes a newly generated file show up as a
+# difference: without it an artifact nobody committed is merely untracked, and
+# `git diff` reports a clean tree over a drift the gate exists to catch.
+contracts-check: contracts
+    git add --intent-to-add -- docs/contracts
+    git diff --exit-code -- docs/contracts
