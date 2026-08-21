@@ -84,7 +84,7 @@ from reachyctl.managed import DEFAULT_DAEMON_UNIT
 from reachyctl.output import OutputFormat, Report, Reporter, build_reporter
 from reachyctl.probe import DEFAULT_CAPABILITIES, ProbePlan, execute, parse_capability
 from reachyctl.provision import DIRECTORY_VARIABLE as PROVISIONING_DIRECTORY_VARIABLE
-from reachyctl.provision import ProvisionPlan
+from reachyctl.provision import ProvisionPlan, checked_extra_vars, checked_scope
 from reachyctl.provision import execute as execute_provision
 from reachyctl.provision import resolve_directory as resolve_provisioning_directory
 from reachyctl.robot import (
@@ -990,7 +990,9 @@ def provision(
             "--tags",
             help=(
                 "Apply one concern rather than all of them: daemon_env, "
-                "app_install, groundstation_link, verify. Repeatable."
+                "app_install, groundstation_link, verify. Repeatable. Not "
+                "accepted with --remove: the removal path takes everything "
+                "provisioning applied or nothing."
             ),
         ),
     ] = None,
@@ -1004,9 +1006,11 @@ def provision(
             "--extra-vars",
             "-e",
             help=(
-                "Passed to Ansible unchanged. A credential arrives this way as "
-                "@path/to/vault.yml — a path, never a value: an argument is "
-                "visible in the process list and lands in the shell history."
+                "A variables file, as @path/to/vars.yml. Only that form: an "
+                "argument carrying a value is visible in the process list to "
+                "every user on this machine and lands in the shell history, and "
+                "a declaration is where the groundstation credential lives. "
+                "`ansible-vault encrypt` the file if it holds one."
             ),
         ),
     ] = None,
@@ -1037,7 +1041,7 @@ def provision(
         inventory: An inventory to use.
         tags: The concerns to apply.
         limit: Which hosts to run against.
-        extra_vars: Values passed to Ansible unchanged.
+        extra_vars: Variables files, each as @path. Refused in any other form.
         remove: Whether to run the removal path.
         preview: Report the changes this would make and make none of them.
 
@@ -1046,6 +1050,7 @@ def provision(
     """
     reporter = _reporter(ctx)
     try:
+        checked_scope(remove=remove, tags=tuple(tags or ()))
         code = execute_provision(
             ProvisionPlan(
                 directory=resolve_provisioning_directory(directory),
@@ -1054,7 +1059,7 @@ def provision(
                 tags=tuple(tags or ()),
                 limit=limit,
                 inventory=inventory,
-                extra_vars=tuple(extra_vars or ()),
+                extra_vars=checked_extra_vars(extra_vars or ()),
                 verbose=reporter.verbose,
             ),
             reporter,

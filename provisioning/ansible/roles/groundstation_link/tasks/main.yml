@@ -17,8 +17,9 @@
       reachy_groundstation_url is set and reachy_groundstation_credential is
       empty. The groundstation refuses a session that presents nothing, so a
       robot configured this way would open no session at all. Supply the
-      credential with --extra-vars over an ansible-vault file; it is never read
-      from a variables file in this repository.
+      credential as --extra-vars @secrets.yml over an ansible-vault file; never
+      as a NAME=VALUE argument, which the process list carries, and never in a
+      plain variables file, which somebody eventually commits.
   when:
     - reachy_groundstation_url | length > 0
     - reachy_groundstation_credential | length == 0

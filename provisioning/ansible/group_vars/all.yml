@@ -79,9 +79,11 @@ reachy_daemon_environment: >-
 reachy_app_distribution: ""
 reachy_app_wheel_path: ""
 reachy_app_wheel_url: ""
-# Passed to `get_url` as `checksum`, in its `algorithm:digest` form. Empty means
-# the artifact is accepted on the strength of the transport alone, which is worth
-# knowing about rather than assuming.
+# Required whenever the wheel is fetched by URL, as `sha256:<64 hex digits>`. A
+# wheel that arrived over the network is installed as root into the environment
+# the daemon runs, so what arrived has to be the artifact that was reviewed —
+# the same reason this repository pins an action by commit SHA and an image by
+# digest. A wheel handed over as a local path needs none of this.
 reachy_app_wheel_checksum: ""
 
 # --- The one question asked of the daemon's own interpreter -------------------

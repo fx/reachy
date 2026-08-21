@@ -28,6 +28,8 @@ from reachyctl.provision import (
     REMOVAL_PLAYBOOK,
     ProvisionPlan,
     ansible_command,
+    checked_extra_vars,
+    checked_scope,
     execute,
     exit_code_for,
     resolve_directory,
@@ -86,7 +88,7 @@ def test_an_inventory_a_limit_and_extra_vars_are_passed_through() -> None:
         plan(
             inventory=Path("inventory.ini"),
             limit="one-robot",
-            extra_vars=("@vault.yml", "reachy_app_distribution=example"),
+            extra_vars=("@vault.yml", "@application.yml"),
         ),
     )
 
@@ -95,6 +97,7 @@ def test_an_inventory_a_limit_and_extra_vars_are_passed_through() -> None:
     assert command[command.index("--limit") + 1] == "one-robot"
     assert command.count("--extra-vars") == 2
     assert "@vault.yml" in command
+    assert "@application.yml" in command
 
 
 def test_a_verbose_run_asks_ansible_for_its_own_detail() -> None:
@@ -186,18 +189,129 @@ def test_a_run_that_worked_reports_what_it_ran() -> None:
     assert "daemon_env" in streams.result
 
 
-def test_a_preview_says_the_robot_was_not_changed() -> None:
-    """Which is the whole of REQ-065 from the wrapper's side."""
+def test_a_preview_makes_no_change_and_says_so() -> None:
+    """REQ-065 from the wrapper's side, asserted as an after-state.
+
+    Deliberately not "the summary said preview": a command that printed a
+    perfect plan and then applied it anyway would pass that. What is asserted is
+    that the run the wrapper actually launched could not have changed anything —
+    it carried `--check`, and the stand-in robot below records whether it was
+    ever asked to converge.
+    """
     reporter, streams = reporter_for()
+    robot = {"converged": False}
+
+    def record(command: Sequence[str], directory: Path) -> int:
+        """Converge the stand-in robot unless the run was a preview.
+
+        Args:
+            command: The arguments the wrapper built.
+            directory: Where it would have run them.
+
+        Returns:
+            The status a successful run exits with.
+        """
+        del directory
+        if "--check" not in command:
+            robot["converged"] = True
+        return 0
 
     execute(
         plan(preview=True),
         reporter,
-        run=lambda _command, _directory: 0,
+        run=record,
         which=lambda _: "/usr/bin/ansible-playbook",
     )
 
+    assert robot["converged"] is False
     assert "was not changed" in streams.result
+
+
+def test_a_run_that_is_not_a_preview_does_converge_the_robot() -> None:
+    """The other half of the pair: the preview assertion above must be able to fail."""
+    robot = {"converged": False}
+
+    def record(command: Sequence[str], directory: Path) -> int:
+        """Converge the stand-in robot unless the run was a preview.
+
+        Args:
+            command: The arguments the wrapper built.
+            directory: Where it would have run them.
+
+        Returns:
+            The status a successful run exits with.
+        """
+        del directory
+        if "--check" not in command:
+            robot["converged"] = True
+        return 0
+
+    execute(
+        plan(),
+        reporter_for()[0],
+        run=record,
+        which=lambda _: "/usr/bin/ansible-playbook",
+    )
+
+    assert robot["converged"] is True
+
+
+def test_a_run_against_a_robot_that_is_not_there_exits_unreachable() -> None:
+    """Not FAILURE: nothing was learned about the robot, so it is not a diagnosis.
+
+    `Reporter.emit` answers OK or FAILURE from the report alone, so a command
+    that returned what it emitted would flatten this into a generic failure and
+    a monitor would page somebody about a robot when what it learned was about a
+    network.
+    """
+    reporter, streams = reporter_for()
+
+    code = execute(
+        plan(),
+        reporter,
+        run=lambda _command, _directory: 3,
+        which=lambda _: "/usr/bin/ansible-playbook",
+    )
+
+    assert code is ExitCode.UNREACHABLE
+    assert "exited 3" in streams.result
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "reachy_groundstation_credential=example-secret",
+        "reachy_app_distribution=example",
+        '{"reachy_groundstation_credential": "example-secret"}',
+        "",
+    ],
+)
+def test_extra_vars_takes_a_path_and_refuses_a_value(value: str) -> None:
+    """An argument carrying a value is in the process list and the shell history.
+
+    Args:
+        value: What the operator wrote.
+    """
+    with pytest.raises(ConfigurationError, match="not a path") as refusal:
+        checked_extra_vars([value])
+
+    # The refusal names the position and never the value, because the reason for
+    # refusing it is that it may be a credential.
+    assert value not in str(refusal.value) or not value
+
+
+def test_extra_vars_accepts_a_variables_file() -> None:
+    """Which is how a credential reaches the playbook: inside a file, vault-encrypted."""
+    assert checked_extra_vars(["@vault.yml", "@more.yml"]) == (
+        "@vault.yml",
+        "@more.yml",
+    )
+
+
+def test_every_offending_extra_var_is_reported_at_once() -> None:
+    """One refusal per invocation is one invocation per mistake."""
+    with pytest.raises(ConfigurationError, match="position 1, 3"):
+        checked_extra_vars(["a=1", "@vault.yml", "b=2"])
 
 
 def test_a_failed_run_exits_non_zero_and_points_at_the_recap() -> None:
@@ -252,3 +366,20 @@ def test_no_ansible_on_the_path_is_a_configuration_failure() -> None:
             run=lambda _command, _directory: 0,
             which=lambda _: None,
         )
+
+
+def test_the_removal_path_refuses_to_be_narrowed_to_one_concern() -> None:
+    """`remove.yml` has no tags, so both together would select no task and exit zero.
+
+    A run that reported success having removed nothing is worse than a refusal,
+    which is why this is checked before Ansible is reached rather than left to
+    produce an empty recap.
+    """
+    with pytest.raises(ConfigurationError, match="takes no --tags"):
+        checked_scope(remove=True, tags=("daemon_env",))
+
+
+def test_tags_and_a_removal_are_each_fine_on_their_own() -> None:
+    """The refusal is about the pair; neither is a problem by itself."""
+    checked_scope(remove=True, tags=())
+    checked_scope(remove=False, tags=("daemon_env",))

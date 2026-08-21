@@ -10,7 +10,9 @@
 reachy_app_distribution: ""
 
 # Exactly one source. A path is read on the machine running the playbook; a URL
-# is fetched by the robot itself.
+# is fetched by the robot itself — and a URL requires a `sha256:<digest>`,
+# because what arrived is installed as root and has to be the artifact that was
+# reviewed.
 reachy_app_wheel_path: ""
 reachy_app_wheel_url: ""
 reachy_app_wheel_checksum: ""

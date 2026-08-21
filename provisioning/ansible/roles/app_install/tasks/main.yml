@@ -66,6 +66,31 @@
           leave the robot running an application nothing here asked for.
       when: reachy_app_release.distribution != reachy_app_distribution
 
+    # A wheel fetched over the network is installed as root into the
+    # environment the daemon runs, so what arrived has to be the artifact that
+    # was reviewed rather than whatever answered the request. That is the same
+    # rule this repository already applies to a GitHub Action — pinned by commit
+    # SHA — and to a container image, pinned by digest. A wheel handed over as a
+    # local path needs none of this: the operator has the file.
+    - name: Refuse a release artifact with no digest to check it against
+      ansible.builtin.fail:
+        msg: >-
+          reachy_app_wheel_url is set and reachy_app_wheel_checksum is empty, so
+          nothing would check what arrived. Set it to sha256:<digest> — the
+          release's own checksum file, or `sha256sum` over a copy you have.
+      when:
+        - reachy_app_wheel_url | length > 0
+        - reachy_app_wheel_checksum | length == 0
+
+    - name: Refuse a digest that is not a SHA-256
+      ansible.builtin.fail:
+        msg: >-
+          reachy_app_wheel_checksum must be sha256:<64 hex digits>. A weaker
+          digest is one an artifact can be constructed to match.
+      when:
+        - reachy_app_wheel_url | length > 0
+        - not (reachy_app_wheel_checksum is match('^sha256:[0-9a-fA-F]{64}$'))
+
     - name: Create the staging directory
       ansible.builtin.file:
         path: "{{ reachy_staging }}"
@@ -91,7 +116,7 @@
       ansible.builtin.get_url:
         url: "{{ reachy_app_wheel_url }}"
         dest: "{{ reachy_staging }}/{{ reachy_app_file }}"
-        checksum: "{{ reachy_app_wheel_checksum | default(omit, true) }}"
+        checksum: "{{ reachy_app_wheel_checksum }}"
         owner: root
         group: root
         mode: "0644"

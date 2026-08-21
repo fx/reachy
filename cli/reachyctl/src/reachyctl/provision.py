@@ -20,18 +20,20 @@ finding the playbook, spelling `--check` the way every other mutating command in
 this tool spells preview, naming the removal path so it is discoverable, and
 turning Ansible's exit status into this tool's.
 
-**Nothing here takes a credential.** The groundstation credential reaches the
-robot through Ansible's own secret handling, which is `--extra-vars` over an
-`ansible-vault` file — a path, passed through. An option that took the value
-would put it in the process list and the shell history, which is the rule
-`reachyctl.credentials` is built around and which does not stop being true
-because the secret is on its way to a playbook.
+**Nothing here takes a credential, and `--extra-vars` is a path or nothing.**
+Ansible accepts `NAME=VALUE` and a JSON document there as well; this command
+refuses both. An argument carrying a value is visible in the process list to
+every user on the machine and lands in the shell history, and a declaration is
+exactly where the groundstation credential lives — so the credential arrives the
+way `reachyctl.credentials` insists every other one does, inside a file, which
+here means one `ansible-vault encrypt` has encrypted.
 """
 
 from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -52,6 +54,8 @@ __all__ = [
     "REMOVAL_PLAYBOOK",
     "ProvisionPlan",
     "ansible_command",
+    "checked_extra_vars",
+    "checked_scope",
     "execute",
     "exit_code_for",
     "resolve_directory",
@@ -68,6 +72,16 @@ PLAYBOOK: Final = "site.yml"
 REMOVAL_PLAYBOOK: Final = "remove.yml"
 
 _EXECUTABLE: Final = "ansible-playbook"
+
+# The one form `--extra-vars` may take here. Ansible also accepts `NAME=VALUE`
+# and a JSON document, and both put whatever they carry into the process list —
+# visible to every user on the machine — and into the shell history. A
+# declaration is where the groundstation credential lives, so this tool takes a
+# path and nothing else, exactly as `--credential-file` does and for exactly the
+# same reason. An operator who wants an inline variable runs `ansible-playbook`
+# themselves, which is a decision they make rather than one this tool makes for
+# them.
+_FILE_PREFIX: Final = "@"
 
 # Ansible's own statuses. 3 is "all hosts were unreachable", which is exactly
 # what `UNREACHABLE` means here and is the one worth translating: a script that
@@ -181,6 +195,71 @@ def _existing(
     return directory
 
 
+def checked_scope(*, remove: bool, tags: Sequence[str]) -> None:
+    """Refuse a removal narrowed to one concern.
+
+    `site.yml` carries per-concern tags because applying one concern without the
+    others is what makes the playbook usable during development. `remove.yml`
+    carries none, and deliberately: REQ-064 asks for a path that removes
+    everything provisioning applied, and half a removal leaves a robot in a state
+    nothing describes. Passing both would therefore select no task at all —
+    Ansible would run, report nothing, and exit zero, which is the shape of a
+    successful removal that removed nothing.
+
+    Args:
+        remove: Whether the removal path was asked for.
+        tags: The concerns asked for.
+
+    Raises:
+        ConfigurationError: If both were given.
+    """
+    if remove and tags:
+        message = (
+            f"--remove takes no --tags. The removal path has no per-concern "
+            f"tags, because removing one concern and leaving the others leaves "
+            f"a robot in a state nothing describes; asking for "
+            f"{', '.join(tags)} would select no task at all and the run would "
+            f"report success having removed nothing"
+        )
+        raise ConfigurationError(message)
+
+
+def checked_extra_vars(values: Sequence[str]) -> tuple[str, ...]:
+    """Insist every `--extra-vars` is a path rather than a value.
+
+    Args:
+        values: What the operator wrote.
+
+    Returns:
+        The same values.
+
+    Raises:
+        ConfigurationError: If any of them is not a path. The offending value is
+            **not** quoted back: the whole reason for refusing it is that it may
+            be a credential, and a refusal that printed it would be the leak it
+            exists to prevent. The position is enough to find it — the same
+            choice `reachyctl.cli._assignments` makes for the same reason.
+    """
+    inline = [
+        position
+        for position, value in enumerate(values, start=1)
+        if not value.startswith(_FILE_PREFIX)
+    ]
+    if inline:
+        positions = ", ".join(str(position) for position in inline)
+        message = (
+            f"--extra-vars at position {positions} is not a path. This command "
+            f"takes @path/to/vars.yml and nothing else, because a NAME=VALUE "
+            f"argument is visible in the process list to every user on this "
+            f"machine and lands in the shell history — and a declaration is "
+            f"where the groundstation credential lives. Put the values in a "
+            f"file, `ansible-vault encrypt` it if it holds a secret, and pass "
+            f"@that. It is not quoted back here, for the same reason"
+        )
+        raise ConfigurationError(message)
+    return tuple(values)
+
+
 def ansible_command(plan: ProvisionPlan) -> list[str]:
     """Build the command this run is.
 
@@ -234,11 +313,20 @@ def execute(
     plan: ProvisionPlan,
     reporter: Reporter,
     run: Callable[[Sequence[str], Path], int] = lambda command, directory: (
-        # S603: the command is built by `ansible_command` from this tool's own
-        # literals plus values the operator typed; nothing is interpolated into a
-        # shell line and no shell is involved. Wrapping the playbook is the whole
-        # point of the command — see the module docstring.
-        subprocess.run(command, cwd=directory, check=False).returncode  # noqa: S603
+        # Ansible's own output goes to standard ERROR, which is where every
+        # other command here puts progress. Standard output carries the result
+        # and nothing else, so `reachyctl provision --output json | jq` parses —
+        # reachyctl REQ-058 — where inheriting Ansible's stdout would interleave
+        # a play recap with the document. It is not captured and replayed
+        # afterwards: a run against a robot on a slow link is minutes of
+        # waiting, and a progress report that arrives all at once at the end is
+        # not one.
+        subprocess.run(  # noqa: S603 - argv is this module's own literals plus checked paths; no shell, and wrapping the playbook is the command
+            command,
+            cwd=directory,
+            stdout=sys.stderr,
+            check=False,
+        ).returncode
     ),
     which: Callable[[str], str | None] = shutil.which,
 ) -> ExitCode:
@@ -247,7 +335,10 @@ def execute(
     Args:
         plan: What the run was asked to do.
         reporter: Where the result is written. Ansible's own progress goes
-            straight to the terminal, unwrapped, because it is the report.
+            straight to standard error, unwrapped and unscrubbed, because it is
+            the report — and because nothing here holds a value to scrub it
+            with: no option takes a credential, and one reaching the playbook
+            does so inside a file Ansible itself does not echo.
         run: How to run it. Injected so the command this builds is exercisable
             without running Ansible — no unit test here performs input or
             output.
@@ -273,7 +364,13 @@ def execute(
     reporter.detail(f"running {' '.join(command)} in {plan.directory}")
     status = run(command, plan.directory)
     code = exit_code_for(status)
-    return reporter.emit(
+    # The report is emitted and the status is this function's own. `emit`
+    # answers `OK` or `FAILURE` from `report.ok`, and `UNREACHABLE` — Ansible's
+    # "every host was unreachable" — would otherwise be flattened into a generic
+    # failure. A script reading that would page somebody about a robot when what
+    # it learned was about a network, which is the distinction
+    # `reachyctl.exits` exists to keep.
+    reporter.emit(
         Report(
             command="provision",
             ok=code is ExitCode.OK,
@@ -288,6 +385,7 @@ def execute(
             },
         ),
     )
+    return code
 
 
 def _summary(plan: ProvisionPlan, status: int) -> str:

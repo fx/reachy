@@ -407,6 +407,19 @@ def test_provision_runs_the_playbook_it_was_asked_for(
     ]
 
 
+def test_provision_refuses_an_extra_var_that_is_not_a_path() -> None:
+    """A NAME=VALUE argument is in the process list before the wrapper sees it."""
+    result = runner.invoke(
+        app,
+        ["provision", "-e", "reachy_groundstation_credential=example-secret"],
+        env=CONFIGURED,
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "not a path" in result.stdout
+    assert "example-secret" not in result.stdout
+
+
 def test_provision_names_the_removal_path_so_it_is_discoverable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -45,8 +45,10 @@ reimplementing what they hold.
   placeholder names.
 - **`group_vars/all.yml` holds neutral defaults**, never a real endpoint,
   account or credential. The groundstation credential reaches the robot through
-  Ansible's own secret handling — `--extra-vars` over an `ansible-vault` file —
-  and any task that could render it carries `no_log`.
+  Ansible's own secret handling — `--extra-vars @secrets.yml` over an
+  `ansible-vault` file, never a `NAME=VALUE` argument — and every task whose
+  output could carry the daemon's environment or the daemon's own free text
+  carries `no_log`.
 - **The managed drop-in is one file with two writers.**
   [`docs/ops/managed-daemon-environment.md`](../../docs/ops/managed-daemon-environment.md)
   is the byte-level contract, `reachyctl config apply` is the other

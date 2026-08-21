@@ -35,6 +35,10 @@
           - --property=Environment
       register: reachy_verify_properties
       changed_when: false
+      # The unit's whole environment, credential included. The registered value
+      # is used below and never printed; without this, `-v` would print the
+      # task's result and the credential with it.
+      no_log: true
 
     - name: Decide which interpreter the daemon runs
       ansible.builtin.set_fact:
@@ -67,18 +71,16 @@
       register: reachy_verify_status
       changed_when: false
       failed_when: false
-
-    # The exit status and nothing the robot wrote. A traceback from the daemon's
-    # control carries its arguments, and a setting is exactly where a credential
-    # lives — `reachyctl` quotes such text verbatim because it holds a redactor
-    # seeded with the robot's secret values, and nothing here does. The text is
-    # one `-v` away, below, which is a decision an operator makes rather than one
-    # this role makes for them.
-    - name: Show what the daemon's application control wrote
-      ansible.builtin.debug:
-        msg: "{{ reachy_verify_status.stderr }}{{ reachy_verify_status.stdout }}"
-        verbosity: 1
-      when: reachy_verify_status.rc != 0
+      # Free text the daemon wrote. A traceback from its control carries its
+      # arguments, and a setting is exactly where a credential lives —
+      # `reachyctl` quotes such text verbatim only because it holds a redactor
+      # seeded with the robot's secret values, and nothing here does. So this
+      # run reports the exit status and withholds the output, the way
+      # `CommandOutcome.status_only` does for the one read reachyctl cannot
+      # scrub either. An operator who needs the text runs the command
+      # themselves, which is a decision they make rather than one this role
+      # makes for them.
+      no_log: true
 
     - name: Validate the declaration the robot is being judged against
       ansible.builtin.set_fact:

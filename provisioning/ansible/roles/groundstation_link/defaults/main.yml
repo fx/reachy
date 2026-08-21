@@ -1,7 +1,9 @@
 ---
 # Neither is defaulted to anything. The endpoint belongs to whoever is running
 # this, and the credential reaches the robot through Ansible's own secret
-# handling — an `ansible-vault` file passed with `--extra-vars`, or a prompted
-# variable — never through a variables file that somebody eventually commits.
+# handling: an `ansible-vault` file passed as `--extra-vars @secrets.yml`. Never
+# as a `NAME=VALUE` argument, which every user on the machine can read out of the
+# process list, and never in a plain variables file that somebody eventually
+# commits.
 reachy_groundstation_url: ""
 reachy_groundstation_credential: ""
