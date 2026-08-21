@@ -19,8 +19,20 @@ import asyncio
 from typing import Final
 
 import pytest
-from satellite_support import FakePerception, face
+from satellite_support import FakeFaceDetector, FakeMedia, FakePerception, face, inline
+from session_client_support import (
+    FACE,
+    ManualClock,
+    RecordedSleep,
+    ScriptedTransports,
+    StubTransport,
+    agreement,
+    credential,
+    hand_control_to_the_event_loop,
+)
 
+from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
+from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import (
     FallbackPerception,
     build_perception,
@@ -30,6 +42,10 @@ from reachy_mini_ha_satellite.ports import (
     DetectionSource,
     SourceSelection,
 )
+from reachy_session_client import SessionClient
+
+# RFC 5737 documentation space; this repository is public.
+_URL = "ws://192.0.2.10:8765/v1/session"
 
 # The two enum members whose dotted form the repository's leak scanner reads as
 # an mDNS hostname. Bound once here, with the per-line marker its own docstring
@@ -114,6 +130,152 @@ class TestTheThreeSelections:
                 SourceSelection.REMOTE_WITH_LOCAL_FALLBACK,
                 remote=_remote_seeing_somebody(),
             )
+
+
+class TestNothingSeenYetNamesNoSource:
+    """`Detections.source` describes what produced a view, not who was asked.
+
+    "Nothing has been produced yet" and "a source produced an empty result" are
+    different facts and the behaviour layer acts on them differently: an empty
+    result from a live source is robot-link REQ-013's ordinary success and the
+    head has truthfully been told nobody is there, while nothing-yet is the
+    startup state and is also what the staleness path collapses to, which
+    ha-satellite REQ-048 answers with a neutral head.
+
+    A source that filled `source` in from "which adapter am I" made the two
+    indistinguishable at the moment the application starts.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_source_names_no_source_before_its_first_result(
+        self,
+    ) -> None:
+        """The composite forwards whichever source is active, so it inherits it."""
+        remote = FakePerception()
+        local = FakePerception()
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        await source.start()
+        view = source.latest()
+        assert view.source is None
+        assert view.faces == ()
+        assert not view.fresh
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_source_names_the_remote_once_it_answers(
+        self,
+    ) -> None:
+        """And the right one, rather than merely a non-`None` one."""
+        remote = _remote_seeing_somebody()
+        source = FallbackPerception(
+            remote,
+            _local_seeing_somebody(),
+            sleep=_immediately,
+        )
+        await source.start()
+        assert source.latest().source is DetectionSource.REMOTE
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_source_names_the_robot_once_it_takes_over(
+        self,
+    ) -> None:
+        """The other side of the same question, after the session is lost."""
+        remote = _remote_seeing_somebody()
+        local = _local_seeing_somebody()
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        await source.start()
+        remote.connected = False
+        await source.check()
+        assert source.latest().source is _ROBOT
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_fallback_source_that_has_lost_the_link_and_seen_nothing(
+        self,
+    ) -> None:
+        """Falling back is not itself a detection.
+
+        The local detector is running and its model may still be loading, so
+        the honest answer is still that nothing has produced anything — which
+        is what returns the head to neutral rather than leaving it wherever the
+        groundstation last pointed it.
+        """
+        remote = _remote_seeing_somebody()
+        remote.connected = False
+        local = FakePerception()
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        await source.start()
+        await source.check()
+        view = source.latest()
+        assert source.falling_back
+        assert view.source is None
+        assert not view.fresh
+        await source.aclose()
+
+
+class TestTheRealSelectionsNameNoSourceBeforeTheyHaveSeenAnything:
+    """The same question through `build_perception`, over the real adapters.
+
+    The tests above drive the composite over fakes, which pins that it forwards
+    whichever source is active — but a fake answers whatever it was told, so
+    they cannot catch an adapter that fills `source` in from its own identity.
+    These build the selections an operator actually chooses, over a fake daemon
+    and a stub link, so a regression at either adapter fails here too.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "selection",
+        [
+            SourceSelection.REMOTE,
+            _ROBOT_ONLY,
+            SourceSelection.REMOTE_WITH_LOCAL_FALLBACK,
+        ],
+        ids=["remote", "local", "remote-with-fallback"],
+    )
+    async def test_a_freshly_built_selection_names_no_source(
+        self,
+        selection: SourceSelection,
+    ) -> None:
+        """Whichever was chosen, nothing has produced anything at start-up.
+
+        Args:
+            selection: The source an operator asked for.
+        """
+        clock = ManualClock()
+        sleep = RecordedSleep()
+        transport = StubTransport()
+        transport.push(agreement(FACE))
+        media = FakeMedia()
+        remote = RemotePerception(
+            media,
+            SessionClient(
+                url=_URL,
+                credential=credential(),
+                capabilities=(FACE,),
+                open_transport=ScriptedTransports(transport),
+                clock=clock,
+                sleep=sleep,
+            ),
+            clock=clock,
+            sleep=sleep,
+            offload=inline,
+        )
+        local = LocalPerception(
+            media,
+            detector=FakeFaceDetector,
+            clock=clock,
+            sleep=_immediately,
+            offload=inline,
+        )
+        source = build_perception(selection, remote=remote, local=local)
+        await source.start()
+        await hand_control_to_the_event_loop()
+        view = source.latest()
+        assert view == Detections()
+        assert view.source is None
+        await source.aclose()
 
 
 class TestFallbackHappensOnSessionLoss:

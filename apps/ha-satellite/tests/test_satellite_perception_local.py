@@ -45,7 +45,7 @@ from reachy_mini_ha_satellite.adapters.perception_local import (
     load_sdk_face_detector,
     normalised_centre,
 )
-from reachy_mini_ha_satellite.ports import DetectionSource
+from reachy_mini_ha_satellite.ports import Detections, DetectionSource
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -237,13 +237,56 @@ class TestDetectionsFromTheRobotsOwnCores:
         await source.aclose()
 
     @pytest.mark.asyncio
-    async def test_nothing_looked_at_yet_is_not_fresh(self) -> None:
-        """A source that has just started has nothing to act on."""
+    async def test_nothing_looked_at_yet_is_not_fresh_and_names_no_source(
+        self,
+    ) -> None:
+        """A source that has just started has nothing to act on.
+
+        And nothing to attribute either: naming the robot's own detector here
+        would report that it looked and found nobody, which is an ordinary
+        success and a different fact from its not having looked yet.
+        """
         clock = ManualClock()
         source = _source(FakeMedia(image=None), FakeFaceDetector(), clock)
         await source.start()
         await _settle()
-        assert not source.latest().fresh
+        view = source.latest()
+        assert not view.fresh
+        assert view.source is None
+        assert view == Detections()
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_source_names_itself_once_it_has_looked(self) -> None:
+        """The other half: `source` is populated by a result, not by identity."""
+        clock = ManualClock()
+        source = _source(
+            FakeMedia(image=frame(480, 640)),
+            FakeFaceDetector([_AT_640]),
+            clock,
+        )
+        await source.start()
+        await _settle()
+        assert source.latest().source is _ROBOT
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_an_empty_scene_still_names_the_source_that_saw_it(
+        self,
+    ) -> None:
+        """The distinction that makes the fix matter.
+
+        A detector that looked and found nobody has produced a result, so it is
+        named — and that view is `fresh`. Only the not-yet state is anonymous.
+        """
+        clock = ManualClock()
+        source = _source(FakeMedia(image=frame()), FakeFaceDetector([]), clock)
+        await source.start()
+        await _settle()
+        view = source.latest()
+        assert view.faces == ()
+        assert view.fresh
+        assert view.source is _ROBOT
         await source.aclose()
 
     @pytest.mark.asyncio

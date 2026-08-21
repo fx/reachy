@@ -36,7 +36,7 @@ from session_client_support import (
 
 from reachy_contracts import Capability
 from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
-from reachy_mini_ha_satellite.ports import DetectionSource
+from reachy_mini_ha_satellite.ports import Detections, DetectionSource
 from reachy_session_client import SessionClient
 
 # RFC 5737 documentation space. This repository is public and no real address
@@ -268,6 +268,13 @@ class TestFreshness:
         view = remote.latest()
         assert not view.fresh
         assert view.age_seconds is None
+        # And it names no source. `source` describes what produced a view, not
+        # which adapter was asked — naming the groundstation here would report
+        # a detection of an empty room, which is a live source's ordinary
+        # success and a different fact from the session not having answered.
+        # `age_seconds` already keeps the two apart by staying `None`.
+        assert view.source is None
+        assert view == Detections()
         await remote.aclose()
 
 

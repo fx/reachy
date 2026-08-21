@@ -551,7 +551,12 @@ class LocalPerception:
             the behaviour that follows is the same either way.
         """
         if self._received_at is None:
-            return Detections(source=_SOURCE)
+            # Nothing has been looked at yet, so no field describes a
+            # detection — `source` included. See the same branch in
+            # `groundstation.py`: "the detector found nobody" and "the detector
+            # has not run yet" are different facts, and `age_seconds` already
+            # keeps them apart by staying `None` here.
+            return Detections()
         age = self._clock() - self._received_at
         if age >= self._staleness_seconds:
             return Detections(fresh=False, source=_SOURCE, age_seconds=age)

@@ -192,7 +192,14 @@ class RemotePerception:
             keep watching an empty chair.
         """
         if self._received_at is None:
-            return Detections(source=DetectionSource.REMOTE)
+            # Nothing has produced anything yet, so no field describes a
+            # detection — `source` included. Naming this source here would say
+            # the groundstation produced a view of an empty room, which is
+            # robot-link REQ-013's ordinary success and a different fact from
+            # "the session has not answered yet". They are least
+            # distinguishable at start-up, which is when a robot is most likely
+            # to do something odd and least likely to be watched.
+            return Detections()
         age = self._clock() - self._received_at
         if age >= self._staleness_seconds:
             return Detections(
