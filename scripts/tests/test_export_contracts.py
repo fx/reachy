@@ -113,6 +113,25 @@ def test_a_stale_symlink_is_removed_rather_than_walked_around(tmp_path: Path) ->
     assert (tmp_path / INDEX_PATH).exists()
 
 
+def test_a_regular_file_where_the_directory_belongs_is_replaced(
+    tmp_path: Path,
+) -> None:
+    """`rmtree` raises `NotADirectoryError` on one, naming neither path nor cause.
+
+    Having chosen to rebuild rather than reconcile, the exporter owns every
+    shape the output path can be in. This is the plain one sitting beside the
+    symlink case below, and missing it made `just contracts` fail with a message
+    about nothing in particular.
+    """
+    out_dir = tmp_path / "contracts"
+    out_dir.write_text("not a directory\n", encoding="utf-8")
+
+    main([str(out_dir)])
+
+    assert out_dir.is_dir()
+    assert (out_dir / INDEX_PATH).exists()
+
+
 def test_the_default_output_directory_is_the_published_one() -> None:
     """`just contracts` passes it explicitly; a caller that does not gets the same."""
     assert DEFAULT_OUT_DIR == "docs/contracts"

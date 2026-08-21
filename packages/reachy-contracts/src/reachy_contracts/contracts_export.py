@@ -266,8 +266,8 @@ def export(
 
     That makes the directory this writes into fully owned. It is
     `docs/contracts/`, whose generated index says in so many words that every
-    file in it is generated; **pointing this at a directory holding anything
-    else destroys it**.
+    file in it is generated; **pointing this at a path holding anything else
+    destroys it**. `_clear` enumerates the shapes that path can be in.
 
     Args:
         out_dir: The directory to write into, created if it does not exist.
@@ -277,19 +277,7 @@ def export(
         The paths written, in sorted order.
     """
     rendered = render_all(contracts)
-    # Discard the whole directory and write it again, rather than reconciling
-    # what is there against what is about to be. Reconciling was tried and it is
-    # a nest of cases nobody gets right in one go: a file to delete, a directory
-    # to delete only once emptied, deepest-first ordering, and a symlink that
-    # `is_file` and `is_dir` both answer about its *target* — so a broken one
-    # survives the sweep meant to remove it and a link to a directory makes
-    # `rmdir` raise on the link itself. None of those shapes has any business in
-    # a generated directory, and removing the directory removes the question
-    # along with them.
-    if out_dir.is_symlink():
-        out_dir.unlink()
-    elif out_dir.exists():
-        shutil.rmtree(out_dir)
+    _clear(out_dir)
     written: list[Path] = []
     for relative, content in sorted(rendered.items()):
         destination = out_dir / relative
@@ -297,6 +285,42 @@ def export(
         destination.write_text(content, encoding="utf-8")
         written.append(destination)
     return written
+
+
+def _clear(out_dir: Path) -> None:  # pragma: no cover - writes the filesystem
+    """Leave nothing at `out_dir`, whatever is there now.
+
+    Discarding and rebuilding was chosen over reconciling what is present
+    against what is about to be, because reconciling is a nest of cases nobody
+    gets right in one go: a file to delete, a directory to delete only once
+    emptied, deepest-first ordering, and a symlink that `is_file` and `is_dir`
+    both answer about its *target*. Two review passes each found one more of
+    them. Having chosen rebuild, this function owns every shape the path can be
+    in, so they are enumerated rather than accumulated:
+
+    - **Nothing there.** Nothing to do; the write creates it. The first run.
+    - **A directory.** `rmtree`. The ordinary case, and the one call that needs
+      to be different from all the others.
+    - **A symlink, to anything or to nothing.** `unlink`, and tested **first**,
+      because `is_dir` and `exists` both answer about the *target*: a broken
+      link is neither, so it would fall through every later branch, and
+      `rmtree` on a link to a directory raises.
+    - **A regular file.** `unlink`. `rmtree` raises `NotADirectoryError` on
+      one, and its message names neither the path nor the reason.
+    - **A device, a socket or a FIFO.** `unlink`, by the same branch as a
+      regular file. Nothing here has to know which it was; the requirement is
+      that the path ends up free.
+
+    The last three collapse into one branch — anything that is not a directory
+    is unlinked — so a shape nobody thought of is removed rather than raising.
+
+    Args:
+        out_dir: The path to clear.
+    """
+    if out_dir.is_symlink() or (out_dir.exists() and not out_dir.is_dir()):
+        out_dir.unlink()
+    elif out_dir.is_dir():
+        shutil.rmtree(out_dir)
 
 
 if __name__ == "__main__":  # pragma: no cover - module entry point
