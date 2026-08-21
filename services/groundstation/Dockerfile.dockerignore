@@ -37,7 +37,14 @@ htmlcov
 
 # Local values. The tracked `.example` sibling documents the shape; the real
 # file never leaves the host it was written on.
-.env
-.env.*
-!.env.example
+#
+# The patterns are nesting-aware, and that is the point rather than tidiness: a
+# pattern matches against the path relative to the context root, so a bare
+# `.env` would exclude one at the repository root and let
+# `services/groundstation/deploy/.env` — the one the deployment instructions
+# tell an operator to create, holding a real credential — into the context and
+# onto a builder-stage layer.
+**/.env
+**/.env.*
+!**/.env.example
 provisioning/ansible/inventory.ini

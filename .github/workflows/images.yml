@@ -173,6 +173,11 @@ jobs:
   publish:
     name: Publish
     runs-on: ubuntu-latest
+    # Nothing is pushed until both variants have been started and driven. These
+    # jobs would otherwise run side by side on a version tag, and a verification
+    # that went red afterwards would leave an unverified release in the
+    # registry, where deleting it does not un-pull it.
+    needs: verify
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: read

@@ -37,12 +37,15 @@
 # `duvet query -c implementation` and `duvet report --ci` mean what they appear
 # to mean.
 #
-# The other 6 are unregistered because no source exists to annotate yet:
-# registering one turns the job red immediately — its requirements, zero
-# annotations — and it stays red until the implementing change lands. A spec is
-# registered by the change that implements it, in that change's pull request,
-# and the annotations arrive with it. Nothing outside those two is evidence of
-# anything today.
+# The other 6 are unregistered because not all of their requirements have an
+# implementation to annotate yet. Architecture and robot-link already carry some
+# annotations — they show up in the snapshot, because duvet loads a
+# specification an annotation points at whether or not it is registered — but
+# registering either turns the job red immediately on the requirements no change
+# has reached, and it stays red until the implementing change lands. A spec is
+# registered by the change that completes it, in that change's pull request,
+# alongside the annotations that make it pass. Nothing outside those two is
+# evidence of anything today.
 #
 # Each entry takes a `source` path plus a MANDATORY `format = "markdown"`:
 #

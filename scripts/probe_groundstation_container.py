@@ -38,6 +38,7 @@ import ctypes
 import importlib.util
 import os
 import socket
+import struct
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -53,6 +54,7 @@ __all__ = [
     "cuda_provider_library",
     "cuda_provider_problem",
     "main",
+    "needed_libraries",
     "reachable_sources",
     "toolchain_found",
 ]
@@ -84,6 +86,17 @@ _CUDA_PROVIDER_NAME: Final = "libonnxruntime_providers_cuda.so"
 # it in from the host when a GPU is requested, so a build machine without one
 # cannot load it and its absence is not a packaging fault.
 _DRIVER_LIBRARY: Final = "libcuda.so.1"
+
+# The parts of the ELF format `needed_libraries` reads: a loadable segment, the
+# dynamic section, and the three dynamic tags that name a dependency, end the
+# table and locate the strings the names live in. Each entry in that table is a
+# tag and a value, eight bytes each.
+_PT_LOAD: Final = 1
+_PT_DYNAMIC: Final = 2
+_DT_NULL: Final = 0
+_DT_NEEDED: Final = 1
+_DT_STRTAB: Final = 5
+_DYNAMIC_ENTRY_BYTES: Final = 16
 
 _FORBIDDEN_NAMES: Final[tuple[str, ...]] = (
     "apt",
@@ -181,24 +194,122 @@ def cuda_provider_library() -> Path | None:
     return Path(spec.origin).parent / "capi" / _CUDA_PROVIDER_NAME
 
 
+def needed_libraries(library: Path) -> tuple[str, ...]:
+    """Read the shared objects an ELF file declares that it needs.
+
+    This is `DT_NEEDED`, read out of the dynamic section by hand. It exists
+    because `ctypes.CDLL` is not enough: the loader stops at the FIRST
+    dependency it cannot resolve, so a library that needs both the driver and a
+    CUDA runtime of the wrong major version reports whichever of them happens to
+    come first, and a broken image passes wherever the driver is reported first.
+    Enumerating the declarations and checking each one separately has no such
+    ordering.
+
+    Only 64-bit little-endian ELF is understood, which is both architectures
+    this repository publishes and every architecture ONNX Runtime ships a CUDA
+    build for.
+
+    Args:
+        library: The shared object to read.
+
+    Returns:
+        The declared dependency names, in declaration order.
+
+    Raises:
+        ProbeError: If the file is not a 64-bit little-endian ELF, or declares
+            no dynamic section. Either means this is not the library it was
+            supposed to be, which is itself the answer worth reporting.
+    """
+    data = library.read_bytes()
+    if data[:4] != b"\x7fELF" or data[4:6] != b"\x02\x01":
+        message = f"{library} is not a 64-bit little-endian ELF object"
+        raise ProbeError(message)
+
+    (header_offset,) = struct.unpack_from("<Q", data, 0x20)
+    entry_size, count = struct.unpack_from("<HH", data, 0x36)
+
+    loads: list[tuple[int, int, int]] = []
+    dynamic: tuple[int, int] | None = None
+    for index in range(count):
+        at = header_offset + index * entry_size
+        (kind,) = struct.unpack_from("<I", data, at)
+        offset, address = struct.unpack_from("<QQ", data, at + 8)
+        (size,) = struct.unpack_from("<Q", data, at + 32)
+        if kind == _PT_LOAD:
+            loads.append((address, offset, size))
+        elif kind == _PT_DYNAMIC:
+            dynamic = (offset, size)
+    if dynamic is None:
+        message = f"{library} declares no dynamic section, so it needs nothing"
+        raise ProbeError(message)
+
+    def _file_offset(address: int) -> int:
+        """Map a virtual address to where it lives in the file.
+
+        Args:
+            address: The virtual address, as the dynamic section records it.
+
+        Returns:
+            The offset into the file.
+
+        Raises:
+            ProbeError: If no loadable segment covers it.
+        """
+        for start, offset, size in loads:
+            if start <= address < start + size:
+                return offset + (address - start)
+        message = f"{library}: virtual address {address:#x} is in no loaded segment"
+        raise ProbeError(message)
+
+    offsets: list[int] = []
+    strings: int | None = None
+    section, length = dynamic
+    for index in range(length // _DYNAMIC_ENTRY_BYTES):
+        tag, value = struct.unpack_from(
+            "<qQ",
+            data,
+            section + index * _DYNAMIC_ENTRY_BYTES,
+        )
+        if tag == _DT_NULL:
+            break
+        if tag == _DT_NEEDED:
+            offsets.append(value)
+        elif tag == _DT_STRTAB:
+            strings = value
+    if strings is None:
+        message = f"{library} declares dependencies but no string table"
+        raise ProbeError(message)
+
+    table = _file_offset(strings)
+    names: list[str] = []
+    for offset in offsets:
+        start = table + offset
+        names.append(data[start : data.index(b"\x00", start)].decode("utf-8"))
+    return tuple(names)
+
+
 def cuda_provider_problem(
     library: Path | None = None,
     loader: Callable[[str], object] = ctypes.CDLL,
 ) -> str | None:
     """Say why the CUDA execution provider could not be loaded, if it could not.
 
+    Every dependency the provider declares is resolved separately rather than by
+    loading the provider itself, because the loader stops at the first one it
+    cannot find — see `needed_libraries`.
+
     Args:
         library: The provider library the accelerated variant ships, or `None`
             to find it in the installed model runtime.
-        loader: What opens it. Injected so a test can exercise both answers
-            without a CUDA image to open.
+        loader: What opens a dependency. Injected so a test can exercise both
+            answers without a CUDA image to open.
 
     Returns:
-        A description of the problem, or `None` when the provider's own
-        dependencies are all satisfied. A failure that names only the driver
-        library is not a problem: the container runtime injects that from the
-        host, so it is absent on every machine without a GPU and its absence
-        says nothing about how the image was built.
+        A description of the problem, or `None` when every dependency but the
+        driver resolves. The driver is skipped rather than checked: the
+        container runtime injects it from a host with a GPU, so it is absent on
+        every machine without one and its absence says nothing about how the
+        image was built.
     """
     if library is None:
         library = cuda_provider_library()
@@ -209,18 +320,39 @@ def cuda_provider_problem(
             f"{library} is not in this image, so it is not an accelerated "
             f"build — the CUDA variant installs onnxruntime-gpu, which ships it"
         )
+
     try:
-        loader(str(library))
-    except OSError as error:
-        detail = str(error)
-        if _DRIVER_LIBRARY in detail:
-            sys.stdout.write(
-                f"container-probe: {library.name} needs {_DRIVER_LIBRARY}, which "
-                f"the container runtime injects from a host with a GPU; every "
-                f"other dependency of it resolved\n",
-            )
-            return None
-        return f"{library.name} could not be loaded: {detail}"
+        declared = needed_libraries(library)
+    except ProbeError as error:
+        return str(error)
+
+    missing: list[str] = []
+    for name in declared:
+        if name == _DRIVER_LIBRARY:
+            continue
+        try:
+            loader(name)
+        except OSError:
+            # A dependency may resolve only through the provider's own run
+            # path, which names the directory it sits in. Look there before
+            # calling it missing.
+            beside = library.parent / name
+            try:
+                loader(str(beside))
+            except OSError:
+                missing.append(name)
+    if missing:
+        return (
+            f"{library.name} needs {missing}, which this image has not got. "
+            f"The base image and the model runtime disagree about the CUDA "
+            f"version; an image like this starts, serves, and silently runs on "
+            f"the CPU provider."
+        )
+    sys.stdout.write(
+        f"container-probe: every library {library.name} needs is here, bar "
+        f"{_DRIVER_LIBRARY}, which the container runtime injects from a host "
+        f"with a GPU\n",
+    )
     return None
 
 

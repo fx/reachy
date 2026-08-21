@@ -158,12 +158,24 @@ selection, so it is a build argument rather than a second Dockerfile.
 
 **The image.** `services/groundstation/Dockerfile`, built from the repository
 root by `just image [variant] [tag] [buildx arguments…]`. Dependencies and the
-models are resolved in a builder stage; the runtime stage is
-`gcr.io/distroless/cc-debian12` with no shell, no package manager and no
-compiler, running as uid 65532. Python is a self-contained interpreter uv
-installs into the builder and both stages copy, which is what makes the runtime
-base a free variable — NVIDIA's CUDA image ships no Python, and installing one
-into it would put a package manager back.
+models are resolved in a builder stage, and neither variant's runtime stage
+installs anything: the interpreter, the environment and the weights arrive as
+`COPY --from` instructions and both run as uid 65532.
+
+The **default** variant's runtime base is `gcr.io/distroless/cc-debian12`, which
+has no shell, no package manager and no compiler — and `just image-verify`
+asserts that from inside the running container rather than taking the base
+image's word for it. The **accelerated** variant's base is NVIDIA's CUDA runtime
+image, which is an Ubuntu and therefore does carry a shell and a package
+manager; NVIDIA publishes no smaller one, and assembling a CUDA runtime from
+parts is not this change's job. That is the one property the two variants do not
+share, and it is why the toolchain assertion is made for the default variant
+only.
+
+Python is a self-contained interpreter uv installs into the builder and both
+stages copy, which is what makes the runtime base a free variable at all —
+NVIDIA's image ships no Python, and installing one into it would have put a
+package manager into the default variant too.
 
 **Measured sizes**, `linux/amd64`, uncompressed, as `just image-size` reports
 them:

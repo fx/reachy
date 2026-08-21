@@ -85,6 +85,47 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def _read_commented_settings(path: Path) -> dict[str, str]:
+    """Parse the settings an environment file documents but deliberately leaves unset.
+
+    A commented `#NAME=value` line, and only one whose name is a setting: an
+    ordinary prose comment is prose. compose hands the whole file to the
+    container with `env_file`, and an `env_file` value overrides the image's own
+    `ENV`, so a setting the image decides is documented this way rather than
+    repeated — see the file's own header.
+
+    Args:
+        path: The file to read.
+
+    Returns:
+        Setting variable name to the value the comment records.
+    """
+    values: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, _, value = stripped.removeprefix("#").strip().partition("=")
+        if name.strip().startswith(ENV_PREFIX):
+            values[name.strip()] = value.strip()
+    return values
+
+
+def _dockerfile_settings() -> dict[str, str]:
+    """Read the settings the image itself decides, out of the image's `ENV`.
+
+    Returns:
+        Setting variable name to the value the Dockerfile bakes in.
+    """
+    return dict(
+        re.findall(
+            rf"^\s+({ENV_PREFIX}[A-Z_]+)=(\S+?)\s*\\?$",
+            _DOCKERFILE.read_text(encoding="utf-8"),
+            flags=re.MULTILINE,
+        ),
+    )
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     """Read a YAML document.
 
@@ -118,8 +159,28 @@ def test_the_example_environment_documents_every_setting_and_no_others() -> None
     """`.env.example` and the settings model cannot disagree about what exists."""
     documented = {
         name for name in _read_env_file(_ENV_EXAMPLE) if name.startswith(ENV_PREFIX)
-    }
+    } | set(_read_commented_settings(_ENV_EXAMPLE))
     assert documented == _settings_variables()
+
+
+@pytest.mark.filesystem  # the example file on disk is the thing under test
+def test_the_settings_the_image_decides_are_documented_but_left_unset() -> None:
+    """An `env_file` value overrides the image's `ENV`, so repeating one is a bug.
+
+    The accelerated variant is what makes this more than tidiness: it ships
+    `CUDAExecutionProvider,CPUExecutionProvider`, and a line in the example
+    repeating the default provider list would replace that with the CPU provider
+    alone and turn the accelerated image into a slower ordinary one that reports
+    nothing unusual.
+
+    The expected set is read out of the Dockerfile rather than written down, so
+    a setting the image starts or stops deciding moves this test with it.
+    """
+    baked = _dockerfile_settings()
+    assert set(_read_commented_settings(_ENV_EXAMPLE)) == set(baked)
+    assert baked  # a Dockerfile that set none would make this vacuous
+    for name in baked:
+        assert name not in _read_env_file(_ENV_EXAMPLE), name
 
 
 @pytest.mark.filesystem  # the example file on disk is the thing under test
@@ -139,18 +200,14 @@ def test_the_example_environment_carries_the_defaults_the_service_carries() -> N
     authenticated nothing because nobody configured it would be a worse failure
     than one that refuses to start.
 
-    The host is excluded because the image overrides it deliberately — the
-    loopback default is right for a process started by hand and wrong for a
-    container, where nothing outside the network namespace could reach it.
+    The settings the image decides are commented out in the example rather than
+    set, so they resolve here to the model's own default and this compares them
+    against themselves. What pins their documented values is
+    `test_the_settings_the_image_decides_are_documented_but_left_unset`, which
+    compares them against the Dockerfile.
     """
     documented = load_settings(_read_env_file(_ENV_EXAMPLE))
-    reference = Settings.model_validate(
-        # S104 is bandit's "binding to all interfaces". That is exactly what the
-        # image does and what this asserts the example documents: a container
-        # binding the loopback interface could be reached by nothing outside its
-        # own network namespace.
-        {"credential": "placeholder", "host": "0.0.0.0"},  # noqa: S104  # the container's deliberate bind address, which is the value under test
-    )
+    reference = Settings.model_validate({"credential": "placeholder"})
     for name in Settings.model_fields:
         if name == "credential":
             continue
@@ -194,7 +251,7 @@ def test_the_scrape_configuration_points_at_the_port_the_service_binds() -> None
     jobs = scrape["scrape_configs"]
     assert len(jobs) == 1
     targets = jobs[0]["static_configs"][0]["targets"]
-    port = _read_env_file(_ENV_EXAMPLE)[f"{ENV_PREFIX}PORT"]
+    port = _read_commented_settings(_ENV_EXAMPLE)[f"{ENV_PREFIX}PORT"]
     assert targets == [f"{_SERVICE_NAME}:{port}"]
     assert jobs[0]["metrics_path"] == "/metrics"
 
