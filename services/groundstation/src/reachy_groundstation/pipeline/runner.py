@@ -88,17 +88,38 @@ class FramePipeline:
         self._clock = clock
 
     async def run(self, queue: FrameQueue) -> None:
-        """Process frames until the queue closes.
+        """Process frames until the queue closes, or until something stops it.
 
         Args:
             queue: The session's queue.
+
+        Raises:
+            Exception: Whatever handling a frame raised, after recording which
+                frame it was handling. The session layer decides what that
+                means for the session.
         """
         while True:
             try:
                 frame = await queue.get()
             except QueueClosedError:
                 return
-            await self.process(frame)
+            try:
+                await self.process(frame)
+            except Exception as error:
+                # Whatever ends the pipeline ends it while one particular frame
+                # was in hand, and the line saying so has to name that frame.
+                # `process` binds the frame context for its own duration, so by
+                # the time this exception reaches the session layer the context
+                # has unwound — it is bound again here, where the frame is still
+                # known. `CancelledError` derives from `BaseException` and does
+                # not come through: a session shutting down is not a failure
+                # this frame caused.
+                with frame_context(frame.header.sequence):
+                    _logger.warning(
+                        "pipeline.stopped",
+                        error=describe_fault(error),
+                    )
+                raise
 
     #:= docs/specs/robot-link/index.md#req-013-an-empty-result-is-a-valid-result
     #:% A result message carrying no detections MUST be treated as a successful result

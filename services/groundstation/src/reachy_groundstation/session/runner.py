@@ -405,12 +405,14 @@ class SessionRunner:
                 running against a connection nobody holds.
         """
         try:
-            await worker
-        except TransportClosedError:
-            # The client went away while the pipeline was still answering. The
-            # caller is unwinding on that same event already, so raising a
-            # second copy of it here would replace the original.
-            _logger.debug("pipeline.stopped_on_a_closed_transport")
+            # A client that went away while the pipeline was still answering
+            # surfaces here as the pipeline's own send failing. The caller is
+            # unwinding on that same event already, so raising a second copy of
+            # it would replace the original — and the pipeline has already
+            # logged it against the frame it was handling, which this far out
+            # is no longer known.
+            with suppress(TransportClosedError):
+                await worker
         except asyncio.CancelledError:
             # Cancelling is not enough on its own: the task has to be awaited
             # for its cancellation to actually complete, or the session ends

@@ -23,6 +23,7 @@ from groundstation_support import (
     TallyCapability,
     agreed,
     build_observability,
+    captured_logs,
     jpeg_bytes,
     make_header,
     make_settings,
@@ -44,11 +45,13 @@ from reachy_groundstation.obs import (
     STAGE_EMIT,
     STAGE_QUEUE,
     Observability,
+    session_context,
 )
 from reachy_groundstation.pipeline.queue import FrameQueue, QueuedFrame
 from reachy_groundstation.pipeline.runner import FramePipeline
 from reachy_groundstation.ports import CapabilityPort, DecodedFrame
 from reachy_groundstation.session.framing import MessageKind
+from reachy_groundstation.session.transport import TransportClosedError
 
 # A timeout that has already expired by the time the event loop looks at it.
 # The assertion in each of these tests is about what happens when a timeout
@@ -418,3 +421,44 @@ async def test_a_result_carries_the_capability_that_produced_it() -> None:
     assert result.capability == ECHO.name
     assert isinstance(result.payload, FaceDetections)
     assert TALLY.name != result.capability
+
+
+#:= docs/specs/groundstation/index.md#req-028-work-is-attributable-end-to-end
+#:% Every log line and metric emitted while handling a frame MUST carry the session
+#:% identifier and the frame's sequence number.
+@pytest.mark.asyncio
+async def test_a_pipeline_that_stops_says_which_frame_it_was_handling() -> None:
+    """The line naming the failure is emitted where the frame is still known.
+
+    A client that vanishes mid-answer stops the pipeline from inside
+    `deliver`, and the exception reaches the session layer with the frame
+    context already unwound. Recording it there would produce a line with a
+    session and no sequence number.
+    """
+
+    class _Vanishing(_Recorder):
+        async def deliver(self, kind: MessageKind, message: WireModel) -> None:
+            del kind, message
+            message_text = "client disconnected mid-answer"
+            raise TransportClosedError(message_text)
+
+    recorder = _Vanishing()
+    pipeline, _obs, _spans = _pipeline(EchoCapability(), recorder=recorder)
+    queue = FrameQueue(2)
+    queue.put(_queued(23))
+    queue.close()
+
+    # Under a session binding, the way the pipeline task always runs: the
+    # session identifier is bound by the session and the sequence number by the
+    # pipeline, and a line carries both only if both are still in scope.
+    with (
+        captured_logs() as logs,
+        session_context(SESSION),
+        pytest.raises(TransportClosedError),
+    ):
+        await pipeline.run(queue)
+
+    (line,) = [entry for entry in logs if entry["event"] == "pipeline.stopped"]
+    assert line["sequence"] == 23
+    assert line["session"] == SESSION
+    assert line["error"] == "TransportClosedError"
