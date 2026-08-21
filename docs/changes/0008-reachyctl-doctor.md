@@ -1,0 +1,147 @@
+# 0008: reachyctl doctor and shared checks
+
+## Summary
+
+Implement `doctor`: an end-to-end diagnosis of the chain from the operator's
+machine to a working robot, built on a shared check definition that
+[provisioning](../specs/provisioning/) verification will also consume.
+
+**Spec:** [reachyctl](../specs/reachyctl/)
+**Status:** draft
+**Depends On:** 0007
+
+## Motivation
+
+Two of the predecessor's most expensive failures were diagnosis failures.
+Environment overrides were silently inert for months because nothing reported
+what was actually in effect, and the robot's configuration lived in a systemd
+drop-in that nobody could inspect without logging in.
+
+`doctor` lands before `deploy` deliberately. It is the tool used to find out
+whether a deployment worked, so building it second would mean the first
+deployments are the ones with no way to check them.
+
+## Requirements
+
+### Testing Requirements
+
+This change MUST satisfy the project's standing testing rules (see
+[Testing conventions](../specs/architecture/index.md#testing-conventions)). CI
+enforces these as merge gates:
+
+- Tests run with `pytest`, with async strict mode enabled.
+- Unit tests MUST perform no input or output.
+- Integration tests MUST exercise real transports in-process rather than mocking
+  them.
+- Coverage MUST be gated on the diff rather than on the whole tree.
+- Type checking MUST run in strict mode for new modules.
+- A lint or type suppression MUST carry the rule identifier and a justification.
+
+Skipping or weakening any of these rules to land the PR MUST be treated as a bug
+in the PR, not in the rule.
+
+Every check MUST be tested in both its passing and its failing state. A
+diagnosis tool tested only against a healthy system is tested against the case
+nobody runs it in.
+
+### Functional requirements
+
+The [reachyctl spec](../specs/reachyctl/) owns the diagnosis behaviour —
+[REQ-054](../specs/reachyctl/index.md#req-054-diagnosis-covers-the-whole-chain-and-names-the-failing-link),
+[REQ-055](../specs/reachyctl/index.md#req-055-a-failed-check-states-how-to-fix-it),
+and
+[REQ-056](../specs/reachyctl/index.md#req-056-diagnosis-and-provisioning-agree-on-what-healthy-means).
+Those scenarios are this change's acceptance criteria. What implementing them
+requires of this change:
+
+- Checks are declared as data — identifier, description, the probe that runs it,
+  and the remediation text — in a shared module. This is what makes
+  [REQ-056](../specs/reachyctl/index.md#req-056-diagnosis-and-provisioning-agree-on-what-healthy-means)
+  achievable when 0010 consumes the same definitions.
+- Checks are independent, and one failing does not prevent the rest from
+  running. An operator with a broken groundstation still learns whether the
+  daemon is healthy.
+- A failing check reports remediation as a runnable command wherever one exists,
+  not as prose describing what to do.
+- The Home Assistant device identity check compares what the satellite announces
+  against what is configured, because a silent change there detaches entity
+  history — see
+  [ha-satellite REQ-040](../specs/ha-satellite/index.md#req-040-the-announced-device-identity-is-configuration).
+- Round-trip time is measured and reported, since the link is the component most
+  likely to be the real problem and the least likely to be suspected.
+- Structured output uses the conventions established in 0007.
+
+## Design
+
+### Approach
+
+The check registry is a workspace module importable by both the CLI and the
+provisioning verification role. Each check declares what it needs — a daemon
+connection, a groundstation session, a local file — so the runner can skip
+checks whose prerequisites are absent and report them as skipped rather than
+failed.
+
+The chain runs in dependency order for readability, but no check depends on
+another's result.
+
+### Decisions
+
+- **Decision**: Checks are data, not functions scattered across commands.
+  - **Why**: [REQ-056](../specs/reachyctl/index.md#req-056-diagnosis-and-provisioning-agree-on-what-healthy-means)
+    requires provisioning and diagnosis to agree, and two independently written
+    notions of "healthy" drift into a robot that provisioning calls fine and
+    diagnosis calls broken.
+  - **Alternatives considered**: Provisioning shelling out to `doctor`, which
+    couples the provisioning run to a CLI installation on the control machine.
+- **Decision**: `doctor` before `deploy`.
+  - **Why**: Deployment verification in
+    [REQ-051](../specs/reachyctl/index.md#req-051-deployment-verifies-its-own-result)
+    is a check, so the check infrastructure has to exist first.
+  - **Alternatives considered**: Deploy first with ad-hoc verification, later
+    refactored — which means writing the verification twice.
+- **Decision**: Skipped is a distinct outcome from failed.
+  - **Why**: An operator with no groundstation configured is not in an error
+    state, and reporting one trains people to ignore the output.
+
+### Non-Goals
+
+- No remediation execution — `doctor` reports the command, it does not run it.
+- No scheduled or unattended operation.
+- No provisioning role; 0010 consumes these definitions.
+
+## Tasks
+
+- [ ] Build the shared check registry
+  - [ ] Check declaration structure: identifier, description, probe, remediation
+  - [ ] Prerequisite declaration and the skipped outcome
+  - [ ] Runner executing checks independently and collecting results
+- [ ] Implement the checks
+  - [ ] Daemon reachable and responding
+  - [ ] Application installed, and the installed version
+  - [ ] Application running
+  - [ ] Groundstation reachable; session established; capabilities negotiated
+  - [ ] Round-trip time measured
+  - [ ] Model files present and matching their pinned hashes
+  - [ ] Effective configuration matches intent
+  - [ ] Announced Home Assistant identity matches configuration
+- [ ] Implement the command
+  - [ ] Human-facing rendering with per-check status
+  - [ ] Structured output and exit status per the 0007 conventions
+  - [ ] Passing-and-failing tests for every check
+
+## Open Questions
+
+- [ ] Whether `doctor` can query Home Assistant directly to compare the
+      registered device against what the satellite announces. It would catch the
+      detached-history case precisely, and it needs Home Assistant credentials
+      the tool does not otherwise hold. Current lean: compare announced against
+      configured only, and document the Home Assistant side as a manual check.
+- [ ] Whether check results are retained between runs to show change over time.
+      Current lean: no; `bench` is where trends belong.
+
+## References
+
+- Spec: [reachyctl](../specs/reachyctl/)
+- Related changes: [0007-reachyctl-probe](./0007-reachyctl-probe.md),
+  [0009-reachyctl-deploy-and-config](./0009-reachyctl-deploy-and-config.md),
+  [0010-provisioning-ansible](./0010-provisioning-ansible.md)

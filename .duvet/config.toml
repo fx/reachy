@@ -1,0 +1,101 @@
+# Regenerating the snapshot
+# -------------------------
+# `.duvet/snapshot.txt` is committed and `duvet report --ci` fails whenever the
+# re-derived report disagrees with it. After editing a spec or any annotation,
+# regenerate from the REPOSITORY ROOT with:
+#
+#     cd "$(git rev-parse --show-toplevel)" && rm -rf .duvet/requirements && duvet report
+#
+# If `duvet` is not on your PATH, substitute the invocation your install
+# provides — `mise exec -- duvet report` when this repo pins cargo:duvet with
+# mise and the shell is not activated, or `~/.cargo/bin/duvet report` after a
+# `cargo install duvet --locked`.
+#
+# The `cd` is not decoration. duvet resolves this config, every specification
+# source, and every source pattern relative to the current working directory and
+# never searches upwards, so the same command run from a subdirectory loads 0
+# specifications, writes no snapshot, and still exits 0 — a silent no-op that
+# looks like success.
+#
+# The `rm -rf` is not optional either. `duvet report` writes one TOML file per
+# current spec section into `.duvet/requirements/` and never deletes stale ones,
+# so renaming or removing a requirement heading leaves an orphan TOML behind.
+# That orphan makes duvet fail locally with `missing section "..."` while CI —
+# which runs from a fresh checkout, where `.duvet/requirements/` is gitignored —
+# passes. Deleting the directory first keeps local and CI results identical.
+
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
+
+# ⚠️ NO SPECS ARE REGISTERED YET, AND THAT IS DELIBERATE.
+#
+# `docs/specs/` currently holds 8 specs carrying 73 requirements, and none of
+# them is registered below. While that is true, `duvet query -c implementation`
+# and `duvet report --ci` both pass VACUOUSLY: they load 0 specifications, check
+# nothing, and exit 0. A green "Requirements traceability" check therefore means
+# nothing at all today. Do not read it as evidence that anything is traced.
+#
+# The specs are unregistered because no source exists to annotate: registering
+# them turns the job red immediately — 73 requirements, 0 annotations — and it
+# stays red until the implementing changes land their annotations. Register them
+# when that work starts, and do not make the job a required check until it can
+# pass. See docs/changes/0001-workspace-skeleton.md onwards.
+#
+# Each entry takes a `source` path plus a MANDATORY `format = "markdown"`:
+#
+#     [[specification]]
+#     source = "docs/specs/architecture/index.md"
+#     format = "markdown"
+#
+# Without `format = "markdown"` duvet applies its default IETF parser, extracts
+# zero requirements, and exits 0 — a failure that looks exactly like success,
+# and one indistinguishable from the vacuous pass described above.
+
+# Files that may carry annotations. At least one block is MANDATORY: duvet parses
+# annotations only from matched files, so a config without one reports every
+# requirement as "Not implemented" and can never pass `duvet query -c
+# implementation`. One block per distinct comment syntax — `comment-style` is
+# per-block, so add a block per language, not a pattern per language.
+
+# --- Python: every uv workspace member -------------------------------------
+[[source]]
+pattern = "packages/**/*.py"
+comment-style = { meta = "#=", content = "#%" }
+
+[[source]]
+pattern = "services/**/*.py"
+comment-style = { meta = "#=", content = "#%" }
+
+[[source]]
+pattern = "apps/**/*.py"
+comment-style = { meta = "#=", content = "#%" }
+
+[[source]]
+pattern = "cli/**/*.py"
+comment-style = { meta = "#=", content = "#%" }
+
+[[source]]
+pattern = "bench/**/*.py"
+comment-style = { meta = "#=", content = "#%" }
+
+# --- Ansible: the provisioning roles ----------------------------------------
+[[source]]
+pattern = "provisioning/ansible/**/*.yml"
+comment-style = { meta = "#=", content = "#%" }
+
+# --- CI workflows: satisfied-by-construction gates --------------------------
+# type = "implication" because every citation under this pattern is a CI job
+# that both enforces and verifies the requirement it cites — the leak scan, the
+# Ansible idempotency gate, the performance regression gate. There is no other
+# artifact to point at: the workflow IS the implementation.
+[[source]]
+pattern = ".github/workflows/*.yml"
+comment-style = { meta = "#=", content = "#%" }
+type = "implication"
+
+[report.snapshot]
+enabled = true
+path = ".duvet/snapshot.txt"
+
+[report.json]
+enabled = true
+path = ".duvet/reports/report.json"
