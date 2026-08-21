@@ -1,0 +1,69 @@
+name: Set up the workspace
+description: >-
+  Install the toolchain mise.toml pins and the locked workspace environment, so
+  a job can call a Justfile recipe and get the same result a contributor gets.
+
+# Every job in every workflow here needs the same steps, and repeating them is
+# how one of them ends up on a different uv or a different Python without
+# anybody noticing.
+#
+# The versions are READ OUT OF mise.toml rather than restated here. A restated
+# version is a second copy of a pin, and a second copy drifts silently: a
+# runner on 3.12.x and a contributor on 3.12.14 look identical in every log
+# until the one difference between them is the bug. Reading the file means
+# bumping a pin is one edit, in the place the repository already documents as
+# the toolchain.
+#
+# The toolchain itself is not installed with mise, because mise.toml also pins
+# a Rust toolchain and a duvet build that only the requirements-traceability
+# workflow needs and that would be compiled from source on every job here.
+runs:
+  using: composite
+  steps:
+    # Fails loudly on a missing pin. A pin that silently resolved to empty
+    # would install "whatever is newest", which is the failure this step exists
+    # to prevent, and it would do it while looking like it worked.
+    - name: Read the pinned toolchain
+      id: pins
+      shell: bash
+      run: |
+        set -euo pipefail
+        for tool in python uv just; do
+          version="$(
+            sed -n -E "s/^${tool}[[:space:]]*=[[:space:]]*\"([^\"]+)\".*/\1/p" \
+              mise.toml | head -1
+          )"
+          if [ -z "${version}" ]; then
+            echo "::error::mise.toml does not pin ${tool}"
+            exit 1
+          fi
+          echo "${tool}=${version}" >> "$GITHUB_OUTPUT"
+        done
+
+    # Pinned by commit SHA, not by tag. A tag is a mutable ref: retargeting it
+    # upstream would run changed third-party code here with no diff in this
+    # repository to review. The trailing comment records which release the SHA
+    # corresponds to, since the SHA alone is unreadable.
+    #
+    # uv also provides the interpreter, rather than a separate setup-python
+    # step: it fetches the exact patch release from the same standalone builds
+    # mise installs from, so the runner and a contributor get the same binary
+    # rather than the same version number from two different build sources.
+    - name: Install uv and the pinned Python
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        version: ${{ steps.pins.outputs.uv }}
+        python-version: ${{ steps.pins.outputs.python }}
+        enable-cache: true
+
+    - name: Install just
+      uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      with:
+        just-version: ${{ steps.pins.outputs.just }}
+
+    # `just sync` installs exactly what uv.lock describes and fails when the
+    # lockfile no longer matches the manifests, which is where a dependency
+    # added without relocking is caught.
+    - name: Install the workspace
+      shell: bash
+      run: just sync

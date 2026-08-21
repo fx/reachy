@@ -19,15 +19,18 @@ one-line import of this file and holds no content of its own.
 | `services/groundstation/` | Off-robot capability host (`reachy_groundstation`) |
 | `cli/reachyctl/` | Command-line tool (`reachyctl`) |
 | `bench/` | Performance suite (`reachy_bench`); a member, never published |
+| `tools/repo-hygiene/` | The repository's own leak scanner (`reachy_hygiene`); a member, never published |
 | `provisioning/ansible/` | Stock image to configured robot; not a Python member |
 | `pyproject.toml` | Workspace root and all shared tool configuration |
 | `uv.lock` | One lockfile for every member |
 | `mise.toml` | The pinned toolchain |
 | `Justfile` | The task surface |
+| `.github/workflows/` | The merge gates: checks, hygiene, release, traceability |
+| `release-please-config.json` | Where the derived version is written, artifact by artifact |
 
-Only `packages/reachy-contracts` has an implementation today. The other members
-are scaffolds: a `pyproject.toml`, an `AGENTS.md` and a package directory,
-waiting for the change that fills them in.
+`packages/reachy-contracts` and `tools/repo-hygiene` have an implementation
+today. The other four members are scaffolds: a `pyproject.toml`, an `AGENTS.md`
+and a package directory, waiting for the change that fills them in.
 
 ## Read before touching
 
@@ -68,15 +71,24 @@ that flag skips the freshness check and runs against the stale resolution.
 
 Every member carries the same version. `packages/reachy-contracts` declares it in
 `src/reachy_contracts/version.py` and derives its distribution metadata from
-that line, so the module and the metadata cannot disagree. Deriving that version
-from conventional commits is wired in change 0002.
+that line, so the module and the metadata cannot disagree.
+
+That version is derived from conventional commits by release-please, which
+maintains a release pull request on the default branch and, when it is merged,
+writes the derived version to every place that declares one and creates the tag.
+`release-please-config.json` is where that list lives; a new member that
+declares a version adds itself there in the same pull request, or it ships the
+version of whenever it was last edited by hand. Nothing is published by the
+release workflow — the publishing steps arrive with the artifacts.
 
 ### The Justfile is the only command surface
 
 `just test`, `just lint`, `just typecheck`, `just check`, plus `just fmt`,
-`just sync`, `just coverage-diff` and `just duvet`. Continuous integration calls
-these recipes rather than restating the commands. A command worth running twice
-belongs in the `Justfile`, not in workflow YAML and not in prose here.
+`just sync`, `just coverage-diff`, `just duvet`, `just leak-scan`,
+`just secret-scan`, `just contracts` and `just contracts-check`. Continuous
+integration calls these recipes rather than restating the commands. A command
+worth running twice belongs in the `Justfile`, not in workflow YAML and not in
+prose here.
 
 ### Behaviour is testable without hardware
 
@@ -117,15 +129,40 @@ the file with what it covers: `test_contracts_version.py`, not `test_version.py`
 
 ## Toolchain
 
-`mise.toml` pins `python`, `uv`, `rust` and `duvet`. Python 3.12 is the floor,
+`mise.toml` pins `python`, `uv`, `just`, `rust`, `duvet` and `gitleaks`, and it
+is the only place any of them is pinned: continuous integration reads the first
+three out of that file rather than restating them, so a runner and a contributor
+cannot end up on versions that merely look alike. Python 3.12 is the floor,
 matching the robot image, and the robot itself is an aarch64 Raspberry Pi CM4 —
 anything shipped to it is built and tested for that architecture.
 
 ```
 mise install     # once, to get the pinned versions
 just sync        # install the workspace exactly as uv.lock describes it
-just check       # lint, typecheck, test — what gates a merge
+just check       # lint, typecheck, test — three of the merge gates
 ```
+
+## Merge gates
+
+Four workflows, and they do not all run on the same events. Each job calls a
+`Justfile` recipe, so every one of them reproduces locally with the command in
+its step.
+
+| Workflow | Runs on | Jobs | Local equivalent |
+|---|---|---|---|
+| `checks.yml` | pull requests, pushes to `main` | `Lint`, `Type check`, `Test` (diff-scoped coverage), `Contract drift` | `just check`, `just contracts-check` |
+| `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
+| `release.yml` | pushes to `main` only | Version derivation and tag creation; publishes nothing | — |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — vacuous today, see below | `just duvet` |
+
+`release.yml` never runs on a pull request, which is why it is not in the set of
+checks to require below.
+
+⚠️ **A gate only blocks a merge once it is a required status check**, which is a
+repository setting rather than a file and cannot be committed. The settings to
+enable, and why direct pushes to the default branch matter, are recorded in the
+completion notes of
+[`docs/changes/0002-ci-and-hygiene-gates.md`](docs/changes/0002-ci-and-hygiene-gates.md).
 
 ## Requirements traceability
 

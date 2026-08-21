@@ -1,0 +1,115 @@
+name: Hygiene
+
+# This repository is public from its first commit and its history is not
+# practically rewritable once pushed, so hygiene has to hold on the way in.
+# Both jobs run on pushes to the default branch as well as on pull requests: a
+# scan on push detects rather than prevents, but it surfaces a leak within a
+# minute of it arriving instead of on whichever later pull request happens to
+# touch the file. Prevention is branch protection, which is a repository
+# setting rather than a file — see the completion notes in
+# docs/changes/0002-ci-and-hygiene-gates.md for the settings to enable.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hygiene-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  #= docs/specs/architecture/index.md#req-004-automated-leak-detection-on-every-change
+  #% Continuous integration MUST reject a change whose diff or commit messages match
+  #% a generic environment-leak pattern — on pull requests and on direct pushes to
+  #% the default branch alike — where the pattern set describes shapes such as
+  #% private IP ranges, internal hostname suffixes, and email addresses rather than
+  #% any specific name.
+  leak-scan:
+    name: Leak scan
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: the scan reads both the diff of a range and the messages
+      # of every commit in it, neither of which a shallow checkout has.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      # Context values are passed through the environment rather than
+      # interpolated into the script, so nothing GitHub hands this job can be
+      # read as shell.
+      - name: Resolve the range to scan
+        id: range
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE"
+            head="$PR_HEAD"
+          else
+            head="$PUSH_HEAD"
+            base="$PUSH_BEFORE"
+            # A branch creation reports an all-zero "before", and a force push
+            # can report one this checkout cannot reach. Either way the range
+            # that was pushed is unknowable from here, and every substitute is
+            # wrong in the direction that matters: the head's parent scans one
+            # commit of however many arrived, and reports the rest clean. Fail
+            # instead, and say what to run by hand.
+            if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              echo "::error::cannot tell what this push added:" \
+                   "'${base}' is not a commit in this checkout, so the pushed" \
+                   "range is unknown. Scan it by hand with" \
+                   "'just leak-scan BASE ${head}'."
+              exit 1
+            fi
+          fi
+          echo "base=${base}" >> "$GITHUB_OUTPUT"
+          echo "head=${head}" >> "$GITHUB_OUTPUT"
+
+      - name: Scan the diff and the commit messages
+        env:
+          BASE: ${{ steps.range.outputs.base }}
+          HEAD: ${{ steps.range.outputs.head }}
+        run: just leak-scan "$BASE" "$HEAD"
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      # The full history was scanned once at set-up and the result is recorded
+      # in docs/ops/secret-scan-baseline.md; this job covers what arrives after
+      # it. The action carries its own gitleaks binary, pinned to the same
+      # release mise.toml pins for `just secret-scan`, so a finding here
+      # reproduces locally.
+      #
+      # Comments and artifact upload are both off. A comment needs write access
+      # this workflow deliberately does not have, and an uploaded report of what
+      # the scan found would publish the secret in the act of reporting it.
+      #
+      # This action is free for a repository owned by a personal account. If
+      # ownership ever moves to an organisation it requires a licence key, and
+      # this job starts failing with a message saying so.
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_ENABLE_COMMENTS: false
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false

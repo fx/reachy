@@ -1,0 +1,96 @@
+name: Checks
+
+# Every step below calls a Justfile recipe rather than restating its command, so
+# what runs here and what a contributor runs locally cannot drift apart.
+#
+# Lint, type check and test are separate jobs rather than one, because a job is
+# the unit branch protection can require. One combined job would report a single
+# red check and hide which gate failed behind a log.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  #= docs/specs/architecture/index.md#req-006-quality-gates-block-merge
+  #% Continuous integration MUST run linting, type checking, and the test suite on
+  #% every pull request, and a failure of any of them MUST block merge.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      - name: Check formatting and lint rules
+        run: just lint
+
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      - name: Type-check every member in strict mode
+        run: just typecheck
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: diff-cover compares the branch against the base, and a
+      # shallow checkout has no merge base to compare with.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      - name: Run the suite with coverage
+        run: just test
+
+      # Coverage is gated on the diff rather than on the whole tree, so a large
+      # untested area cannot mask a new one. There is no diff to gate on a push
+      # to the default branch, where the branch and the base are the same
+      # commit, so the threshold applies on pull requests only.
+      - name: Enforce coverage of the lines this branch changed
+        if: github.event_name == 'pull_request'
+        run: just coverage-diff "origin/${{ github.base_ref }}"
+
+  #= docs/specs/architecture/index.md#req-008-generated-contract-artifacts-cannot-drift
+  #% Continuous integration MUST regenerate every published schema and interface
+  #% description from source and fail when the regenerated output differs from the
+  #% committed copy.
+  contract-drift:
+    name: Contract drift
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      # The registry this regenerates from is empty until the wire types exist,
+      # so today the job proves the loop rather than any particular schema. It
+      # is wired now because a drift gate added after the artifacts it guards is
+      # a gate that first runs against content nobody checked.
+      - name: Regenerate the contracts and fail on any difference
+        run: just contracts-check

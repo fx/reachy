@@ -1,0 +1,20 @@
+SPECIFICATION: [Architecture](docs/specs/architecture/index.md)
+  SECTION: [REQ-002: One version for the whole repository](#req-002-one-version-for-the-whole-repository)
+    TEXT[implication]: Every artifact published from this repository MUST carry the same version
+    TEXT[implication]: string, derived from a single repository-wide version.
+
+  SECTION: [REQ-004: Automated leak detection on every change](#req-004-automated-leak-detection-on-every-change)
+    TEXT[implication]: Continuous integration MUST reject a change whose diff or commit messages match
+    TEXT[implication]: a generic environment-leak pattern — on pull requests and on direct pushes to
+    TEXT[implication]: the default branch alike — where the pattern set describes shapes such as
+    TEXT[implication]: private IP ranges, internal hostname suffixes, and email addresses rather than
+    TEXT[implication]: any specific name.
+
+  SECTION: [REQ-006: Quality gates block merge](#req-006-quality-gates-block-merge)
+    TEXT[implication]: Continuous integration MUST run linting, type checking, and the test suite on
+    TEXT[implication]: every pull request, and a failure of any of them MUST block merge.
+
+  SECTION: [REQ-008: Generated contract artifacts cannot drift](#req-008-generated-contract-artifacts-cannot-drift)
+    TEXT[implication]: Continuous integration MUST regenerate every published schema and interface
+    TEXT[implication]: description from source and fail when the regenerated output differs from the
+    TEXT[implication]: committed copy.

@@ -11,10 +11,14 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` is intentionally empty.** With no specs registered,
-`duvet report` writes a 0-byte snapshot and both `duvet report --ci` and
-`duvet query -c implementation` exit 0. Regeneration is byte-identical, so CI is
-deterministic. See `.duvet/config.toml` for why the specs are unregistered.
+**`.duvet/snapshot.txt` records annotations, not coverage.** No spec is
+registered in `.duvet/config.toml`, so duvet extracts 0 requirements and both
+`duvet report --ci` and `duvet query -c implementation` exit 0 having checked
+nothing. The snapshot is nonetheless non-empty: duvet loads a specification an
+annotation points at whether or not it is registered, so the file lists the
+requirement text each annotation cites. Regeneration is byte-identical, so CI is
+deterministic — and a green run is still not evidence that any requirement is
+traced. See `.duvet/config.toml` for why the specs are unregistered.
 
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a

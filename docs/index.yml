@@ -48,7 +48,7 @@ changes:
     path: changes/0002-ci-and-hygiene-gates.md
     description: Quality gates, generic leak detection, secret scanning and release version derivation
     spec: architecture
-    status: draft
+    status: complete
     depends_on: ["0001"]
   - id: "0003"
     name: contracts-package
