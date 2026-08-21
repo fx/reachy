@@ -1,0 +1,78 @@
+NOTICE
+======
+
+This directory contains test code derived from a third-party project. The full
+licence text of that project is in `LICENSE`, beside this file.
+
+Upstream project
+----------------
+
+  Name:    Linux Voice Assistant
+  Owner:   The Open Home Foundation / the Home Assistant Authors
+  Source:  https://github.com/OHF-Voice/linux-voice-assistant
+  Licence: Apache License, Version 2.0
+  Commit:  d1f5761f7591495794734e79c98f7199100153c0
+
+The modules those tests exercise are vendored in
+`../src/reachy_mini_ha_satellite/esphome/`, which carries the same licence and a
+notice of its own. Every file below was taken at the commit above, and repeats
+that commit and its own upstream path in its own header.
+
+Files derived from upstream
+---------------------------
+
+  this file  <-  the upstream file it was derived from
+
+  esphome_test_support.py                  <- tests/unit/conftest.py
+  test_satellite_esphome_api_server.py     <- tests/unit/test_api_server.py
+  test_satellite_esphome_entity.py         <- tests/unit/test_entity.py
+  test_satellite_esphome_models.py         <- tests/unit/test_models.py
+  test_satellite_esphome_protocol.py       <- tests/unit/test_satellite.py
+  test_satellite_esphome_util.py           <- tests/unit/test_unit.py
+  test_satellite_esphome_wake_word.py      <- tests/unit/test_wake_word.py
+  test_satellite_esphome_webrtc.py         <- tests/unit/test_webrtc.py
+  test_satellite_esphome_zeroconf.py       <- tests/unit/test_zeroconf.py
+
+Files original to this repository
+---------------------------------
+
+  conftest.py
+  test_satellite_asset_registry.py
+  test_satellite_asset_verify.py
+  test_satellite_audio_seams.py
+  fixtures/vendored_boundary_probe.py.txt
+
+What was not carried
+--------------------
+
+  tests/unit/test_main.py        Covers the command-line entry point, which is
+                                 not carried.
+  tests/unit/test_mpv_player.py  Covers the mpv playback path, which is replaced
+                                 by a seam.
+
+What was changed
+----------------
+
+1. Each file gained the provenance header described above.
+
+2. They import from `reachy_mini_ha_satellite.esphome` rather than from
+   `linux_voice_assistant`, and their shared helpers moved from
+   `tests.unit.conftest` to `esphome_test_support`, because a member's `tests/`
+   directory in this repository is deliberately not a package.
+
+3. They were renamed. Test module names have to be unique across the whole
+   repository — `tests/` is not a package, so two members with a `test_models.py`
+   would collide during type checking.
+
+4. They run against an in-memory filesystem. This repository requires that a unit
+   test perform no input or output, and upstream's tests write preference files
+   and wake-word configurations into real temporary directories. The change is
+   one `tmp_path` fixture in `conftest.py`, which is original to this repository;
+   no test body was rewritten.
+
+5. Example addresses use the RFC 5737 documentation ranges. This repository is
+   public and requires that of every tracked file.
+
+Nothing else was touched — in particular the test bodies are not reformatted and
+not annotated, and the suppressions they carry are upstream's own. The shared
+ruff and mypy configuration names these files and stands down.

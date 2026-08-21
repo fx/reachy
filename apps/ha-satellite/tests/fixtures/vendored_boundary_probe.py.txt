@@ -1,0 +1,34 @@
+# The failing scenario for the import-direction boundary, as a fixture rather
+# than as prose. `just lint-boundary` feeds this file to ruff twice: once as if
+# it lived inside the vendored ESPHome directory, where every import below is
+# banned, and once as if it lived beside the adapters, where all of them are
+# ordinary. The first run has to fail and the second has to pass.
+#
+# The bare `import reachy_mini_ha_satellite` below is the one TID251 cannot
+# express — banning the package root would ban the vendored modules' own relative
+# imports, which ruff resolves to absolute paths before matching. The recipe's
+# second half greps for it instead, and requires this line to be here so that half
+# is proved to fire too. Do not remove it.
+#
+# It is a .txt so that nothing else picks it up — it is not linted by `ruff check
+# .`, not type-checked, and not collected as a test. Its only readers are the
+# recipe, through `ruff check --stdin-filename` and grep, and
+# `scripts/vendored_provenance.py`, which knows it is original to this repository.
+
+import reachy_contracts
+import reachy_mini
+import reachy_mini_ha_satellite
+import reachy_mini_ha_satellite.adapters
+import reachy_mini_ha_satellite.assets
+import reachy_mini_ha_satellite.behaviour
+import reachy_mini_ha_satellite.config
+import reachy_mini_ha_satellite.main
+import reachy_mini_ha_satellite.ports
+import reachy_mini_ha_satellite.web
+
+# Dynamic forms, which TID251 cannot see at all — it inspects import statements.
+# The grep half catches these, qualified or not, and this is what proves it.
+import importlib
+
+importlib.import_module("reachy_mini")
+__import__("reachy_mini_ha_satellite.adapters")

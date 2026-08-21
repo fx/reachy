@@ -3,7 +3,52 @@ name = "reachy-mini-ha-satellite"
 version = "0.1.0"
 description = "Robot-side ESPHome voice satellite for Home Assistant"
 requires-python = ">=3.12"
-dependencies = ["reachy-contracts"]
+# The ESPHome protocol layer in `src/reachy_mini_ha_satellite/esphome/` is
+# vendored, but its own dependencies are not: they are ordinary packages, and
+# these are the ones the carried modules import.
+#
+# Every upper bound is the next release that may change something this code
+# depends on, which is not always the next major:
+#
+#   - For the four post-1.0 packages it is the major, because each is a protocol
+#     library or a model runtime where a major release can change a wire format
+#     or a file format.
+#   - `netifaces2` is 0.0.x, where the patch is what moves, so its ceiling is the
+#     next minor. `zeroconf` is 0.x but releases minors freely, so its ceiling is
+#     1.0.
+#   - `websockets` is bounded by the API the vendored code calls, not by a
+#     major. `peripheral_api.py` uses `websockets.server.serve`, which is the
+#     current API through 13 and deprecated from 14 onward. The ceiling also
+#     stays inside the Reachy Mini SDK's own `>=12,<16`, so the two resolve
+#     together in the robot's shared application environment rather than
+#     conflicting the moment this wheel is installed beside it.
+#
+# Deliberately absent: `soundcard` and `python-mpv`, which upstream used for
+# desktop capture and playback. On this robot the daemon owns both devices, so
+# neither library is carried and each became a seam instead — see
+# `esphome/seams.py`. The Reachy Mini SDK is absent too: it belongs behind the
+# ports that change 0012 adds, imported inside adapters, so that this package's
+# test suite runs with no robot attached.
+dependencies = [
+    "reachy-contracts",
+    # The ESPHome native API: protobuf message types, the frame helper and the
+    # entity model Home Assistant speaks.
+    "aioesphomeapi>=45.3,<46",
+    # Default network interface and address lookup (`esphome/util.py`).
+    "netifaces2>=0.0.22,<0.1",
+    # Wake-word runtimes. Detection runs on the robot, per ha-satellite REQ-044.
+    "pymicro-wakeword>=2,<3",
+    "pyopen-wakeword>=1,<2",
+    # mDNS advertisement, which is how Home Assistant discovers the satellite.
+    "zeroconf>=0.130,<1",
+    # Microphone gain control and noise suppression (`esphome/webrtc.py`).
+    "webrtc-noise-gain>=1,<2",
+    # The peripheral WebSocket API (`esphome/peripheral_api.py`). Upstream
+    # imports it lazily and degrades to a log line when it is missing; it is
+    # declared here so the feature is actually present rather than accidentally
+    # disabled.
+    "websockets>=12,<14",
+]
 
 [build-system]
 requires = ["hatchling"]

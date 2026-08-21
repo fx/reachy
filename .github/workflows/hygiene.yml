@@ -22,12 +22,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  #= docs/specs/architecture/index.md#req-004-automated-leak-detection-on-every-change
-  #% Continuous integration MUST reject a change whose diff or commit messages match
-  #% a generic environment-leak pattern — on pull requests and on direct pushes to
-  #% the default branch alike — where the pattern set describes shapes such as
-  #% private IP ranges, internal hostname suffixes, and email addresses rather than
-  #% any specific name.
+  #:= docs/specs/architecture/index.md#req-004-automated-leak-detection-on-every-change
+  #:% Continuous integration MUST reject a change whose diff or commit messages match
+  #:% a generic environment-leak pattern — on pull requests and on direct pushes to
+  #:% the default branch alike — where the pattern set describes shapes such as
+  #:% private IP ranges, internal hostname suffixes, and email addresses rather than
+  #:% any specific name.
   leak-scan:
     name: Leak scan
     runs-on: ubuntu-latest

@@ -21,6 +21,7 @@ one-line import of this file and holds no content of its own.
 | `bench/` | Performance suite (`reachy_bench`); a member, never published |
 | `tools/repo-hygiene/` | The repository's own leak scanner (`reachy_hygiene`); a member, never published |
 | `provisioning/ansible/` | Stock image to configured robot; not a Python member |
+| `scripts/` | Helpers the `Justfile` calls; not a Python member |
 | `pyproject.toml` | Workspace root and all shared tool configuration |
 | `uv.lock` | One lockfile for every member |
 | `mise.toml` | The pinned toolchain |
@@ -28,9 +29,10 @@ one-line import of this file and holds no content of its own.
 | `.github/workflows/` | The merge gates: checks, hygiene, release, traceability |
 | `release-please-config.json` | Where the derived version is written, artifact by artifact |
 
-`packages/reachy-contracts` and `tools/repo-hygiene` have an implementation
-today. The other four members are scaffolds: a `pyproject.toml`, an `AGENTS.md`
-and a package directory, waiting for the change that fills them in.
+`packages/reachy-contracts`, `apps/ha-satellite` and `tools/repo-hygiene` have
+implementations today. The other three members are scaffolds: a
+`pyproject.toml`, an `AGENTS.md` and a package directory, waiting for the change
+that fills them in.
 
 ## Read before touching
 
@@ -85,7 +87,8 @@ release workflow — the publishing steps arrive with the artifacts.
 
 `just test`, `just lint`, `just typecheck`, `just check`, plus `just fmt`,
 `just sync`, `just coverage-diff`, `just duvet`, `just leak-scan`,
-`just secret-scan`, `just contracts` and `just contracts-check`. Continuous
+`just secret-scan`, `just contracts`, `just contracts-check`,
+`just lint-boundary`, `just check-assets` and `just vendored-drift`. Continuous
 integration calls these recipes rather than restating the commands. A command
 worth running twice belongs in the `Justfile`, not in workflow YAML and not in
 prose here.
@@ -112,6 +115,13 @@ drift, and a reviewer should learn the rules from one file.
 
 `# type: ignore[code]  # why` and `# noqa: RULE  # why`. A mypy relaxation is a
 per-module override with a comment naming the reason, never a global loosening.
+Vendored third-party code is the one standing exception, and it is recorded the
+same way: the modules are named in a `[[tool.mypy.overrides]]` block and in
+ruff's `per-file-ignores`, both carrying the reason, and neither excludes the
+code from being checked at all. The suppressions *inside* those files are
+upstream's and stay as upstream wrote them — the reason is the directory's
+`NOTICE`, and annotating each one would be an unlisted edit to a derived file.
+This rule governs the suppressions this repository adds.
 
 The two halves are enforced differently, and the difference is deliberate. The
 **rule identifier** is enforced by the tooling: mypy runs with
@@ -171,6 +181,11 @@ is registered in `.duvet/config.toml`, so duvet loads zero specifications and
 exits 0 having checked nothing. A green run is not evidence that any requirement
 is traced. The header comment in that file explains why they are deliberately
 unregistered and when to register them.
+
+Annotations already in the tree still resolve, and they are written `#:=` for the
+meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and
+`#%`. The colon is what stops `ruff format` inserting a space after the `#` and
+silently breaking the citation; the same file's header explains it.
 
 ## Task Tracking
 

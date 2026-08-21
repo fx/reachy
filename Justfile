@@ -31,9 +31,214 @@ test:
     {{ uv }} pytest
 
 # Check formatting and lint rules. Fails without modifying anything.
-lint:
+lint: lint-boundary
     {{ uv }} ruff check .
     {{ uv }} ruff format --check .
+
+# Prove the vendored ESPHome directory's import-direction boundary still fires.
+#
+# A lint rule nobody has watched fail is a rule that does not exist, and this one
+# guards something a single convenient import would quietly undo. So the failing
+# scenario is a fixture — a file full of Reachy imports — and the recipe runs both
+# halves of the boundary against it and fails if either stays quiet.
+#
+# The first half is ruff's TID251, run twice over the fixture: once under a path
+# inside the vendored directory, where every import in it is banned, and once
+# under a path beside the adapters, where all of them are ordinary. Neither path
+# exists on disk — `--stdin-filename` only tells ruff which per-file rules apply —
+# so no probe file is ever left in the tree to be imported by mistake.
+#
+# The second half exists because TID251 alone cannot express the whole rule. Ruff
+# resolves a relative import to its absolute path before matching, so banning the
+# package root would ban the vendored modules' own `from .entity import ...`; the
+# ban therefore names Reachy-specific modules, and `import
+# reachy_mini_ha_satellite` on its own would slip through. TID251 also inspects
+# only import statements, so it never sees a dynamic import. A grep for any
+# absolute `reachy`-prefixed import closes both, qualified or not — the fixture
+# carries a bare root import and two dynamic ones, so this half is proved to fire.
+#
+# It is a backstop against the convenient accident, not a sandbox: an author
+# determined to load a Reachy module from in here can always assemble the name at
+# run time, and no lint rule stops that. What this makes impossible is doing it
+# without meaning to, and without a reviewer seeing it.
+#
+# The grep is restricted to `*.py`. Left unrestricted it also reads `.pyc` files
+# under `__pycache__`, where it reports `Binary file … matches` and fails the
+# recipe over stale bytecode — and a boundary check that fails for reasons that
+# have nothing to do with the boundary is one people learn to route around.
+lint-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    probe='apps/ha-satellite/tests/fixtures/vendored_boundary_probe.py.txt'
+    vendored='apps/ha-satellite/src/reachy_mini_ha_satellite/esphome'
+    inside="$vendored/boundary_probe.py"
+    outside='apps/ha-satellite/src/reachy_mini_ha_satellite/adapters/boundary_probe.py'
+    reachy_import='^[[:space:]]*(from|import)[[:space:]]+reachy|(import_module|__import__)[[:space:]]*\([[:space:]]*[\"'"'"']reachy'
+
+    if [ ! -f "$probe" ]; then
+        echo "lint-boundary: FAILED — the fixture $probe is missing, so neither half of the boundary is proved." >&2
+        exit 1
+    fi
+    if [ ! -d "$vendored" ]; then
+        echo "lint-boundary: FAILED — $vendored is not a directory. The vendored code moved and this recipe no longer checks it." >&2
+        exit 1
+    fi
+
+    # ruff exits non-zero both when the rule fires and when the invocation is
+    # broken, so a bad config or an unreadable fixture would otherwise read as
+    # proof. The output has to actually name TID251.
+    fired="$({{ uv }} ruff check --no-cache --select TID251 --output-format concise --stdin-filename "$inside" - < "$probe" 2>&1)" && status=0 || status=$?
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$fired"
+        echo 'lint-boundary: FAILED — a Reachy import inside the vendored directory did not trip TID251.' >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$fired" | grep -q 'TID251'; then
+        printf '%s\n' "$fired"
+        echo "lint-boundary: FAILED — ruff exited $status without reporting TID251, so it failed for some other reason and proves nothing." >&2
+        exit 1
+    fi
+    printf '%s\n' "$fired" | sed 's/^/    /'
+
+    if ! {{ uv }} ruff check --no-cache --select TID251 --output-format concise --stdin-filename "$outside" - < "$probe"; then
+        echo 'lint-boundary: FAILED — the same imports are banned outside the vendored directory, so the rule is not scoped to it.' >&2
+        exit 1
+    fi
+
+    if ! grep -qE "$reachy_import" "$probe"; then
+        echo 'lint-boundary: FAILED — the fixture no longer contains an absolute Reachy import, so the grep half proves nothing.' >&2
+        exit 1
+    fi
+    if grep -rnE --include='*.py' "$reachy_import" "$vendored"; then
+        echo 'lint-boundary: FAILED — the vendored directory imports a Reachy module by absolute name.' >&2
+        exit 1
+    fi
+    echo 'lint-boundary: TID251 fires inside the vendored directory and nowhere else, and no absolute Reachy import survives there.'
+
+# Verify that the assets shipped in the satellite wheel are exactly the ones the
+# registry records, unmodified. The half of the licence gate that has to read the
+# directory; the half that judges the terms is an ordinary unit test.
+check-assets:
+    {{ uv }} python -m reachy_mini_ha_satellite.assets.verify
+
+# Report how far the vendored ESPHome core has drifted from the upstream it was
+# derived from, as a markdown table on standard output.
+#
+# It reports; it never merges, and it never opens a pull request. This is a
+# derivation, not a mirror: both audio seams are replaced and the command-line
+# entry point is discarded, so an automatic sync would be a conflict resolution
+# every time and machinery that implied otherwise would mislead.
+#
+# The file list is not written down here. Every vendored file records its own
+# upstream path and commit in its header, so those headers are the single source
+# of truth and `scripts/vendored_provenance.py` reads them back out — a file that
+# moves inside this repository keeps being tracked, and a file whose header goes
+# missing fails the run rather than dropping out of the report.
+#
+# What that script hands back, and what the table below reports, are UPSTREAM
+# paths: the comparison diffs upstream against itself, so the local file each one
+# was derived from never enters it. The pairing lives in the local file's header
+# and in its directory NOTICE.
+#
+# Exits 0 even when upstream has moved. Drift is news about somebody else's
+# repository, and a check that went red on it would be permanently red and
+# quickly ignored. What does fail is a broken provenance record: a recorded
+# commit that no longer resolves, or a header naming a path upstream has not got.
+# That is a defect here.
+#
+# The scheduled workflow runs this recipe and puts its output in the job summary.
+vendored-drift clone_dir=".upstream-drift":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    provenance="$(python3 scripts/vendored_provenance.py)"
+    url="$(printf '%s\n' "$provenance" | sed -n 's/^upstream-url=//p')"
+    recorded="$(printf '%s\n' "$provenance" | sed -n 's/^upstream-commit=//p')"
+    upstream_paths="$(printf '%s\n' "$provenance" | sed -n 's/^upstream-paths=//p')"
+
+    # An absent key parses as an empty string, and an empty path list would walk
+    # zero files and report a clean comparison over nothing — the one outcome
+    # this whole recipe exists to make impossible. Each is named separately so
+    # the message says which key went missing.
+    for pair in "upstream-url=$url" "upstream-commit=$recorded" "upstream-paths=$upstream_paths"; do
+        if [ -z "${pair#*=}" ]; then
+            echo "vendored-drift: scripts/vendored_provenance.py printed no ${pair%%=*}. Its output and this recipe have gone out of step." >&2
+            exit 1
+        fi
+    done
+
+    if [ -d '{{ clone_dir }}/.git' ]; then
+        # A cached clone of a DIFFERENT upstream would be compared against
+        # happily, and every path would appear to have vanished.
+        cached="$(git -C '{{ clone_dir }}' remote get-url origin)"
+        # `git clone` records the URL verbatim, but a clone made by hand often
+        # carries a trailing `.git` the headers do not. Compare what identifies
+        # the repository, not the spelling.
+        if [ "${cached%.git}" != "${url%.git}" ]; then
+            echo "vendored-drift: {{ clone_dir }} is a clone of $cached, but the headers name $url. Remove it and run again." >&2
+            exit 1
+        fi
+    else
+        git clone --quiet --filter=blob:none --no-checkout "$url" '{{ clone_dir }}'
+    fi
+    cd '{{ clone_dir }}'
+    git fetch --quiet --filter=blob:none origin
+
+    if ! git cat-file -e "${recorded}^{commit}" 2>/dev/null; then
+        git fetch --quiet --filter=blob:none origin "$recorded" || true
+    fi
+    if ! git cat-file -e "${recorded}^{commit}" 2>/dev/null; then
+        echo "vendored-drift: the recorded upstream commit $recorded is not reachable in $url." >&2
+        echo "vendored-drift: the provenance headers name a commit that no longer exists." >&2
+        exit 1
+    fi
+
+    if ! head_commit="$(git rev-parse --verify --quiet origin/HEAD)"; then
+        echo "vendored-drift: $url has no origin/HEAD in {{ clone_dir }}, so there is no upstream tip to compare against." >&2
+        exit 1
+    fi
+    echo '## Vendored ESPHome core'
+    echo
+    echo '| | |'
+    echo '|---|---|'
+    echo "| Upstream | \`$url\` |"
+    echo "| Recorded at | \`$recorded\` |"
+    echo "| Upstream head | \`$head_commit\` |"
+    echo
+
+    if [ "$head_commit" = "$recorded" ]; then
+        echo 'No drift: upstream has not moved since the vendored files were taken from it.'
+        exit 0
+    fi
+
+    drifted=0
+    rows=''
+    for upstream_path in $upstream_paths; do
+        if ! git cat-file -e "$recorded:$upstream_path" 2>/dev/null; then
+            echo "vendored-drift: a provenance header names $upstream_path, which does not exist upstream at $recorded." >&2
+            exit 1
+        fi
+        stat="$(git diff --numstat "$recorded" "$head_commit" -- "$upstream_path")"
+        [ -z "$stat" ] && continue
+        drifted=$((drifted + 1))
+        rows+="| \`$upstream_path\` | $(echo "$stat" | cut -f1) | $(echo "$stat" | cut -f2) |"$'\n'
+    done
+
+    if [ "$drifted" -eq 0 ]; then
+        echo 'Upstream has moved, but none of the files this repository derives from changed.'
+        exit 0
+    fi
+
+    echo '| Upstream file | Lines added | Lines removed |'
+    echo '|---|---:|---:|'
+    printf '%s' "$rows"
+    echo
+    echo "$drifted upstream file(s) that this repository derives from have changed."
+    echo 'Each row above is an UPSTREAM path; the local file derived from it is named'
+    echo 'in its own header and in its directory NOTICE. Review the changes and decide'
+    echo 'deliberately whether to carry any of them across; nothing here merges'
+    echo 'anything. Re-vendoring means updating the files, every per-file header,'
+    echo 'and the commit recorded in the NOTICE.'
 
 # Apply formatting and the lint fixes that are safe to apply automatically.
 fmt:
@@ -44,17 +249,44 @@ fmt:
 typecheck:
     {{ uv }} mypy
 
-# The three gates a contributor runs before pushing. Not every merge gate: the
+# The gates a contributor runs before pushing. Not every merge gate: the
 # contract-drift check writes to the index and the leak scan needs a commit
 # range, so both stay their own recipe rather than making this one mutate
-# anything or guess what to compare against.
-check: lint typecheck test
+# anything or guess what to compare against. `check-assets` is here because it
+# only reads the tree, and because an unregistered asset is a licensing problem
+# rather than a test failure — it should stop a contributor, not a release.
+check: lint typecheck test check-assets
 
 # Coverage of the lines this branch changed, rather than of the whole tree, so
 # a large untested area cannot mask a new one. Requires `just test` to have
 # written coverage.xml first.
+#
+# The nine vendored modules are excluded from this gate, and only from this gate:
+# they are still measured, and `just test` still prints their coverage. The gate
+# asks whether the work done on a branch was tested, and vendored code is not
+# work done on a branch — it arrives with whatever tests its upstream wrote, and
+# the rule for it is to carry those tests where they exercise retained code,
+# which is a weaker guarantee than 90% of the lines and deliberately so. Holding
+# it to the threshold leaves two ways out and both are worse: writing tests
+# against a derived file, which forks it from upstream and turns every future
+# comparison into a reconciliation, or deleting protocol the application needs.
+#
+# The nine are named one by one rather than globbed by directory, because
+# `esphome/seams.py` sits among them and is ours — it stays gated, and adding a
+# vendored file is a visible edit here rather than something a directory pattern
+# swallows.
 coverage-diff base="origin/main":
-    {{ uv }} diff-cover coverage.xml --compare-branch={{ base }} --fail-under=90
+    {{ uv }} diff-cover coverage.xml --compare-branch={{ base }} --fail-under=90 \
+        --exclude \
+        '*/esphome/api_server.py' \
+        '*/esphome/entity.py' \
+        '*/esphome/models.py' \
+        '*/esphome/peripheral_api.py' \
+        '*/esphome/satellite.py' \
+        '*/esphome/util.py' \
+        '*/esphome/wake_word.py' \
+        '*/esphome/webrtc.py' \
+        '*/esphome/zeroconf.py'
 
 # Verify that every requirement annotation still agrees with the specs.
 duvet:

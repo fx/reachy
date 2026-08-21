@@ -7,7 +7,7 @@ with full attribution and per-file provenance, trimmed to what this application
 needs and cut at the seams the Reachy adapters will replace.
 
 **Spec:** [HA Satellite](../specs/ha-satellite/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0001
 
 ## Motivation
@@ -132,38 +132,50 @@ the vendored code used the library directly.
 
 ## Tasks
 
-- [ ] Vendor and attribute
-  - [ ] Copy the protocol, entity, message, wake-word and discovery modules
-  - [ ] Upstream licence text and notice in the vendored directory
-  - [ ] Per-file provenance headers naming upstream path and commit
-  - [ ] Module-level type-check relaxation with a comment naming it as vendored
-- [ ] Trim to what is needed
-  - [ ] Discard the command-line entry point and its wiring
-  - [ ] Discard the desktop capture and media-player playback paths
-  - [ ] Carry over upstream tests covering retained code
-- [ ] Cut the seams
-  - [ ] Define the capture interface at the point capture was performed
-  - [ ] Define the playback interface at the point playback was performed
-  - [ ] Verify the module imports and its tests pass with both seams unfilled
-- [ ] Gate the shipped assets on licence
-  - [ ] Record every wake-word model and sound asset's source and licence in an
+- [x] Vendor and attribute
+  - [x] Copy the protocol, entity, message, wake-word and discovery modules
+  - [x] Upstream licence text and notice in the vendored directory
+  - [x] Per-file provenance headers naming upstream path and commit
+  - [x] Module-level type-check relaxation with a comment naming it as vendored
+- [x] Trim to what is needed
+  - [x] Discard the command-line entry point and its wiring
+  - [x] Discard the desktop capture and media-player playback paths
+  - [x] Carry over upstream tests covering retained code
+- [x] Cut the seams
+  - [x] Define the capture interface at the point capture was performed
+  - [x] Define the playback interface at the point playback was performed
+  - [x] Verify the module imports and its tests pass with both seams unfilled
+- [x] Gate the shipped assets on licence
+  - [x] Record every wake-word model and sound asset's source and licence in an
         asset registry owned by this change
-  - [ ] Add a licence-allowlist test over that registry, so an asset with
+  - [x] Add a licence-allowlist test over that registry, so an asset with
         unacceptable terms fails CI rather than shipping in a wheel
-- [ ] Enforce the boundary
-  - [ ] Lint rule forbidding Reachy imports inside the vendored directory
-  - [ ] Scheduled job reporting upstream drift in the derived files
+- [x] Enforce the boundary
+  - [x] Lint rule forbidding Reachy imports inside the vendored directory
+  - [x] Scheduled job reporting upstream drift in the derived files
 
 ## Open Questions
 
-- [ ] Which wake-word assets ship in the wheel. Current lean: the smallest set
-      that makes the application usable. Which ones those are is open; *whether*
-      an asset may ship without acceptable terms is not — the licence gate in
-      the tasks above decides that mechanically, so this question cannot resolve
-      into shipping something unlicensed.
-- [ ] Whether the entity model is trimmed to what this robot exposes or carried
-      whole. Trimming reduces surface; carrying whole reduces divergence from
-      upstream. Current lean: carry whole, expose selectively in 0013.
+- [x] **Which wake-word assets ship in the wheel.** Resolved: two microWakeWord
+      models, `okay_nabu` and `stop`. That is the smallest set that works — a
+      default wake word, and the stop word the protocol needs to interrupt a
+      response or silence a ringing timer — and it leaves roughly four megabytes
+      of upstream's model collection out of both the wheel and this repository's
+      history. Nothing is lost by it: Home Assistant can activate a wake word
+      the robot does not have, and the vendored protocol downloads it on demand
+      into the download directory, where it is not a shipped asset and so not
+      the registry's concern. Both models are Apache-2.0 and both pass the
+      licence gate; so do the nine sounds, under CC BY 4.0 with the attribution
+      the licence requires carried beside them.
+- [x] **Whether the entity model is trimmed or carried whole.** Resolved:
+      carried whole. Trimming would have meant editing `entity.py` and
+      `satellite.py` to remove entities — precisely the kind of edit that makes
+      every future upstream comparison a manual reconciliation, in exchange for
+      a surface reduction that 0013 can achieve without touching upstream code
+      at all, by choosing what it constructs. The peripheral WebSocket API came
+      across for the same reason: `satellite.py` imports its event enumeration,
+      so removing it would have meant rewriting the protocol layer rather than
+      declining to start it.
 
 ## References
 

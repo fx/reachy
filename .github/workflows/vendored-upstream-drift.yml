@@ -1,0 +1,39 @@
+name: Vendored upstream drift
+
+# Reports how far the vendored ESPHome satellite core has drifted from the
+# upstream it was derived from. It reports; it never merges, and it never opens
+# a pull request. See docs/changes/0011-satellite-esphome-vendoring.md.
+#
+# The comparison itself is `just vendored-drift`, so it can be run by hand and
+# this file stays a schedule and a place to put the output. The recipe's own
+# comment explains why it exits 0 on drift and what does fail it.
+
+on:
+  schedule:
+    # Weekly, on Monday morning UTC. Upstream drift is a thing to notice, not a
+    # thing to react to within the hour.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Report drift from upstream
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned by commit SHA, not by tag. A tag is a mutable ref: retargeting it
+      # upstream would run changed third-party code here with no diff in this
+      # repository to review. The trailing comment records which release the SHA
+      # corresponds to, since the SHA alone is unreadable.
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The recipe needs nothing else: it drives git and python3, both of which
+      # the runner image already has.
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+
+      - name: Report drift
+        run: just vendored-drift >> "$GITHUB_STEP_SUMMARY"

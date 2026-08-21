@@ -18,7 +18,18 @@ nothing. The snapshot is nonetheless non-empty: duvet loads a specification an
 annotation points at whether or not it is registered, so the file lists the
 requirement text each annotation cites. Regeneration is byte-identical, so CI is
 deterministic — and a green run is still not evidence that any requirement is
-traced. See `.duvet/config.toml` for why the specs are unregistered.
+traced. See `.duvet/config.toml` for why the specs are unregistered, and for why
+annotations are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
+
+**A vendored file stays as upstream wrote it.** A file carrying a provenance
+header is a derived work, and its directory's `NOTICE` enumerates the complete
+intended diff from upstream. Its style, its partial typing, its suppressions and
+its latent bugs are inherited, and the reason is recorded once per directory — in
+that `NOTICE`, and in the `[[tool.mypy.overrides]]` and `per-file-ignores` blocks
+that name those files. Do not report any of it, and do not ask for a
+suppression's justification there: annotating one would itself be an unlisted
+edit. The rule that a suppression carries a reason governs code this repository
+authors, and a suppression *added* here without one is still a finding.
 
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a
