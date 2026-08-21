@@ -1,3 +1,5 @@
 [tools]
 rust = "1.97.1"
 "cargo:duvet" = "0.4.3"
+python = "3.12.14"
+uv = "0.12.5"

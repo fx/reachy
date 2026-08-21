@@ -16,6 +16,12 @@ lines.
 `duvet query -c implementation` exit 0. Regeneration is byte-identical, so CI is
 deterministic. See `.duvet/config.toml` for why the specs are unregistered.
 
+**Some standing rules are review-enforced on purpose.** Tooling decides what a
+tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a
+suppression's rule identifier. Whether its comment *explains* anything, and
+whether a unit test touches the filesystem or sleeps, are review judgements.
+Report a violation, never the absence of a tool.
+
 **Specs are written in duvet mode.** RFC 2119 keywords appear **only** inside
 `### REQ-NNN:` sections; their absence from Overview, Background, Design,
 Constraints, Open Questions and scenario bodies is required, since a keyword

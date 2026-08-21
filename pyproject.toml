@@ -1,0 +1,175 @@
+[project]
+name = "reachy"
+version = "0.1.0"
+description = "Workspace root for the Reachy Mini monorepo"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "reachy-bench",
+    "reachy-contracts",
+    "reachy-groundstation",
+    "reachy-mini-ha-satellite",
+    "reachyctl",
+]
+
+[dependency-groups]
+dev = [
+    "diff-cover>=9.2",
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "pytest-socket>=0.7",
+    "ruff>=0.6",
+]
+
+# The root is not itself a distribution: it exists to hold one resolution, one
+# set of development tools, and the shared tool configuration below. Depending
+# on every member means `uv sync` produces an environment with all of them
+# importable, which is what the test, lint and type-check recipes run against.
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "packages/reachy-contracts",
+    "apps/ha-satellite",
+    "services/groundstation",
+    "cli/reachyctl",
+    "bench",
+]
+
+# Members resolve to each other by path, never by version range, so there is no
+# published version of one member that a sibling could be resolved against.
+[tool.uv.sources]
+reachy-bench = { workspace = true }
+reachy-contracts = { workspace = true }
+reachy-groundstation = { workspace = true }
+reachy-mini-ha-satellite = { workspace = true }
+reachyctl = { workspace = true }
+
+# --- Shared tool configuration ----------------------------------------------
+# Every member inherits the sections below. Members do not carry their own
+# ruff, mypy, pytest or coverage configuration: per-member dialects drift, and a
+# reviewer reading one file should be able to tell what the rules are.
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = [
+    "packages/reachy-contracts/src",
+    "apps/ha-satellite/src",
+    "services/groundstation/src",
+    "cli/reachyctl/src",
+    "bench/src",
+]
+
+[tool.ruff.lint]
+select = [
+    "A",    # builtin shadowing
+    "ANN",  # missing annotations
+    "ARG",  # unused arguments
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "D",    # docstrings
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import sorting
+    "N",    # naming
+    "PGH",  # blanket suppressions
+    "PT",   # pytest style
+    "PTH",  # pathlib over os.path
+    "RET",  # return values
+    "RUF",  # ruff-specific
+    "S",    # bandit
+    "SIM",  # simplifications
+    "TID",  # tidy imports
+    "UP",   # pyupgrade
+    "W",    # pycodestyle warnings
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert, and pytest rewrites those asserts; S101 is the rule that objects
+# to `assert` in shipped code, which is not what a test file is.
+"**/tests/**/*.py" = ["S101"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "parents"
+
+[tool.mypy]
+python_version = "3.12"
+# Strict for every module. Relaxations are per-module `[[tool.mypy.overrides]]`
+# blocks carrying a comment that names the reason, never a global loosening.
+strict = true
+warn_unreachable = true
+explicit_package_bases = true
+mypy_path = [
+    "packages/reachy-contracts/src",
+    "apps/ha-satellite/src",
+    "services/groundstation/src",
+    "cli/reachyctl/src",
+    "bench/src",
+]
+files = ["packages", "apps", "services", "cli", "bench"]
+# `ignore-without-code` is how the "a suppression carries its rule identifier"
+# rule is enforced for mypy; ruff's PGH003/PGH004 enforce the same for lint.
+enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+# Strict async mode: an async test without an explicit marker errors rather than
+# being collected and silently never awaited.
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+    # No test opens a socket unless it says so. This is the enforceable part of
+    # the no-input-or-output rule: a unit test that reaches for the network
+    # errors instead of quietly depending on a machine having one. An
+    # integration test that exercises a real transport in-process opts in with
+    # `@pytest.mark.enable_socket`, which makes that dependency visible in the
+    # test rather than in a CI failure. The filesystem and sleeping halves of
+    # the rule have no equivalent guard and stay review-enforced.
+    #
+    # `--allow-unix-socket` is required, not a loosening: asyncio builds its
+    # event loop's self-pipe from an AF_UNIX socket pair, so banning those bans
+    # every async test. It permits no network.
+    "--disable-socket",
+    "--allow-unix-socket",
+    "--cov",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+]
+testpaths = ["packages", "apps", "services", "cli", "bench"]
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+branch = true
+# Only member source is measured. Test files are not production code, and
+# counting them inflates the number the diff gate reads.
+source = [
+    "packages/reachy-contracts/src",
+    "apps/ha-satellite/src",
+    "services/groundstation/src",
+    "cli/reachyctl/src",
+    "bench/src",
+]
+# Relative paths so the XML report is readable from any checkout root, which is
+# what diff-cover needs to line results up against a diff.
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]
+
+[tool.coverage.xml]
+output = "coverage.xml"
