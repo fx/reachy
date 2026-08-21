@@ -60,7 +60,9 @@ implementing them requires of this change:
   variant. Both carry the repository-wide version from 0002.
 - The compose file runs the service standalone and includes a metrics scrape
   configuration, because the predecessor exposed metrics that nothing collected.
-- Image size is recorded as a build output so 0014 can gate on its growth.
+- Image size is recorded as a build output, so that the later performance
+  work can gate on its growth without this change having to guess a
+  threshold.
 - The published image is verified by starting it in CI and running a real
   session against it.
 

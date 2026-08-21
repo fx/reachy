@@ -25,10 +25,12 @@ name: reachy-groundstation
 
 services:
   groundstation:
-    # Pinned to a version by default rather than to a moving tag, because
-    # "which groundstation is this" has to be answerable from a deployment. The
-    # variable is what a host overrides to run a different one, including the
-    # `-cuda` variant.
+    # `latest` so that a fresh copy of this file runs, and a moving tag for
+    # exactly that reason: a pull after a release gives a different service with
+    # no local change to explain it. A deployment that has to answer "which
+    # groundstation is this" sets GROUNDSTATION_IMAGE to a version tag in `.env`.
+    # The same variable is what selects the accelerated variant, which also
+    # needs the overlay named in the header above.
     image: ${GROUNDSTATION_IMAGE:-ghcr.io/OWNER/REPOSITORY/groundstation:latest}
 
     # `env_file` rather than `environment`, so that adding a setting is an edit
