@@ -25,9 +25,7 @@ was skipped; a person gets told in the summary that not everything was checked.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from reachy_checks import (
@@ -35,29 +33,30 @@ from reachy_checks import (
     CheckResult,
     CheckRun,
     GroundstationModelFiles,
-    Intent,
     Requirement,
     SessionLink,
     counts_of,
     run_checks,
 )
 from reachy_session_client import open_websocket, redact_url
-from reachyctl.credentials import ENV_PREFIX
-from reachyctl.errors import ConfigurationError
+from reachyctl.declaration import INTENT_VARIABLE, load_intent
 from reachyctl.output import Report
+from reachyctl.robot import closing
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from pathlib import Path
 
+    from reachy_checks import Intent, RobotDaemon
     from reachy_contracts import Capability
     from reachy_session_client import Credential, TransportFactory
     from reachyctl.exits import ExitCode
     from reachyctl.output import Reporter
+    from reachyctl.robot import Closer
 
 __all__ = [
     "INTENT_VARIABLE",
     "MODELS_DIR_VARIABLE",
-    "NO_ROBOT_YET",
+    "NO_ROBOT_WAS_GIVEN",
     "DoctorPlan",
     "execute",
     "load_intent",
@@ -65,25 +64,18 @@ __all__ = [
     "run_doctor",
 ]
 
-# Where the declared intent is, when it is not given on the command line.
-INTENT_VARIABLE: Final = f"{ENV_PREFIX}INTENT_FILE"
-
 # Where the model files are. Deliberately the groundstation's own variable
 # rather than a second one under this tool's prefix: the files belong to that
 # service's artifact, and a `doctor` run on the host serving them should find
 # them without being told twice.
 MODELS_DIR_VARIABLE: Final = "REACHY_GROUNDSTATION_MODELS_DIR"
 
-# Why the robot-side checks cannot run yet, said out loud. Change 0009 brings
-# the robot's remote-access and daemon interfaces; until it lands, nothing in
-# this tool can open a connection to a robot, and a skip line that did not say
-# so would read as "you have not configured this" to an operator who has.
-NO_ROBOT_YET: Final = (
-    "reachyctl cannot open a connection to the robot yet: robot access arrives "
-    "with the deploy, config and app commands"
+# Why the robot-side checks did not run, when no robot was named. A skip line
+# that did not say which of the two reasons applied would read as "you have not
+# configured this" to an operator who has.
+NO_ROBOT_WAS_GIVEN: Final = (
+    "no robot was given: pass --robot with user@host, or set REACHYCTL_ROBOT"
 )
-
-_INTENT_KEYS: Final = frozenset({"configuration", "announced_identity"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -94,6 +86,17 @@ class DoctorPlan:
         url: The groundstation's session endpoint, or `None` when none is
             configured and the groundstation checks are to be skipped.
         capabilities: What to offer during negotiation.
+        daemon: The robot, when one was named. `None` skips the robot-side
+            checks rather than failing them: an operator diagnosing a
+            groundstation from a machine with no robot on it has not been told
+            their robot is broken.
+        robot: The robot as the run actually addressed it — the resolved
+            target, not the text of the option. The two differ: an IPv6 address
+            typed bare comes back bracketed and with its port. Reporting what
+            was typed would make `doctor` and `deploy` name one robot two ways
+            in the field a script reads, and would name an address the run did
+            not use. Never a credential: a key is a path and a host key is a
+            path.
         models_directory: Where the model files are, or `None`.
         intent: What the robot is supposed to be, or `None`.
         timeout: One budget for the whole groundstation exchange — opening the
@@ -105,165 +108,11 @@ class DoctorPlan:
 
     url: str | None
     capabilities: tuple[Capability, ...]
+    daemon: RobotDaemon | None = None
+    robot: str | None = None
     models_directory: Path | None = None
     intent: Intent | None = None
     timeout: float = 10.0
-
-
-def _read(path: Path) -> str:
-    """Read a declared-intent document.
-
-    Nothing but the read, so that what a failure means stays `load_intent`'s to
-    decide for whatever reader it was given.
-
-    Args:
-        path: Where the document is.
-
-    Returns:
-        Its contents.
-
-    Raises:
-        OSError: If the file cannot be read.
-    """
-    return path.read_text(encoding="utf-8")
-
-
-def load_intent(
-    path: Path,
-    read: Callable[[Path], str] = _read,
-) -> Intent:
-    """Read what the robot is supposed to be from a declaration.
-
-    The document is deliberately small — the settings that are supposed to be
-    in force, and the identity the satellite is supposed to announce — because
-    the authoritative configuration surface is `reachyctl config`, which
-    arrives in change 0009, and provisioning holds the declaration this is a
-    copy of. Anything richer here would be a second schema to reconcile.
-
-    Args:
-        path: Where the document is.
-        read: How to read it. Injected so the parsing rules are exercised
-            without performing any input.
-
-    Returns:
-        The declared intent.
-
-    Raises:
-        ConfigurationError: If the file cannot be read, is not JSON, is not an
-            object, carries a key this does not understand, or holds a
-            configuration that is not a mapping of strings to strings. A
-            message may name a setting's key and never names what that setting
-            holds: a key is a name, and a value is exactly where a credential
-            ends up.
-    """
-    try:
-        content = read(path)
-    except OSError as error:
-        reason = error.strerror or type(error).__name__
-        message = f"the intent document {path} could not be read: {reason}"
-        raise ConfigurationError(message) from error
-    try:
-        document = json.loads(content)
-    except ValueError as error:
-        message = (
-            f"the intent document {path} is not JSON: {type(error).__name__} "
-            f"at position {getattr(error, 'pos', 'unknown')}"
-        )
-        raise ConfigurationError(message) from error
-    if not isinstance(document, dict):
-        message = (
-            f"the intent document {path} is a "
-            f"{type(document).__name__}; it must be an object with the keys "
-            f"{sorted(_INTENT_KEYS)}"
-        )
-        raise ConfigurationError(message)
-    unknown = sorted(set(document) - _INTENT_KEYS)
-    if unknown:
-        message = (
-            f"the intent document {path} carries {unknown}, which this "
-            f"command does not understand; it reads {sorted(_INTENT_KEYS)}"
-        )
-        raise ConfigurationError(message)
-    return Intent(
-        configuration=_configuration(document.get("configuration", {}), path),
-        announced_identity=_identity(document.get("announced_identity"), path),
-    )
-
-
-def _configuration(value: object, path: Path) -> Mapping[str, str]:
-    """Read the declared settings out of an intent document.
-
-    Args:
-        value: What the document held under `configuration`.
-        path: Where the document is, for the message.
-
-    Returns:
-        The settings by name.
-
-    Raises:
-        ConfigurationError: If it is not a mapping of strings to strings. The
-            offending key is named and its value never is — a key is a
-            setting's *name* and is safe to print, where a value is exactly
-            where a credential ends up. A key that is not a string is reported
-            by its type rather than by itself, because an object of any kind at
-            all could be there and its `repr` is not something this message can
-            vouch for.
-    """
-    if not isinstance(value, dict):
-        message = (
-            f"the intent document {path} declares a configuration that is a "
-            f"{type(value).__name__}; it must be an object of setting names to "
-            f"values"
-        )
-        raise ConfigurationError(message)
-    settings: dict[str, str] = {}
-    for name, setting in value.items():
-        if not isinstance(name, str):
-            message = (
-                f"the intent document {path} declares a setting name of type "
-                f"{type(name).__name__}; every setting name must be a string"
-            )
-            raise ConfigurationError(message)
-        if not isinstance(setting, str):
-            # The name is quoted and the value is not, and the asymmetry is the
-            # point: naming which setting is wrong is what makes the message
-            # actionable on a configuration of any size, and printing what it
-            # holds is how a credential reaches the output.
-            message = (
-                f"the intent document {path} declares the setting {name!r} "
-                f"with a value of type {type(setting).__name__}; every setting "
-                f"value must be a string"
-            )
-            raise ConfigurationError(message)
-        settings[name] = setting
-    return settings
-
-
-def _identity(value: object, path: Path) -> str | None:
-    """Read the declared announced identity out of an intent document.
-
-    Args:
-        value: What the document held under `announced_identity`.
-        path: Where the document is, for the message.
-
-    Returns:
-        The identity, or `None` when the document declares none.
-
-    Raises:
-        ConfigurationError: If it is present and is not a non-empty string.
-    """
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        # The type rather than the value, for the same reason as a setting
-        # name that is not a string: what is there could be any object at all.
-        message = (
-            f"the intent document {path} declares an announced identity that "
-            f"is not a non-empty string (it is of type "
-            f"{type(value).__name__})"
-        )
-        raise ConfigurationError(message)
-    return value
 
 
 def _context(plan: DoctorPlan, link: SessionLink | None) -> CheckContext:
@@ -277,7 +126,9 @@ def _context(plan: DoctorPlan, link: SessionLink | None) -> CheckContext:
         The context, carrying a reason for every resource that is absent so a
         skipped check says why rather than leaving a blank.
     """
-    unavailable: dict[Requirement, str] = {Requirement.DAEMON: NO_ROBOT_YET}
+    unavailable: dict[Requirement, str] = {}
+    if plan.daemon is None:
+        unavailable[Requirement.DAEMON] = NO_ROBOT_WAS_GIVEN
     if link is None:
         # Two ways to have no link, and they are different mistakes. Saying
         # "configure an address" to somebody who configured one and no
@@ -299,6 +150,7 @@ def _context(plan: DoctorPlan, link: SessionLink | None) -> CheckContext:
             "with a declaration"
         )
     return CheckContext(
+        daemon=plan.daemon,
         groundstation=link,
         models=(
             None
@@ -393,6 +245,11 @@ def report_for(run: CheckRun, plan: DoctorPlan) -> Report:
         # and makes the report safe by construction rather than by the
         # validator having run first.
         "groundstation": None if plan.url is None else redact_url(plan.url),
+        # The robot the run actually addressed. A run against two robots on
+        # two days produces two reports, and a report that did not say which
+        # one it is about is a report nobody can file — and one that named an
+        # address the run did not use would be worse than saying nothing.
+        "robot": plan.robot,
         "checks": len(run.results),
         "passed": tally["passed"],
         "failed": tally["failed"],
@@ -462,6 +319,7 @@ def execute(
     credential: Credential | None,
     reporter: Reporter,
     open_transport: TransportFactory = open_websocket,
+    close: Closer | None = None,
 ) -> ExitCode:
     """Diagnose the chain and report it, link by link.
 
@@ -471,6 +329,9 @@ def execute(
             configured.
         reporter: Where everything is written.
         open_transport: How to open the connection.
+        close: How to let the robot's link go, when one was opened. Awaited
+            inside the same event loop the run used, because a connection
+            opened on one loop cannot be closed from another.
 
     Returns:
         The exit status: `OK` when nothing failed, `FAILURE` when something
@@ -478,5 +339,7 @@ def execute(
         statuses that mean "nothing was learned" are raised before this by the
         command surface.
     """
-    run = asyncio.run(run_doctor(plan, credential, reporter, open_transport))
+    run = asyncio.run(
+        closing(run_doctor(plan, credential, reporter, open_transport), close),
+    )
     return reporter.emit(report_for(run, plan))

@@ -18,11 +18,15 @@ from importlib import metadata
 from typing import TYPE_CHECKING
 
 import pytest
+from reachyctl_fixture_wheel import FIXTURE_VERSION, fixture_wheel
 from reachyctl_support import FakeCapture
 
 from reachyctl import cli
 from reachyctl.exits import ExitCode
 from reachyctl.frames import CameraFrames, RecordedFrames
+from reachyctl.robot import RobotTarget
+from reachyctl.ssh import SshAccess
+from reachyctl.wheels import describe_wheel
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -106,3 +110,58 @@ def test_a_checkout_that_was_never_installed_still_answers_version(
     monkeypatch.setattr(metadata, "version", missing)
 
     assert "not installed" in cli._version()
+
+
+def test_the_robot_seam_hands_out_the_real_transport() -> None:
+    """The one seam every command-level test replaces, exercised unreplaced.
+
+    Nothing is connected by building it, which is what makes "the robot was not
+    contacted" an observable property rather than a claim — see reachyctl
+    REQ-053.
+    """
+    access = cli._build_access(
+        RobotTarget(host="192.0.2.10", user="operator"),
+    )
+
+    assert isinstance(access, SshAccess)
+
+
+def test_a_deploy_told_to_build_a_member_builds_it_and_reads_what_came_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The build branch of the wheel source, with the build itself replaced.
+
+    A unit of this suite runs no build, so what is exercised is the wiring: the
+    member reaches the builder, and the wheel that comes back is read rather
+    than assumed.
+
+    Args:
+        monkeypatch: How the builder and the reader are replaced.
+    """
+    name, content = fixture_wheel()
+    built: list[str] = []
+
+    def build(member: str, output: Path) -> Path:
+        """Pretend to build.
+
+        Args:
+            member: What was asked for.
+            output: Where it would have been written.
+
+        Returns:
+            Where the wheel would be.
+        """
+        built.append(member)
+        return output / name
+
+    monkeypatch.setattr(cli, "build_wheel", build)
+    monkeypatch.setattr(
+        cli, "read_wheel", lambda path: describe_wheel(path.name, content)
+    )
+
+    obtain, origin = cli._wheel_source("reachyctl", None)
+    wheel = obtain()
+
+    assert built == ["reachyctl"]
+    assert origin == "by building reachyctl"
+    assert wheel.version == FIXTURE_VERSION

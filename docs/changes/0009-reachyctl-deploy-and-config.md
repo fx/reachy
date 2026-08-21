@@ -7,7 +7,7 @@ satellite wheel with verification, managing configuration with preview, and
 controlling the application lifecycle.
 
 **Spec:** [reachyctl](../specs/reachyctl/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0002, 0008
 
 ## Motivation
@@ -137,41 +137,74 @@ rather than as two behaviours.
 
 ## Tasks
 
-- [ ] Build a fixture wheel for testing deployment with no application present
-- [ ] Implement robot access
-  - [ ] In-process remote shell and file transfer
-  - [ ] Daemon interface client reusing the 0008 check registry
-  - [ ] Structured error reporting for both
-- [ ] Implement `deploy`
-  - [ ] Build a wheel from a named workspace member, or accept one by path
-  - [ ] Transfer and install into the robot's application environment
-  - [ ] Restart the daemon and start the application
-  - [ ] Verify the running version and fail on mismatch
-  - [ ] Live progress reporting across the step sequence
-- [ ] Implement `config`
-  - [ ] `get` reading effective configuration from the robot
-  - [ ] `diff` comparing declared against actual
-  - [ ] `set` and `apply` with local validation against the contracts
-  - [ ] Preview mode, with a test asserting the robot is unchanged after it
-  - [ ] Managed-region ownership including removal of withdrawn settings
-  - [ ] Explicit warning before a daemon restart
-- [ ] Implement `app`
-  - [ ] `start`, `stop` via the daemon interface
-  - [ ] `logs` streaming from the robot journal, filtered to the application
-- [ ] Publish the tool
-  - [ ] Publish the `reachyctl` wheel to GitHub Releases on a version tag, using
+- [x] Build a fixture wheel for testing deployment with no application present
+- [x] Implement robot access
+  - [x] In-process remote shell and file transfer
+  - [x] Daemon interface client reusing the 0008 check registry
+  - [x] Structured error reporting for both
+- [x] Implement `deploy`
+  - [x] Build a wheel from a named workspace member, or accept one by path
+  - [x] Transfer and install into the robot's application environment
+  - [x] Restart the daemon and start the application
+  - [x] Verify the running version and fail on mismatch
+  - [x] Live progress reporting across the step sequence
+- [x] Implement `config`
+  - [x] `get` reading effective configuration from the robot
+  - [x] `diff` comparing declared against actual
+  - [x] `set` and `apply` with local validation against the contracts
+  - [x] Preview mode, with a test asserting the robot is unchanged after it
+  - [x] Managed-region ownership including removal of withdrawn settings
+  - [x] Explicit warning before a daemon restart
+- [x] Implement `app`
+  - [x] `start`, `stop` via the daemon interface
+  - [x] `logs` streaming from the robot journal, filtered to the application
+- [x] Publish the tool
+  - [x] Publish the `reachyctl` wheel to GitHub Releases on a version tag, using
         the repository-wide version from 0002
-  - [ ] Record the wheel's size as a release output, for 0014 to gate on
-  - [ ] Verify the published wheel installs and runs as a standalone tool
+  - [x] Record the wheel's size as a release output, for 0014 to gate on
+  - [x] Verify the published wheel installs and runs as a standalone tool
 
 ## Open Questions
 
-- [ ] Whether `deploy` should refuse to run when the robot is mid-conversation.
-      It would avoid interrupting a user; it needs application state the daemon
-      does not currently expose. Current lean: warn, do not refuse.
-- [ ] Whether wheel transfer should be incremental. A wheel with models in it is
-      large over a slow link. Current lean: full transfer, revisited if it
-      becomes painful.
+- [x] **Whether `deploy` should refuse to run when the robot is mid-conversation.**
+      Resolved as the lean recorded here: it warns and does not refuse.
+      Refusing needs application state the daemon does not expose — "is somebody
+      talking to it right now" is not a thing that can be asked — so the
+      alternative to warning is not safety, it is a `--force` flag that
+      everybody types by reflex. The deploy says the application is running
+      before it does anything, and says the restart is about to happen before
+      the restart, which is the moment in which interrupting is still possible.
+- [x] **Whether wheel transfer should be incremental.** Resolved as the lean
+      recorded here: the wheel is transferred whole, in one step, over one
+      connection. Nothing this repository ships puts models in a wheel — they
+      belong to the groundstation's image — so the artifact is measured in tens
+      of kilobytes rather than in hundreds of megabytes, and an incremental
+      transfer would be machinery with nothing to save. Revisit if a wheel ever
+      carries weights.
+
+## Completion notes
+
+- **`deploy` is defined over a wheel**, identified by `--member` to build or
+  `--wheel` to send. It neither waits for 0013 nor assumes anything about what
+  the wheel contains, and the deploy sequence is exercised end to end against a
+  fixture wheel with no application in it.
+- **The daemon control surface is the one provisional piece.** The module the
+  daemon's start/stop/status verbs are reached through is
+  `RobotLayout.daemon_control`, defaulting to `reachy_mini.apps`, so meeting a
+  robot that spells it differently is `--daemon-control` rather than a release.
+  Confirming it is the first thing the deferred hardware session does.
+- **The managed region's exact shape is documented** in
+  [`docs/ops/managed-daemon-environment.md`](../ops/managed-daemon-environment.md),
+  which change 0010's Ansible `daemon_env` role is written against. A contract
+  test renders the tool's own output and compares it with the block in that
+  document, so the two cannot drift.
+- **The wheel size is recorded** by `just wheel-size <wheel>`, which emits one
+  JSON object on standard output in the same shape as `just image-size`. The
+  release workflow writes one per wheel, into the log, the job summary and an
+  uploaded artifact named `reachyctl-wheel-size`.
+- **`doctor` gained a robot.** The daemon-side checks 0008 left permanently
+  skipped now run when `--robot` is given, which is what makes REQ-054's first
+  scenario reachable at all.
 
 ## References
 

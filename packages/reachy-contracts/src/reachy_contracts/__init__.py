@@ -33,6 +33,17 @@ from reachy_contracts.session import (
     SessionOffer,
     negotiate,
 )
+from reachy_contracts.settings import (
+    ROBOT_SETTINGS,
+    Setting,
+    SettingError,
+    SettingKind,
+    UnknownSettingError,
+    setting_for,
+    setting_names,
+    validate_setting,
+    validate_settings,
+)
 from reachy_contracts.values import (
     CAPABILITY_PAYLOADS,
     FACE_CAPABILITY,
@@ -56,6 +67,7 @@ __all__ = [
     "FACE_CAPABILITY",
     "FIXTURES",
     "GESTURE_CAPABILITY",
+    "ROBOT_SETTINGS",
     "VERSION",
     "Capability",
     "CapabilityName",
@@ -80,6 +92,10 @@ __all__ = [
     "SessionClose",
     "SessionError",
     "SessionOffer",
+    "Setting",
+    "SettingError",
+    "SettingKind",
+    "UnknownSettingError",
     "WireModel",
     "__version__",
     "fixture_bytes",
@@ -88,4 +104,8 @@ __all__ = [
     "load_fixture",
     "negotiate",
     "round_trip",
+    "setting_for",
+    "setting_names",
+    "validate_setting",
+    "validate_settings",
 ]

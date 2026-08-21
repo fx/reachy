@@ -21,6 +21,19 @@ dependencies = [
     # that hands a command a `str` where it expects a path.
     "typer>=0.12.4",
     "rich>=13.7",
+    # The robot's remote-access interface, spoken in process rather than by
+    # driving an `ssh` client: a command's exit status, its two streams and the
+    # reason a connection failed all arrive as values. It also ships a server,
+    # which is what lets the transport be exercised against a real SSH session
+    # rather than a description of one.
+    #
+    # The floor is 2.23 rather than the version this was written against: it is
+    # the highest "fixed in" across every advisory OSV lists for this
+    # distribution — CVE-2018-7749 in 1.12.1, CVE-2023-46445 and CVE-2023-46446
+    # in 2.14.1, GHSA-hfmc-7525-mj55 (Terrapin, CVE-2023-48795) in 2.14.2, and
+    # CVE-2026-45309 in 2.23.0 — so nothing this permits carries any of them.
+    # `uv.lock` resolves higher still, and `--locked` is what CI installs.
+    "asyncssh>=2.23",
 ]
 
 # The live-frame source and nothing else. OpenCV is tens of megabytes and every

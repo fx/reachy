@@ -3,8 +3,11 @@
 Shared wire types and golden fixtures. Distribution `reachy-contracts`, import
 name `reachy_contracts`.
 
-**Spec:** [robot-link](../../docs/specs/robot-link/) owns the wire contract.
-**Filled in by:** [0003](../../docs/changes/0003-contracts-package.md).
+**Spec:** [robot-link](../../docs/specs/robot-link/) owns the wire contract;
+[reachyctl REQ-053](../../docs/specs/reachyctl/index.md#req-053-configuration-values-are-validated-before-they-are-sent)
+owns the settings vocabulary below.
+**Filled in by:** [0003](../../docs/changes/0003-contracts-package.md) and
+[0009](../../docs/changes/0009-reachyctl-deploy-and-config.md).
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -17,6 +20,7 @@ that apply here.
 | `src/reachy_contracts/values.py` | The wire model base, normalised coordinates, the capture token, and the per-capability payloads |
 | `src/reachy_contracts/fixtures.py` | The corpus manifest and the loader every consumer reads it through |
 | `src/reachy_contracts/golden/` | The golden fixtures themselves, one file per message type |
+| `src/reachy_contracts/settings.py` | The robot's configuration vocabulary: every setting and what it will accept |
 | `src/reachy_contracts/contracts_export.py` | The registry `just contracts` renders `docs/contracts/` from |
 
 ## Local rules
@@ -41,6 +45,17 @@ that apply here.
   byte-identical.** Add a message type, add a file in `golden/`, add its row to
   `FIXTURES`, and add its schema to `_MESSAGE_TYPES` in `contracts_export.py`.
   Never generate a fixture from the code it pins.
+- **The settings vocabulary is declared here for the same reason the wire types
+  are.** `reachyctl config` validates against it before it contacts a robot and
+  provisioning's declaration is written in the same names, so a constraint
+  declared here is one constraint rather than two that are free to drift — see
+  reachyctl REQ-053. It is plain dataclasses rather than pydantic models: it is
+  a validation vocabulary, not a shape that crosses the link, so it publishes no
+  schema and adding a setting is a line in `ROBOT_SETTINGS`.
+- **A setting's refusal names the setting and states the constraint, never the
+  value.** A setting is exactly where a credential ends up, and `Setting.secret`
+  marks the ones a consumer must additionally report as set or unset rather than
+  by value.
 - **No dependencies on other members.** Everything else depends on this package;
   a dependency in the other direction is a cycle.
 - **Keep it dependency-light.** It is installed on the robot, in the

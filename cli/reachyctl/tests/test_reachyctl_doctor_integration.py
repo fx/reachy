@@ -87,8 +87,8 @@ def test_a_healthy_groundstation_passes_every_link_it_owns() -> None:
 
 
 @pytest.mark.enable_socket(reason="the session is the thing under test")
-def test_the_robot_side_is_skipped_and_says_it_is_not_configurable_yet() -> None:
-    """Reaching a robot arrives in a later change, and the output says so plainly."""
+def test_the_robot_side_is_skipped_when_no_robot_was_named() -> None:
+    """Diagnosing a groundstation from a machine with no robot is not a fault."""
     with serving(StaticRegistry(CountingFace())) as url:
         result = runner.invoke(
             app,
@@ -99,9 +99,7 @@ def test_the_robot_side_is_skipped_and_says_it_is_not_configurable_yet() -> None
     rows = _rows(result.stdout)
     assert rows[DAEMON_REACHABLE]["status"] == "skipped"
     assert rows[APPLICATION_RUNNING]["status"] == "skipped"
-    assert "cannot open a connection to the robot yet" in str(
-        rows[DAEMON_REACHABLE]["detail"],
-    )
+    assert "--robot" in str(rows[DAEMON_REACHABLE]["detail"])
 
 
 @pytest.mark.enable_socket(reason="the session is the thing under test")
