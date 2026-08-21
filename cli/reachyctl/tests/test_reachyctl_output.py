@@ -397,3 +397,71 @@ def test_a_value_rich_would_read_as_an_unmatched_tag_does_not_crash_the_command(
 
     assert code is ExitCode.FAILURE
     assert "[/oddly-named" in streams.result
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+def test_a_credential_nested_inside_a_structured_field_is_removed_too() -> None:
+    """A report's fields are `object`, so a value can be a mapping or a list.
+
+    `probe` produces flat fields today. The commands that come later produce
+    per-check results, which nest — and a scrubber that covered only what
+    exists now would be a guarantee that stopped holding the first time
+    somebody nested a field.
+    """
+    nested = "exemplaire-crédentiel-imbriqué"
+    reporter, streams = reporter_for(
+        output_format=OutputFormat.JSON,
+        secrets=[nested],
+    )
+
+    reporter.emit(
+        Report(
+            command="doctor",
+            ok=True,
+            data={"session": {"credential": nested, "tried": [{"with": nested}]}},
+            columns=("check",),
+            rows=({"check": {"detail": nested}},),
+        ),
+    )
+
+    document = json.loads(streams.result)
+    assert nested not in streams.result
+    assert document["data"]["session"]["credential"] == "<redacted>"
+    assert document["data"]["session"]["tried"][0]["with"] == "<redacted>"
+    assert document["rows"][0]["check"]["detail"] == "<redacted>"
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+def test_a_credential_containing_a_bracket_is_removed_from_the_rich_rendering() -> None:
+    r"""Escaping before scrubbing puts the secret back, so the order is pinned.
+
+    Rich reads `[` as the start of a style tag, so every untrusted string is
+    escaped before it reaches the console. Escape first and the redactor is
+    handed `tok\[en]-abc` while it is looking for `tok[en]-abc`, so it matches
+    nothing — and the console then renders the escape away and puts the value
+    on the terminal whole. The table got this right and the scalar fields and
+    the summary did not, which is the half of a guarantee that is worse than
+    none: the same credential was redacted in one part of one screen and
+    printed in another.
+    """
+    bracketed = "tok[en]-abc"
+    reporter, streams = reporter_for(terminal=True, secrets=[bracketed])
+
+    code = reporter.emit(
+        Report(
+            command="probe",
+            ok=False,
+            summary=f"the groundstation refused {bracketed}",
+            data={"url": f"wss://example.com/v1/session?c={bracketed}"},
+            columns=("value",),
+            rows=({"value": bracketed},),
+        ),
+    )
+
+    assert code is ExitCode.FAILURE
+    assert bracketed not in streams.result
+    assert streams.result.count("<redacted>") == 3

@@ -12,6 +12,7 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -659,11 +660,19 @@ async def test_an_offer_that_will_not_validate_is_reported_without_the_credentia
 @pytest.mark.parametrize(
     "url",
     [
+        # The user information before the @.
         "wss://someone:example-secret@198.51.100.10/v1/session",
         "ws://someone@198.51.100.10:8080/v1/session",
+        # The query, which is how an HTTP API would usually take a credential
+        # and therefore the spelling somebody reaches for first.
+        "wss://198.51.100.10/v1/session?credential=example-secret",
+        "ws://198.51.100.10:8080/v1/session?token=example-secret&someone=1",
+        # And the fragment, which never reaches the groundstation at all but
+        # reaches the output, which is what the rule is about.
+        "wss://198.51.100.10/v1/session#example-secret",
     ],
 )
-def test_a_url_carrying_user_information_is_refused_without_quoting_it(
+def test_a_url_carrying_a_secret_in_any_part_is_refused_without_quoting_it(
     url: str,
 ) -> None:
     """The address is repeated into output; a credential inside one rides along.
@@ -672,10 +681,15 @@ def test_a_url_carrying_user_information_is_refused_without_quoting_it(
     an address, so this has to be refused rather than scrubbed — and the
     refusal quotes none of it back.
 
+    All three carriers are checked together because refusing only the one
+    somebody thought of first would make the rule true of a spelling rather
+    than of an address: `probe` puts the URL into verbose output twice and into
+    the report's `url` field, and a secret in the query would reach all three.
+
     Args:
         url: The address to refuse.
     """
-    with pytest.raises(ValueError, match="carries no credential") as raised:
+    with pytest.raises(ValueError, match="carries no") as raised:
         SessionClient(url=url, credential=credential())
 
     assert "example-secret" not in str(raised.value)
@@ -714,3 +728,30 @@ async def test_a_result_for_a_capability_this_session_did_not_agree_to() -> None
     assert result.capability == "face"
     assert client.stats.results_ignored == 1
     assert client.connected
+
+
+@pytest.mark.asyncio
+async def test_a_connection_cancelled_mid_handshake_is_still_closed() -> None:
+    """An opened transport that never became the session still has to be let go.
+
+    Until `_establish` assigns it, the transport is in no attribute anything
+    else can read, so `aclose` cannot reach it and a connection that escapes
+    stays open for the life of the process. The handshake's own failures were
+    already handled; cancellation was not, and cancellation is the one that
+    happens — `probe` bounds its run with `wait_for`, so the cancel lands
+    inside the handshake whenever a groundstation accepts a connection and then
+    does not answer the offer, which is what a hung service looks like.
+    """
+    silent = StubTransport()  # nothing pushed: the offer is never answered
+    client, _sleep = build(silent)
+
+    connecting = asyncio.create_task(client.connect())
+    # Let the task open the transport and block waiting for the agreement.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    connecting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await connecting
+
+    assert silent.closed
+    assert not client.connected

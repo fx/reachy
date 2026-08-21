@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
@@ -40,7 +41,7 @@ from reachyctl.exits import ExitCode
 from reachyctl.redaction import Redactor
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
     from typing import TextIO
 
 __all__ = ["OutputFormat", "Report", "Reporter", "build_reporter"]
@@ -246,9 +247,22 @@ class Reporter:
             The value with every string inside it scrubbed, and every other
             kind of value unchanged — a number cannot carry a credential and
             rendering one to scrub it would change the document's types.
+
+        Every container a report's type permits is descended into, not only the
+        ones a command happens to produce today. `Report.data` and each row are
+        `Mapping[str, object]`, so a value can be a mapping or a sequence of
+        them — which is the shape a per-check report naturally takes, and the
+        commands that produce one arrive in later changes. A scrubber that
+        covered only what exists now would be a guarantee that quietly stopped
+        holding the first time somebody nested a field.
         """
         if isinstance(value, str):
             return self._scrub(value)
+        if isinstance(value, Mapping):
+            return {
+                self._scrub(str(name)): self._scrub_field(item)
+                for name, item in value.items()
+            }
         if isinstance(value, tuple | list):
             return [self._scrub_field(item) for item in value]
         return value
@@ -290,20 +304,42 @@ class Reporter:
         if report.columns:
             table = Table(show_header=True, header_style="bold")
             for name in report.columns:
-                table.add_column(_markup(self._scrub(name)))
+                table.add_column(self._safe(name))
             for row in report.rows:
                 table.add_row(
-                    *(
-                        _markup(self._scrub(_render(row.get(name))))
-                        for name in report.columns
-                    ),
+                    *(self._safe(_render(row.get(name))) for name in report.columns),
                 )
             self._console.print(table)
         for name, value in report.data.items():
-            self._print(f"{_markup(name)}: {_markup(_render(value))}")
+            self._print(f"{self._safe(name)}: {self._safe(_render(value))}")
         status = "[green]ok[/green]" if report.ok else "[red]failed[/red]"
-        summary = f" — {_markup(report.summary)}" if report.summary else ""
-        self._print(f"{_markup(report.command)}: {status}{summary}")
+        summary = f" — {self._safe(report.summary)}" if report.summary else ""
+        self._print(f"{self._safe(report.command)}: {status}{summary}")
+
+    def _safe(self, text: str) -> str:
+        r"""Scrub a command's string and then escape it, in that order.
+
+        **The order is the whole point, and getting it the wrong way round is a
+        silent REQ-059 failure rather than a visible one.** `_markup` escapes a
+        `[`, so a credential like `tok[en]-abc` becomes `tok\[en]-abc`, which
+        no longer matches the value the redactor was given — and the console
+        then renders the escape away and puts the secret back on the terminal
+        whole. Scrubbing first means the redactor sees the value as it was
+        configured, and only what survives redaction is ever escaped.
+
+        This exists so that no call site has to remember the order. Every
+        untrusted string in the rich rendering goes through here; `_print`
+        scrubs again on the way out, which is the choke point for the styling
+        tags this class adds itself.
+
+        Args:
+            text: What a command produced.
+
+        Returns:
+            The text with every known secret removed and its brackets shown
+            rather than read.
+        """
+        return _markup(self._scrub(text))
 
     def _scrub(self, text: str) -> str:
         """Remove every known secret from a string about to be written.

@@ -40,12 +40,29 @@ class Backoff:
         """Reject a policy that would not retry, or would not grow.
 
         Raises:
-            ValueError: If the delays are not positive, if the multiplier would
-                not grow the delay, or if the bound leaves it no room to grow
-                into — a bound below the first delay would mean the first
-                attempt already exceeded the maximum, and a bound equal to it
-                means every attempt waits the same.
+            ValueError: If any value is not a finite number, if the delays are
+                not positive, if the multiplier would not grow the delay, or if
+                the bound leaves it no room to grow into — a bound below the
+                first delay would mean the first attempt already exceeded the
+                maximum, and a bound equal to it means every attempt waits the
+                same.
         """
+        # Checked before anything else, because a non-finite value passes the
+        # comparisons below rather than failing them: every comparison against
+        # `nan` is false, so `nan` satisfies each rule here and then raises out
+        # of `_steps` on the first retry — inside the reconnection loop, which
+        # is the one place an exception ends the session for good. An infinite
+        # multiplier is worse because it does not raise at all: it makes
+        # `_steps` zero and yields the first delay forever, which is the
+        # constant delay the next two checks exist to refuse.
+        for name, value in (
+            ("first delay", self.initial_seconds),
+            ("multiplier", self.multiplier),
+            ("bound", self.maximum_seconds),
+        ):
+            if not math.isfinite(value):
+                message = f"the {name} must be a finite number, not {value}"
+                raise ValueError(message)
         if self.initial_seconds <= 0:
             message = f"the first delay must be positive, not {self.initial_seconds}"
             raise ValueError(message)

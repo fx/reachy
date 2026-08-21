@@ -98,6 +98,20 @@ def test_the_delay_survives_an_outage_of_any_length() -> None:
         # robot that retries at the same interval for an afternoon.
         (1.0, 1.0, 5.0),
         (5.0, 2.0, 5.0),
+        # And the non-finite values, which are the same defect wearing a
+        # disguise: every comparison against `nan` is false, so `nan` satisfies
+        # each of the rules above rather than failing one. An infinite
+        # multiplier is the worst of them because it raises nothing — it makes
+        # the exponent clamp zero and yields the first delay forever, which is
+        # exactly the constant delay the two cases above refuse. The others
+        # raise out of `delay`, inside the reconnection loop, which is the one
+        # place an exception ends the session for good.
+        (float("inf"), 2.0, 30.0),
+        (float("nan"), 2.0, 30.0),
+        (0.5, float("inf"), 30.0),
+        (0.5, float("nan"), 30.0),
+        (0.5, 2.0, float("inf")),
+        (0.5, 2.0, float("nan")),
     ],
 )
 def test_a_policy_that_would_not_grow_or_would_not_wait_is_refused(
@@ -105,7 +119,11 @@ def test_a_policy_that_would_not_grow_or_would_not_wait_is_refused(
     multiplier: float,
     maximum: float,
 ) -> None:
-    """A bound below or equal to the first delay is a policy, not a bound.
+    """Every policy REQ-018 could not be satisfied by is refused where it is built.
+
+    `Backoff` is public API and the robot adapter that constructs one is a
+    later change, so the check has to cover the value domain rather than the
+    handful of policies this repository happens to write down today.
 
     Args:
         initial: What the first retry would wait.

@@ -96,14 +96,21 @@ def validate_session_url(url: str) -> str:
     arriving from a constructor three layers down. There is one rule and it
     lives here, so the check a caller runs early is the check the client runs.
 
-    A URL carrying user information is refused, and that is a privacy rule
-    rather than a syntax one. The address is repeated into verbose output, into
-    a report, and into the text of a connection failure, and what redacts a
-    credential knows the credential it was *given* — not one somebody embedded
-    in an address. `wss://someone:secret@host/v1/session` would therefore reach
-    output whole, which reachyctl REQ-059 forbids. The credential is presented
-    in the offer, and this is what makes "the URL carries no credential" true
-    rather than merely intended.
+    A URL carrying a secret in any of its parts is refused, and that is a
+    privacy rule rather than a syntax one. The address is repeated into verbose
+    output, into a report, and into the text of a connection failure, and what
+    redacts a credential knows the credential it was *given* — not one somebody
+    embedded in an address. `wss://someone:secret@host/v1/session` would
+    therefore reach output whole, which reachyctl REQ-059 forbids.
+
+    There are three places in a URL a secret fits, and refusing only the first
+    would leave the rule true of the spelling somebody happened to think of
+    rather than of the address: the user information before the `@`, the query
+    (`?credential=…`, which is how an HTTP API would usually take one), and the
+    fragment. A session endpoint needs none of them — it is a scheme, a host
+    and a path — and the credential has a channel of its own in the offer. So
+    all three are refused, which is what makes "the URL carries no credential"
+    true rather than merely intended.
 
     Args:
         url: The address to check.
@@ -113,7 +120,7 @@ def validate_session_url(url: str) -> str:
 
     Raises:
         ValueError: If the address does not name a WebSocket scheme, or if it
-            carries user information.
+            carries user information, a query or a fragment.
     """
     parts = urlsplit(url)
     if parts.scheme not in _SCHEMES:
@@ -121,12 +128,24 @@ def validate_session_url(url: str) -> str:
             f"a session URL is ws:// or wss://, not {parts.scheme or 'a bare address'}"
         )
         raise ValueError(message)
+    # Deliberately quoting nothing back in any of these: the value being refused
+    # is the one thing that must not be repeated.
     if parts.username is not None or parts.password is not None:
-        # Deliberately quoting nothing back: the value being refused is the one
-        # thing that must not be repeated.
         message = (
             "a session URL carries no credential; remove the user information "
             "before the @ and present the credential the ordinary way"
+        )
+        raise ValueError(message)
+    if parts.query:
+        message = (
+            "a session URL carries no query; remove everything after the ? and "
+            "present the credential the ordinary way"
+        )
+        raise ValueError(message)
+    if parts.fragment:
+        message = (
+            "a session URL carries no fragment; remove everything after the # "
+            "and present the credential the ordinary way"
         )
         raise ValueError(message)
     return url
@@ -520,8 +539,23 @@ class SessionClient:
         transport = await self._open_transport(self._url)
         try:
             agreement = await self._negotiate(transport)
-        except SessionClientError:
-            await transport.close()
+        except BaseException:
+            # Every failure path, cancellation included — not just the
+            # `SessionClientError` the handshake raises deliberately. Until the
+            # line below runs, this transport is in no attribute anything else
+            # can read, so `aclose` cannot reach it: a connection that escapes
+            # here stays open for the life of the process. Cancellation is the
+            # path that matters in practice rather than in theory, because
+            # `probe` bounds its run with `wait_for` and the cancel lands
+            # inside the handshake whenever a groundstation accepts a
+            # connection and then does not answer the offer.
+            #
+            # `Exception` is suppressed around the close and `BaseException` is
+            # not: a transport that fails while being closed is already gone,
+            # and swallowing the cancellation that brought us here would turn a
+            # cancelled connect into one that appears to have succeeded.
+            with contextlib.suppress(Exception):
+                await transport.close()
             raise
         self._transport = transport
         self._agreement = agreement
