@@ -158,7 +158,9 @@ def _frame_shape(options: Options) -> str:  # pragma: no cover
 
     Returns:
         The frame's dimensions as `WxH`, or an empty string when it cannot be
-        read — which `_measure_threads` will report properly a moment later.
+        read. Through `build` that second case cannot arise: the sweep has
+        already read the same file and would have failed first, which is why
+        this reports rather than raises.
     """
     from reachy_groundstation.pipeline.decode import decode_jpeg
 

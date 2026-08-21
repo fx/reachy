@@ -250,6 +250,21 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write(path: Path, text: str) -> None:
+    """Write a result document, making its directory if it is not there.
+
+    The directory before the file: `--output` takes any path, and losing a
+    whole suite's measurements to a missing parent would be an expensive way to
+    learn about a typo.
+
+    Args:
+        path: Where to write.
+        text: What to write.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def _options(arguments: argparse.Namespace) -> Options:
     """Read the run's arguments into the options the benchmarks are handed.
 
@@ -352,7 +367,7 @@ def _run(arguments: argparse.Namespace, context: RunContext) -> int:
         sys.stderr.write(f"{error}\n")
         return _REGRESSION_EXIT
     result = run_selected(selections, options, context)
-    arguments.output.write_text(result.as_json(), encoding="utf-8")
+    _write(arguments.output, result.as_json())
     sys.stdout.write(_summarise(result))
     sys.stdout.write(f"results written to {arguments.output}\n")
     failed = [one.benchmark for one in result.benchmarks if one.status is Status.FAILED]
@@ -397,7 +412,7 @@ def _sizes(arguments: argparse.Namespace, context: RunContext) -> int:
         ),
     )
     if arguments.output is not None:
-        arguments.output.write_text(run.as_json(), encoding="utf-8")
+        _write(arguments.output, run.as_json())
     sys.stdout.write(_summarise(run))
     outcome = compare(run, baseline)
     sys.stdout.write(outcome.report())

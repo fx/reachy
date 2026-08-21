@@ -554,7 +554,9 @@ def test_the_session_benchmark_reports_establishing_using_and_reconnecting() -> 
         "session.round_trip",
         "session.reconnect",
     ]
-    assert result.configuration["transport"].startswith("websocket")
+    assert result.configuration["transport"] == (
+        "websocket over the loopback interface"
+    )
 
 
 def test_the_session_result_says_what_network_it_did_not_cross() -> None:
@@ -583,3 +585,24 @@ def test_the_session_result_says_what_network_it_did_not_cross() -> None:
     assert any("loopback interface" in note for note in plain.notes)
     assert not any("as reported by the operator" in note for note in plain.notes)
     assert any("2.4 GHz WLAN, 120 ms idle" in note for note in described.notes)
+
+
+def test_a_virtualised_robots_guest_time_is_not_counted_twice() -> None:
+    """The kernel counts `guest` inside `user` and `guest_nice` inside `nice`.
+
+    Summing every field would therefore inflate the total, and an inflated
+    total makes the busy fraction — and the reported load — smaller than it
+    really is. That is the direction that hides load, which is why it is worth
+    a test of its own.
+    """
+    fields = "cpu  1000 0 1000 8000 0 0 0 0 500 0\n"
+    sample = load.parse_proc_stat(fields)
+
+    assert sample.total == 10000
+    assert sample.idle == 8000
+
+
+def test_an_aggregate_line_without_an_iowait_field_is_refused() -> None:
+    """`idle` and `iowait` are the fourth and fifth, so four fields is short."""
+    with pytest.raises(ValueError, match="too short"):
+        load.parse_proc_stat("cpu  1 2 3 4\n")

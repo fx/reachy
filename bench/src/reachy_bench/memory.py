@@ -28,6 +28,7 @@ import socket
 # argument vector and no shell.
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -51,6 +52,10 @@ _READY_TIMEOUT_SECONDS: Final = 180.0
 _STOP_TIMEOUT_SECONDS: Final = 30.0
 
 _POLL_SECONDS: Final = 0.25
+
+# What the service reads its configuration under. Everything already set under
+# it is dropped before the subprocess is started.
+_SERVICE_PREFIX: Final = "REACHY_GROUNDSTATION_"
 
 # What a ready service answers with.
 _HTTP_OK: Final = 200
@@ -142,55 +147,66 @@ def resident_memory_of_service(  # pragma: no cover
         ValueError: If this platform does not publish a resident set.
     """
     port = free_port()
-    environment = dict(os.environ)
-    # Every variable the service reads it reads from here, and an unrecognised
-    # one under its prefix is fatal by design — so the environment is set
-    # explicitly rather than inherited with additions.
+    # Everything under the service's own prefix is dropped and then set below.
+    # An unrecognised variable under that prefix is fatal by design, so a shell
+    # that happened to export one would turn a footprint measurement into a
+    # service that refuses to start — and the failure would name the variable
+    # rather than the benchmark, which is a long way from the cause.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(_SERVICE_PREFIX)
+    }
     environment.update(
         {
-            "REACHY_GROUNDSTATION_CREDENTIAL": "benchmark-placeholder",
-            "REACHY_GROUNDSTATION_MODELS_DIR": str(options.models_dir),
-            "REACHY_GROUNDSTATION_HOST": "127.0.0.1",
-            "REACHY_GROUNDSTATION_PORT": str(port),
-            "REACHY_GROUNDSTATION_LOG_LEVEL": "warning",
+            f"{_SERVICE_PREFIX}CREDENTIAL": "benchmark-placeholder",
+            f"{_SERVICE_PREFIX}MODELS_DIR": str(options.models_dir),
+            f"{_SERVICE_PREFIX}HOST": "127.0.0.1",
+            f"{_SERVICE_PREFIX}PORT": str(port),
+            f"{_SERVICE_PREFIX}LOG_LEVEL": "warning",
         },
     )
-    # A fixed argument vector running this repository's own module: no shell,
-    # and no caller-supplied text anywhere in it.
-    service = subprocess.Popen(
-        [sys.executable, "-m", "reachy_groundstation"],
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
-        url = f"http://127.0.0.1:{port}/readyz"
-        while not _ready(url):
-            if service.poll() is not None:
-                complaint = (service.stderr.read() if service.stderr else "").strip()
-                message = (
-                    f"the groundstation exited with status {service.returncode} "
-                    f"while starting: {complaint or 'it said nothing'}"
-                )
-                raise RuntimeError(message)
-            if time.monotonic() > deadline:
-                message = (
-                    "the groundstation did not report itself ready within "
-                    f"{_READY_TIMEOUT_SECONDS:.0f}s"
-                )
-                raise RuntimeError(message)
-            time.sleep(_POLL_SECONDS)
-        status = Path(f"/proc/{service.pid}/status").read_text(encoding="utf-8")
-    finally:
-        service.terminate()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            service.wait(timeout=_STOP_TIMEOUT_SECONDS)
-        if service.poll() is None:
-            service.kill()
-        if service.stderr is not None:
-            service.stderr.close()
+    # A file rather than a pipe. Nothing reads the service's diagnostics until
+    # it has either exited or run out of time, and a pipe nobody is draining
+    # fills: the service would block on a write, never report itself ready, and
+    # the run would fail after the readiness deadline naming the wrong cause.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as diagnostics:
+        # A fixed argument vector running this repository's own module: no
+        # shell, and no caller-supplied text anywhere in it.
+        service = subprocess.Popen(
+            [sys.executable, "-m", "reachy_groundstation"],
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=diagnostics,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
+            url = f"http://127.0.0.1:{port}/readyz"
+            while not _ready(url):
+                if service.poll() is not None:
+                    diagnostics.seek(0)
+                    complaint = diagnostics.read().strip()
+                    message = (
+                        f"the groundstation exited with status "
+                        f"{service.returncode} while starting: "
+                        f"{complaint or 'it said nothing'}"
+                    )
+                    raise RuntimeError(message)
+                if time.monotonic() > deadline:
+                    message = (
+                        "the groundstation did not report itself ready within "
+                        f"{_READY_TIMEOUT_SECONDS:.0f}s"
+                    )
+                    raise RuntimeError(message)
+                time.sleep(_POLL_SECONDS)
+            status = Path(f"/proc/{service.pid}/status").read_text(encoding="utf-8")
+        finally:
+            service.terminate()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                service.wait(timeout=_STOP_TIMEOUT_SECONDS)
+            if service.poll() is None:
+                service.kill()
     return (
         read_resident_mebibytes(status),
         "reachy_groundstation, once it reported itself ready",

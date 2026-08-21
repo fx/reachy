@@ -325,3 +325,24 @@ def test_a_recorded_figure_with_neither_renders_neither() -> None:
     entry = BaselineEntry(value=1.0, unit=Unit.CORES)
 
     assert entry.as_document() == {"value": 1.0, "unit": "cores"}
+
+
+@pytest.mark.parametrize("section", ["tolerances", "artifacts", "profiles"])
+def test_a_section_that_is_not_a_mapping_is_refused(section: str) -> None:
+    """The command surface catches `ValueError`, so nothing else may escape.
+
+    A section committed as a list would otherwise raise `AttributeError` out of
+    `.items()`, and the gate would exit with a traceback rather than with the
+    sentence it means to print.
+
+    Args:
+        section: The section to commit as something that is not a mapping.
+    """
+    with pytest.raises(ValueError, match="is a mapping"):
+        Baseline.from_document(_document(**{section: ["several"]}))
+
+
+def test_a_recorded_figure_committed_as_a_bare_number_is_refused() -> None:
+    """An entry with no `get` would raise `AttributeError` from inside it."""
+    with pytest.raises(ValueError, match="is not one"):
+        Baseline.from_document(_document(artifacts={"footprint.x": 97451}))

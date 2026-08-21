@@ -292,10 +292,18 @@ def execute(
     finally:
         # The link is let go on every path out, including the one where a
         # benchmark raised: `run_selected` contains an ordinary failure, but a
-        # cancellation or an interrupt comes through here.
-        if close is not None:
-            loop.run_until_complete(close())
-        loop.close()
+        # cancellation or an interrupt comes through here. The loop is closed in
+        # its own `finally` so a teardown that itself fails does not leak the
+        # loop and every file descriptor it holds.
+        try:
+            if close is not None:
+                loop.run_until_complete(close())
+        finally:
+            loop.close()
 
+    # The directory before the file: `--output` takes any path, and losing a
+    # whole suite's measurements to a missing parent would be an expensive way
+    # to learn about a typo.
+    plan.output.parent.mkdir(parents=True, exist_ok=True)
     plan.output.write_text(run.as_json(), encoding="utf-8")
     return reporter.emit(report_for(run, plan))

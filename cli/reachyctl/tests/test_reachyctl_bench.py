@@ -165,10 +165,15 @@ def _plan(*benchmarks: str) -> BenchPlan:
 #:= docs/specs/benchmarks/index.md#req-072-benchmarks-requiring-hardware-are-opt-in
 #:% Any benchmark that requires a physical robot MUST be excluded from the default
 #:% suite and selectable explicitly.
-def test_a_run_with_no_robot_reports_the_hardware_benchmarks_as_excluded(
+def test_naming_a_hardware_benchmark_selects_it_and_it_fails_without_its_input(
     fs: FakeFilesystem,
 ) -> None:
-    """Nothing is attempted that needs one, and nothing is silently absent.
+    """Naming it is what selects it — the second half of REQ-072.
+
+    And with no observations it reports a failure rather than a number, because
+    there is no automated stimulus and a figure this benchmark invented would
+    be worse than none. The exclusion half of REQ-072 is covered by the suite's
+    own registry tests, over the default selection.
 
     Args:
         fs: The in-memory filesystem.

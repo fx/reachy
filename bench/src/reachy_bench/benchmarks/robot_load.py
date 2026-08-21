@@ -56,7 +56,17 @@ _CPU_COUNT_COMMAND: Final = ("nproc",)
 # The fields of `/proc/stat`'s aggregate line that are not work. `idle` is the
 # processor doing nothing and `iowait` is it waiting on a device, and counting
 # either as busy would report a robot that is asleep as a robot at capacity.
+# They are the fourth and fifth fields, so a line with fewer than five is not
+# one this can read.
+_FIRST_IDLE_FIELD: Final = 3
 _IDLE_FIELDS: Final = 2
+
+# `user` through `steal`, and deliberately not the two after them. The kernel
+# counts `guest` inside `user` and `guest_nice` inside `nice`, so a total that
+# summed every field would count a virtualised robot's guest time twice and
+# report a *lower* busy fraction than the real one — which is the direction that
+# hides load rather than inventing it.
+_COUNTED_FIELDS: Final = 8
 
 
 class CpuSample(tuple[int, int]):
@@ -109,12 +119,11 @@ def parse_proc_stat(text: str) -> CpuSample:
         except ValueError as error:
             message = f"the aggregate cpu line is not numeric: {line!r}"
             raise ValueError(message) from error
-        if len(values) < _IDLE_FIELDS + 2:
+        if len(values) < _FIRST_IDLE_FIELD + _IDLE_FIELDS:
             message = f"the aggregate cpu line is too short: {line!r}"
             raise ValueError(message)
-        # Fields three and four are `idle` and `iowait`, in that order, and
-        # every kernel this runs on publishes at least the first seven.
-        return CpuSample((sum(values), values[3] + values[4]))
+        idle = sum(values[_FIRST_IDLE_FIELD : _FIRST_IDLE_FIELD + _IDLE_FIELDS])
+        return CpuSample((sum(values[:_COUNTED_FIELDS]), idle))
     message = "no aggregate cpu line in the /proc/stat dump"
     raise ValueError(message)
 

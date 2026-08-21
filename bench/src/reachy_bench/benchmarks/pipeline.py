@@ -66,8 +66,10 @@ class Stages(dict[str, "Distribution"]):
 
     A named type rather than a bare mapping so the seam below has something to
     say in its signature about what a stage measurement is: `decode`,
-    `capability.face`, `emit` and `end_to_end`, each with the distribution the
-    pipeline's own stage boundaries produce.
+    `capability.face`, `emit` and `end_to_end`. The first three are timed
+    against the same callables the pipeline invokes and the fourth against the
+    pipeline itself, so they are four measurements of overlapping work rather
+    than a decomposition of one.
     """
 
 

@@ -221,3 +221,54 @@ def test_the_json_ends_in_a_newline_so_two_runs_diff_line_by_line() -> None:
 
     assert text.endswith("\n")
     assert "\n  " in text
+
+
+def test_a_truncated_distribution_block_is_refused_as_a_measurement() -> None:
+    """A comparison reads a document another job wrote, so it can meet one."""
+    with pytest.raises(ValueError, match="not a measurement"):
+        Measurement.from_document(
+            {
+                "name": "detect.x",
+                "unit": "ms",
+                "value": 1.0,
+                "distribution": {"samples": 3},
+            },
+        )
+
+
+def test_a_host_block_missing_a_field_is_refused_as_a_document() -> None:
+    """Every reader promises `ValueError`, and a `KeyError` is not one."""
+    document = json.loads(make_run([]).as_json())
+    del document["context"]["host"]["cpu_model"]
+
+    with pytest.raises(ValueError, match="carries a context"):
+        RunResult.from_document(document)
+
+
+def test_a_context_that_is_not_a_mapping_is_refused_as_a_document() -> None:
+    """A `TypeError` out of a subscript is not the answer a gate can print."""
+    document = json.loads(make_run([]).as_json())
+    document["context"] = "measured somewhere"
+
+    with pytest.raises(ValueError, match="carries a context"):
+        RunResult.from_document(document)
+
+
+def test_a_benchmark_entry_with_a_malformed_measurement_is_refused() -> None:
+    """The failure has to travel outwards as the one thing callers handle."""
+    with pytest.raises(ValueError, match="not a benchmark result"):
+        BenchmarkResult.from_document(
+            {
+                "benchmark": "detect",
+                "status": "measured",
+                "measurements": [{"name": "detect.x"}],
+            },
+        )
+
+
+def test_a_configuration_that_is_not_a_mapping_is_refused() -> None:
+    """`AttributeError` out of `dict()` would escape every caller's guard."""
+    with pytest.raises(ValueError, match="not a benchmark result"):
+        BenchmarkResult.from_document(
+            {"benchmark": "detect", "status": "measured", "configuration": 4},
+        )

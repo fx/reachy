@@ -182,32 +182,34 @@ class Measurement:
                 result would report on numbers it had invented.
         """
         try:
-            name = str(document["name"])
-            unit = Unit(document["unit"])
-            value = float(document["value"])
-        except (KeyError, TypeError, ValueError) as error:
+            spread = document.get("distribution")
+            return cls(
+                name=str(document["name"]),
+                unit=Unit(document["unit"]),
+                value=float(document["value"]),
+                distribution=(
+                    None
+                    if spread is None
+                    else Distribution(
+                        samples=int(spread["samples"]),
+                        min_ms=float(spread["min_ms"]),
+                        median_ms=float(spread["median_ms"]),
+                        p95_ms=float(spread["p95_ms"]),
+                        max_ms=float(spread["max_ms"]),
+                        mean_ms=float(spread["mean_ms"]),
+                        stdev_ms=float(spread["stdev_ms"]),
+                    )
+                ),
+                detail=dict(document.get("detail", {})),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            # Every way a half-written document can fail, reported as the one
+            # thing every caller documents. A truncated distribution block and a
+            # `unit` this build has never heard of are the same event to a
+            # comparison: a result it cannot read, which must not become a
+            # traceback out of a command.
             message = f"not a measurement: {document!r}"
             raise ValueError(message) from error
-        spread = document.get("distribution")
-        return cls(
-            name=name,
-            unit=unit,
-            value=value,
-            distribution=(
-                None
-                if spread is None
-                else Distribution(
-                    samples=int(spread["samples"]),
-                    min_ms=float(spread["min_ms"]),
-                    median_ms=float(spread["median_ms"]),
-                    p95_ms=float(spread["p95_ms"]),
-                    max_ms=float(spread["max_ms"]),
-                    mean_ms=float(spread["mean_ms"]),
-                    stdev_ms=float(spread["stdev_ms"]),
-                )
-            ),
-            detail=dict(document.get("detail", {})),
-        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -289,22 +291,23 @@ class BenchmarkResult:
             ValueError: If the entry is not one.
         """
         try:
-            benchmark = str(document["benchmark"])
-            status = Status(document["status"])
-        except (KeyError, TypeError, ValueError) as error:
+            return cls(
+                benchmark=str(document["benchmark"]),
+                status=Status(document["status"]),
+                configuration=dict(document.get("configuration", {})),
+                measurements=tuple(
+                    Measurement.from_document(one)
+                    for one in document.get("measurements", ())
+                ),
+                notes=tuple(str(note) for note in document.get("notes", ())),
+                reason=str(document.get("reason", "")),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            # Inside the guard, so a malformed measurement or a `configuration`
+            # that is not a mapping reaches a caller as the ValueError every
+            # reader of a result document is documented to raise.
             message = f"not a benchmark result: {document!r}"
             raise ValueError(message) from error
-        return cls(
-            benchmark=benchmark,
-            status=status,
-            configuration=dict(document.get("configuration", {})),
-            measurements=tuple(
-                Measurement.from_document(one)
-                for one in document.get("measurements", ())
-            ),
-            notes=tuple(str(note) for note in document.get("notes", ())),
-            reason=str(document.get("reason", "")),
-        )
 
 
 #:= docs/specs/benchmarks/index.md#req-067-results-are-structured-and-machine-readable
@@ -408,11 +411,11 @@ class RunResult:
             host = context["host"]
             software = context["software"]
             benchmarks: Iterable[Mapping[str, Any]] = document["benchmarks"]
-        except (KeyError, TypeError) as error:
-            message = "a result document carries a context and a benchmark list"
-            raise ValueError(message) from error
-        return cls(
-            context=RunContext(
+            # Inside the guard, not after it. A host block missing a field, or
+            # a context that is a string rather than a mapping, is the same
+            # event as a missing section — a document this build cannot read —
+            # and both must reach a caller as the ValueError it handles.
+            recorded = RunContext(
                 host=HostContext(
                     profile=str(host["profile"]),
                     system=str(host["system"]),
@@ -429,7 +432,12 @@ class RunResult:
                 ),
                 started_at=str(context["started_at"]),
                 network=str(context.get("network", "")),
-            ),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            message = "a result document carries a context and a benchmark list"
+            raise ValueError(message) from error
+        return cls(
+            context=recorded,
             benchmarks=tuple(BenchmarkResult.from_document(one) for one in benchmarks),
         )
 

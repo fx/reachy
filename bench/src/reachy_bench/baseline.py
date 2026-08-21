@@ -137,7 +137,10 @@ class BaselineEntry:
                 tolerance=None if stated is None else float(stated),
                 note=str(document.get("note", "")),
             )
-        except (KeyError, TypeError, ValueError) as error:
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            # `AttributeError` included deliberately: an entry committed as a
+            # bare number rather than a mapping has no `get`, and a baseline
+            # that half-parsed would gate on the half that did.
             message = f"baseline entry {name!r} is not one: {document!r}"
             raise ValueError(message) from error
 
@@ -277,7 +280,9 @@ class Baseline:
             The baseline.
 
         Raises:
-            ValueError: If the document is not one this build reads.
+            ValueError: If the document is not one this build reads — a schema
+                it does not know, a section that is not a mapping, or an entry
+                that is not one.
         """
         schema = document.get("schema")
         if schema != SCHEMA_VERSION:
@@ -286,22 +291,34 @@ class Baseline:
                 f"build reads"
             )
             raise ValueError(message)
+        # Each section is checked to be a mapping before it is walked. A
+        # section committed as a list or a number would otherwise raise
+        # `AttributeError` out of `.items()`, and the command surface catches
+        # `ValueError` — so the gate would exit with a traceback rather than
+        # with the sentence it means to print.
+        sections: dict[str, Mapping[str, Any]] = {}
+        for section in ("tolerances", "artifacts", "profiles"):
+            value = document.get(section, {})
+            if not isinstance(value, dict):
+                message = f"the baseline's {section!r} is a mapping, not {value!r}"
+                raise ValueError(message)
+            sections[section] = value
         tolerances: dict[Unit, float] = {}
-        for key, value in document.get("tolerances", {}).items():
+        for key, stated in sections["tolerances"].items():
             try:
-                tolerances[Unit(key)] = float(value)
+                tolerances[Unit(key)] = float(stated)
             except (TypeError, ValueError) as error:
-                message = f"baseline tolerance {key!r} is not one: {value!r}"
+                message = f"baseline tolerance {key!r} is not one: {stated!r}"
                 raise ValueError(message) from error
         return cls(
             tolerances=tolerances,
             artifacts={
                 name: BaselineEntry.from_document(name, entry)
-                for name, entry in document.get("artifacts", {}).items()
+                for name, entry in sections["artifacts"].items()
             },
             profiles={
                 name: Profile.from_document(name, entry)
-                for name, entry in document.get("profiles", {}).items()
+                for name, entry in sections["profiles"].items()
             },
         )
 
