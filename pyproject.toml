@@ -36,12 +36,62 @@ dev = [
     "types-protobuf>=5",
 ]
 
+# The reference implementation the YuNet parity test measures against, and
+# nothing else. Perception REQ-036 requires the hand-written decoding be checked
+# against an independent reference, and the Reachy Mini SDK's own detector is
+# that reference: it runs the identical weights, it is maintained elsewhere, and
+# it already runs on the robot.
+#
+# It is a group of its own rather than another line in `dev` so that the
+# `[[tool.uv.dependency-metadata]]` block below has one obvious thing it is
+# about. It is never a dependency of `reachy-groundstation`: the service
+# implements its own decoding and the SDK exists here only to disagree with it.
+parity = [
+    # Bounded above at the major version. The metadata block below deliberately
+    # applies to every version — pinning it there would let a routine bump
+    # reintroduce the whole PyGObject dependency tree it exists to avoid — so
+    # the bound belongs here instead: a new major, which is where the module
+    # this loads could change what it imports, is a deliberate edit and a
+    # review rather than something a resolver does quietly.
+    "reachy-mini>=1.9,<2",
+    # `reachy_mini.vision.face_detector` imports these three at module level.
+    # `huggingface_hub` is imported for its downloader, which the parity test
+    # redirects at the already-fetched local file — the service never reaches
+    # the network for a model, and neither does its test.
+    "huggingface-hub>=1.17",
+    "numpy>=2.1",
+    "onnxruntime>=1.19",
+]
+
 # The root is not itself a distribution: it exists to hold one resolution, one
 # set of development tools, and the shared tool configuration below. Depending
 # on every member means `uv sync` produces an environment with all of them
 # importable, which is what the test, lint and type-check recipes run against.
 [tool.uv]
 package = false
+# Both groups are installed by `uv sync` and by every `uv run` the Justfile
+# makes, so the parity reference is present wherever the test suite runs. A
+# group that had to be asked for would be a merge gate that is skipped by
+# default, which is the one thing perception REQ-036 must not be.
+default-groups = ["dev", "parity"]
+
+# `reachy-mini`'s real metadata requires PyGObject, and through it the whole
+# GStreamer stack — because the distribution also ships the robot's camera and
+# audio pipelines. None of that is needed here: the parity reference is one
+# module, `reachy_mini/vision/face_detector.py`, whose only imports are `math`,
+# `dataclasses`, `numpy`, `onnxruntime`, `huggingface_hub` and `numpy.typing`.
+# Declaring the metadata statically is uv's supported way of saying "install
+# this one without its dependency tree", and it is what makes the parity gate
+# installable on a runner that has no system GTK. The three requirements listed
+# are exactly what that module imports, and they are in the `parity` group above
+# so the resolver still pins them.
+#
+# The version is deliberately absent: uv then applies this metadata to every
+# version of the distribution, so a routine bump does not silently reintroduce
+# the dependency tree this block exists to avoid.
+[[tool.uv.dependency-metadata]]
+name = "reachy-mini"
+requires-dist = ["numpy", "onnxruntime", "huggingface-hub>=1.17"]
 
 [tool.uv.workspace]
 members = [
@@ -296,6 +346,17 @@ files = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 # `ignore-without-code` is how the "a suppression carries its rule identifier"
 # rule is enforced for mypy; ruff's PGH003/PGH004 enforce the same for lint.
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+# --- The model runtime ------------------------------------------------------
+# `onnxruntime` ships no `py.typed` marker and no stubs, so mypy cannot follow
+# it and strict mode reports every import of it. This is the narrowest available
+# relaxation: it applies to that distribution alone, and the modules that use it
+# stay strict — `reachy_groundstation.runtime.onnx` annotates every signature it
+# exposes, so what the rest of the service sees is typed even though what it
+# wraps is not. Nothing else in the tree imports it.
+[[tool.mypy.overrides]]
+module = ["onnxruntime.*"]
+ignore_missing_imports = true
 
 # --- Vendored third-party code ----------------------------------------------
 # The one recorded exception to strict mode. These modules are derived from the

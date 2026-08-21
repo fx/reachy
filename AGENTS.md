@@ -29,10 +29,10 @@ one-line import of this file and holds no content of its own.
 | `.github/workflows/` | The merge gates: checks, hygiene, release, traceability |
 | `release-please-config.json` | Where the derived version is written, artifact by artifact |
 
-`packages/reachy-contracts`, `apps/ha-satellite` and `tools/repo-hygiene` have
-implementations today. The other three members are scaffolds: a
-`pyproject.toml`, an `AGENTS.md` and a package directory, waiting for the change
-that fills them in.
+`packages/reachy-contracts`, `apps/ha-satellite`, `services/groundstation` and
+`tools/repo-hygiene` have implementations today. The other two members are
+scaffolds: a `pyproject.toml`, an `AGENTS.md` and a package directory, waiting
+for the change that fills them in.
 
 ## Read before touching
 
@@ -185,8 +185,16 @@ anything shipped to it is built and tested for that architecture.
 ```
 mise install     # once, to get the pinned versions
 just sync        # install the workspace exactly as uv.lock describes it
+just models      # fetch and hash-verify the pinned model weights, never committed
 just check       # lint, typecheck, test — three of the merge gates
 ```
+
+Model weights are not in the repository: `just models` fetches them into
+`.models/` and refuses anything whose digest is not the one
+`services/groundstation/src/reachy_groundstation/models/registry.py` pins. The
+perception tests that run real inference skip without them, saying so; on a
+runner they fail instead, because a merge gate that skips when its inputs are
+missing is not a merge gate.
 
 ## Merge gates
 
@@ -199,7 +207,7 @@ its step.
 | `checks.yml` | pull requests, pushes to `main` | `Lint`, `Type check`, `Test` (diff-scoped coverage), `Contract drift` | `just check`, `just contracts-check` |
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `release.yml` | pushes to `main` only | Version derivation and tag creation; publishes nothing | — |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — vacuous today, see below | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — one spec registered so far, see below | `just duvet` |
 
 `release.yml` never runs on a pull request, which is why it is not in the set of
 checks to require below.
@@ -212,11 +220,13 @@ completion notes of
 
 ## Requirements traceability
 
-⚠️ **The "Requirements traceability" check currently passes vacuously.** No spec
-is registered in `.duvet/config.toml`, so duvet loads zero specifications and
-exits 0 having checked nothing. A green run is not evidence that any requirement
-is traced. The header comment in that file explains why they are deliberately
-unregistered and when to register them.
+⚠️ **The "Requirements traceability" check covers one spec so far.**
+`.duvet/config.toml` registers `docs/specs/perception/index.md` and nothing else,
+so a green run is evidence that perception's 8 requirements are traced and is
+evidence of nothing about the other 7 specs — duvet does not load them. A spec is
+registered by the change that implements it, in that change's pull request,
+alongside the annotations that make it pass. The header comment in that file
+explains why the rest are deliberately unregistered.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and

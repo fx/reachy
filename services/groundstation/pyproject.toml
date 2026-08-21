@@ -12,6 +12,13 @@ dependencies = [
     # which is the reason the architecture spec keeps this service in Python.
     "numpy>=2.1",
     "opencv-python-headless>=4.10",
+    # The model runtime every capability's inference goes through. Named here
+    # rather than left to a capability's own extra, because the thread bounds
+    # groundstation REQ-027 requires are set on its session options and the
+    # service has to be able to set them whatever capability is loaded. The
+    # provider list is configuration: this package pulls the CPU build, and the
+    # accelerated image variant supplies its own.
+    "onnxruntime>=1.19",
     # The metrics registry and the OpenMetrics exposition the /metrics endpoint
     # serves, including the exemplars that carry a frame's identity without
     # making the session or the sequence number a label.

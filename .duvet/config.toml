@@ -26,19 +26,20 @@
 
 '$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
 
-# ⚠️ NO SPECS ARE REGISTERED YET, AND THAT IS DELIBERATE.
+# ⚠️ MOST SPECS ARE STILL UNREGISTERED, AND THAT IS DELIBERATE.
 #
-# `docs/specs/` currently holds 8 specs carrying 73 requirements, and none of
-# them is registered below. While that is true, `duvet query -c implementation`
-# and `duvet report --ci` both pass VACUOUSLY: they load 0 specifications, check
-# nothing, and exit 0. A green "Requirements traceability" check therefore means
-# nothing at all today. Do not read it as evidence that anything is traced.
+# `docs/specs/` holds 8 specs carrying 73 requirements. Exactly one of them is
+# registered below: perception, whose 8 requirements are implemented and
+# annotated by docs/changes/0005-perception-capability.md. For that spec, and
+# only that spec, `duvet query -c implementation` and `duvet report --ci` mean
+# what they appear to mean.
 #
-# The specs are unregistered because no source exists to annotate: registering
-# them turns the job red immediately — 73 requirements, 0 annotations — and it
-# stays red until the implementing changes land their annotations. Register them
-# when that work starts, and do not make the job a required check until it can
-# pass. See docs/changes/0001-workspace-skeleton.md onwards.
+# The other 7 are unregistered because no source exists to annotate yet:
+# registering one turns the job red immediately — its requirements, zero
+# annotations — and it stays red until the implementing change lands. A spec is
+# registered by the change that implements it, in that change's pull request,
+# and the annotations arrive with it. Nothing outside perception is evidence of
+# anything today.
 #
 # Each entry takes a `source` path plus a MANDATORY `format = "markdown"`:
 #
@@ -48,7 +49,12 @@
 #
 # Without `format = "markdown"` duvet applies its default IETF parser, extracts
 # zero requirements, and exits 0 — a failure that looks exactly like success,
-# and one indistinguishable from the vacuous pass described above.
+# and one indistinguishable from the vacuous pass a spec-less config gives.
+
+# --- Perception: implemented and annotated by change 0005 -------------------
+[[specification]]
+source = "docs/specs/perception/index.md"
+format = "markdown"
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses
 # annotations only from matched files, so a config without one reports every

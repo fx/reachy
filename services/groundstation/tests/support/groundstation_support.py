@@ -5,12 +5,15 @@ something it is configured with. Nothing here fakes the service's own behaviour:
 the session layer, the pipeline and the registry are always the real ones, and
 the integration tests drive the real transport as well.
 
-The capabilities are the interesting part. There is no production capability yet
-— perception is change 0005 — so the registry's central guarantee, that it is not
-coupled to whatever the first capability turned out to look like, is proved by
-registering two unrelated ones here and watching both route. They return payload
-types from `reachy_contracts` rather than declaring their own, because a test is
-not a place to declare a wire type either.
+The capabilities are the interesting part, and they are deliberately not the real
+ones. The registry's central guarantee is that it is not coupled to whatever the
+first capability turned out to look like, so it is proved by two unrelated
+made-up capabilities routing through it rather than by the perception ones, which
+would prove only that the code works with itself. The perception capabilities
+have their own tests and their own helpers in
+`groundstation_perception_support`. These return payload types from
+`reachy_contracts` rather than declaring their own, because a test is not a place
+to declare a wire type either.
 """
 
 from __future__ import annotations
