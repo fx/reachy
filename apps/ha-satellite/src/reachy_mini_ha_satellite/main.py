@@ -44,7 +44,7 @@ import threading
 import time
 from dataclasses import fields
 from pathlib import Path
-from queue import Full, Queue
+from queue import Empty, Full, Queue
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
 import numpy as np
@@ -464,6 +464,11 @@ _THREAD_JOIN_SECONDS: Final = 2.0
 # at the ten-millisecond chunks the capture port produces is half a second.
 _DETECTION_BACKLOG: Final = 50
 
+# How many chunks beyond the queue's own size `_end_detection` will drain before
+# giving up on placing its sentinel. Small, because the only producer left by
+# then is a pump that has already been told to stop.
+_SENTINEL_ATTEMPTS_MARGIN: Final = 4
+
 # How often to say that detection is falling behind: once for the first drop,
 # and once per hundred after that. An overloaded robot must not spend what is
 # left of its processor writing about being overloaded.
@@ -598,10 +603,15 @@ class EsphomeService:
         # memory leak ending in the daemon killing the application.
         self._pending: Queue[bytes | None] = Queue(maxsize=backlog)
         self._dropped = 0
+        # The loop the protocol lives on, bound when this service starts. The
+        # detection thread hands `wakeup` and `stop` to it rather than calling
+        # them itself; see `detect`.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
         """Bind the port, then start feeding the microphone into the protocol."""
         loop = asyncio.get_running_loop()
+        self._loop = loop
         self._tap.bind(loop)
 
         listen = self._listen
@@ -643,34 +653,52 @@ class EsphomeService:
                 conditioned = self._condition(chunk)
                 if conditioned is None:
                     continue
-                satellite = self._state.satellite
-                if satellite is None:
-                    # Nothing is connected yet. The chunk is dropped rather than
-                    # queued: Home Assistant transcribes live audio, and a
-                    # backlog replayed at connection time would be a
-                    # conversation that already happened. Detection is skipped
-                    # with it, because a wake word has nothing to wake.
-                    continue
                 primary, second = conditioned
-                # Streaming first, always, and before anything that could be
-                # slow. This is the half that carries a conversation already in
-                # progress, and it must not wait on the half that starts one.
-                satellite.handle_audio(primary, second)
+                satellite = self._state.satellite
+                if satellite is not None:
+                    # Streaming first, always, and before anything that could be
+                    # slow. This is the half that carries a conversation already
+                    # in progress, and it must not wait on the half that starts
+                    # one. A chunk arriving while nobody is connected is dropped
+                    # rather than queued: Home Assistant transcribes live audio,
+                    # and a backlog replayed at connection time would be a
+                    # conversation that already happened.
+                    satellite.handle_audio(primary, second)
+                # Detection runs whether or not Home Assistant is there, and
+                # that is REQ-044 rather than a nicety. `connection_lost` sets
+                # `state.satellite` to `None`, so a robot whose network has
+                # failed is a robot with no satellite — and skipping detection
+                # for it would make the wake word depend on exactly the thing
+                # the requirement says it must not. The models are streaming
+                # models besides: one fed only the audio that arrived while a
+                # connection happened to be up has no window to judge the first
+                # word after a reconnection against.
                 self._offer(primary)
         finally:
             # However the pump ended, the detector is owed the news: `detect`
             # blocks on the queue and would otherwise never return.
-            with contextlib.suppress(Full):
-                self._pending.put_nowait(None)
+            self._end_detection()
 
     def detect(self) -> None:
         """Run the wake-word models over the audio the pump has forwarded.
 
         Public for the same reason `pump` is: it is the whole of what the
         second thread does, so a test drives it directly.
+
+        **What this thread does not do is touch the protocol.** `wakeup` and
+        `stop` are not sends; they move the pipeline's own state, duck the
+        music and start a sound, and every other transition of that state
+        happens on the event loop while a packet is being handled. Calling them
+        from here would race one — two pipelines started, or a response stopped
+        halfway into starting — so they are handed to the loop instead. Only the
+        model runs on this thread, which is the whole reason it exists.
         """
         detector = self._detector
-        if detector is None:
+        loop = self._loop
+        if detector is None or loop is None:
+            # Either nothing runs the models, or the service was never started
+            # — in both cases there is nothing to read from and nowhere to
+            # deliver an activation to.
             return
         while True:
             chunk = self._pending.get()
@@ -687,6 +715,7 @@ class EsphomeService:
                 continue
             satellite = self._state.satellite
             if satellite is None:
+                # The models still ran; there is simply nothing to tell.
                 continue
             for model in activations.woken:
                 # The vendored signature names the two concrete runtime classes
@@ -694,9 +723,34 @@ class EsphomeService:
                 # them satisfy. That is what lets a test drive this loop with a
                 # model that is neither, and the cast is where the two spellings
                 # of the same object meet.
-                satellite.wakeup(cast("MicroWakeWord | OpenWakeWord", model))
+                self._on_loop(
+                    loop,
+                    satellite.wakeup,
+                    cast("MicroWakeWord | OpenWakeWord", model),
+                )
             if activations.stopped:
-                satellite.stop()
+                self._on_loop(loop, satellite.stop)
+
+    @staticmethod
+    def _on_loop(
+        loop: asyncio.AbstractEventLoop,
+        action: Callable[..., None],
+        *args: object,
+    ) -> None:
+        """Run something on the event loop, from a thread that is not it.
+
+        Args:
+            loop: The loop the protocol lives on.
+            action: What to run there.
+            args: What to run it with.
+        """
+        try:
+            loop.call_soon_threadsafe(action, *args)
+        except RuntimeError:
+            # The loop has closed, which means the application is on its way
+            # out. A wake word arriving now has nothing left to start, and
+            # there is no thread left to report it to.
+            _LOGGER.debug("the event loop has closed; dropping %s", action)
 
     def _condition(self, chunk: Sequence[bytes]) -> tuple[bytes, bytes | None] | None:
         """Apply the microphone settings Home Assistant owns to one chunk.
@@ -750,6 +804,34 @@ class EsphomeService:
                     self._dropped,
                 )
 
+    def _end_detection(self) -> None:
+        """Put the sentinel that ends `detect` on the queue, come what may.
+
+        A plain `put_nowait` is not enough, and the case where it is not is
+        exactly the case this service is built for: a detector that has fallen
+        behind leaves the queue full, the sentinel is refused, and `detect`
+        blocks on `get` for ever — through `aclose`, which then spends its join
+        timeout on a thread that is never going to end.
+
+        So a full queue is drained a chunk at a time until the sentinel fits.
+        The bound is the queue's own size and a small margin for a chunk the
+        pump adds on its way past; a service that somehow exhausted it would
+        leave the thread to the daemon-thread exit rather than hanging the
+        event loop `aclose` runs on, which is the safer of the two failures.
+        """
+        for _ in range(self._pending.maxsize + _SENTINEL_ATTEMPTS_MARGIN):
+            try:
+                self._pending.put_nowait(None)
+            except Full:
+                with contextlib.suppress(Empty):
+                    self._pending.get_nowait()
+            else:
+                return
+        _LOGGER.warning(
+            "the wake-word queue stayed full; the detection thread is left to "
+            "the process exit rather than stopping now",
+        )
+
     async def aclose(self) -> None:
         """Stop accepting connections and stop both threads."""
         self._running = False
@@ -761,8 +843,7 @@ class EsphomeService:
         # The pump ends the detection thread on its way out, but only if it was
         # ever running. A service closed without having read a chunk has to end
         # it here instead, and a second sentinel is harmless.
-        with contextlib.suppress(Full):
-            self._pending.put_nowait(None)
+        self._end_detection()
         threads, self._threads = self._threads, []
         for thread in threads:
             if thread is not None and hasattr(thread, "join"):

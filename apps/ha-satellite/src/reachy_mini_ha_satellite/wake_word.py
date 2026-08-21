@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.esphome.models import ServerState
 
 __all__ = [
+    "SENSITIVITY_SLOTS",
     "Activations",
     "MicroWakeWordModel",
     "ModelInput",
@@ -80,6 +81,16 @@ _LOGGER: Final = logging.getLogger(__name__)
 # exactly two sensitivity entities, so a third model has no control of its own
 # and upstream's fallback is the one this matches.
 FALLBACK_THRESHOLD: Final = 0.7
+
+# How many sensitivity sliders Home Assistant gets. The protocol announces
+# `max_active_wake_words=2` and carries two entities, and
+# `preferences.active_wake_words` is a two-element list with holes rather than a
+# list of what is active — which is why a slot is not an index. See
+# `WakeWordDetector._assign_slots`.
+SENSITIVITY_SLOTS: Final = 2
+
+# The slot of a model that has no slider of its own.
+_NO_SLOT: Final = SENSITIVITY_SLOTS
 
 
 type ModelInput = npt.NDArray[Any]
@@ -254,6 +265,7 @@ class WakeWordDetector:
         self._open: WakeWordFeatures | None = None
         self._models: list[WakeWordModel] = []
         self._engines: list[WakeWordType] = []
+        self._slots: list[int] = []
         # Whether the active list has ever been built. Deliberately not "is the
         # list non-empty": switching every wake word off in Home Assistant is a
         # legitimate state, and treating it as "not built yet" is what makes
@@ -362,18 +374,58 @@ class WakeWordDetector:
             if model.id in state.active_wake_words
         ]
         self._engines = [self._engine_of(model) for model in self._models]
+        self._slots = self._assign_slots(self._models)
         _LOGGER.info(
             "wake words now active: %s",
             [phrase_of(model) for model in self._models] or "none",
         )
 
-        for index, model in enumerate(self._models[:2]):
-            threshold = self._resolve_threshold(index, model)
-            if index == 0:
+        for model, slot in zip(self._models, self._slots, strict=True):
+            if slot >= SENSITIVITY_SLOTS:
+                continue
+            threshold = self._resolve_threshold(slot, model)
+            if slot == 0:
                 state.wake_word_1_threshold = threshold
             else:
                 state.wake_word_2_threshold = threshold
         self._publish_thresholds()
+
+    def _assign_slots(self, models: list[WakeWordModel]) -> list[int]:
+        """Say which sensitivity slider each active model sits behind.
+
+        **Not the position in the active list**, and the difference is one Home
+        Assistant can produce in two clicks. `preferences.active_wake_words` is
+        a two-element list with holes, and the protocol keeps a wake word where
+        it was: switch the first of two off and the survivor stays in the
+        *second* slot, with `None` in the first. Numbering the survivors from
+        zero would judge it by the slider the operator moved for the wake word
+        they just removed.
+
+        Args:
+            models: The active models, in the order they are run.
+
+        Returns:
+            One slot per model. `SENSITIVITY_SLOTS` or more means "no slider of
+            its own", which is what a third active wake word gets.
+        """
+        saved = list(self._state.preferences.active_wake_words or [])
+        slots = [_NO_SLOT] * len(models)
+        taken: set[int] = set()
+        for index, model in enumerate(models):
+            if model.id not in saved:
+                continue
+            slot = saved.index(model.id)
+            if slot < SENSITIVITY_SLOTS and slot not in taken:
+                slots[index] = slot
+                taken.add(slot)
+        # Anything the preferences do not place — a fresh installation, or a
+        # wake word chosen by configuration rather than by Home Assistant —
+        # takes the lowest slider nothing else has claimed.
+        free = [slot for slot in range(SENSITIVITY_SLOTS) if slot not in taken]
+        for index, slot in enumerate(slots):
+            if slot == _NO_SLOT and free:
+                slots[index] = free.pop(0)
+        return slots
 
     def _engine_of(self, model: WakeWordModel) -> WakeWordType:
         """Say which runtime a loaded model belongs to.
@@ -393,11 +445,11 @@ class WakeWordDetector:
         available = self._state.available_wake_words.get(model.id)
         return available.type if available is not None else WakeWordType.MICRO_WAKE_WORD
 
-    def _resolve_threshold(self, index: int, model: WakeWordModel) -> float:
+    def _resolve_threshold(self, slot: int, model: WakeWordModel) -> float:
         """Work out what a wake word should be judged against.
 
         Args:
-            index: Which of the two sensitivity entities this model is behind.
+            slot: Which of the two sensitivity entities this model sits behind.
             model: The loaded model.
 
         Returns:
@@ -407,7 +459,7 @@ class WakeWordDetector:
         """
         saved = (
             self._state.preferences.wake_word_1_sensitivity
-            if index == 0
+            if slot == 0
             else self._state.preferences.wake_word_2_sensitivity
         )
         if saved is not None:
@@ -441,7 +493,7 @@ class WakeWordDetector:
         if updates:
             satellite.send_messages(updates)
 
-    def _threshold(self, index: int) -> float:
+    def _threshold(self, slot: int) -> float:
         """Read what a wake word is judged against right now.
 
         Read per chunk rather than remembered from the rebuild, because Home
@@ -449,15 +501,15 @@ class WakeWordDetector:
         operator sliding it expects the next word they say to be judged by it.
 
         Args:
-            index: Which of the active models this is.
+            slot: Which sensitivity entity this model sits behind.
 
         Returns:
-            The threshold, or the fallback for a model past the second, which
-            has no sensitivity entity of its own.
+            The threshold, or the fallback for a model with no sensitivity
+            entity of its own.
         """
-        if index == 0:
+        if slot == 0:
             return self._state.wake_word_1_threshold
-        if index == 1:
+        if slot == 1:
             return self._state.wake_word_2_threshold
         return FALLBACK_THRESHOLD
 
@@ -480,7 +532,7 @@ class WakeWordDetector:
         Returns:
             Whether it fired.
         """
-        threshold = self._threshold(index)
+        threshold = self._threshold(self._slots[index])
         if self._engines[index] == WakeWordType.OPEN_WAKE_WORD:
             # Each cast is what the engine lookup has just established. The two
             # runtimes share no `process_streaming` signature, so a caller has

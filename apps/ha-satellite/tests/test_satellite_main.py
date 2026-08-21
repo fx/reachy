@@ -31,6 +31,7 @@ import logging
 import socket
 import threading
 from pathlib import Path
+from queue import Empty, Full
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
@@ -99,6 +100,7 @@ from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from queue import Queue
 
     from pyfakefs.fake_filesystem import FakeFilesystem
 
@@ -691,6 +693,9 @@ class TestTheWakeWordFeed:
 
         service.pump()
         service.detect()
+        # The detection thread hands the protocol to the event loop rather than
+        # touching it; one turn of the loop is what delivers it.
+        await asyncio.sleep(0)
 
         assert satellite.woken == [model]
 
@@ -705,6 +710,52 @@ class TestTheWakeWordFeed:
         assert len(satellite.chunks) == 3
 
     @pytest.mark.asyncio
+    async def test_it_detects_while_home_assistant_is_not_connected(self) -> None:
+        """REQ-044's own scenario: `connection_lost` sets the satellite to `None`.
+
+        A robot whose network has failed has no connection, so skipping
+        detection for one would make the wake word depend on exactly the thing
+        the requirement says it must not.
+        """
+        model = FakeMicroWakeWord("okay_nabu", fires=[True])
+        service, state, satellite = await self._feed(model, chunks=2)
+        state.satellite = None
+
+        service.pump()
+        service.detect()
+
+        assert len(model.inputs) == 2
+        assert satellite.chunks == []
+
+    @pytest.mark.asyncio
+    async def test_it_ends_detection_even_when_the_queue_is_full(self) -> None:
+        """A detector that has fallen behind must still be able to stop.
+
+        The sentinel that ends `detect` goes on the same bounded queue the
+        chunks do, so a full queue would refuse it and leave the thread
+        blocked on `get` through shutdown and beyond. This runs `detect` on a
+        real thread rather than inline, because the regression it guards is a
+        thread that never returns — and a test that asserted inline would hang
+        rather than fail.
+        """
+        model = FakeMicroWakeWord("okay_nabu")
+        service, _state, _satellite = await self._feed(model, chunks=5, backlog=2)
+        service.pump()
+
+        finished = threading.Event()
+
+        def _drain() -> None:
+            """Run the detection loop, and record that it came back."""
+            service.detect()
+            finished.set()
+
+        thread = threading.Thread(target=_drain, daemon=True)
+        thread.start()
+        thread.join(timeout=_THREAD_JOIN_SECONDS)
+
+        assert finished.is_set()
+
+    @pytest.mark.asyncio
     async def test_a_muted_robot_is_not_woken(self) -> None:
         """Asserted here as well as in the detector: it is what mute means."""
         model = FakeMicroWakeWord("okay_nabu", fires=[True])
@@ -713,6 +764,7 @@ class TestTheWakeWordFeed:
 
         service.pump()
         service.detect()
+        await asyncio.sleep(0)
 
         assert satellite.woken == []
 
@@ -726,6 +778,7 @@ class TestTheWakeWordFeed:
 
         service.pump()
         service.detect()
+        await asyncio.sleep(0)
 
         assert satellite.stops == 1
 
@@ -783,6 +836,48 @@ class TestTheWakeWordFeed:
 
         assert True  # as above: the sentinel `aclose` leaves is what ends it
 
+    @pytest.mark.asyncio
+    async def test_an_activation_arriving_after_the_loop_has_gone_is_dropped(
+        self,
+    ) -> None:
+        """Shutdown races the microphone, and this is the losing side of it.
+
+        A wake word that fires in the moment between the event loop closing and
+        the detection thread noticing has nothing left to start, and must not
+        take the thread down with an exception nobody is there to see.
+        """
+        closed = _ClosedLoop()
+        ran: list[str] = []
+
+        # Reached through a private name deliberately: the guard is the unit
+        # here, and the path to it runs from a thread this test cannot schedule
+        # against a loop that is in the act of closing.
+        EsphomeService._on_loop(
+            cast("asyncio.AbstractEventLoop", closed),
+            lambda: ran.append("woken"),
+        )
+
+        assert ran == []
+
+    @pytest.mark.asyncio
+    async def test_it_gives_up_rather_than_hanging_the_event_loop(self) -> None:
+        """`aclose` runs on the event loop, so the sentinel cannot loop for ever.
+
+        A queue that refuses every insertion and yields nothing to drain cannot
+        happen with the real one; the bound exists so that if it ever did, the
+        detection thread would be left to the process exit instead of wedging
+        shutdown.
+        """
+        model = FakeMicroWakeWord("okay_nabu")
+        service, _state, _satellite = await self._feed(model)
+        # A private name again, and for the same kind of reason: the bound is
+        # what is under test, and no real queue behaves this way.
+        service._pending = cast("Queue[bytes | None]", _ImmovableQueue())
+
+        await service.aclose()
+
+        assert True  # returning at all is the assertion: the drain is bounded
+
     async def _feed(
         self,
         model: FakeMicroWakeWord,
@@ -830,6 +925,61 @@ class TestTheWakeWordFeed:
         state.satellite = cast("VoiceSatelliteProtocol", satellite)
         await service.start()
         return service, state, satellite
+
+
+class _ClosedLoop:
+    """An event loop that has been closed, without one ever having existed.
+
+    A real closed loop would have to be created first, and creating one opens a
+    socket pair — which the harness refuses, and rightly.
+    """
+
+    def call_soon_threadsafe(
+        self,
+        callback: Callable[..., None],
+        *args: object,
+    ) -> None:
+        """Refuse, the way a closed loop does.
+
+        Args:
+            callback: What was to be run.
+            args: What it was to be run with.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        del callback, args
+        message = "Event loop is closed"
+        raise RuntimeError(message)
+
+
+class _ImmovableQueue:
+    """A queue that will neither take anything nor give anything up."""
+
+    maxsize = 1
+
+    def put_nowait(self, item: object) -> None:
+        """Refuse the item.
+
+        Args:
+            item: What was to be queued.
+
+        Raises:
+            Full: Always.
+        """
+        del item
+        raise Full
+
+    def get_nowait(self) -> object:
+        """Refuse to hand anything back.
+
+        Returns:
+            Nothing; this always raises.
+
+        Raises:
+            Empty: Always.
+        """
+        raise Empty
 
 
 class TestTheMicrophoneSettings:

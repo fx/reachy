@@ -390,6 +390,84 @@ class TestTheThresholds:
             pytest.approx(FALLBACK_THRESHOLD),
         ]
 
+    def test_a_wake_word_left_in_the_second_slot_keeps_its_slider(self) -> None:
+        """A slot is not the same thing as a position in the active list.
+
+        Two clicks in Home Assistant produce the difference.
+        `preferences.active_wake_words` is a two-element list with holes, and
+        the protocol keeps a wake word where it was — so switching the first of
+        two off leaves the survivor in slot two with `None` in slot one.
+        Numbering the survivors from zero would judge it by the slider the
+        operator moved for the wake word they had just removed.
+        """
+        model = FakeMicroWakeWord("okay_nabu")
+        state = state_with(
+            model,
+            preferences=Preferences(
+                active_wake_words=[None, "okay_nabu"],
+                wake_word_1_sensitivity=0.9,
+                wake_word_2_sensitivity=0.31,
+            ),
+        )
+        detector, _micro, _open = detector_over(state)
+
+        detector.process(CHUNK)
+
+        assert state.wake_word_2_threshold == pytest.approx(0.31)
+        assert model.cutoffs == [pytest.approx(0.31)]
+
+    def test_a_wake_word_the_preferences_do_not_place_takes_a_free_slot(
+        self,
+    ) -> None:
+        """A fresh installation, or one wake word chosen by configuration."""
+        placed = FakeMicroWakeWord("okay_nabu")
+        unplaced = FakeMicroWakeWord("hey_jarvis")
+        state = state_with(
+            placed,
+            wake_words={placed.id: placed, unplaced.id: unplaced},
+            active_wake_words={placed.id, unplaced.id},
+            available_wake_words={
+                placed.id: available_wake_word(placed.id),
+                unplaced.id: available_wake_word(unplaced.id),
+            },
+            preferences=Preferences(
+                active_wake_words=[None, "okay_nabu"],
+                wake_word_1_sensitivity=0.9,
+                wake_word_2_sensitivity=0.31,
+            ),
+        )
+        detector, _micro, _open = detector_over(state)
+
+        detector.process(CHUNK)
+
+        assert placed.cutoffs == [pytest.approx(0.31)]
+        assert unplaced.cutoffs == [pytest.approx(0.9)]
+
+    def test_two_models_never_share_a_slider(self) -> None:
+        """A preferences file naming one wake word twice is still two models."""
+        first = FakeMicroWakeWord("okay_nabu")
+        second = FakeMicroWakeWord("hey_jarvis")
+        state = state_with(
+            first,
+            wake_words={first.id: first, second.id: second},
+            active_wake_words={first.id, second.id},
+            available_wake_words={
+                first.id: available_wake_word(first.id),
+                second.id: available_wake_word(second.id),
+            },
+            preferences=Preferences(
+                active_wake_words=["okay_nabu", "okay_nabu"],
+                wake_word_1_sensitivity=0.9,
+                wake_word_2_sensitivity=0.31,
+            ),
+        )
+        detector, _micro, _open = detector_over(state)
+
+        detector.process(CHUNK)
+
+        assert first.cutoffs == [pytest.approx(0.9)]
+        assert second.cutoffs == [pytest.approx(0.31)]
+
     def test_it_reads_the_threshold_again_on_every_chunk(self) -> None:
         """Home Assistant writes straight into the state while this runs."""
         model = FakeMicroWakeWord("okay_nabu")
