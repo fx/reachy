@@ -291,10 +291,10 @@ class Reporter:
         Every container a report's type permits is descended into, not only the
         ones a command happens to produce today. `Report.data` and each row are
         `Mapping[str, object]`, so a value can be a mapping or a sequence of
-        them — which is the shape a per-check report naturally takes, and the
-        commands that produce one arrive in later changes. A scrubber that
-        covered only what exists now would be a guarantee that quietly stopped
-        holding the first time somebody nested a field.
+        them — which is the shape `doctor`'s per-check rows take. A scrubber
+        that covered only the shapes today's commands happen to produce would
+        be a guarantee that quietly stopped holding the first time somebody
+        nested a field.
         """
         if isinstance(value, str):
             return self._scrub(value)

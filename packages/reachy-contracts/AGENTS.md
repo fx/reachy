@@ -21,7 +21,7 @@ that apply here.
 | `src/reachy_contracts/fixtures.py` | The corpus manifest and the loader every consumer reads it through |
 | `src/reachy_contracts/golden/` | The golden fixtures themselves, one file per message type |
 | `src/reachy_contracts/settings.py` | The robot's configuration vocabulary: every setting and what it will accept |
-| `src/reachy_contracts/contracts_export.py` | The registry `just contracts` renders `docs/contracts/` from |
+| `src/reachy_contracts/contracts_export.py` | The wire-schema half of what `just contracts` renders `docs/contracts/` from, plus the `Contract` type and the `export` every registry is driven through |
 
 ## Local rules
 
@@ -57,7 +57,11 @@ that apply here.
   marks the ones a consumer must additionally report as set or unset rather than
   by value.
 - **No dependencies on other members.** Everything else depends on this package;
-  a dependency in the other direction is a cycle.
+  a dependency in the other direction is a cycle. That is why the `doctor` check
+  reference is generated from a registry in `reachy-checks` rather than from
+  `CONTRACTS` here, and why `scripts/export_contracts.py` exists: the index has
+  to be rendered over both registries at once, and only something above both of
+  them can do that.
 - **Keep it dependency-light.** It is installed on the robot, in the
   groundstation image and in the CLI wheel alike, so anything added here is
   added to all three.

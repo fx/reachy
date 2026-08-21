@@ -12,11 +12,18 @@ troubleshooting runbook is keyed to the identifiers and shares this text rather
 than restating it, so renaming one is a breaking change and paraphrasing one in
 another document reintroduces exactly the drift this module exists to prevent.
 
+That sharing is enforced rather than requested, in two places.
+`reachy_checks.checks_export` generates `docs/contracts/doctor-checks.md` from
+this registry, and the contract-drift gate fails when the committed copy differs
+from what regenerating produces. `tests/test_checks_runbook.py` reads
+`docs/ops/troubleshooting.md` and requires its sections to be exactly these
+identifiers, in this order, each quoting this remediation word for word — so a
+renamed check or a reworded remedy is a red run rather than a runbook that has
+quietly stopped being true.
+
 Three of the commands below — `reachyctl deploy`, `reachyctl app start` and
 `reachyctl config apply` — are the command surface the reachyctl spec defines
-and change 0009 implements. They are named here because they are the right
-remedy and because these strings are meant to be stable, not because they can
-be run today.
+and change 0009 implements.
 
 The order is the order of the links between an operator and a working robot,
 and it is for reading only: no check depends on another's result, and the

@@ -9,6 +9,13 @@ and
 [REQ-004](../../docs/specs/architecture/index.md#req-004-automated-leak-detection-on-every-change).
 **Fills this in:** [0002](../../docs/changes/0002-ci-and-hygiene-gates.md).
 
+This member is REQ-004 — the automated detection. **REQ-003 is the prohibition
+and the untracked-file-plus-tracked-`.example` rule, and its duvet citation is in
+`.gitignore`**, where the ignore rules and their negations are the mechanism the
+requirement describes. Detecting a leak and being arranged so there is nothing to
+detect are two different things, and they are cited from the two different files
+that do them.
+
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
 

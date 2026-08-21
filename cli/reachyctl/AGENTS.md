@@ -7,9 +7,11 @@ Distribution and import name `reachyctl`.
 **Filled in by:** [0007](../../docs/changes/0007-reachyctl-probe.md),
 [0008](../../docs/changes/0008-reachyctl-doctor.md),
 [0009](../../docs/changes/0009-reachyctl-deploy-and-config.md) and
-[0010](../../docs/changes/0010-provisioning-ansible.md), which added `provision`.
-Every command the spec names exists except `bench`, which is
-[0014](../../docs/changes/0014-benchmarks-and-gates.md).
+[0010](../../docs/changes/0010-provisioning-ansible.md), which added `provision`,
+and [0014](../../docs/changes/0014-benchmarks-and-gates.md), which added `bench`.
+Every command the spec names exists, and
+`docs/specs/reachyctl/index.md` is registered in `.duvet/config.toml`, so all
+nine of its requirements are traced.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.

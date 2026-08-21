@@ -28,12 +28,16 @@ that apply here.
   stream it goes to, or what a process exits with belongs here: those are the
   consumer's, and `reachyctl` already decided them in `output.py` and
   `exits.py`.
-- **Identifiers and remediation strings are a published interface.** The
-  troubleshooting runbook in
-  [0015](../../docs/changes/0015-documentation-and-runbooks.md) is keyed to the
-  identifiers and shares the remediation text rather than restating it, so
-  renaming one is a breaking change and needs the runbook updated in the same
-  pull request.
+- **Identifiers and remediation strings are a published interface**, and two
+  things enforce it rather than requesting it.
+  [`docs/contracts/doctor-checks.md`](../../docs/contracts/doctor-checks.md) is
+  generated from `CHECKS` by `checks_export.py`, and the contract-drift gate
+  compares the committed copy against what regenerating produces.
+  [`docs/ops/troubleshooting.md`](../../docs/ops/troubleshooting.md) is keyed to
+  the identifiers, and `tests/test_checks_runbook.py` requires its sections to
+  be exactly these identifiers, in this order, each quoting this remediation
+  word for word. So renaming a check or rewording a remedy is a breaking change
+  that goes red until the runbook travels with it, in the same pull request.
 - **A remediation is a runnable command wherever one exists.** Where none
   exists, `Remediation.command` is empty and the explanation says what to do
   instead. Inventing a command that does not exist is worse than admitting

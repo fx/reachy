@@ -33,11 +33,13 @@ jobs:
       # path is configured — so without this step a requirement with no citing
       # annotation would pass CI unnoticed.
       #
-      # ⚠️ This step checks only the specs registered in .duvet/config.toml,
-      # which today are perception and groundstation. duvet loads no others, so
-      # a green run here is evidence about those two and about nothing else.
-      # See the header comment in that file for why the rest are deliberately
-      # unregistered and when to register them.
+      # This step checks the specs registered in .duvet/config.toml, which is
+      # now all eight of them — 73 requirements, every one traced. A green run
+      # here is therefore evidence about the whole of this repository's
+      # requirements rather than about a subset, which it was until change 0015
+      # registered the last spec. The header comment in that file records which
+      # change registered which spec, and the rule that governs anything added
+      # later: a spec is registered by the change that completes it.
       - name: Verify every requirement is implemented
         run: duvet query -c implementation
 
