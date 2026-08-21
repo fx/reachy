@@ -11,14 +11,14 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** Three specs are
-registered in `.duvet/config.toml` — perception, groundstation and robot-link —
-so `duvet report --ci` and `duvet query -c implementation` check those 30
-requirements and nothing else. The snapshot is nonetheless larger than that:
-duvet loads a specification an annotation points at whether or not it is
+**`.duvet/snapshot.txt` records annotations, not coverage.** Four specs are
+registered in `.duvet/config.toml` — perception, groundstation, robot-link and
+reachyctl — so `duvet report --ci` and `duvet query -c implementation` check
+those 39 requirements and nothing else. The snapshot is nonetheless larger than
+that: duvet loads a specification an annotation points at whether or not it is
 registered, so the file lists the requirement text every annotation cites —
-including the annotations that already point at architecture, which is not
-registered. Regeneration is
+including the annotations that already point at architecture and provisioning,
+neither of which is registered. Regeneration is
 byte-identical, so CI is deterministic — and a green run is evidence about those
 three specs only. A spec is registered by the change that implements it. See
 `.duvet/config.toml` for why the rest are unregistered, and for why annotations

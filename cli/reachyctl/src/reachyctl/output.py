@@ -164,6 +164,32 @@ class Reporter:
         """
         self._write(self._err, message)
 
+    def stream_line(self, text: str) -> None:
+        """Write one line of a result that is a stream rather than a document.
+
+        `app logs` is the one command whose result does not fit a `Report`: it
+        is unbounded, it arrives over time, and the whole point of `--follow` is
+        that it is shown as it arrives rather than collected and rendered at the
+        end. So it gets its own way out — and it is still a way out of this
+        class, on standard output beside every other result, scrubbed like
+        everything else.
+
+        The structured rendering is one JSON object per line, which is what a
+        stream of JSON is: a consumer reads it a line at a time, and the run
+        still ends with the ordinary result document, so `ok` and the counts
+        are the last object rather than absent.
+
+        Args:
+            text: The line, as the robot wrote it.
+        """
+        if self._format is OutputFormat.JSON:
+            # Scrubbed before `json.dumps` for the reason `_emit_json` gives:
+            # `ensure_ascii` rewrites a non-ASCII character into an escape the
+            # redactor would no longer recognise.
+            self._write(self._out, json.dumps({"line": self._scrub(text)}))
+        else:
+            self._write(self._out, text)
+
     def emit(self, report: Report) -> ExitCode:
         """Render a command's result and say how the process should exit.
 

@@ -532,6 +532,98 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
 
     docker logs "$name"
 
+# Build the `reachyctl` wheel and the wheels it needs to install anywhere else.
+#
+# Four members, and the other three are not padding. `reachyctl` declares
+# `reachy-contracts`, `reachy-checks` and `reachy-session-client` as
+# requirements and nothing publishes them to an index, so a wheel released on
+# its own installs nowhere: the resolver looks for three distributions that do
+# not exist. They are built beside it and released beside it, and
+# `just wheel-verify` installs the set into an empty environment to prove that
+# is enough.
+#
+# One version for the whole repository, so every wheel here carries the same one
+# — see the root AGENTS.md.
+wheels out_dir="dist":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm --recursive --force '{{ out_dir }}'
+    for member in reachy-contracts reachy-checks reachy-session-client reachyctl; do
+        uv build --package "$member" --wheel --out-dir '{{ out_dir }}'
+    done
+    ls -1 '{{ out_dir }}'
+
+# Report how large a built wheel is, as one line of JSON.
+#
+# The same shape as `just image-size`, and for the same consumer: change 0014
+# gates on artifact growth and should read one format rather than two. The unit
+# differs because the artifacts do — an image is measured in mebibytes and a
+# wheel in kibibytes — and `size_bytes` is the field a gate compares, in both.
+#
+# JSON on standard output rather than a table, because the consumer is a gate.
+wheel-size wheel:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name="$(basename '{{ wheel }}')"
+    bytes="$(stat --format=%s '{{ wheel }}')"
+    # `{distribution}-{version}-{python}-{abi}-{platform}.whl`, and a wheel's
+    # file name spells a hyphen as an underscore.
+    artifact="$(echo "${name%%-*}" | tr '_' '-')"
+    version="$(echo "$name" | cut -d- -f2)"
+    printf '{"artifact":"%s","wheel":"%s","version":"%s","size_bytes":%s,"size_kib":%s}\n' \
+        "$artifact" "$name" "$version" "$bytes" \
+        "$(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1024 }')"
+
+# Install the built wheels into an empty environment and drive the tool.
+#
+# A wheel that builds and cannot be installed is a passing build and a broken
+# release, which is the same reasoning `just image-verify` is written from: the
+# artifact is verified by running it, not by inspecting how it was made. Three
+# things are checked, and the first is the one that catches a missing sibling —
+# an environment with nothing in it resolves the whole dependency set or fails.
+#
+# The environment is built in a temporary directory and the install runs from
+# there, so nothing about this checkout — its `.venv`, its workspace sources —
+# is on the path. `--find-links` supplies the four unpublished wheels; the
+# third-party dependencies come from the index, exactly as they would for
+# somebody installing a release.
+wheel-verify out_dir="dist":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    expected="$(just version)"
+    wheels="$(cd '{{ out_dir }}' && pwd)"
+    scratch="$(mktemp --directory)"
+    trap 'rm --recursive --force "$scratch"' EXIT
+    cd "$scratch"
+    uv venv --quiet env
+    VIRTUAL_ENV="$scratch/env" uv pip install --quiet --find-links "$wheels" reachyctl
+
+    reported="$("$scratch/env/bin/reachyctl" --version)"
+    if [ "$reported" != "reachyctl $expected" ]; then
+        echo "wheel-verify: the installed tool reports '$reported', not 'reachyctl $expected'" >&2
+        exit 1
+    fi
+    echo "wheel-verify: $reported"
+
+    "$scratch/env/bin/reachyctl" --help >/dev/null
+
+    # A real command, run as a standalone tool with nothing configured: every
+    # check is skipped, the run exits zero, and the result parses. That is
+    # reachyctl REQ-058's scenario, and it is also what proves the console
+    # script's whole import graph resolves in an environment that has only the
+    # release in it.
+    "$scratch/env/bin/reachyctl" --output json doctor > result.json
+    "$scratch/env/bin/python" - <<'PYTHON'
+    import json
+    import pathlib
+
+    document = json.loads(pathlib.Path("result.json").read_text(encoding="utf-8"))
+    assert document["command"] == "doctor", document
+    assert document["ok"] is True, document
+    assert document["data"]["skipped"] == document["data"]["checks"], document
+    print(f"wheel-verify: doctor reported {document['data']['checks']} checks, all skipped")
+    PYTHON
+
 # Redraw the committed perception fixture images.
 #
 # They are drawn rather than photographed, so their provenance is the script and

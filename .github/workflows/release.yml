@@ -1,25 +1,33 @@
 name: Release
 
-# Version derivation only. Nothing is published here: the image, the wheels and
-# the workflows that push them belong to the changes that create those
-# artifacts. What this workflow owns is the single version every one of them
-# will carry, and the tag that names the combination.
+# Version derivation, and the wheels. Two jobs on two different events, and
+# neither ever runs on the other's.
 #
 # release-please maintains a release pull request on the default branch,
 # accumulating conventional commits and the version they imply. Merging that
 # pull request is the release: the action then creates the tag and the GitHub
 # release. Nothing happens on a merge that is not the release pull request
 # except the release pull request being updated.
+#
+# The tag it creates is what runs the second job, which builds the `reachyctl`
+# wheel and the three unpublished wheels it needs, installs the set into an
+# empty environment to prove the release is installable, records each wheel's
+# size for change 0014 to gate on, and attaches them all to the release. The
+# container image is published from `images.yml` on the same tag.
+#
+# Every step calls a Justfile recipe rather than restating its command, so what
+# runs here reproduces locally with the command in the step.
 
 on:
   push:
     branches: [main]
+    tags: ["v*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -29,6 +37,10 @@ jobs:
   release-please:
     name: Release please
     runs-on: ubuntu-latest
+    # The default branch only. This workflow now also runs on the tag
+    # release-please itself creates, and running the action again there would be
+    # asking it to derive a version for a commit it has just released.
+    if: github.ref == 'refs/heads/main'
     permissions:
       # Writing the release pull request, the tag and the release, plus the
       # labels release-please puts on its own pull request to track its state.
@@ -57,3 +69,95 @@ jobs:
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  publish-wheels:
+    name: Publish the wheels
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      # Attaching the wheels to the release release-please created. Narrowed to
+      # this job, so the workflow-level default stays read-only.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      # One version for the whole repository, read from the place release
+      # automation writes it rather than from the tag. The tag has to agree: a
+      # tag pushed by hand at a commit whose version says something else would
+      # otherwise publish a wheel labelled with neither.
+      - name: Resolve the version the tag carries
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(just version)"
+          if [ "$TAG" != "v${version}" ]; then
+            echo "::error::the tag is ${TAG} but the repository version is ${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the wheels
+        run: just wheels
+
+      # A wheel that builds and cannot be installed is a passing build and a
+      # broken release. This installs the set into an empty environment with no
+      # workspace sources on the path and drives the console script, which is
+      # what catches an unpublished sibling that only resolves in this checkout.
+      - name: Install the wheels into an empty environment and run the tool
+        run: just wheel-verify
+
+      # Recorded as a release output so change 0014 can gate on their growth,
+      # in the same JSON shape `just image-size` emits. Three places on purpose:
+      # the log, the job summary a human reads, and an artifact a later job or a
+      # later change can fetch.
+      - name: Record the wheel sizes
+        run: |
+          set -euo pipefail
+          mkdir --parents wheel-size
+          {
+            echo '### Wheel sizes'
+            echo
+            echo '```json'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for wheel in dist/*.whl; do
+            name="$(basename "${wheel%.whl}")"
+            just wheel-size "$wheel" | tee "wheel-size/${name}.json" \
+              >> "$GITHUB_STEP_SUMMARY"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish the sizes as an artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reachyctl-wheel-size
+          path: wheel-size/
+          if-no-files-found: error
+
+      # Attached to the release release-please created for this tag. The
+      # architecture spec names GitHub Releases as the destination for both
+      # wheels, and `--clobber` makes a re-run of this job replace what it
+      # uploaded rather than fail on it.
+      #
+      # The release is created in the same action that pushed the tag, so it is
+      # normally there before this job starts; the wait covers the case where it
+      # is not yet, rather than failing a release over a few seconds.
+      - name: Attach the wheels to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5 6; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              break
+            fi
+            echo "the release for $TAG is not there yet (attempt ${attempt}); waiting"
+            sleep 10
+          done
+          gh release upload "$TAG" dist/*.whl wheel-size/*.json --clobber

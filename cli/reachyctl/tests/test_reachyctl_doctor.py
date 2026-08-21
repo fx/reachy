@@ -36,11 +36,10 @@ from reachy_session_client import (
     ConnectionFailedError,
     Credential,
 )
+from reachyctl.declaration import _configuration, load_intent
 from reachyctl.doctor import (
     DoctorPlan,
-    _configuration,
     execute,
-    load_intent,
     report_for,
 )
 from reachyctl.errors import ConfigurationError
@@ -448,9 +447,7 @@ def test_a_skipped_robot_check_says_why_rather_than_implying_a_mistake() -> None
     execute(plan, None, reporter)
 
     rows = {row["check"]: row for row in json.loads(streams.result)["rows"]}
-    assert (
-        "cannot open a connection to the robot yet" in rows[DAEMON_REACHABLE]["detail"]
-    )
+    assert "--robot" in rows[DAEMON_REACHABLE]["detail"]
     assert "--url" in rows[GROUNDSTATION_SESSION]["detail"]
 
 

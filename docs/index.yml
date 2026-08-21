@@ -97,7 +97,7 @@ changes:
     path: changes/0009-reachyctl-deploy-and-config.md
     description: Verified deployment, configuration management with preview, and application lifecycle
     spec: reachyctl
-    status: draft
+    status: complete
     depends_on: ["0002", "0008"]
   - id: "0010"
     name: provisioning-ansible

@@ -21,6 +21,7 @@ dependencies = [
     # that hands a command a `str` where it expects a path.
     "typer>=0.12.4",
     "rich>=13.7",
+    "asyncssh>=2.14",
 ]
 
 # The live-frame source and nothing else. OpenCV is tens of megabytes and every
