@@ -272,3 +272,32 @@ def test_a_configuration_that_is_not_a_mapping_is_refused() -> None:
         BenchmarkResult.from_document(
             {"benchmark": "detect", "status": "measured", "configuration": 4},
         )
+
+
+def test_a_measured_figure_that_is_not_finite_is_refused() -> None:
+    """`json` writes `NaN` unquoted and reads it back as a float."""
+    with pytest.raises(ValueError, match="not a measurement"):
+        Measurement.from_document(
+            {"name": "detect.x", "unit": "ms", "value": float("nan")},
+        )
+
+
+def test_a_distribution_carrying_an_infinity_is_refused() -> None:
+    """A gate reading one would report a percentile nobody can act on."""
+    with pytest.raises(ValueError, match="not a measurement"):
+        Measurement.from_document(
+            {
+                "name": "detect.x",
+                "unit": "ms",
+                "value": 1.0,
+                "distribution": {
+                    "samples": 3,
+                    "min_ms": 1.0,
+                    "median_ms": 1.0,
+                    "p95_ms": float("inf"),
+                    "max_ms": 1.0,
+                    "mean_ms": 1.0,
+                    "stdev_ms": 0.0,
+                },
+            },
+        )

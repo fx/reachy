@@ -45,7 +45,6 @@ from reachy_bench.compare import compare, predecessor_lines
 from reachy_bench.context import RunContext, collect_context
 from reachy_bench.registry import (
     DEFAULT_FRAME,
-    DEFAULT_FRAME_RATE,
     DEFAULT_ITERATIONS,
     DEFAULT_SAMPLE_SECONDS,
     DEFAULT_THREAD_COUNTS,
@@ -191,7 +190,16 @@ def _parser() -> argparse.ArgumentParser:
         metavar="MS",
         help="A manually recorded photon-to-head interval, in milliseconds.",
     )
-    run.add_argument("--frame-rate", type=float, default=DEFAULT_FRAME_RATE)
+    run.add_argument(
+        "--frame-rate",
+        type=float,
+        default=0.0,
+        help=(
+            "The frame rate the robot is already tracking at, as you know it "
+            "to be. `robot-load` records it and refuses without it; it does "
+            "not set it."
+        ),
+    )
     run.add_argument("--sample-seconds", type=float, default=DEFAULT_SAMPLE_SECONDS)
 
     sizes = commands.add_parser(

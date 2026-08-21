@@ -29,9 +29,16 @@ Against a real installation, the two that need a robot go through `reachyctl`,
 which already knows how to open a link to one:
 
 ```
-reachyctl bench --benchmark robot-load --robot user@host
+reachyctl bench --benchmark robot-load --robot user@host --frame-rate 10
 reachyctl bench --benchmark photon-to-head --observation 180 --observation 210
 ```
+
+Both of those take something from the operator rather than establishing it.
+`robot-load` reads the robot's processors and does **not** start the robot
+tracking, so `--frame-rate` declares what it is already doing and the benchmark
+refuses without it; `photon-to-head` has no automated stimulus at all, so the
+intervals are recorded by hand and passed in. A default in either place would
+put a condition into a result that nothing had established.
 
 ## What is measured
 
@@ -44,13 +51,21 @@ reachyctl bench --benchmark photon-to-head --observation 180 --observation 210
 | `photon-to-head` | Stimulus to head movement, end to end | yes |
 | `robot-load` | The robot's processor load while it tracks | yes |
 
-Two of those need reading carefully.
+Three of those need reading carefully.
 
 **`detect` reproduces a curve, not a number.** The predecessor's inference was
 fastest at four threads; the knee moves with the host, and a suite that measured
 only the configured value would never reveal that it had moved. The knee is
 reported as a note rather than gated, because a knee that moved is a property of
 the machine.
+
+**`robot-load` reads a load; it does not create one.** The spec asks for robot
+CPU "while tracking at a *given* frame rate", and the given part is the
+operator's: the benchmark samples `/proc/stat` twice and multiplies by the core
+count, and the rate is a declaration that travels in the result so two runs can
+be told apart. What it does check is that the robot is not idle — a machine
+doing nothing reported under a heading that says "while tracking" would be worse
+than no measurement — and that check is a floor rather than a proof.
 
 **`pipeline` reports no gesture timing**, and that is deliberate. This build
 wires no gesture model — the perception spec's recorded decision — so the

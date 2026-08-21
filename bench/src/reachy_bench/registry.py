@@ -39,7 +39,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_FRAME",
-    "DEFAULT_FRAME_RATE",
     "DEFAULT_ITERATIONS",
     "DEFAULT_SAMPLE_SECONDS",
     "DEFAULT_THREAD_COUNTS",
@@ -82,9 +81,8 @@ DEFAULT_WARMUP: Final = 5
 # are here because a knee at either would be invisible otherwise.
 DEFAULT_THREAD_COUNTS: Final = (1, 2, 4, 6, 8)
 
-# The frame rate the recorded robot-load figure was taken at, and how long to
-# sample the robot's processors for.
-DEFAULT_FRAME_RATE: Final = 10.0
+# How long `robot-load` samples the robot's processors for. There is
+# deliberately no default frame rate beside it: see `Options.frame_rate`.
 DEFAULT_SAMPLE_SECONDS: Final = 10.0
 
 
@@ -117,7 +115,14 @@ class Options:
         robot: How to run a command on the robot, for the hardware benchmarks.
             `None` off the robot, which is what makes them refuse rather than
             invent a number.
-        frame_rate: The frame rate `robot-load` measures the robot under.
+        frame_rate: The frame rate the robot is tracking at while `robot-load`
+            samples it, **as the operator declares it**. There is no default,
+            and that is the point: this benchmark samples the robot's processors
+            over an interval and does not start, configure or verify the
+            tracking — the operator sets that up, exactly as they set up the
+            photon-to-head stimulus. A default would put a condition into a
+            result that nothing had established. Zero means undeclared, which
+            `robot-load` refuses.
         sample_seconds: How long `robot-load` samples for.
         observations_ms: Manually recorded photon-to-head timings, in
             milliseconds. There is no automated stimulus — that is this
@@ -134,7 +139,7 @@ class Options:
     artifact_sizes: tuple[Path, ...] = ()
     network: str = ""
     robot: Callable[[Sequence[str]], str] | None = None
-    frame_rate: float = DEFAULT_FRAME_RATE
+    frame_rate: float = 0.0
     sample_seconds: float = DEFAULT_SAMPLE_SECONDS
     observations_ms: tuple[float, ...] = ()
 

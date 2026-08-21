@@ -73,12 +73,16 @@ jobs:
       - name: Take the measurements
         run: just bench --profile "$PROFILE" --output bench-results.json
 
+      # `always()` because a run where a benchmark failed is a run whose other
+      # numbers are still worth having, and the document is written either way:
+      # the suite reports a failed benchmark in it and then exits non-zero.
       - name: Publish the measurements as an artifact
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bench-results
           path: bench-results.json
-          if-no-files-found: error
+          if-no-files-found: warn
 
       # The gate. It fails when a measurement has regressed beyond its stated
       # tolerance — naming the measurement and by how much — and also when a

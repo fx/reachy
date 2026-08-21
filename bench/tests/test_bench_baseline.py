@@ -346,3 +346,18 @@ def test_a_recorded_figure_committed_as_a_bare_number_is_refused() -> None:
     """An entry with no `get` would raise `AttributeError` from inside it."""
     with pytest.raises(ValueError, match="is not one"):
         Baseline.from_document(_document(artifacts={"footprint.x": 97451}))
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity"])
+def test_a_recorded_figure_that_is_not_finite_is_refused(value: str) -> None:
+    """`json` reads both back as floats, and a gate built on one fails open.
+
+    Args:
+        value: The unquoted JSON literal to commit.
+    """
+    document = json.loads(
+        json.dumps(_document()).replace('"value": 97451', f'"value": {value}'),
+    )
+
+    with pytest.raises(ValueError, match="is not one"):
+        Baseline.from_document(document)

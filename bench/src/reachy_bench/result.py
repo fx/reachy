@@ -36,7 +36,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Self
 
 from reachy_bench.context import HostContext, RunContext, SoftwareContext
-from reachy_bench.stats import Distribution
+from reachy_bench.stats import Distribution, finite
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
@@ -186,18 +186,18 @@ class Measurement:
             return cls(
                 name=str(document["name"]),
                 unit=Unit(document["unit"]),
-                value=float(document["value"]),
+                value=finite(document["value"]),
                 distribution=(
                     None
                     if spread is None
                     else Distribution(
                         samples=int(spread["samples"]),
-                        min_ms=float(spread["min_ms"]),
-                        median_ms=float(spread["median_ms"]),
-                        p95_ms=float(spread["p95_ms"]),
-                        max_ms=float(spread["max_ms"]),
-                        mean_ms=float(spread["mean_ms"]),
-                        stdev_ms=float(spread["stdev_ms"]),
+                        min_ms=finite(spread["min_ms"]),
+                        median_ms=finite(spread["median_ms"]),
+                        p95_ms=finite(spread["p95_ms"]),
+                        max_ms=finite(spread["max_ms"]),
+                        mean_ms=finite(spread["mean_ms"]),
+                        stdev_ms=finite(spread["stdev_ms"]),
                     )
                 ),
                 detail=dict(document.get("detail", {})),

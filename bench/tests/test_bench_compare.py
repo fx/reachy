@@ -637,3 +637,39 @@ def test_a_size_only_run_on_an_unrecorded_machine_says_nothing_about_profiles() 
 
     assert comparison.ok
     assert "linux-aarch64-4c" not in _verdicts(comparison)
+
+
+def test_a_measurement_that_is_not_a_finite_number_fails_rather_than_passing() -> None:
+    """`nan` compares false against every bound, so it would read as within it.
+
+    That is the one direction a gate must never fail in, and it is why the
+    document readers refuse a non-finite figure at the door and the comparison
+    refuses one again for a value built in memory.
+    """
+    run = make_run(
+        [
+            make_benchmark(
+                "footprint",
+                {"footprint.x": float("nan")},
+                unit=Unit.BYTES,
+            ),
+        ],
+    )
+    baseline = make_baseline(artifacts={"footprint.x": 100.0})
+
+    comparison = compare(run, baseline)
+
+    assert not comparison.ok
+    (failure,) = comparison.failures
+    assert failure.verdict is Verdict.REGRESSED
+    assert "not a finite number" in failure.describe()
+
+
+def test_an_infinite_recorded_figure_fails_rather_than_permitting_everything() -> None:
+    """An infinity on either side makes the ratio meaningless, not generous."""
+    run = make_run(
+        [make_benchmark("footprint", {"footprint.x": 100.0}, unit=Unit.BYTES)],
+    )
+    baseline = make_baseline(artifacts={"footprint.x": float("inf")})
+
+    assert not compare(run, baseline).ok

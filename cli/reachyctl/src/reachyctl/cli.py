@@ -1626,10 +1626,14 @@ def bench(
         float,
         typer.Option(
             "--frame-rate",
-            min=0.1,
-            help="The frame rate the robot is tracking at, recorded with the load.",
+            min=0.0,
+            help=(
+                "The frame rate the robot is already tracking at, as you know "
+                "it to be. `robot-load` records it and refuses without it; it "
+                "does not set it, any more than it sets up the robot."
+            ),
         ),
-    ] = 10.0,
+    ] = 0.0,
     sample_seconds: Annotated[
         float,
         typer.Option(
@@ -1644,8 +1648,11 @@ def bench(
     Without `--robot` this measures what a container can measure and reports
     the two hardware benchmarks as excluded, which is what `just bench` does.
     With one, `robot-load` reads the robot's own processor time over an
-    interval; `photon-to-head` reports the intervals given with `--observation`,
-    because there is no automated stimulus and the measurement is taken by hand.
+    interval — it does not start the robot tracking, so `--frame-rate` declares
+    what it is already doing and the command refuses without it.
+    `photon-to-head` reports the intervals given with `--observation`, for the
+    same reason: there is no automated stimulus, and the measurement is taken by
+    hand.
 
     The result is one JSON document. `just bench-compare` judges it against the
     baseline committed in the repository.
@@ -1662,7 +1669,7 @@ def bench(
         output: Where to write the result document.
         network: How the link behaved.
         observation: Manually recorded photon-to-head intervals.
-        frame_rate: The frame rate the robot is tracking at.
+        frame_rate: The frame rate the robot is already tracking at.
         sample_seconds: How long to sample the robot's processors for.
 
     Raises:

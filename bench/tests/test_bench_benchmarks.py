@@ -466,7 +466,7 @@ def test_robot_load_reports_cores_busy_out_of_the_cores_the_robot_has() -> None:
     assert measurement.unit is Unit.CORES
     assert measurement.value == pytest.approx(1.6)
     assert measurement.detail["cores_available"] == 4
-    assert result.configuration["frame_rate"] == 10.0
+    assert result.configuration["frame_rate_declared"] == 10.0
 
 
 def test_robot_load_refuses_to_measure_the_machine_it_is_running_on() -> None:
@@ -476,6 +476,76 @@ def test_robot_load_refuses_to_measure_the_machine_it_is_running_on() -> None:
     assert result.status is Status.FAILED
     assert "no robot" in result.reason
     assert "reachyctl bench --robot" in result.reason
+
+
+def test_robot_load_refuses_a_frame_rate_nobody_declared() -> None:
+    """It reads the robot's processors; it does not set the robot tracking.
+
+    A defaulted rate would put a condition into the result that nothing had
+    established, which is the same fabrication as reporting a figure for a
+    stage with no model behind it.
+    """
+
+    def _run(argv: Sequence[str]) -> str:
+        """Answer nothing, because the declaration is checked first.
+
+        Args:
+            argv: The command.
+
+        Returns:
+            Nothing; it always raises.
+
+        Raises:
+            AssertionError: If the robot is contacted at all.
+        """
+        del argv
+        message = "the robot must not be contacted without a declared frame rate"
+        raise AssertionError(message)
+
+    result = load.build(
+        Options(repository=Path("/nowhere"), robot=_run),
+        sleep=lambda _seconds: None,
+    )
+
+    assert result.status is Status.FAILED
+    assert "no frame rate" in result.reason
+    assert "--frame-rate" in result.reason
+
+
+def test_an_idle_robot_is_refused_rather_than_reported_as_tracking() -> None:
+    """A floor, not a proof: it catches the wrong machine and a stopped app."""
+    answers = iter(
+        [
+            "4\n",
+            "cpu  1000 0 1000 8000 0 0 0 0 0 0\n",
+            "cpu  1000 0 1000 9000 0 0 0 0 0 0\n",
+        ],
+    )
+
+    def _run(argv: Sequence[str]) -> str:
+        """Answer a command on an idle robot.
+
+        Args:
+            argv: The command.
+
+        Returns:
+            The next canned answer.
+        """
+        del argv
+        return next(answers)
+
+    result = load.build(
+        Options(
+            repository=Path("/nowhere"),
+            robot=_run,
+            frame_rate=10.0,
+            sample_seconds=5.0,
+        ),
+        sleep=lambda _seconds: None,
+    )
+
+    assert result.status is Status.FAILED
+    assert "a machine doing nothing" in result.reason
 
 
 def test_a_robot_that_reports_no_processors_is_refused() -> None:

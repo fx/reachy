@@ -8,10 +8,23 @@ else is not this measurement.
 
 **How it is measured.** The robot publishes cumulative processor time in
 `/proc/stat`; two samples an interval apart give the busy time in that interval,
-and dividing by the interval gives cores. Sampling twice and subtracting is the
-only honest way to read it — the file's first line is time since boot, so a
+and multiplying by the core count gives cores. Sampling twice and subtracting is
+the only honest way to read it — the file's first line is time since boot, so a
 single sample reports the machine's whole history rather than what tracking
 costs now.
+
+**What it does not do is start the tracking.** The spec asks for "robot CPU
+while tracking at a *given* frame rate", and this benchmark is what reads the
+CPU: the tracking is the operator's to set up, exactly as the photon-to-head
+stimulus is. So the frame rate is **declared** rather than defaulted — a default
+would put a condition into a result that nothing had established, which is the
+same fabrication as reporting a number for a stage with no model behind it — and
+a run that declares none is refused. What the benchmark *can* check, it does: a
+robot whose processors are essentially idle is not running this stack at all,
+and reporting a tracking figure from one would be worse than reporting none. The
+floor below is that check and no more than that check; it catches the wrong
+machine and a stopped application, and it is not evidence that anything is
+tracking.
 
 **What talks to the robot is an argument.** This benchmark is handed something
 that runs a command there and hands back its output, which is what
@@ -52,6 +65,13 @@ NAME: Final = "robot-load"
 # taken from anywhere: this benchmark reads a file and never composes one.
 _STAT_COMMAND: Final = ("cat", "/proc/stat")
 _CPU_COUNT_COMMAND: Final = ("nproc",)
+
+# Below this many cores the robot is doing nothing, and a figure reported from
+# it would describe an idle machine under a heading that says "while tracking".
+# A floor rather than a proof: a robot running its daemon and nothing else
+# clears it easily, so what this catches is the wrong machine and a stopped
+# application, which are the two mistakes worth catching cheaply.
+_IDLE_FLOOR_CORES: Final = 0.05
 
 # The fields of `/proc/stat`'s aggregate line that are not work. `idle` is the
 # processor doing nothing and `iowait` is it waiting on a device, and counting
@@ -218,12 +238,30 @@ def build(
             "report a groundstation's processors as a robot's. Run it through "
             "`reachyctl bench --robot user@host`",
         )
+    if options.frame_rate <= 0.0:
+        return BenchmarkResult.failed(
+            NAME,
+            "no frame rate: this benchmark reads the robot's processors and "
+            "does not set the robot tracking, so the rate it is tracking at is "
+            "yours to declare with --frame-rate. Without it the figure would "
+            "carry a condition nothing established, and two runs would not be "
+            "comparable",
+        )
     cores, available = measure_load(options.robot, options.sample_seconds, sleep)
+    if cores < _IDLE_FLOOR_CORES:
+        return BenchmarkResult.failed(
+            NAME,
+            f"the robot used {cores:.3f} of {available} cores over "
+            f"{options.sample_seconds:.0f}s, which is a machine doing nothing. "
+            f"Reporting that under a heading that says 'while tracking' would "
+            f"be worse than reporting nothing: check the application is running "
+            f"and that this is the robot you meant",
+        )
     return BenchmarkResult(
         benchmark=NAME,
         status=Status.MEASURED,
         configuration={
-            "frame_rate": options.frame_rate,
+            "frame_rate_declared": options.frame_rate,
             "sample_seconds": options.sample_seconds,
             "cores_available": available,
             "network": options.network,
@@ -235,16 +273,18 @@ def build(
                 value=cores,
                 detail={
                     "cores_available": available,
-                    "frame_rate": options.frame_rate,
+                    "frame_rate_declared": options.frame_rate,
                 },
             ),
         ),
         notes=(
             "the whole machine's processors, not the application's: the robot "
             "runs motion control and audio alongside, and what the recorded "
-            "1.52-of-4 figure describes is the device rather than one process. "
-            "The frame rate is configuration and is recorded above, because the "
-            "figure means nothing without it",
+            "1.52-of-4 figure describes is the device rather than one process",
+            "the frame rate is the operator's declaration of what the robot was "
+            "already doing, not something this benchmark set. Two runs are "
+            "comparable only when the same setup produced both, which is why "
+            "the declaration travels in the result",
         ),
     )
 

@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final, Self
 
 from reachy_bench.result import Unit
+from reachy_bench.stats import finite
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -131,10 +132,10 @@ class BaselineEntry:
         """
         try:
             stated = document.get("tolerance")
-            return cls(
-                value=float(document["value"]),
+            entry = cls(
+                value=finite(document["value"]),
                 unit=Unit(document["unit"]),
-                tolerance=None if stated is None else float(stated),
+                tolerance=None if stated is None else finite(stated),
                 note=str(document.get("note", "")),
             )
         except (AttributeError, KeyError, TypeError, ValueError) as error:
@@ -143,6 +144,7 @@ class BaselineEntry:
             # that half-parsed would gate on the half that did.
             message = f"baseline entry {name!r} is not one: {document!r}"
             raise ValueError(message) from error
+        return entry
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

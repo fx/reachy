@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-__all__ = ["HIGH_PERCENTILE", "Distribution", "percentile"]
+__all__ = ["HIGH_PERCENTILE", "Distribution", "finite", "percentile"]
 
 # The high percentile every timing reports beside its median. Ninety-five rather
 # than ninety-nine: a benchmark run is tens of samples, and the ninety-ninth
@@ -39,6 +39,32 @@ HIGH_PERCENTILE: Final = 95.0
 # `time.perf_counter` deals in, and reported in milliseconds, because that is
 # what the recorded baseline is written in.
 _MILLISECONDS: Final = 1000.0
+
+
+def finite(value: object) -> float:
+    """Read a number that a comparison can actually compare.
+
+    `float()` accepts `nan` and `inf`, and neither is a figure a gate can be
+    built on: `nan` compares false against every bound, so a measurement
+    carrying one is reported as within tolerance, and an infinite tolerance
+    permits every regression there is. Both fail *open*, which is the one
+    direction a gate must never fail in.
+
+    Args:
+        value: What the document carried.
+
+    Returns:
+        The number.
+
+    Raises:
+        ValueError: If it is not a finite number. The caller turns that into a
+            message naming the entry.
+    """
+    number = float(value)  # type: ignore[arg-type]  # the caller catches TypeError: this is where a document's arbitrary JSON is turned into a number, and "not a number at all" and "not a finite one" are the same event to it
+    if not math.isfinite(number):
+        message = f"{number} is not a figure a comparison can compare"
+        raise ValueError(message)
+    return number
 
 
 def percentile(samples: Sequence[float], rank: float) -> float:

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from reachy_bench.stats import HIGH_PERCENTILE, Distribution, percentile
+from reachy_bench.stats import HIGH_PERCENTILE, Distribution, finite, percentile
 
 
 def test_the_percentile_is_a_sample_that_was_actually_observed() -> None:
@@ -142,3 +142,26 @@ def test_the_document_carries_every_statistic_rounded_to_the_microsecond() -> No
     }
     assert document["min_ms"] == pytest.approx(1.234)
     assert document["max_ms"] == pytest.approx(2.346)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_figure_is_refused(value: float) -> None:
+    """A gate built on one fails open, which is the one direction it must not.
+
+    Args:
+        value: The figure to refuse.
+    """
+    with pytest.raises(ValueError, match="not a figure"):
+        finite(value)
+
+
+def test_a_finite_figure_comes_back_as_a_float() -> None:
+    """Including one a JSON document carried as a whole number."""
+    assert finite(97451) == 97451.0
+    assert finite("1.5") == 1.5
+
+
+def test_something_that_is_not_a_number_at_all_is_refused() -> None:
+    """The caller catches both, because to a document they are one event."""
+    with pytest.raises((TypeError, ValueError)):
+        finite("plenty")

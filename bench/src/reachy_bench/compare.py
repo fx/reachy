@@ -57,6 +57,7 @@ better would need a direction recorded beside it, and there is not one.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -284,6 +285,25 @@ def _judge(
                 f"the recorded figure is in {entry.unit.value} and this run "
                 f"measured {measurement.unit.value}; they are not the same "
                 f"quantity"
+            ),
+        )
+    if not math.isfinite(measurement.value) or not math.isfinite(entry.value):
+        # The one direction a gate must never fail in. `nan` compares false
+        # against every bound, so a measurement carrying one would be reported
+        # as within tolerance however wrong it is; an infinity would be reported
+        # as a regression of an amount nobody can read. The readers refuse both
+        # at the door, and this is the backstop for a value built in memory
+        # rather than read from a document.
+        return Delta(
+            name=name,
+            verdict=Verdict.REGRESSED,
+            measured=measurement.value,
+            baseline=entry.value,
+            unit=entry.unit,
+            tolerance=tolerance,
+            detail=(
+                "one of these is not a finite number, so nothing about them can "
+                "be compared; a gate that passed on that would fail open"
             ),
         )
     if entry.value == 0.0:
