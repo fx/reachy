@@ -270,13 +270,16 @@ either way.
 
 ## After: prove the chain again
 
+**`--output` is a root option, so it goes before the command name**, exactly as
+it does in the `before.json` run at the top of this page. After it, `reachyctl`
+answers `No such option: --output`.
+
 ```
-reachyctl doctor \
+reachyctl --output json doctor \
   --robot reachy@192.0.2.20 \
   --url ws://127.0.0.1:8080/v1/session \
   --credential-file ~/.config/reachy/groundstation-credential \
-  --intent declaration.json \
-  --output json > after.json
+  --intent declaration.json > after.json
 ```
 
 > **⏳ PENDING HARDWARE VERIFICATION** for the `--robot` half. The groundstation
