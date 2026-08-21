@@ -30,9 +30,12 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Annotated, Final, Self
 
-# TID251 bans pydantic's model bases everywhere so that a consumer cannot
-# declare its own copy of a wire type; the ban is lifted for this package in the
-# root `pyproject.toml`, because this is the declaration site it points at.
+# TID253 bans importing pydantic at module level everywhere else in the
+# workspace, so that a consumer cannot declare its own copy of a wire type. The
+# ban is lifted for this package in the root `pyproject.toml`, because this is
+# the declaration site it points at. (TID251 in this repository is a different
+# rule doing a different job: it keeps Reachy imports out of the vendored
+# ESPHome directory.)
 from pydantic import BaseModel, ConfigDict, Field, RootModel, StringConstraints
 
 __all__ = [
