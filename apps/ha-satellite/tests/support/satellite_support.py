@@ -27,12 +27,14 @@ certain about exactly the property it was checking.
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 
 from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.adapters.sounds import Sound
+from reachy_mini_ha_satellite.esphome.models import AvailableWakeWord, WakeWordType
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     Detections,
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.adapters.perception_local import PixelFace
     from reachy_mini_ha_satellite.esphome.models import ServerState
     from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
+    from reachy_mini_ha_satellite.wake_word import ModelInput
 
 __all__ = [
     "CREDENTIAL",
@@ -59,13 +62,17 @@ __all__ = [
     "FakeCapture",
     "FakeFaceDetector",
     "FakeMedia",
+    "FakeMicroWakeWord",
+    "FakeOpenWakeWord",
     "FakePerception",
     "FakePlayback",
     "FakeRobot",
     "FakeSoundSource",
+    "FakeWakeWordFeatures",
     "ManualClock",
     "ManualScheduler",
     "ScheduledCall",
+    "available_wake_word",
     "face",
     "frame",
     "immediately",
@@ -876,6 +883,152 @@ class FakeRobot:
         self.gaze.append((x, y, z))
         self.durations.append(duration)
         return np.eye(4, dtype=np.float64)
+
+
+# --- Wake words ---------------------------------------------------------------
+#
+# The three fakes below are what makes wake-word detection testable at all. A
+# real model answers a question about a recording of somebody speaking, which
+# this repository does not have and a runner could not act on if it did; these
+# answer whatever the test scripted, which turns "does it fire twice inside the
+# refractory window" into an assertion instead of a thing somebody stands in
+# front of a robot to find out.
+
+
+class FakeWakeWordFeatures:
+    """A feature frontend that turns each chunk into exactly one model input.
+
+    The real ones turn a chunk into zero, one or several inputs depending on
+    how full their window is, which is a detail of the runtimes rather than of
+    anything the detector decides. One-in-one-out makes "the model fired on
+    this chunk" a thing a test can state.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing having been seen."""
+        self.chunks: list[bytes] = []
+
+    def process_streaming(self, audio_chunk: bytes, /) -> Iterable[ModelInput]:
+        """Record the chunk and hand back one input standing for it.
+
+        Args:
+            audio_chunk: The audio, which is not examined.
+
+        Returns:
+            Exactly one input.
+        """
+        self.chunks.append(audio_chunk)
+        return [np.frombuffer(audio_chunk, dtype="<i2")]
+
+
+class FakeMicroWakeWord:
+    """A microWakeWord model that fires when a test says so."""
+
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        wake_word: str = "Fake Word",
+        fires: Sequence[bool] = (),
+        fails: bool = False,
+    ) -> None:
+        """Script what this model answers.
+
+        Args:
+            model_id: Its identifier, which is what the active set holds.
+            wake_word: The phrase it listens for.
+            fires: What it answers, one entry per input it is given. Once they
+                run out it answers `False`, which is what a model does for
+                nearly every ten milliseconds of its life.
+            fails: Whether it raises instead of answering. A model whose native
+                runtime has gone wrong is a thing that happens, and what the
+                caller does about it is worth asserting.
+        """
+        self.id = model_id
+        self.wake_word = wake_word
+        self.probability_cutoff = 0.0
+        self.cutoffs: list[float] = []
+        self.inputs: list[ModelInput] = []
+        self._fires = list(fires)
+        self._fails = fails
+
+    def process_streaming(self, features: ModelInput, /) -> bool | None:
+        """Answer whatever this model was scripted to answer.
+
+        Args:
+            features: One input from the frontend.
+
+        Returns:
+            Whether the wake word fired.
+
+        Raises:
+            RuntimeError: When this model was built to fail.
+        """
+        self.inputs.append(features)
+        self.cutoffs.append(self.probability_cutoff)
+        if self._fails:
+            message = "the model is broken"
+            raise RuntimeError(message)
+        return self._fires.pop(0) if self._fires else False
+
+
+class FakeOpenWakeWord:
+    """An openWakeWord model, which answers with probabilities rather than a verdict."""
+
+    def __init__(self, model_id: str, *, probabilities: Sequence[float] = ()) -> None:
+        """Script what this model answers.
+
+        Args:
+            model_id: Its identifier.
+            probabilities: What it yields for each input it is given, one entry
+                per input. Once they run out it yields zero.
+        """
+        self.id = model_id
+        self.wake_word = "Fake Open Word"
+        self.inputs: list[ModelInput] = []
+        self._probabilities = list(probabilities)
+
+    def process_streaming(self, embeddings: ModelInput, /) -> Iterable[float]:
+        """Answer whatever this model was scripted to answer.
+
+        Args:
+            embeddings: One input from the frontend.
+
+        Returns:
+            The probabilities for this input.
+        """
+        self.inputs.append(embeddings)
+        return [self._probabilities.pop(0) if self._probabilities else 0.0]
+
+
+def available_wake_word(
+    model_id: str,
+    *,
+    cutoff: float = 0.7,
+    kind: WakeWordType = WakeWordType.MICRO_WAKE_WORD,
+) -> AvailableWakeWord:
+    """Describe a wake word the way the registry that discovers them does.
+
+    Args:
+        model_id: Its identifier.
+        cutoff: The probability cutoff its own configuration declares.
+        kind: Which runtime it belongs to. The detector reads this rather than
+            testing the model's class, which is what lets the fakes above stand
+            in for either engine.
+
+    Returns:
+        The registry entry.
+    """
+    return AvailableWakeWord(
+        id=model_id,
+        type=kind,
+        wake_word=model_id,
+        # Never opened: the registry entry is read for its type and its cutoff,
+        # and the model it would point at is one of the fakes above.
+        wake_word_path=Path("/reachy-satellite-tests") / f"{model_id}.json",
+        trained_languages=["en"],
+        probability_cutoff=cutoff,
+    )
 
 
 # --- The vendored protocol layer ---------------------------------------------

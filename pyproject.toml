@@ -352,6 +352,7 @@ banned-module-level-imports = ["pydantic"]
 "reachy_mini_ha_satellite.behaviour".msg = "The vendored ESPHome code must not import the behaviour layer."
 "reachy_mini_ha_satellite.config".msg = "The vendored ESPHome code must not import this application's configuration."
 "reachy_mini_ha_satellite.ports".msg = "The vendored ESPHome code must not import this application's ports."
+"reachy_mini_ha_satellite.wake_word".msg = "The vendored ESPHome code must not import the wake-word detector; it runs the models this code merely loads and announces, and it is driven from outside the directory."
 "reachy_mini_ha_satellite.web".msg = "The vendored ESPHome code must not import this application's web interface."
 
 [tool.mypy]

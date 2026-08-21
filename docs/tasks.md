@@ -36,6 +36,20 @@ Catch-all task list for work not tracked in a specific [change document](changes
       - It starts, appears in the daemon's application list, and the dashboard
         links to its settings page (ha-satellite REQ-049)
       - `/config`, `/status` and the settings page answer
+      - **Somebody says the wake word and the robot wakes** (ha-satellite
+        REQ-044), and says it again with the network unplugged. The detection
+        loop is proved here against fake models, and against the real ones only
+        with the threshold forced below anything they can report — there is no
+        recording of the phrase in this repository, so *recognition* has never
+        been exercised anywhere. Say "stop" over a response and check that it
+        stops; then check that saying it at an idle robot does nothing
+      - The three microphone settings audibly do something: turn Home
+        Assistant's `mic_volume` down and confirm it transcribes a quieter
+        signal, and turn `mic_gain` and `mic_noise` up — the entities behind
+        `mic_auto_gain` and `mic_noise_suppression` — and confirm the
+        conditioner improves a noisy room rather than damaging a quiet one. All
+        three were inert until the detection loop landed and none of them has
+        been near a microphone
       - The three required antenna motions read as distinct across a room —
         still, opposed, together — and the head tracks smoothly at the tuned
         deadzone and smoothing
