@@ -27,6 +27,7 @@ and the gate covers it with no further change here or in the workflow.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -255,8 +256,8 @@ def export(
 ) -> list[Path]:  # pragma: no cover - writes to the filesystem
     """Write every rendered artifact under an output directory, and only those.
 
-    **Anything already under `out_dir` that this run did not write is deleted**,
-    along with any directory left empty by that. Writing without pruning would
+    **The output directory is discarded and rebuilt**, so what is left in it
+    afterwards is exactly what this run produced. Writing without removing would
     let a contract that was removed or renamed keep its committed artifact
     forever: the drift gate compares the tree against what regeneration
     produced, so it would go on passing over a published interface nothing
@@ -265,8 +266,8 @@ def export(
 
     That makes the directory this writes into fully owned. It is
     `docs/contracts/`, whose generated index says in so many words that every
-    file in it is generated; pointing this at a directory holding anything else
-    would delete it.
+    file in it is generated; **pointing this at a directory holding anything
+    else destroys it**.
 
     Args:
         out_dir: The directory to write into, created if it does not exist.
@@ -276,58 +277,26 @@ def export(
         The paths written, in sorted order.
     """
     rendered = render_all(contracts)
+    # Discard the whole directory and write it again, rather than reconciling
+    # what is there against what is about to be. Reconciling was tried and it is
+    # a nest of cases nobody gets right in one go: a file to delete, a directory
+    # to delete only once emptied, deepest-first ordering, and a symlink that
+    # `is_file` and `is_dir` both answer about its *target* — so a broken one
+    # survives the sweep meant to remove it and a link to a directory makes
+    # `rmdir` raise on the link itself. None of those shapes has any business in
+    # a generated directory, and removing the directory removes the question
+    # along with them.
+    if out_dir.is_symlink():
+        out_dir.unlink()
+    elif out_dir.exists():
+        shutil.rmtree(out_dir)
     written: list[Path] = []
     for relative, content in sorted(rendered.items()):
         destination = out_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
         written.append(destination)
-    _prune(out_dir, set(written))
     return written
-
-
-def _prune(
-    out_dir: Path,
-    written: set[Path],
-) -> None:  # pragma: no cover - reads and writes the filesystem
-    """Delete everything under a directory that this run did not write.
-
-    Deepest entries first, so a directory is considered only after its contents
-    and is removed exactly when it is left empty — a directory still holding a
-    generated artifact survives, and one whose last artifact was withdrawn does
-    not.
-
-    **A symlink is handled before either of those branches, and that ordering is
-    the whole of why it is here.** `is_file` and `is_dir` follow a link, so a
-    broken one is neither and would be left behind — a stale artifact surviving
-    the very sweep that exists to remove it. A link to a directory is worse than
-    that: it answers `is_dir` truthfully about its target, and `rmdir` on the
-    link itself then raises `NotADirectoryError` and fails the run. Neither
-    shape has any business being in a generated directory, which is exactly why
-    the sweep has to remove one rather than trip over it.
-
-    Enumeration happens up front, so removing a directory or a link can leave a
-    later entry pointing at nothing. Each is checked for existence without
-    following links before it is touched.
-
-    Args:
-        out_dir: The directory to prune.
-        written: The paths this run wrote.
-    """
-    if not out_dir.exists():
-        return
-    for path in sorted(
-        out_dir.rglob("*"), key=lambda path: len(path.parts), reverse=True
-    ):
-        if path.is_symlink():
-            path.unlink()
-        elif not path.exists():
-            continue
-        elif path.is_file():
-            if path not in written:
-                path.unlink()
-        elif path.is_dir() and not any(path.iterdir()):
-            path.rmdir()
 
 
 if __name__ == "__main__":  # pragma: no cover - module entry point

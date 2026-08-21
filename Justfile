@@ -1077,9 +1077,9 @@ secret-scan log-opts="":
 # Registering a further generator is a `Contract` in whichever registry owns its
 # source, and nothing here or in the workflow changes.
 #
-# `docs/contracts/` is owned in full: this deletes anything under it that the run
-# did not write, so a contract that was removed or renamed loses its committed
-# artifact instead of keeping it forever behind a gate that cannot see it.
+# `docs/contracts/` is owned in full: this discards the directory and writes it
+# again, so a contract that was removed or renamed loses its committed artifact
+# instead of keeping it forever behind a gate that cannot see it.
 contracts:
     {{ uv }} python scripts/export_contracts.py docs/contracts
 
