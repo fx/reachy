@@ -1781,7 +1781,7 @@ camera = [
 
 [package.metadata]
 requires-dist = [
-    { name = "asyncssh", specifier = ">=2.14" },
+    { name = "asyncssh", specifier = ">=2.23" },
     { name = "opencv-python-headless", marker = "extra == 'camera'", specifier = ">=4.10" },
     { name = "reachy-checks", editable = "packages/reachy-checks" },
     { name = "reachy-contracts", editable = "packages/reachy-contracts" },

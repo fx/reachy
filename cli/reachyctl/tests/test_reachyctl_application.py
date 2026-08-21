@@ -14,10 +14,12 @@ from __future__ import annotations
 import json
 from typing import Final
 
+import pytest
 from reachyctl_robot import FakeRobot, daemon_for
 from reachyctl_support import reporter_for
 
 from reachyctl.application import execute_logs, execute_start, execute_stop
+from reachyctl.daemon import DaemonControlError
 from reachyctl.exits import ExitCode
 from reachyctl.output import OutputFormat
 
@@ -79,17 +81,53 @@ def test_a_start_the_daemon_accepted_that_did_not_take_fails() -> None:
     assert rows["verify"]["status"] == "failed"
 
 
-def test_a_control_that_refused_the_start_is_reported_and_still_verified() -> None:
-    """Both are recorded: a refusal and a lie are different faults."""
+def test_a_control_that_complained_while_the_application_started_is_a_success() -> None:
+    """The robot's state decides it; a control command's exit status is not evidence.
+
+    The complaint is recorded rather than swallowed, and it is a warning rather
+    than a failure — otherwise a robot that did exactly what was asked would be
+    reported as a failed command.
+    """
     daemon, _access = daemon_for(FakeRobot(control_succeeds=False))
     reporter, streams = reporter_for(output_format=OutputFormat.JSON)
 
     code = execute_start(daemon, reporter, ROBOT, preview=False)
 
     rows = _rows(streams.result)
+    assert code is ExitCode.OK
+    assert rows["control"]["status"] == "warned"
+    assert rows["verify"]["status"] == "done"
+
+
+def test_a_control_that_complained_and_did_not_start_it_fails() -> None:
+    """And it is the verification that failed the run, not the control."""
+    daemon, _access = daemon_for(
+        FakeRobot(control_succeeds=False, start_succeeds=False),
+    )
+    reporter, streams = reporter_for(output_format=OutputFormat.JSON)
+
+    code = execute_start(daemon, reporter, ROBOT, preview=False)
+
+    rows = _rows(streams.result)
     assert code is ExitCode.FAILURE
-    assert rows["control"]["status"] == "failed"
+    assert rows["control"]["status"] == "warned"
     assert rows["verify"]["status"] == "failed"
+
+
+def test_a_robot_whose_state_cannot_be_read_is_unreachable_not_already_stopped() -> (
+    None
+):
+    """The failure the inspect step asks the daemon directly to avoid.
+
+    A `stop` that read a failed check as "not running" would report the
+    application as already stopped and exit zero, having learned nothing about
+    it at all.
+    """
+    daemon, _access = daemon_for(FakeRobot(control_stdout="not json at all"))
+    reporter, _streams = reporter_for()
+
+    with pytest.raises(DaemonControlError):
+        execute_stop(daemon, reporter, ROBOT, preview=False)
 
 
 def test_stopping_an_application_that_is_running_stops_it_and_confirms() -> None:
@@ -243,3 +281,28 @@ def test_ending_a_followed_journal_at_the_keyboard_is_a_successful_run() -> None
     result = json.loads("\n".join(lines[1:]))
     assert result["summary"] == "stopped following the journal"
     assert access.closed is True
+
+
+def test_both_exit_paths_of_a_log_run_report_the_same_fields() -> None:
+    """Ending `--follow` at the keyboard is how this command is meant to stop.
+
+    A consumer reading `data["lines"]` must not fail on the ordinary
+    termination path, so the keys are the same on both and the count that is
+    genuinely unknown says so rather than claiming a number.
+    """
+    ended, _one = daemon_for(FakeRobot(journal=["a line"]))
+    interrupted, _two = daemon_for(
+        FakeRobot(journal=["a line"], journal_interrupts=True),
+    )
+    reporter, streams = reporter_for(output_format=OutputFormat.JSON)
+    execute_logs(ended, reporter, ROBOT, lines=5, follow=True)
+    normal = json.loads("\n".join(streams.result.splitlines()[1:]))["data"]
+
+    reporter, streams = reporter_for(output_format=OutputFormat.JSON)
+    execute_logs(interrupted, reporter, ROBOT, lines=5, follow=True)
+    stopped = json.loads("\n".join(streams.result.splitlines()[1:]))["data"]
+
+    assert sorted(normal) == sorted(stopped)
+    assert normal["lines"] == 1
+    assert stopped["lines"] is None
+    assert stopped["followed"] is True

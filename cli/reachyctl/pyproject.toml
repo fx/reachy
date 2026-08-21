@@ -21,7 +21,17 @@ dependencies = [
     # that hands a command a `str` where it expects a path.
     "typer>=0.12.4",
     "rich>=13.7",
-    "asyncssh>=2.14",
+    # The robot's remote-access interface, spoken in process rather than by
+    # driving an `ssh` client: a command's exit status, its two streams and the
+    # reason a connection failed all arrive as values. It also ships a server,
+    # which is what lets the transport be exercised against a real SSH session
+    # rather than a description of one.
+    #
+    # The floor is 2.23.0 rather than the version this was written against. It
+    # is the highest "fixed in" across every advisory published for this
+    # distribution — CVE-2023-46445 and CVE-2023-46446 are fixed in 2.14.1,
+    # CVE-2026-45309 in 2.23.0 — so anything this permits carries none of them.
+    "asyncssh>=2.23",
 ]
 
 # The live-frame source and nothing else. OpenCV is tens of megabytes and every

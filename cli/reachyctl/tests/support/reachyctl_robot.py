@@ -96,8 +96,10 @@ class FakeRobot:
             of that scenario is that the install DID succeed.
         restart_succeeds: Whether restarting the daemon exits zero.
         start_succeeds: Whether asking the daemon to start the application
-            actually starts it. The control command exits zero either way, which
-            is what a crash loop looks like from the other end of a link.
+            actually starts it. Independent of the control's exit status, which
+            is what makes a crash loop and a complaining control two different
+            robots.
+        stop_succeeds: The same, for stopping it.
         control_stdout: What the daemon's application control writes for a
             `status`, when it is not to write the JSON this tool reads. The
             empty default means the ordinary answer.
@@ -106,9 +108,13 @@ class FakeRobot:
         journal_interrupts: Whether reading the journal ends the way an
             operator ends `--follow`.
         control_succeeds: Whether the control's start and stop verbs exit zero.
-            Separate from `start_succeeds`, because a control that complained
-            and a control that lied are two different things a lifecycle
-            command has to survive.
+            It governs the exit STATUS only: what the application then does is
+            `start_succeeds` and `stop_succeeds`. The two are separate because
+            the interesting case is a control that complained while the thing it
+            controls did exactly what was asked — which is the case a tool
+            reading exit statuses gets wrong.
+        modes: The mode each path was last `chmod`-ed to, so a test can assert
+            the staging directory is narrowed rather than left as it was found.
         journal: The lines the robot's journal holds for the application.
         leaky: Whether a command that fails quotes the whole environment back in
             its complaint, values included. Robots and the tools on them do this
@@ -134,10 +140,12 @@ class FakeRobot:
     install_takes_effect: bool = True
     restart_succeeds: bool = True
     start_succeeds: bool = True
+    stop_succeeds: bool = True
     control_stdout: str = ""
     metadata_stdout: str = ""
     journal_interrupts: bool = False
     control_succeeds: bool = True
+    modes: dict[str, str] = field(default_factory=dict)
     journal: list[str] = field(default_factory=list)
     leaky: bool = False
     failing: set[str] = field(default_factory=set)
@@ -280,6 +288,8 @@ class FakeRemoteAccess:
             (_is_cat, self._cat),
             (_is_mkdir, self._mkdir),
             (_is_install, self._install),
+            (_is_chmod, self._chmod),
+            (_is_remove, self._remove),
             (_is_pip, self._pip),
             (_is_metadata, self._metadata),
             (_is_control, self._control),
@@ -410,6 +420,34 @@ class FakeRemoteAccess:
         self.robot.files.setdefault(argv[-1], "<directory>")
         return CommandOutcome(command=line, exit_status=0, stdout="", stderr="")
 
+    def _chmod(self, line: str, argv: list[str]) -> CommandOutcome:
+        """Answer `chmod`, which narrows the staging directory.
+
+        Args:
+            line: The rendered command.
+            argv: Its arguments.
+
+        Returns:
+            What it did. The mode is recorded so a test can assert the staging
+            directory is not left readable to everyone on the robot.
+        """
+        self.robot.modes[argv[-1]] = argv[-2]
+        return CommandOutcome(command=line, exit_status=0, stdout="", stderr="")
+
+    def _remove(self, line: str, argv: list[str]) -> CommandOutcome:
+        """Answer `rm --force`, which is how a staged file is discarded.
+
+        Args:
+            line: The rendered command.
+            argv: Its arguments.
+
+        Returns:
+            What it did. `--force` succeeds on a path that is not there, as the
+            real one does.
+        """
+        self.robot.files.pop(argv[-1], None)
+        return CommandOutcome(command=line, exit_status=0, stdout="", stderr="")
+
     def _install(self, line: str, argv: list[str]) -> CommandOutcome:
         """Answer `install`, which is how a staged file reaches `/etc`.
 
@@ -511,14 +549,18 @@ class FakeRemoteAccess:
             What it did.
         """
         verb = argv[3]
-        if verb == "start" and self.robot.control_succeeds:
+        if verb == "start":
             self.robot.app_running = self.robot.start_succeeds
             self.robot.app_detail = (
                 "active" if self.robot.start_succeeds else "exited 1 on startup"
             )
-        elif verb == "stop" and self.robot.control_succeeds:
-            self.robot.app_running = False
-            self.robot.app_detail = "stopped by an operator"
+        elif verb == "stop":
+            self.robot.app_running = not self.robot.stop_succeeds
+            self.robot.app_detail = (
+                "stopped by an operator"
+                if self.robot.stop_succeeds
+                else "still running after a stop"
+            )
         if verb != "status":
             return CommandOutcome(
                 command=line,
@@ -666,3 +708,27 @@ def daemon_for(
     """
     access = FakeRemoteAccess(robot, observer)
     return DaemonClient(access, layout or RobotLayout(), elevate=True), access
+
+
+def _is_chmod(argv: list[str]) -> bool:
+    """Say whether this is `chmod`.
+
+    Args:
+        argv: The command.
+
+    Returns:
+        True when it is.
+    """
+    return len(argv) > 2 and argv[0] == "chmod"
+
+
+def _is_remove(argv: list[str]) -> bool:
+    """Say whether this is `rm`.
+
+    Args:
+        argv: The command.
+
+    Returns:
+        True when it is.
+    """
+    return len(argv) > 1 and argv[0] == "rm"

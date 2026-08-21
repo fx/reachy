@@ -32,6 +32,15 @@ where a markdown link in a change document uses `…-the-daemons-media-layer`. T
 two spellings are both correct for their own reader. Do not "fix" one to match
 the other.
 
+**The lockfile travels in the pull request, and CI runs `--locked`.** Every
+`uv` invocation in the `Justfile` passes `--locked`, never `--frozen` — the
+difference is recorded at the top of that file: `--frozen` skips the freshness
+check and runs against a stale resolution, which is the failure the rule exists
+to prevent. A pull request that adds a dependency therefore commits the
+regenerated root `uv.lock` alongside the manifest. Do not report "CI runs
+`uv sync --frozen`, so the lockfile must be updated" — the first half is not
+true, and the second is already the rule.
+
 **A vendored file stays as upstream wrote it.** A file carrying a provenance
 header is a derived work, and its directory's `NOTICE` enumerates the complete
 intended diff from upstream. Its style, its partial typing, its suppressions and

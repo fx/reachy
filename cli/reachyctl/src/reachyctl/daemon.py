@@ -21,6 +21,15 @@ with itself no matter which environment the daemon was really using, which is
 the shape of the original failure rather than a check on it. The configured path
 is a fallback for a unit whose `ExecStart` cannot be read, and it says so.
 
+**A question that could not be asked is not an answer.** A method here either
+returns what the robot said or raises. None of them returns an empty mapping, an
+empty version or an empty file to mean "the command failed", because a caller
+cannot tell that apart from "there is nothing there" — and the whole of this
+change is about refusing to treat an absent answer as a good one. "Not
+installed" and "no such drop-in" are real answers and are returned as such; a
+command that could not run at all is a `RobotAccessError`, which the command
+surface already knows costs `UNREACHABLE`.
+
 **No method reports a configuration value.** `effective_configuration` returns
 the settings so a caller can compare them; whether any of them is rendered is
 the caller's decision, and `reachyctl.configure` renders a secret setting as set
@@ -40,7 +49,7 @@ from reachyctl.managed import parse_region
 from reachyctl.robot import CommandOutcome, RobotAccessError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from reachyctl.robot import RemoteAccess, RobotLayout
 
@@ -70,6 +79,14 @@ _EXEC_PATH: Final = re.compile(r"path=(\S+)")
 # systemd's own spelling for "this unit is running".
 _ACTIVE: Final = "active"
 
+# What a POSIX tool says when a path is not there. Matched rather than inferred
+# from the exit status, because `cat` exits 1 for a file that is absent and for
+# one it may not read, and those are different facts about the robot. A robot
+# whose tools speak another language falls through to the error, which is the
+# safe direction: it says the file could not be read rather than silently
+# treating it as never written.
+_NOT_FOUND: Final = re.compile(r"No such file or directory", re.IGNORECASE)
+
 
 class DaemonControlError(RobotAccessError):
     """The daemon's application control answered with something unreadable.
@@ -90,6 +107,7 @@ class DaemonClient:
         layout: RobotLayout,
         *,
         elevate: bool = True,
+        complain: Callable[[str], None] | None = None,
     ) -> None:
         """Bind a client to one robot.
 
@@ -97,10 +115,24 @@ class DaemonClient:
             access: How commands reach it.
             layout: Where things are on it and what they are called.
             elevate: Whether privileged commands are prefixed with `sudo -n`.
+            complain: Where to say something that is worth an operator seeing
+                and is not worth failing a command over. The command surface
+                passes the reporter's own progress line, so it is scrubbed like
+                everything else; without one, such a line is dropped.
         """
         self._access = access
         self._layout = layout
         self._elevate = elevate
+        self._complain_to = complain
+
+    def _complain(self, message: str) -> None:
+        """Say something an operator should see that does not fail a command.
+
+        Args:
+            message: What to say.
+        """
+        if self._complain_to is not None:
+            self._complain_to(message)
 
     @property
     def layout(self) -> RobotLayout:
@@ -188,15 +220,22 @@ class DaemonClient:
         """Ask the daemon whether it is running the application.
 
         Returns:
-            Whether it is, with whatever the daemon said about it.
+            Whether it is, with whatever the daemon said about it. `running` is
+            false only when the daemon said so.
 
         Raises:
-            DaemonControlError: If the daemon's control answered with something
-                this tool cannot read.
+            DaemonControlError: If the control could not be run, or answered
+                with something this tool cannot read. Returning "not running"
+                for either would make `app stop` report an application it never
+                asked about as already stopped, and exit zero.
         """
         outcome = await self._control("status", "--json")
         if not outcome.ok:
-            return ApplicationState(running=False, detail=outcome.complaint())
+            message = (
+                f"the daemon's application control could not be run: "
+                f"{outcome.complaint()}"
+            )
+            raise DaemonControlError(message)
         report = self._decode(outcome)
         running = report.get("running")
         detail = report.get("detail")
@@ -217,6 +256,13 @@ class DaemonClient:
         Returns:
             The settings by name. Values are returned so a caller can compare
             them and are not for printing — see the module documentation.
+
+        Raises:
+            RobotAccessError: If the environment could not be read. An empty
+                mapping would mean "this robot has no settings", which is a
+                different robot from one that did not answer: `config diff`
+                would report every declared setting as missing, and an apply's
+                verification would fail a change that had worked.
         """
         outcome = await self._run(
             [
@@ -228,11 +274,19 @@ class DaemonClient:
             ],
         )
         if not outcome.ok:
-            return {}
+            message = (
+                f"could not read the environment of {self._layout.daemon_unit}: "
+                f"{outcome.complaint()}"
+            )
+            raise RobotAccessError(message)
         settings: dict[str, str] = {}
-        # systemd prints the whole environment on one line, each assignment
-        # quoted the way a shell would quote it. Splitting it the way a shell
-        # would is therefore the parse, rather than a guess at one.
+        # systemd prints the whole environment on one line, quoting an
+        # assignment that needs it. Splitting it the way a shell would is the
+        # closest available parse and not an exact one: systemd's own escaping
+        # is its own, and a value carrying something it escapes differently
+        # would come back subtly wrong. It is what there is — `systemctl show`
+        # offers no structured output — and the managed region itself is read
+        # from the file, where the format is this repository's own.
         for assignment in shlex.split(outcome.stdout.strip()):
             name, separator, value = assignment.partition("=")
             if separator:
@@ -260,24 +314,18 @@ class DaemonClient:
         """Ask systemd which interpreter the daemon runs.
 
         Returns:
-            The path in the unit's first `ExecStart`, or the configured
-            fallback when the unit cannot be read. See the module documentation
-            for why asking rather than assuming is the point.
+            The path in the unit's first `ExecStart`. The configured fallback is
+            used only when the unit declares none — a unit that is not installed
+            reports an empty property — and never to paper over a command that
+            failed. See the module documentation for why asking rather than
+            assuming is the point.
+
+        Raises:
+            RobotAccessError: If the unit could not be read at all.
         """
-        outcome = await self._run(
-            [
-                "systemctl",
-                "show",
-                self._layout.daemon_unit,
-                "--property=ExecStart",
-                "--value",
-            ],
-        )
-        if outcome.ok:
-            found = _EXEC_PATH.search(outcome.stdout)
-            if found is not None:
-                return found.group(1)
-        return self._layout.python
+        properties = await self._show(self._layout.daemon_unit, "ExecStart")
+        found = _EXEC_PATH.search(properties.get("ExecStart", ""))
+        return found.group(1) if found is not None else self._layout.python
 
     async def installed_versions(self, *distributions: str) -> dict[str, str]:
         """Ask the daemon's environment what versions it holds.
@@ -286,21 +334,36 @@ class DaemonClient:
             distributions: The distribution names to look up.
 
         Returns:
-            One entry per name, empty where nothing is installed. An
-            environment that cannot be reached at all answers with every name
-            empty rather than raising, because "not installed" is what a check
-            reports and an exception here would make a diagnosis an accident.
+            One entry per name, empty where nothing is installed. That is a real
+            answer about a real environment.
+
+        Raises:
+            RobotAccessError: If the environment could not be asked, or answered
+                with something unreadable. Answering "nothing is installed"
+                would make a deploy's verification report the exact failure it
+                exists to detect — a version that is not there — for a robot
+                that simply did not answer.
         """
         python = await self.interpreter()
         outcome = await self._run([python, "-c", _METADATA_SCRIPT, *distributions])
         if not outcome.ok:
-            return dict.fromkeys(distributions, "")
+            message = (
+                f"could not ask {python} what it has installed: {outcome.complaint()}"
+            )
+            raise RobotAccessError(message)
         try:
             decoded = json.loads(outcome.stdout)
-        except ValueError:
-            return dict.fromkeys(distributions, "")
+        except ValueError as error:
+            message = (
+                f"{python} answered the version query with something that is not JSON"
+            )
+            raise RobotAccessError(message) from error
         if not isinstance(decoded, dict):
-            return dict.fromkeys(distributions, "")
+            message = (
+                f"{python} answered the version query with a "
+                f"{type(decoded).__name__} rather than an object"
+            )
+            raise RobotAccessError(message)
         return {name: str(decoded.get(name, "") or "") for name in distributions}
 
     async def read_managed_region(self) -> str:
@@ -309,9 +372,21 @@ class DaemonClient:
         Returns:
             Its content, or an empty string when it has never been written. A
             missing file is a robot nothing has been applied to, not a fault.
+
+        Raises:
+            RobotAccessError: If the file is there and could not be read — a
+                permission that is wrong, a directory where a file belongs.
+                Treating that as "never written" would make the next apply
+                report every setting as new and then overwrite whatever is
+                actually in the file.
         """
         outcome = await self._run(["cat", self._layout.drop_in])
-        return outcome.stdout if outcome.ok else ""
+        if outcome.ok:
+            return outcome.stdout
+        if _NOT_FOUND.search(outcome.stderr):
+            return ""
+        message = f"could not read {self._layout.drop_in}: {outcome.complaint()}"
+        raise RobotAccessError(message)
 
     async def read_managed_settings(self) -> dict[str, str]:
         """Read back the settings the managed region carries.
@@ -329,11 +404,17 @@ class DaemonClient:
     async def write_managed_region(self, content: str) -> None:
         """Replace the managed drop-in with new content, and reload systemd.
 
-        The write is staged and then moved into place with `install`, rather
+        The write is staged and then copied into place with `install`, rather
         than written to `/etc` directly: the staging area is somewhere the
         connecting account can write, and `install` is what sets the mode and
         the ownership in the same step that puts the file where systemd reads
         it. A half-written drop-in is a daemon that will not start.
+
+        **The staged copy is removed afterwards, always.** `install` copies, so
+        without this the whole region — including whatever a setting marked
+        secret holds — would be left sitting in the staging directory, on the
+        robot, indefinitely. It is removed in a `finally`, because the paths
+        that fail are exactly the ones that would otherwise leave it there.
 
         Args:
             content: The whole file, as `reachyctl.managed.render_region`
@@ -344,49 +425,85 @@ class DaemonClient:
                 names the step and quotes no setting value.
         """
         staged = await self.stage(content.encode("utf-8"), "managed.conf")
-        await self._expect(
-            self._privileged(["mkdir", "--parents", self._layout.drop_in_directory]),
-            "could not create the drop-in directory",
-        )
-        await self._expect(
-            self._privileged(
-                [
-                    "install",
-                    "--mode=0644",
-                    "--owner=root",
-                    "--group=root",
-                    str(staged),
-                    self._layout.drop_in,
-                ],
-            ),
-            "could not install the managed drop-in",
-        )
-        await self._expect(
-            self._privileged(["systemctl", "daemon-reload"]),
-            "could not reload systemd after writing the managed drop-in",
-        )
+        try:
+            await self._expect(
+                self._privileged(
+                    ["mkdir", "--parents", self._layout.drop_in_directory],
+                ),
+                "could not create the drop-in directory",
+            )
+            await self._expect(
+                self._privileged(
+                    [
+                        "install",
+                        "--mode=0644",
+                        "--owner=root",
+                        "--group=root",
+                        str(staged),
+                        self._layout.drop_in,
+                    ],
+                ),
+                "could not install the managed drop-in",
+            )
+            await self._expect(
+                self._privileged(["systemctl", "daemon-reload"]),
+                "could not reload systemd after writing the managed drop-in",
+            )
+        finally:
+            await self.discard(staged)
 
     async def stage(self, content: bytes, name: str) -> PurePosixPath:
         """Put bytes somewhere on the robot the connecting account can write.
+
+        The directory is created and then narrowed to the connecting account,
+        because what passes through it includes the managed region and a
+        setting is exactly where a credential lives. `chmod` runs on every call
+        rather than only on creation: `mkdir --parents` leaves an existing
+        directory's mode alone, so a staging directory made by something else,
+        or by an older version of this tool, would keep whatever mode it had.
 
         Args:
             content: What to write.
             name: The file name to give it inside the staging directory.
 
         Returns:
-            Where it landed.
+            Where it landed. The caller removes it when it is done with it —
+            `write_managed_region` and `reachyctl.deploy` both do.
 
         Raises:
-            RobotAccessError: If the staging directory could not be made or the
-                transfer failed.
+            RobotAccessError: If the staging directory could not be made or
+                narrowed, or the transfer failed.
         """
         await self._expect(
             ["mkdir", "--parents", self._layout.staging],
             "could not create the staging directory",
         )
+        await self._expect(
+            ["chmod", "0700", self._layout.staging],
+            "could not narrow the staging directory to this account",
+        )
         destination = PurePosixPath(self._layout.staging) / name
         await self._access.upload(content, destination)
         return destination
+
+    async def discard(self, staged: PurePosixPath) -> None:
+        """Remove something this tool staged on the robot.
+
+        Best effort, and deliberately so: it is called from the `finally` of a
+        step that may already be failing, and a robot that cannot delete a
+        temporary file is not a reason to replace the failure an operator needs
+        to read with one about tidying up. What it must not do is leave the
+        file there quietly, so a refusal is written to the progress stream.
+
+        Args:
+            staged: What to remove.
+        """
+        outcome = await self._run(["rm", "--force", str(staged)])
+        if not outcome.ok:
+            # Nothing is raised, and nothing is silent either.
+            self._complain(
+                f"could not remove {staged} from the robot: {outcome.complaint()}",
+            )
 
     async def install_wheel(self, wheel: PurePosixPath) -> CommandOutcome:
         """Install a wheel into the environment the daemon runs.
@@ -554,13 +671,24 @@ class DaemonClient:
             properties: Which properties to ask for.
 
         Returns:
-            The properties by name, empty when the command did not succeed.
+            The properties by name. A unit that is not installed answers with
+            empty values rather than failing, so an empty answer here means what
+            it says.
+
+        Raises:
+            RobotAccessError: If the command could not be run. Returning empty
+                properties would be indistinguishable from a unit that has none,
+                and `ping` would then report a healthy robot as merely quiet.
         """
         outcome = await self._run(
             ["systemctl", "show", unit, *(f"--property={name}" for name in properties)],
         )
         if not outcome.ok:
-            return {}
+            message = (
+                f"could not read {', '.join(properties)} of {unit}: "
+                f"{outcome.complaint()}"
+            )
+            raise RobotAccessError(message)
         found: dict[str, str] = {}
         for line in outcome.stdout.splitlines():
             name, separator, value = line.partition("=")

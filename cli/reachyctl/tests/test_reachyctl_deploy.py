@@ -34,7 +34,7 @@ from reachyctl.deploy import (
 )
 from reachyctl.exits import ExitCode
 from reachyctl.output import OutputFormat
-from reachyctl.robot import RobotLayout
+from reachyctl.robot import DEFAULT_STAGING, RobotLayout
 from reachyctl.steps import StepLog
 from reachyctl.wheels import Wheel, describe_wheel
 
@@ -185,8 +185,12 @@ async def test_a_version_that_installed_and_will_not_run_fails_the_deploy() -> N
 
 
 @pytest.mark.asyncio
-async def test_a_restart_that_failed_stops_before_the_application_is_started() -> None:
-    """There is nothing to start, and the failing step is the one worth naming."""
+async def test_a_restart_that_failed_skips_the_start_and_still_verifies() -> None:
+    """There is nothing to start, and the operator still needs to know what is running.
+
+    The verification only reads, and a restart that reported a failure may still
+    have taken effect — so the sequence never ends before it has asked.
+    """
     daemon, _access = daemon_for(FakeRobot(restart_succeeds=False), layout=LAYOUT)
     reporter, _streams = reporter_for()
 
@@ -194,15 +198,22 @@ async def test_a_restart_that_failed_stops_before_the_application_is_started() -
 
     steps = _named(outcome.steps.results)
     assert steps["restart"].failed is True
-    assert "start" not in steps
+    assert steps["start"].outcome.value == "skipped"
+    assert steps["verify"].outcome.value in {"done", "failed"}
     assert outcome.ok is False
 
 
 @pytest.mark.asyncio
 async def test_a_control_that_refused_the_start_does_not_decide_the_deploy() -> None:
-    """The robot's state decides it. A control command's status is not evidence."""
+    """The robot's state decides it. A control command's status is not evidence.
+
+    The refusal is recorded as a warning rather than a failure, because a run
+    whose verification then finds the right version running is a successful
+    deploy — reading the control's exit status as the answer would be trusting
+    an exit status again.
+    """
     daemon, _access = daemon_for(
-        FakeRobot(control_succeeds=False),
+        FakeRobot(control_succeeds=False, start_succeeds=False),
         layout=LAYOUT,
     )
     reporter, _streams = reporter_for()
@@ -210,9 +221,31 @@ async def test_a_control_that_refused_the_start_does_not_decide_the_deploy() -> 
     outcome = await run_deploy(_plan(), daemon, reporter)
 
     steps = _named(outcome.steps.results)
-    assert steps["start"].failed is True
+    assert steps["start"].outcome.value == "warned"
+    assert steps["start"].failed is False
+    # Here the application really is not running, so the verification fails —
+    # and it is the verification that failed the run, not the control.
     assert steps["verify"].failed is True
     assert outcome.ok is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_that_still_worked_is_a_successful_deploy() -> None:
+    """The other half of the same rule, and the one a status-reading tool gets wrong.
+
+    The daemon's control complains and the application is running at the right
+    version afterwards. That is a working robot.
+    """
+    robot = FakeRobot(control_succeeds=False)
+    daemon, _access = daemon_for(robot, layout=LAYOUT)
+    reporter, _streams = reporter_for()
+
+    outcome = await run_deploy(_plan(), daemon, reporter)
+
+    steps = _named(outcome.steps.results)
+    assert steps["start"].outcome.value == "warned"
+    assert steps["verify"].outcome.value == "done"
+    assert outcome.ok is True
 
 
 @pytest.mark.asyncio
@@ -232,17 +265,53 @@ async def test_a_robot_whose_daemon_is_not_answering_stops_before_it_transfers()
 
 
 @pytest.mark.asyncio
-async def test_an_install_that_failed_stops_before_the_restart() -> None:
-    """Restarting a daemon over a failed install interrupts the robot for nothing."""
-    daemon, _access = daemon_for(FakeRobot(install_succeeds=False), layout=LAYOUT)
+async def test_an_install_that_failed_skips_the_restart_and_still_verifies() -> None:
+    """Restarting over a failed install interrupts the robot for nothing.
+
+    The verification still runs, because it only reads and because the operator
+    needs to know what the robot is running now — which, after a failed install,
+    is whatever it was running before.
+    """
+    robot = FakeRobot(
+        install_succeeds=False,
+        packages={"reachy-mini": "4.5.6", FIXTURE_DISTRIBUTION: "0.9.0"},
+        app_running=True,
+        app_detail="active",
+    )
+    daemon, access = daemon_for(robot, layout=LAYOUT)
     reporter, _streams = reporter_for()
 
     outcome = await run_deploy(_plan(), daemon, reporter)
 
     steps = _named(outcome.steps.results)
     assert steps["install"].failed is True
-    assert "restart" not in steps
+    assert steps["restart"].outcome.value == "skipped"
+    assert steps["start"].outcome.value == "skipped"
+    assert outcome.running_version == "0.9.0"
     assert outcome.ok is False
+    assert not any("restart" in command for command in access.commands)
+
+
+@pytest.mark.asyncio
+async def test_the_transferred_wheel_is_removed_from_the_robot() -> None:
+    """The robot has little room and this change retains no versions.
+
+    Removed whether or not the install worked, because the path that fails is
+    exactly the one that would otherwise leave it there.
+    """
+    for install_succeeds in (True, False):
+        robot = FakeRobot(install_succeeds=install_succeeds)
+        daemon, _access = daemon_for(robot, layout=LAYOUT)
+        reporter, _streams = reporter_for()
+
+        await run_deploy(_plan(), daemon, reporter)
+
+        staged = [
+            path
+            for path in robot.files
+            if path.startswith(f"{DEFAULT_STAGING}/") and path.endswith(".whl")
+        ]
+        assert staged == [], install_succeeds
 
 
 @pytest.mark.asyncio

@@ -68,6 +68,20 @@ class Watcher:
         self.built: list[RobotTarget] = []
         self.access: FakeRemoteAccess | None = None
 
+    @property
+    def contacted(self) -> bool:
+        """Whether anything was ever actually asked of the robot.
+
+        Building a link asks nothing — the connection is opened by the first
+        command that needs it — so this is the property that says the robot was
+        left alone, and it is true of a command that built a link and then
+        refused its arguments before using it.
+
+        Returns:
+            True when a command reached the robot.
+        """
+        return self.access is not None and self.access.connected
+
     def __call__(self, target: RobotTarget) -> RemoteAccess:
         """Hand out a link, recording that one was asked for.
 
@@ -197,6 +211,7 @@ def test_an_out_of_range_value_is_refused_locally_with_no_connection_attempted(
     assert "from 20 to 1000" in result.stdout
     assert watcher.built == []
     assert watcher.access is None
+    assert watcher.contacted is False
 
 
 def test_a_setting_nothing_declares_is_refused_locally(watcher: Watcher) -> None:
@@ -385,7 +400,6 @@ def test_a_wheel_that_is_not_one_is_refused_before_the_robot_is_contacted(
         tmp_path: Where the file is written.
     """
     (tmp_path / "broken-1.0-py3-none-any.whl").write_bytes(b"not a zip")
-    assert watcher.built == []
 
     result = runner.invoke(
         cli.app,
@@ -400,6 +414,10 @@ def test_a_wheel_that_is_not_one_is_refused_before_the_robot_is_contacted(
 
     assert result.exit_code == ExitCode.CONFIGURATION
     assert "not a readable zip" in result.stdout
+    # The link object exists by this point and has been used for nothing: the
+    # wheel is read by the deploy's first step, which is above every step that
+    # asks the robot anything.
+    assert watcher.contacted is False
 
 
 @pytest.mark.filesystem  # writes a declaration for the command to read; not a unit test
@@ -732,3 +750,80 @@ def test_a_deploy_against_an_unreachable_robot_reports_it_the_same_way(
 
     assert result.exit_code == ExitCode.UNREACHABLE, result.stdout
     assert "cannot reach the robot" in result.stdout
+
+
+def test_a_secret_setting_is_refused_as_an_argument(watcher: Watcher) -> None:
+    """The tool's own rule, and it does not stop being true because it is a setting.
+
+    An argument is visible in the process list to every user on the machine and
+    lands in the shell history. `--credential-file` exists for exactly this
+    reason, and the declaration document is the equivalent for a setting.
+    """
+    result = runner.invoke(
+        cli.app,
+        [
+            "config",
+            "set",
+            "REACHY_GROUNDSTATION_CREDENTIAL=example-not-a-real-secret",
+            "--robot",
+            ROBOT,
+        ],
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "config apply --declaration" in result.stdout
+    assert "example-not-a-real-secret" not in result.stdout
+    assert watcher.built == []
+
+
+def test_a_malformed_argument_is_reported_by_its_position_not_its_text(
+    watcher: Watcher,
+) -> None:
+    """`=hunter2` partitions into no name and a value, and quoting it would print it.
+
+    Nothing has seeded the redactor at that point — it is seeded from the
+    settings this parse produces — so a message carrying the argument would
+    carry the whole of it.
+    """
+    result = runner.invoke(
+        cli.app,
+        [
+            "config",
+            "set",
+            "REACHY_SATELLITE_LOG_LEVEL=info",
+            "=hunter2",
+            "--robot",
+            ROBOT,
+        ],
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "argument 2" in result.stdout
+    assert "hunter2" not in result.stdout
+    assert watcher.built == []
+
+
+def test_an_unmanaged_setting_is_reported_by_presence_rather_than_by_value(
+    watcher: Watcher,
+) -> None:
+    """The effective environment carries values this tool never wrote.
+
+    A token another tool set on the robot would otherwise be printed in full,
+    and the redactor was never given it. Unclassified is treated as secret.
+    """
+    watcher.robot.environment = {
+        "SOMETHING_ELSE_PUT_THIS_HERE": "a-value-this-tool-cannot-vouch-for",
+        LEVEL: "info",
+    }
+
+    result = runner.invoke(
+        cli.app,
+        ["--output", "json", "config", "get", "--robot", ROBOT],
+    )
+
+    rows = {row["setting"]: row for row in json.loads(result.stdout)["rows"]}
+    assert rows["SOMETHING_ELSE_PUT_THIS_HERE"]["in_force"] == "set"
+    assert "a-value-this-tool-cannot-vouch-for" not in result.stdout
+    # A setting the vocabulary declares is still shown, because a configuration
+    # command that cannot say what a setting holds has not done its job.
+    assert rows[LEVEL]["in_force"] == "info"

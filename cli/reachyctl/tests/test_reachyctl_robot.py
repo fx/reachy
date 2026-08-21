@@ -200,3 +200,18 @@ def test_the_layout_derives_its_paths_from_the_unit_it_is_given() -> None:
     assert layout.drop_in == (
         "/etc/systemd/system/other.service.d/10-reachy-managed.conf"
     )
+
+
+def test_an_ipv6_address_is_rendered_so_it_can_be_read_back() -> None:
+    """`describe` is the one place the authority is rebuilt, so it puts the brackets back.
+
+    Every `RobotAccessError` message quotes this string. Unbracketed it reads as
+    `operator@2001:db8::1:22`, which is an address nobody can paste into another
+    command.
+    """
+    assert parse_robot("operator@2001:db8::1").describe() == "operator@[2001:db8::1]:22"
+    assert (
+        parse_robot("operator@[2001:db8::1]:2222").describe()
+        == "operator@[2001:db8::1]:2222"
+    )
+    assert parse_robot("operator@192.0.2.10").describe() == "operator@192.0.2.10:22"

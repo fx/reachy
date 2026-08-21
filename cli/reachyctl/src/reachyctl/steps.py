@@ -47,13 +47,22 @@ class StepOutcome(StrEnum):
         PLANNED: It was not run, because this was a preview. Something would
             have changed and nothing did.
         SKIPPED: It was not run because it had nothing to do — a setting
-            already in force, an application already stopped.
+            already in force, an application already stopped — or because an
+            earlier step failed and running it would make things worse.
+        WARNED: It ran, it complained, and it does not decide the run. A
+            control command that reported a failure while the thing it controls
+            went on to do what was asked is the case this exists for: reading
+            its exit status as the answer would be trusting an exit status
+            again, which is the whole failure this change is written against.
+            It is recorded rather than swallowed, and it does not make the run
+            negative — the verification step does that, or nothing does.
         FAILED: It ran and did not do what it was for.
     """
 
     DONE = "done"
     PLANNED = "planned"
     SKIPPED = "skipped"
+    WARNED = "warned"
     FAILED = "failed"
 
 
@@ -142,6 +151,18 @@ class StepLog:
             The result.
         """
         return self._record(name, StepOutcome.SKIPPED, detail)
+
+    def warned(self, name: str, detail: str) -> StepResult:
+        """Record a step that complained and does not decide the run.
+
+        Args:
+            name: The step's name.
+            detail: What it complained about.
+
+        Returns:
+            The result.
+        """
+        return self._record(name, StepOutcome.WARNED, detail)
 
     def failed(self, name: str, detail: str) -> StepResult:
         """Record a step that did not do what it was for.

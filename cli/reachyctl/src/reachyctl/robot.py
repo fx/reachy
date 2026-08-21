@@ -179,13 +179,21 @@ class RobotTarget:
     def describe(self) -> str:
         """Say where this is, for a progress line.
 
+        This *does* rebuild the authority, and it is the one place that does —
+        so it is also the one place that has to put the brackets back. An IPv6
+        host is stored without them, because that is what a socket takes, and
+        joining it to a port unbracketed produces `user@2001:db8::1:22`, which
+        is an address nobody can read back or paste into another command. Every
+        `RobotAccessError` message quotes this string.
+
         Returns:
-            The account and address as an operator wrote them. Nothing is
-            invented and nothing is hidden: an operator watching a deploy needs
-            to know which robot it is talking to, and a credential never
-            reaches this type — the key is a path and the host key is a path.
+            The account and address, readable back. Nothing is invented and
+            nothing is hidden: an operator watching a deploy needs to know which
+            robot it is talking to, and a credential never reaches this type —
+            the key is a path and the host key is a path.
         """
-        return f"{self.user}@{self.host}:{self.port}"
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"{self.user}@{host}:{self.port}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

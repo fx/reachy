@@ -23,13 +23,16 @@ through a multi-step apply leaves a half-written region. `reachy_contracts`
 declares what each setting accepts and the command surface checks the whole
 declaration against it before it builds anything that could open a connection.
 
-**A secret setting is reported as set or unset and never by value.** Everything
-else is shown, because a configuration command whose output cannot tell an
-operator what a setting is set to has not done its job. The values that are
-shown are the ones the vocabulary does not mark secret, and every secret value —
-declared or read back off the robot — is handed to the reporter's redactor
-before anything is rendered, so a value that reaches some other path is scrubbed
-there too.
+**A value this tool cannot vouch for is reported as set or unset, never shown.**
+Two kinds qualify: a setting the vocabulary marks `secret`, and a setting the
+vocabulary does not declare at all. The second is the one that is easy to miss —
+the effective environment is read off the unit and whatever else drops into it,
+so it carries values this tool never wrote, and a token another tool set would
+otherwise be printed in full. Everything the vocabulary *does* declare and does
+not mark secret is shown, because a configuration command whose output cannot
+tell an operator what a setting is set to has not done its job. Every declared
+secret value is additionally handed to the reporter's redactor before anything
+is rendered, so a value that reaches some other path is scrubbed there too.
 
 **Applying restarts the daemon, and the command says so first.** The warning is
 written before the restart rather than beside it, because the point of it is the
@@ -74,6 +77,7 @@ __all__ = [
     "guard_secrets",
     "report_for_difference",
     "run_apply",
+    "secret_setting_names",
 ]
 
 # Said before the restart happens. An environment change is only in force once
@@ -95,20 +99,28 @@ _SECRET_NAMES: Final = frozenset(
     setting.name for setting in ROBOT_SETTINGS if setting.secret
 )
 
+_DECLARED_NAMES: Final = frozenset(setting.name for setting in ROBOT_SETTINGS)
 
-def _is_secret(name: str) -> bool:
-    """Say whether a setting's value must never be rendered.
+
+def _unclassified(name: str) -> bool:
+    """Say whether a setting's value must not be rendered.
+
+    Two kinds of setting qualify, and the second is the one that is easy to
+    miss. A setting the vocabulary marks `secret` obviously must not be
+    printed. So must a setting the vocabulary does not declare **at all**: the
+    effective environment is read off the unit and whatever else drops into it,
+    so it carries values this tool never wrote and cannot classify. A token
+    another tool set on the robot would otherwise be printed in full, and the
+    redactor was never given it. Unclassified is treated as secret rather than
+    as safe.
 
     Args:
         name: The setting's name.
 
     Returns:
-        True when the vocabulary marks it secret. A name nothing declares is
-        not secret — it cannot be, because nothing this tool wrote put it
-        there — and it is still never invented into output: `config` renders
-        only what it was asked about or what the region carries.
+        True when its value must be reported as set or unset rather than shown.
     """
-    return name in _SECRET_NAMES
+    return name in _SECRET_NAMES or name not in _DECLARED_NAMES
 
 
 def _shown(name: str, value: str | None) -> str:
@@ -123,7 +135,7 @@ def _shown(name: str, value: str | None) -> str:
         secret. See `REVIEW.md`: a self-reporting configuration surface reports
         a secret as set or unset, never by value.
     """
-    if _is_secret(name):
+    if _unclassified(name):
         return _UNSET if not value else _SET
     return "" if value is None else value
 
@@ -138,13 +150,19 @@ def guard_secrets(reporter: Reporter, *settings: Mapping[str, str]) -> None:
     remove a string it was never given — see `REVIEW.md` on why seeding one is
     the legitimate reveal.
 
+    Only the values of settings the vocabulary marks `secret` are guarded. A
+    value this tool cannot classify is not rendered at all — see `_unclassified`
+    — and seeding the redactor with every environment value the robot happens
+    to carry would replace ordinary words like a log level or a path with a
+    placeholder throughout the output.
+
     Args:
         reporter: Where everything is written.
         settings: Any number of mappings that may hold a secret value.
     """
     for mapping in settings:
         for name, value in mapping.items():
-            if _is_secret(name) and value:
+            if name in _SECRET_NAMES and value:
                 reporter.redactor.guard(value)
 
 
@@ -355,17 +373,24 @@ async def run_apply(
         )
         return steps, difference
     else:
+        # Before the first mutation, not merely before the restart. The write is
+        # what makes the restart necessary, so an operator told afterwards has
+        # been told about something that already happened.
+        reporter.note(RESTART_WARNING)
         steps.begin(_WRITE, f"writing {daemon.layout.drop_in}")
         await daemon.write_managed_region(render_region(desired))
         steps.done(_WRITE, _would_write(difference).replace("would ", "", 1))
 
-        reporter.note(RESTART_WARNING)
         steps.begin(_RESTART, f"restarting {daemon.layout.daemon_unit}")
         restarted = await daemon.restart_daemon()
-        if not restarted.ok:
+        if restarted.ok:
+            steps.done(_RESTART, "the daemon restarted and re-read its environment")
+        else:
+            # Recorded, and the run does not end here. The verification only
+            # reads, a restart that reported a failure may still have taken
+            # effect, and either way the operator needs to know what is in force
+            # now rather than only that a command exited non-zero.
             steps.failed(_RESTART, restarted.complaint())
-            return steps, difference
-        steps.done(_RESTART, "the daemon restarted and re-read its environment")
 
     await _verify(steps, daemon, desired)
     return steps, difference
@@ -703,6 +728,18 @@ def merge_settings(
         The desired state.
     """
     return {**managed, **assignments}
+
+
+def secret_setting_names() -> frozenset[str]:
+    """List the settings whose value must not become a command-line argument.
+
+    Returns:
+        Their names. `config set` refuses these: an argument is visible in the
+        process list and lands in the shell history, which is the rule
+        `reachyctl.credentials` is built around and which does not stop being
+        true because the secret arrived as a setting.
+    """
+    return _SECRET_NAMES
 
 
 def known_setting_names() -> tuple[str, ...]:

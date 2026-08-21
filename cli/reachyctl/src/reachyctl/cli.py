@@ -17,9 +17,12 @@ Three conventions are set here and inherited by every command added later:
   failures: a command raises `CommandError` carrying the exit status its kind of
   failure is worth, and the one handler here renders it — so a structured run
   gets a document for a failure exactly as it does for a success.
-- **No option takes a credential.** `--credential-file` takes a path. An
-  argument is visible in the process list and lands in the shell history, and no
-  amount of care afterwards undoes either.
+- **No option or argument takes a credential.** `--credential-file` takes a
+  path, and `config set` refuses a setting the vocabulary marks secret for
+  exactly the same reason: an argument is visible in the process list to every
+  user on the machine and lands in the shell history, and no amount of care
+  afterwards undoes either. A secret setting reaches the robot through
+  `config apply --declaration`, which reads a file.
 
 `bench` is registered and does nothing. The name is reserved here so that the
 change which implements it adds a body rather than a command, and so that
@@ -49,6 +52,7 @@ from reachyctl.configure import (
     execute_get,
     guard_secrets,
     known_setting_names,
+    secret_setting_names,
 )
 from reachyctl.credentials import (
     CREDENTIAL_FILE_VARIABLE,
@@ -376,18 +380,33 @@ def _layout(
     )
 
 
-def _connect(target: RobotTarget, layout: RobotLayout) -> tuple[DaemonClient, Closer]:
+def _connect(
+    target: RobotTarget,
+    layout: RobotLayout,
+    reporter: Reporter,
+) -> tuple[DaemonClient, Closer]:
     """Build the daemon client and the thing that lets its link go.
 
     Args:
         target: Where the robot is.
         layout: Where things are on it.
+        reporter: Where the client writes what is worth seeing and not worth
+            failing over.
 
     Returns:
         The client, and the closer to hand to the command's `execute`.
     """
     access = _build_access(target)
-    return DaemonClient(access, layout, elevate=target.elevate), access.aclose
+    client = DaemonClient(
+        access,
+        layout,
+        elevate=target.elevate,
+        # Where the client says something worth seeing that is not worth
+        # failing a command over — a staged file it could not remove. It goes
+        # through the reporter, so it is scrubbed like every other line.
+        complain=reporter.note,
+    )
+    return client, access.aclose
 
 
 def _validated(declared: Mapping[str, str]) -> dict[str, str]:
@@ -421,18 +440,33 @@ def _assignments(pairs: list[str]) -> dict[str, str]:
         The settings by name.
 
     Raises:
-        ConfigurationError: If an argument is not an assignment, or names the
-            same setting twice. The offending argument is reported by its name
-            only — the text after the `=` is a value, and a value is exactly
-            where a credential ends up.
+        ConfigurationError: If an argument is not an assignment, names a setting
+            the vocabulary marks secret, or names the same setting twice.
+
+    **A malformed argument is reported by its position, never by its text.**
+    `=hunter2` partitions into an empty name and a value, so a message that
+    quoted "the argument" would print the whole of it — and it would do so
+    before anything has seeded the redactor, because the redactor is seeded from
+    the parsed settings this function produces. The position is enough to find
+    the argument and carries nothing.
     """
     settings: dict[str, str] = {}
-    for pair in pairs:
+    for position, pair in enumerate(pairs, start=1):
         name, separator, value = pair.partition("=")
         if not separator or not name:
             message = (
-                f"{name or pair!r} is not an assignment; write NAME=VALUE. "
-                f"Declared settings: {', '.join(known_setting_names())}"
+                f"argument {position} is not an assignment; write NAME=VALUE. "
+                f"It is not quoted back, because the text after an '=' is a "
+                f"value. Declared settings: {', '.join(known_setting_names())}"
+            )
+            raise ConfigurationError(message)
+        if name in secret_setting_names():
+            message = (
+                f"{name} holds a secret, and this command takes its values as "
+                f"arguments — which are visible in the process list to every "
+                f"user on this machine and land in the shell history. Put it in "
+                f"a declaration document and use `config apply --declaration`, "
+                f"which reads a file"
             )
             raise ConfigurationError(message)
         if name in settings:
@@ -781,6 +815,7 @@ def doctor(
             daemon, close = _connect(
                 target,
                 _layout(application, daemon_unit, daemon_control, python),
+                reporter,
             )
         plan = DoctorPlan(
             url=None if url is None else _session_url(url),
@@ -876,6 +911,7 @@ def deploy(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_deploy(
             DeployPlan(obtain=obtain, origin=origin, preview=preview),
@@ -951,6 +987,7 @@ def config_get(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_get(daemon, name or [], reporter, target.describe(), close)
     except CommandError as error:
@@ -1008,6 +1045,7 @@ def config_diff(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_diff(daemon, desired, reporter, target.describe(), close)
     except CommandError as error:
@@ -1072,6 +1110,7 @@ def config_apply(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_apply(
             "config apply",
@@ -1114,6 +1153,10 @@ def config_set(
     asked for, so it stays exactly what this tool says it is. Removing a
     setting is `apply`'s job, which is why they are separate verbs.
 
+    A setting the vocabulary marks secret is refused here. Its value would be an
+    argument, and an argument is visible in the process list and lands in the
+    shell history; `config apply --declaration` reads a file instead.
+
     Args:
         ctx: The invocation, carrying the reporter.
         assignment: The settings to change.
@@ -1141,6 +1184,7 @@ def config_set(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_apply(
             "config set",
@@ -1226,6 +1270,7 @@ def app_start(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_start(
             daemon,
@@ -1277,6 +1322,7 @@ def app_stop(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_stop(
             daemon,
@@ -1348,6 +1394,7 @@ def app_logs(
         daemon, close = _connect(
             target,
             _layout(application, daemon_unit, daemon_control, python),
+            reporter,
         )
         code = execute_logs(
             daemon,

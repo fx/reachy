@@ -141,23 +141,29 @@ async def test_nothing_is_cached_so_a_version_can_change_under_the_client() -> N
 
 
 @pytest.mark.asyncio
-async def test_an_environment_that_cannot_be_read_answers_with_nothing_installed() -> (
+async def test_an_environment_that_cannot_be_asked_is_a_fault_not_an_empty_answer() -> (
     None
 ):
-    """A robot that refuses the query has nothing installed as far as a check knows."""
+    """Answering "nothing is installed" would be the exact failure REQ-051 detects.
+
+    A deploy's verification asks this and fails when the version is not there.
+    An environment that did not answer, reported as an environment holding
+    nothing, would make every deploy against an unreachable interpreter report a
+    version mismatch that never happened.
+    """
     daemon, _access = daemon_for(FakeRobot(failing={"/opt/reachy/venv/bin/python"}))
 
-    assert await daemon.installed_versions("anything") == {"anything": ""}
+    with pytest.raises(RobotAccessError, match="what it has installed"):
+        await daemon.installed_versions("anything")
 
 
 @pytest.mark.asyncio
-async def test_an_environment_that_answers_with_nonsense_answers_with_nothing() -> None:
-    """A metadata query is not a place to raise; a check would then be an accident.
+async def test_an_empty_environment_is_an_answer_and_an_unreadable_one_is_not() -> None:
+    """The distinction the whole module turns on, at the one method that reads a version.
 
-    Three ways for the answer to be useless — an environment that has nothing,
-    one that answered with something that is not JSON, and one that answered
-    with JSON of the wrong shape — and all three are "not installed" as far as a
-    check is concerned.
+    An environment that answered and holds nothing has told us something. One
+    that answered with nonsense has not, and saying "nothing is installed" for
+    it would be a wrong answer presented as a successful read.
     """
     empty = FakeRobot()
     empty.packages = {}
@@ -166,8 +172,10 @@ async def test_an_environment_that_answers_with_nonsense_answers_with_nothing() 
     wrong_shape, _three = daemon_for(FakeRobot(metadata_stdout="[1, 2, 3]"))
 
     assert await installed.installed_versions("absent") == {"absent": ""}
-    assert await unreadable.installed_versions("absent") == {"absent": ""}
-    assert await wrong_shape.installed_versions("absent") == {"absent": ""}
+    with pytest.raises(RobotAccessError, match="not JSON"):
+        await unreadable.installed_versions("absent")
+    with pytest.raises(RobotAccessError, match="rather than an object"):
+        await wrong_shape.installed_versions("absent")
 
 
 @pytest.mark.asyncio
@@ -187,13 +195,16 @@ async def test_the_effective_environment_is_read_from_systemd_and_shell_quoted()
 
 
 @pytest.mark.asyncio
-async def test_an_environment_that_cannot_be_read_is_empty_rather_than_an_error() -> (
-    None
-):
-    """The configuration check compares what it is given; nothing is nothing."""
+async def test_an_environment_that_cannot_be_read_is_a_fault_not_an_empty_one() -> None:
+    """An empty mapping would be a different robot from one that did not answer.
+
+    `config diff` would report every declared setting as missing, and an
+    apply's verification would fail a change that had worked.
+    """
     daemon, _access = daemon_for(FakeRobot(failing={"systemctl"}))
 
-    assert await daemon.effective_configuration() == {}
+    with pytest.raises(RobotAccessError, match="could not read"):
+        await daemon.effective_configuration()
 
 
 @pytest.mark.asyncio
@@ -238,14 +249,18 @@ async def test_a_control_that_answers_with_something_unreadable_names_the_module
 
 
 @pytest.mark.asyncio
-async def test_a_control_that_could_not_be_run_reports_it_as_not_running() -> None:
-    """A daemon that will not answer is not a daemon that is running the application."""
+async def test_a_control_that_could_not_be_run_is_a_fault_not_a_stopped_application() -> (
+    None
+):
+    """Reporting "not running" for it would make `app stop` succeed over silence.
+
+    The command would find the application already stopped, do nothing, and
+    exit zero, having learned nothing about it at all.
+    """
     daemon, _access = daemon_for(FakeRobot(failing={"/opt/reachy/venv/bin/python"}))
 
-    state = await daemon.application_state()
-
-    assert state.running is False
-    assert "exited 1" in state.detail
+    with pytest.raises(DaemonControlError, match="could not be run"):
+        await daemon.application_state()
 
 
 @pytest.mark.asyncio
@@ -353,14 +368,18 @@ async def test_an_account_that_is_already_root_sends_no_sudo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_unit_systemd_will_not_report_on_reads_as_answering_nothing() -> None:
-    """`systemctl` refusing is a robot that has told us nothing, not a healthy one."""
+async def test_a_unit_systemd_will_not_report_on_is_a_fault_not_a_stopped_daemon() -> (
+    None
+):
+    """`systemctl` refusing is a robot that told us nothing, not one that is down.
+
+    A unit that is not installed answers with empty properties rather than
+    failing, so an empty answer means what it says and this one does not.
+    """
     daemon, _access = daemon_for(FakeRobot(failing={"systemctl"}))
 
-    info = await daemon.ping()
-
-    assert info.responding is False
-    assert "not reporting a state" in info.complaint
+    with pytest.raises(RobotAccessError, match="could not read"):
+        await daemon.ping()
 
 
 @pytest.mark.asyncio
@@ -372,3 +391,64 @@ async def test_a_control_answering_with_a_list_rather_than_an_object_is_refused(
 
     with pytest.raises(DaemonControlError, match="rather than an object"):
         await daemon.application_state()
+
+
+@pytest.mark.asyncio
+async def test_the_staging_directory_is_narrowed_to_the_connecting_account() -> None:
+    """The managed region passes through it, and a setting is where a credential lives.
+
+    `chmod` runs on every call rather than only on creation, because
+    `mkdir --parents` leaves an existing directory's mode alone.
+    """
+    robot = FakeRobot()
+    daemon, _access = daemon_for(robot)
+
+    await daemon.stage(b"something", "thing")
+
+    assert robot.modes[DEFAULT_STAGING] == "0700"
+
+
+@pytest.mark.asyncio
+async def test_the_staged_region_is_removed_after_it_is_installed() -> None:
+    """`install` copies, so without this the whole region is left on the robot."""
+    robot = FakeRobot()
+    daemon, _access = daemon_for(robot)
+
+    await daemon.write_managed_region(render_region({"A_SETTING": "1"}))
+
+    assert f"{DEFAULT_STAGING}/managed.conf" not in robot.files
+    assert robot.files[DROP_IN]
+
+
+@pytest.mark.asyncio
+async def test_the_staged_region_is_removed_even_when_the_install_failed() -> None:
+    """The path that fails is exactly the one that would otherwise leave it there."""
+    robot = FakeRobot(failing={"install"})
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(RobotAccessError):
+        await daemon.write_managed_region(render_region({"A_SETTING": "1"}))
+
+    assert f"{DEFAULT_STAGING}/managed.conf" not in robot.files
+
+
+@pytest.mark.asyncio
+async def test_a_staged_file_that_could_not_be_removed_is_said_out_loud() -> None:
+    """Best effort, and not silent: a file left on the robot is worth knowing about."""
+    said: list[str] = []
+    access = FakeRemoteAccess(FakeRobot(failing={"rm"}))
+    daemon = DaemonClient(access, RobotLayout(), elevate=True, complain=said.append)
+
+    await daemon.discard(PurePosixPath(DEFAULT_STAGING) / "thing")
+
+    assert said
+    assert "could not remove" in said[0]
+
+
+@pytest.mark.asyncio
+async def test_a_drop_in_that_is_there_and_unreadable_is_a_fault() -> None:
+    """Treating it as never written would overwrite whatever is actually in it."""
+    daemon, _access = daemon_for(FakeRobot(failing={"cat"}))
+
+    with pytest.raises(RobotAccessError, match="could not read"):
+        await daemon.read_managed_region()

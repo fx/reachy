@@ -28,6 +28,7 @@ rather than a schema to publish.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from enum import StrEnum
@@ -221,6 +222,11 @@ class Setting:
             )
         except ValueError as error:
             raise SettingError(self._refusal()) from error
+        # `float("nan")` parses, and every comparison with a NaN is false — so a
+        # bounded setting would accept it while reporting a range it is not in.
+        # Infinity parses too, and is outside every bound that exists.
+        if not math.isfinite(number):
+            raise SettingError(self._refusal())
         if self.minimum is not None and number < self.minimum:
             raise SettingError(self._refusal())
         if self.maximum is not None and number > self.maximum:

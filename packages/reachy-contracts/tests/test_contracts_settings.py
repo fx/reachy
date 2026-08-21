@@ -202,3 +202,18 @@ def test_a_declaration_that_is_acceptable_comes_back_normalised_and_ordered() ->
 def test_an_empty_declaration_is_acceptable() -> None:
     """It declares that nothing should be in force, which `apply` acts on."""
     assert validate_settings({}) == {}
+
+
+@pytest.mark.parametrize("value", ["nan", "NaN", "inf", "-inf", "Infinity"])
+def test_a_non_finite_number_is_refused_by_a_bounded_setting(value: str) -> None:
+    """`float("nan")` parses, and every comparison with it is false.
+
+    A bounded setting checking only its two comparisons would therefore accept
+    it while reporting a range it is not in. Infinity parses too, and is outside
+    every bound there is.
+
+    Args:
+        value: The non-finite spelling to refuse.
+    """
+    with pytest.raises(SettingError, match=STALENESS):
+        validate_setting(STALENESS, value)

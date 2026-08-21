@@ -21,6 +21,16 @@ is what stops a deploy having a private opinion about whether a robot is healthy
 — reachyctl REQ-056. If verification needs a question the registry cannot ask,
 the answer is a check in the registry, not a probe in this file.
 
+**Every run that reached the robot ends by asking it what it is running.** A
+step that fails does not end the sequence; it stops the steps that would make
+things worse — there is nothing to restart over a failed install — and the
+verification still runs, because it only reads. Two reasons, and the second is
+the one that matters. An operator whose install failed still needs to know what
+the robot is running now. And a command that exits non-zero may still have taken
+effect, so its own status is never the last word: that is the whole thesis of
+this change, and applying it only to the happy path would be applying it
+nowhere.
+
 **A running application is warned about, not refused.** The change document
 records this as an open question and it resolves here: restarting the daemon
 interrupts whatever the robot is doing, possibly a conversation, and the command
@@ -213,40 +223,46 @@ async def run_deploy(
     steps.done(_TRANSFER, f"the wheel is at {staged}")
 
     steps.begin(_INSTALL, "installing into the environment the daemon runs")
-    installed = await daemon.install_wheel(staged)
-    if not installed.ok:
-        steps.failed(_INSTALL, installed.complaint())
-        return DeployOutcome(
-            steps=steps,
-            wheel=wheel,
-            running_version=_version_of(before),
-            preview=False,
-        )
-    steps.done(_INSTALL, "the install reported success, which proves nothing yet")
+    try:
+        installed = await daemon.install_wheel(staged)
+    finally:
+        # The robot has little room and this change retains no versions, so the
+        # transferred wheel is removed whether or not the install worked.
+        await daemon.discard(staged)
+    if installed.ok:
+        steps.done(_INSTALL, "the install reported success, which proves nothing yet")
 
-    reporter.note(RESTART_WARNING)
-    steps.begin(_RESTART, f"restarting {daemon.layout.daemon_unit}")
-    restarted = await daemon.restart_daemon()
-    if not restarted.ok:
-        steps.failed(_RESTART, restarted.complaint())
-        return DeployOutcome(
-            steps=steps,
-            wheel=wheel,
-            running_version="",
-            preview=False,
-        )
-    steps.done(_RESTART, "the daemon restarted")
-
-    steps.begin(_START, f"asking the daemon to start {daemon.layout.application}")
-    started = await daemon.start_application()
-    if started.ok:
-        steps.done(_START, "the daemon accepted the start")
+        reporter.note(RESTART_WARNING)
+        steps.begin(_RESTART, f"restarting {daemon.layout.daemon_unit}")
+        restarted = await daemon.restart_daemon()
+        if restarted.ok:
+            steps.done(_RESTART, "the daemon restarted")
+            steps.begin(
+                _START,
+                f"asking the daemon to start {daemon.layout.application}",
+            )
+            started = await daemon.start_application()
+            if started.ok:
+                steps.done(_START, "the daemon accepted the start")
+            else:
+                # Recorded and not decisive. The verification below asks the
+                # robot what is actually running, and an application that
+                # started despite a control command complaining is a working
+                # robot — where treating this as the answer would be trusting
+                # an exit status again.
+                steps.warned(_START, started.complaint())
+        else:
+            steps.failed(_RESTART, restarted.complaint())
+            steps.skipped(
+                _START, "the daemon did not restart, so there is nothing to start"
+            )
     else:
-        # Not fatal on its own. The verification below asks the robot what is
-        # actually running, and an application that started despite a control
-        # command complaining is a working robot — where treating this as the
-        # answer would be trusting an exit status again.
-        steps.failed(_START, started.complaint())
+        steps.failed(_INSTALL, installed.complaint())
+        steps.skipped(
+            _RESTART,
+            "the install failed, so restarting would interrupt the robot for nothing",
+        )
+        steps.skipped(_START, "nothing new was installed to start")
 
     return await _verify(steps, wheel, context)
 
@@ -371,7 +387,12 @@ def _summary(outcome: DeployOutcome) -> str:
     failures = [result for result in outcome.steps.results if result.failed]
     if failures:
         first = failures[0]
-        return f"the deploy failed at {first.name}: {first.detail}"
+        running = (
+            ""
+            if not outcome.running_version
+            else f"; the robot is running {outcome.running_version}"
+        )
+        return f"the deploy failed at {first.name}: {first.detail}{running}"
     if outcome.preview:
         return "nothing was changed: this was a preview"
     wheel = outcome.wheel

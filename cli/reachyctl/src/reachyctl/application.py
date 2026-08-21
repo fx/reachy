@@ -21,7 +21,19 @@ all.
 
 **Both verbs verify.** The same reasoning as `deploy`: a control command that
 exits zero is not evidence that the application is running, so the verb asks the
-shared `application.running` check afterwards and reports what it found.
+shared `application.running` check afterwards and reports what it found. A
+control command that reported a *failure* is not evidence either, so it is
+recorded as a warning and the verification still decides.
+
+**A state that could not be read is not a state.** The step that decides whether
+there is anything to do asks the daemon directly rather than reading the shared
+check's result, and the difference is not stylistic. `reachy_checks.run_check`
+turns anything a probe raises into a *failed* check, and a failed
+`application.running` reads as "it is not running" — so `app stop` against a
+robot whose control could not be reached would report the application as already
+stopped and exit zero, having learned nothing about it. Asked directly, that
+same fault is a `DaemonControlError` and costs `UNREACHABLE`. The registry check
+is still what verifies the end state, which is the question REQ-056 is about.
 """
 
 from __future__ import annotations
@@ -75,14 +87,18 @@ async def _lifecycle(
     context = CheckContext(daemon=daemon)
 
     steps.begin(_INSPECT, f"asking whether {daemon.layout.application} is running")
-    # Above the check on purpose. `run_check` turns anything a probe raises into
-    # a failed result, and a failed `application.running` reads as "it is not
-    # running" — so `stop` against a robot that is not there would otherwise
-    # report that it was already stopped and exit zero.
     await daemon.connect()
-    before = await run_check(check_by_identifier(APPLICATION_RUNNING), context)
-    running = not before.failed
-    steps.done(_INSPECT, before.summary)
+    # Asked directly rather than through the registry, and the module
+    # documentation says why: a check that could not run reads as a negative
+    # answer, and this is the answer the "nothing to do" branch turns on.
+    state = await daemon.application_state()
+    running = state.running
+    steps.done(
+        _INSPECT,
+        f"{daemon.layout.application} is "
+        f"{'running' if running else 'not running'}"
+        f"{f' ({state.detail})' if state.detail else ''}",
+    )
 
     if running is start:
         # Already in the state that was asked for. Reported as skipped rather
@@ -114,9 +130,11 @@ async def _lifecycle(
     if outcome.ok:
         steps.done(_CONTROL, f"the daemon accepted the {verb}")
     else:
-        # Recorded and not returned on. What decides the answer is the state
-        # afterwards, not what the control command said about itself.
-        steps.failed(_CONTROL, outcome.complaint())
+        # Recorded and not decisive. What decides the answer is the state
+        # afterwards, not what the control command said about itself — so this
+        # is a warning rather than a failure, or a robot that did as it was
+        # asked would be reported as a failed command.
+        steps.warned(_CONTROL, outcome.complaint())
 
     steps.begin(_VERIFY, "asking the robot what the application is doing now")
     after = await run_check(check_by_identifier(APPLICATION_RUNNING), context)
@@ -299,7 +317,17 @@ def execute_logs(
                 command="app logs",
                 ok=True,
                 summary="stopped following the journal",
-                data={"robot": robot, "application": daemon.layout.application},
+                data={
+                    "robot": robot,
+                    "application": daemon.layout.application,
+                    # The same keys as the ordinary path. Ending `--follow` at
+                    # the keyboard is how this command is meant to stop, so a
+                    # consumer reading `lines` must not fail on the normal
+                    # termination path; the count is genuinely unknown, and
+                    # `None` says that rather than claiming a number.
+                    "lines": None,
+                    "followed": follow,
+                },
             ),
         )
     return reporter.emit(

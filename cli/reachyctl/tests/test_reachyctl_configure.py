@@ -267,15 +267,22 @@ async def test_the_restart_warning_is_written_before_the_restart_happens() -> No
 
 
 @pytest.mark.asyncio
-async def test_a_restart_that_failed_is_reported_before_anything_is_verified() -> None:
-    """A declaration written and not re-read is not a declaration in force."""
+async def test_a_restart_that_failed_is_still_followed_by_the_verification() -> None:
+    """A declaration written and not re-read is not a declaration in force.
+
+    The run does not end at the failed restart: the verification only reads, a
+    restart that reported a failure may still have taken effect, and either way
+    the operator needs to know what is in force now.
+    """
     daemon, _access = daemon_for(FakeRobot(restart_succeeds=False))
     reporter, _streams = reporter_for()
 
     steps, _difference = await run_apply(daemon, DECLARED, reporter, preview=False)
 
-    assert _named(steps.results)["restart"].failed is True
-    assert "verify" not in _named(steps.results)
+    results = _named(steps.results)
+    assert results["restart"].failed is True
+    assert results["verify"].failed is True
+    assert URL in results["verify"].detail
     assert steps.ok is False
 
 
