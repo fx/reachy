@@ -1629,8 +1629,11 @@ def bench(
             min=0.0,
             help=(
                 "The frame rate the robot is already tracking at, as you know "
-                "it to be. `robot-load` records it and refuses without it; it "
-                "does not set it, any more than it sets up the robot."
+                "it to be. REQUIRED by `robot-load`, which refuses to report "
+                "anything while this is left at its default of 0 — it reads "
+                "the robot's processors and does not set the robot tracking, "
+                "so a rate it defaulted would be a condition nothing "
+                "established. Ignored by every other benchmark."
             ),
         ),
     ] = 0.0,

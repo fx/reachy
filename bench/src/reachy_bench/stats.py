@@ -60,7 +60,11 @@ def finite(value: object) -> float:
         ValueError: If it is not a finite number. The caller turns that into a
             message naming the entry.
     """
-    number = float(value)  # type: ignore[arg-type]  # the caller catches TypeError: this is where a document's arbitrary JSON is turned into a number, and "not a number at all" and "not a finite one" are the same event to it
+    # `float` is annotated against the types it accepts and this is handed a
+    # document's arbitrary JSON, so the conversion is where "not a number at
+    # all" is discovered. Every caller catches `TypeError` beside `ValueError`
+    # for that reason: to a reader of a result document the two are one event.
+    number = float(value)  # type: ignore[arg-type]  # arbitrary JSON; see above
     if not math.isfinite(number):
         message = f"{number} is not a figure a comparison can compare"
         raise ValueError(message)

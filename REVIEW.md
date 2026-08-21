@@ -104,6 +104,13 @@ event loop looks at it is not, because nothing waits and no outcome can turn on
 how loaded the runner is. The groundstation's three such tests use
 `_ALREADY_ELAPSED`.
 
+**A changelog row in a spec can be authorised by a change document.** The rule
+against editing `docs/specs/` while implementing a change has one exception: a
+`## Changelog` row in the spec that change settles, where its task list asks for
+one — a measurement deciding a question the spec argued for is what a decision
+record is for. Do not report such a row. Any other edit under `docs/specs/` is
+still a finding.
+
 **Specs are written in duvet mode.** RFC 2119 keywords appear **only** inside
 `### REQ-NNN:` sections; their absence from Overview, Background, Design,
 Constraints, Open Questions and scenario bodies is required, since a keyword

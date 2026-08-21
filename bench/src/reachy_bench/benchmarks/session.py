@@ -228,11 +228,15 @@ async def _drive(  # pragma: no cover - see `_measure_session`
                     raise RuntimeError(message)
                 await asyncio.wait_for(anext(results), timeout=_TIMEOUT_SECONDS)
 
-            await measure_async(
-                _exchange,
-                iterations=options.warmup + 1,
-                warmup=0,
-            )
+            # A plain loop, not `measure_async`. The round trips below are the
+            # client's own figures — a single-clock subtraction between the
+            # stamp it minted for a frame and the moment the result carrying
+            # that stamp came back — so nothing here times anything, and timing
+            # the warm-up only to discard the distribution would read as a
+            # measurement being thrown away. One pass to get the exchange
+            # flowing, plus the configured warm-up.
+            for _ in range(options.warmup + 1):
+                await _exchange()
             round_trips: list[float] = []
             for _ in range(options.iterations):
                 if await held.submit_frame(payload) is None:

@@ -103,9 +103,20 @@ jobs:
             echo
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # The status is captured rather than left to `set -e`, and the fence
+          # is closed before the step exits on it. Otherwise the summary is
+          # malformed in exactly the case somebody is reading it: an unclosed
+          # code fence swallows everything after it, and the run where that
+          # happens is the run where the gate caught a regression.
+          #
+          # `|| status=$?` is what suppresses `-e` for this one pipeline, and
+          # `pipefail` is what makes the captured status the comparison's
+          # rather than `tee`'s.
+          status=0
           just bench-compare --results bench-results.json --require-profile \
-            | tee --append "$GITHUB_STEP_SUMMARY"
+            | tee --append "$GITHUB_STEP_SUMMARY" || status=$?
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
       # What to commit in order to start gating this runner class's timings.
       # Written unconditionally rather than only when the profile is missing:
@@ -118,10 +129,16 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          # The prose carries no backticks, deliberately. A markdown code span
+          # inside a single-quoted `echo` is what shellcheck reads as a command
+          # substitution somebody forgot to double-quote (SC2016), and the
+          # alternatives are worse: a quoted heredoc keeps this block's YAML
+          # indentation, and ten leading spaces turn every line of it into a
+          # markdown code block.
           {
             echo '### The baseline profile this run would record'
             echo
-            echo 'Paste this into the `profiles` object of `bench/baseline.json`'
+            echo 'Paste this into the "profiles" object of bench/baseline.json'
             echo 'to record — or to update — the figures for this runner class.'
             echo 'Nothing here writes it: changing a recorded number is a pull'
             echo 'request, so that accepting one is a decision made in a review.'

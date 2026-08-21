@@ -62,7 +62,12 @@ is the change that makes that requirement false.
 - **Before adding a dependency**, read the invariants below — the lockfile
   travels in the same pull request.
 - **Do not edit `docs/specs/`** as part of implementing a change. A spec change
-  is its own proposal, made through `/spec-writer`.
+  is its own proposal, made through `/spec-writer`. The one exception is a
+  `## Changelog` row in the spec a change settles, and only where that change
+  document asks for one: a measurement that decides a question the spec argued
+  is what its decision record is for, and recording it anywhere else is how that
+  record goes stale. Everything else about a spec still goes through
+  `/spec-writer`.
 
 ## Cross-cutting invariants
 

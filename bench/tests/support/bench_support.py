@@ -1,4 +1,4 @@
-"""Builders the benchmark suite's tests share, so no test builds a run by hand.
+"""The builders that the benchmark suite's tests share, so none builds a run by hand.
 
 Every test here is about the harness rather than about a measurement, so what it
 needs is a result document with particular numbers in it — not a real one. These
