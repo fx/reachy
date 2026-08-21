@@ -3,7 +3,37 @@ name = "reachy-groundstation"
 version = "0.1.0"
 description = "Off-robot service hosting heavy computation as pluggable capabilities"
 requires-python = ">=3.12"
-dependencies = ["reachy-contracts"]
+dependencies = [
+    # The wire vocabulary. Declared once, in the contracts package, and imported
+    # here rather than restated — see the root AGENTS.md.
+    "reachy-contracts",
+    # The decoded frame is a numpy array shared by every capability, and the
+    # JPEG decoder that produces it is OpenCV's. Both do their work in C or C++,
+    # which is the reason the architecture spec keeps this service in Python.
+    "numpy>=2.1",
+    "opencv-python-headless>=4.10",
+    # The metrics registry and the OpenMetrics exposition the /metrics endpoint
+    # serves, including the exemplars that carry a frame's identity without
+    # making the session or the sequence number a label.
+    "prometheus-client>=0.21",
+    # Validated configuration. `pydantic_settings` is deliberately outside the
+    # TID253 ban: a settings model is configuration, not a wire type.
+    "pydantic-settings>=2.5",
+    # The ASGI application, its WebSocket endpoint and the server that runs it.
+    # `websockets` is uvicorn's WebSocket implementation, named explicitly so the
+    # lockfile pins it rather than leaving the choice to an extra.
+    "starlette>=0.41",
+    "uvicorn>=0.32",
+    "websockets>=13.1",
+    # Structured logging: every line carries the session identifier and the
+    # sequence number of the frame it concerns.
+    "structlog>=24.4",
+    # Tracing spans across the pipeline stages. The SDK is a runtime dependency
+    # rather than a development one because the service installs the provider
+    # itself at boot; what it exports is deployment configuration.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
+]
 
 [build-system]
 requires = ["hatchling"]

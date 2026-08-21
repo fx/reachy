@@ -62,7 +62,7 @@ changes:
     path: changes/0004-groundstation-session.md
     description: Transport, session layer, capability registry, pipeline and observability
     spec: groundstation
-    status: draft
+    status: complete
     depends_on: ["0003"]
   - id: "0005"
     name: perception-capability

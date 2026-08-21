@@ -16,6 +16,10 @@ dependencies = [
 [dependency-groups]
 dev = [
     "diff-cover>=9.2",
+    # `httpx.ASGITransport` speaks HTTP to an ASGI application in memory, which
+    # is what lets the endpoint tests drive the real routes, the real middleware
+    # and the real responses without opening a socket.
+    "httpx>=0.27",
     "mypy>=1.11",
     # An in-memory filesystem. The satellite's carried upstream tests exercise
     # code that reads and writes files; this is what lets them do so without
@@ -276,6 +280,17 @@ mypy_path = [
     # path so their tests can import them by name, the same way `scripts/tests/`
     # puts it on `sys.path` at run time.
     "scripts",
+    # Not a member either. A member's `tests/` is deliberately not a package, so
+    # a test module reaches its siblings' shared fakes by plain module name; the
+    # member's `conftest.py` puts this directory on `sys.path` at run time and
+    # this entry is the same thing for the type checker. Without it the helper is
+    # still checked — it is under `files` — but every import of it is unresolved
+    # and the fakes it exports degrade to `Any`, which strict mode then rejects.
+    #
+    # It is the `support/` subdirectory rather than `tests/` itself because a
+    # mypy path root makes the files directly under it top-level modules, and two
+    # members' `conftest.py` would then both be the module `conftest`.
+    "services/groundstation/tests/support",
 ]
 files = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 # `ignore-without-code` is how the "a suppression carries its rule identifier"

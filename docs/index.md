@@ -20,7 +20,7 @@
 | 0001 | [workspace-skeleton](changes/0001-workspace-skeleton.md) | [architecture](specs/architecture/) | complete | — |
 | 0002 | [ci-and-hygiene-gates](changes/0002-ci-and-hygiene-gates.md) | [architecture](specs/architecture/) | complete | 0001 |
 | 0003 | [contracts-package](changes/0003-contracts-package.md) | [robot-link](specs/robot-link/) | complete | 0001, 0002 |
-| 0004 | [groundstation-session](changes/0004-groundstation-session.md) | [groundstation](specs/groundstation/) | draft | 0003 |
+| 0004 | [groundstation-session](changes/0004-groundstation-session.md) | [groundstation](specs/groundstation/) | complete | 0003 |
 | 0005 | [perception-capability](changes/0005-perception-capability.md) | [perception](specs/perception/) | draft | 0004 |
 | 0006 | [groundstation-images](changes/0006-groundstation-images.md) | [groundstation](specs/groundstation/) | draft | 0002, 0005 |
 | 0007 | [reachyctl-probe](changes/0007-reachyctl-probe.md) | [reachyctl](specs/reachyctl/) | draft | 0003, 0004 |
