@@ -243,8 +243,13 @@ async def test_overload_drops_the_oldest_and_still_answers_the_newest() -> None:
 
         # Wait for the service to have taken delivery of all six before letting
         # the pipeline move, so the overload is real rather than a race that
-        # sometimes happens.
+        # sometimes happens. Bounded, so that a service which never takes
+        # delivery fails this test rather than hanging the suite.
+        deadline = asyncio.get_running_loop().time() + _TIMEOUT
         while harness.sample("groundstation_frames_received_total") < 6:
+            if asyncio.get_running_loop().time() > deadline:
+                message = "the service did not take delivery of six frames"
+                raise AssertionError(message)
             await asyncio.sleep(0.005)
 
         # With a bound of one, at most two frames can have survived: the one the

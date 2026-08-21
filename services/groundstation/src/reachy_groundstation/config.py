@@ -87,7 +87,9 @@ class Settings(BaseSettings):
             its offer before the session is closed.
         warm_up_timeout_seconds: How long one capability may spend warming up
             before it is recorded as unhealthy.
-        max_frame_bytes: The largest frame message the session will accept.
+        max_message_bytes: The largest message of either kind the session will
+            accept, counted in bytes for a frame and in characters for a
+            control message.
         log_level: The lowest severity emitted.
         log_format: `json` for machines, `console` for a terminal.
         service_name: What this process calls itself in traces and metrics.
@@ -107,7 +109,9 @@ class Settings(BaseSettings):
     capability_timeout_seconds: float = Field(default=5.0, gt=0.0, le=600.0)
     handshake_timeout_seconds: float = Field(default=10.0, gt=0.0, le=600.0)
     warm_up_timeout_seconds: float = Field(default=60.0, gt=0.0, le=3600.0)
-    max_frame_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024)
+    max_message_bytes: int = Field(
+        default=4 * 1024 * 1024, ge=1024, le=64 * 1024 * 1024
+    )
     log_level: Literal["debug", "info", "warning", "error"] = "info"
     log_format: Literal["json", "console"] = "json"
     service_name: str = Field(default="reachy-groundstation", min_length=1)

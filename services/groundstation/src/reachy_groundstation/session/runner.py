@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -32,7 +33,7 @@ from reachy_contracts import (
     SessionOffer,
     negotiate,
 )
-from reachy_groundstation.obs import get_logger, session_context
+from reachy_groundstation.obs import frame_exemplar, get_logger, session_context
 from reachy_groundstation.pipeline.queue import FrameQueue, QueuedFrame
 from reachy_groundstation.pipeline.runner import FramePipeline
 from reachy_groundstation.session.auth import credential_is_valid
@@ -66,6 +67,30 @@ _logger = get_logger(__name__)
 # What a refused client is told. It says the credential was not accepted and
 # nothing about which part of it was wrong.
 _UNAUTHENTICATED_DETAIL = "the credential presented is not the configured one"
+
+
+def _fault_summary(error: ValueError) -> str:
+    """Say which fields of a message failed to validate, and never with what.
+
+    A `pydantic.ValidationError` renders the offending input value into its own
+    text. That is helpful everywhere except on the one message that carries a
+    credential, so this reports the location and the kind of each fault and
+    discards the values.
+
+    Args:
+        error: What validation raised.
+
+    Returns:
+        A short, value-free description of what was wrong.
+    """
+    faults = getattr(error, "errors", None)
+    if faults is None:
+        return type(error).__name__
+    return "; ".join(
+        f"{'.'.join(str(part) for part in fault['loc']) or '(message)'}: "
+        f"{fault['type']}"
+        for fault in faults()
+    )
 
 
 def new_session_id() -> str:
@@ -239,17 +264,46 @@ class SessionRunner:
             )
             return None
 
-        try:
-            kind, payload = decode_control(first)
-            if kind is not MessageKind.OFFER:
-                message = f"a session opens with an offer, not {kind.value!r}"
-                raise FramingError(message)
-            return SessionOffer.from_wire(payload)
-        except (FramingError, ValueError) as error:
+        if len(first) > self._settings.max_message_bytes:
             await self._refuse(
                 CloseReason.PROTOCOL_ERROR,
                 CLOSE_PROTOCOL_ERROR,
-                f"offer did not parse: {error}",
+                f"opening message of {len(first)} characters exceeds the "
+                f"configured maximum of {self._settings.max_message_bytes}",
+            )
+            return None
+
+        try:
+            kind, payload = decode_control(first)
+        except FramingError as error:
+            await self._refuse(
+                CloseReason.PROTOCOL_ERROR,
+                CLOSE_PROTOCOL_ERROR,
+                f"opening message did not parse: {error}",
+            )
+            return None
+
+        if kind is not MessageKind.OFFER:
+            await self._refuse(
+                CloseReason.PROTOCOL_ERROR,
+                CLOSE_PROTOCOL_ERROR,
+                f"a session opens with an offer, not {kind.value!r}",
+            )
+            return None
+
+        try:
+            return SessionOffer.from_wire(payload)
+        except ValueError as error:
+            # The exception's message is deliberately not repeated. An offer is
+            # the one message that carries the credential, and pydantic puts the
+            # offending input value into a validation error's text — so
+            # forwarding it would write the presented credential into a close
+            # reason and into whatever reads one. What is reported instead is
+            # which fields failed and how, which is what a client can act on.
+            await self._refuse(
+                CloseReason.PROTOCOL_ERROR,
+                CLOSE_PROTOCOL_ERROR,
+                f"offer did not parse: {_fault_summary(error)}",
             )
             return None
 
@@ -279,6 +333,8 @@ class SessionRunner:
         ):
             return True
         _logger.warning("session.unauthenticated")
+        # No exemplar: no frame has been handled, and none ever will be on this
+        # session.
         self._obs.metrics.errors_total.labels(
             code=ErrorCode.UNAUTHENTICATED.value,
         ).inc()
@@ -353,7 +409,37 @@ class SessionRunner:
             return await self._receive_frames(queue)
         finally:
             queue.close()
+            await self._drain(worker)
+
+    async def _drain(self, worker: asyncio.Task[None]) -> None:
+        """Let the pipeline finish the frames it already accepted, then stop.
+
+        Args:
+            worker: The pipeline task for this session.
+
+        Raises:
+            asyncio.CancelledError: If the session itself is being cancelled, in
+                which case the pipeline is cancelled with it rather than left
+                running against a connection nobody holds.
+        """
+        try:
             await worker
+        except TransportClosedError:
+            # The client went away while the pipeline was still answering. The
+            # caller is unwinding on that same event already, so raising a
+            # second copy of it here would replace the original.
+            _logger.debug("pipeline.stopped_on_a_closed_transport")
+        except asyncio.CancelledError:
+            # Cancelling is not enough on its own: the task has to be awaited
+            # for its cancellation to actually complete, or the session ends
+            # with a pipeline still unwinding against a connection nobody
+            # holds. Whatever it raises on the way out is its own end, not this
+            # session's outcome. A capability that ignores cancellation is
+            # already bounded by `capability_timeout_seconds`.
+            worker.cancel()
+            with suppress(asyncio.CancelledError, TransportClosedError):
+                await worker
+            raise
 
     async def _receive_frames(self, queue: FrameQueue) -> CloseReason:
         """Read frames off the connection and queue them.
@@ -369,15 +455,22 @@ class SessionRunner:
         """
         while True:
             message = await self._transport.receive()
+            # The bound is checked before anything reads the message, and it
+            # covers text as well as frames: a control message is parsed as
+            # JSON, so an unbounded one is an unbounded parse. `len` counts
+            # bytes for a frame and characters for a control message, which is
+            # the right order of magnitude for a guard and cheaper than
+            # encoding a message in order to measure it.
+            if len(message) > self._settings.max_message_bytes:
+                await self._report_malformed(
+                    f"message of {len(message)} bytes exceeds the configured "
+                    f"maximum of {self._settings.max_message_bytes}",
+                )
+                continue
             if isinstance(message, str):
                 reason = await self._handle_control(message)
                 if reason is not None:
                     return reason
-                continue
-            if len(message) > self._settings.max_frame_bytes:
-                await self._report_malformed(
-                    f"frame of {len(message)} bytes exceeds the configured maximum",
-                )
                 continue
             try:
                 header, payload = decode_frame(message)
@@ -385,7 +478,12 @@ class SessionRunner:
                 await self._report_malformed(str(error))
                 continue
             self._frames_received += 1
-            self._obs.metrics.frames_received_total.inc()
+            # Both counters carry the arriving frame's identity as an exemplar,
+            # the same way the pipeline's timings do. A drop is attributed to
+            # the frame whose arrival caused it, which is what makes "why was
+            # frame N never answered?" answerable from the metrics alone.
+            exemplar = frame_exemplar(self._session_id, header.sequence)
+            self._obs.metrics.frames_received_total.inc(exemplar=exemplar)
             dropped = queue.put(
                 QueuedFrame(
                     header=header,
@@ -395,7 +493,7 @@ class SessionRunner:
             )
             if dropped:
                 self._frames_dropped += dropped
-                self._obs.metrics.frames_dropped_total.inc(dropped)
+                self._obs.metrics.frames_dropped_total.inc(dropped, exemplar=exemplar)
 
     async def _handle_control(self, text: str) -> CloseReason | None:
         """Deal with a control message arriving mid-session.
@@ -429,6 +527,10 @@ class SessionRunner:
         Raises:
             TransportClosedError: If the connection ended while answering.
         """
+        # No exemplar: a message that did not parse as a frame has no sequence
+        # number to attribute the error to. REQ-028 attaches a frame's identity
+        # to what is emitted while handling a frame, and this is emitted while
+        # declining to.
         self._obs.metrics.errors_total.labels(
             code=ErrorCode.MALFORMED_MESSAGE.value,
         ).inc()

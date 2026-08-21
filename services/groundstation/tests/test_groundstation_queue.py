@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from groundstation_support import make_header
+from groundstation_support import hand_control_to_the_event_loop, make_header
 
 from reachy_groundstation.pipeline.queue import (
     FrameQueue,
@@ -88,7 +88,7 @@ async def test_a_waiting_consumer_is_woken_by_a_put() -> None:
     """The consumer parks on the queue rather than polling it."""
     queue = FrameQueue(2)
     getter = asyncio.ensure_future(queue.get())
-    await asyncio.sleep(0)
+    await hand_control_to_the_event_loop(1)
     queue.put(_frame(11))
     assert (await getter).header.sequence == 11
 
@@ -98,7 +98,7 @@ async def test_closing_an_empty_queue_releases_the_consumer() -> None:
     """A session that ends must not leave its pipeline parked forever."""
     queue = FrameQueue(2)
     getter = asyncio.ensure_future(queue.get())
-    await asyncio.sleep(0)
+    await hand_control_to_the_event_loop(1)
     queue.close()
     with pytest.raises(QueueClosedError):
         await getter

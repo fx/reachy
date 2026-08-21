@@ -84,15 +84,21 @@ def registered_factories() -> tuple[CapabilityFactory, ...]:
 class _Entry:
     """One capability and what became of it.
 
+    The descriptor is read once, when the capability is built, and kept here.
+    Nothing asks the capability for it again: it is a property on somebody
+    else's object, so every later read is another chance for third-party code to
+    raise somewhere the failure is not contained.
+
     Attributes:
         name: What it is known as, which is its own name when it got far enough
             to have one and the factory's name otherwise.
         capability: The built capability, or `None` when building failed.
+        descriptor: What it negotiates as, or `None` when it never said.
         state: Where it is in its lifecycle.
         detail: Why it is unhealthy, when it is.
     """
 
-    __slots__ = ("capability", "detail", "name", "state")
+    __slots__ = ("capability", "descriptor", "detail", "name", "state")
 
     def __init__(
         self,
@@ -100,6 +106,7 @@ class _Entry:
         capability: CapabilityPort | None,
         state: CapabilityState,
         detail: str = "",
+        descriptor: Capability | None = None,
     ) -> None:
         """Record one capability's fate.
 
@@ -108,9 +115,11 @@ class _Entry:
             capability: The built capability, or `None`.
             state: Where it is in its lifecycle.
             detail: Why it is unhealthy, when it is.
+            descriptor: What it negotiates as, or `None`.
         """
         self.name = name
         self.capability = capability
+        self.descriptor = descriptor
         self.state = state
         self.detail = detail
 
@@ -122,11 +131,7 @@ class _Entry:
         """
         return CapabilityHealth(
             name=self.name,
-            version=(
-                self.capability.descriptor.version
-                if self.capability is not None
-                else None
-            ),
+            version=self.descriptor.version if self.descriptor is not None else None,
             state=self.state,
             detail=self.detail,
         )
@@ -168,10 +173,18 @@ class CapabilityRegistry:
         label = getattr(factory, "__name__", repr(factory))
         try:
             capability = factory(self._settings)
+            # Inside the guard, not after it: `descriptor` is a property on
+            # third-party code, so it is as able to raise as the factory is.
+            descriptor = capability.descriptor
         except Exception as error:
             _logger.error("capability.build_failed", factory=label, error=repr(error))
             return _Entry(label, None, CapabilityState.UNHEALTHY, repr(error)[:500])
-        return _Entry(capability.descriptor.name, capability, CapabilityState.WARMING)
+        return _Entry(
+            descriptor.name,
+            capability,
+            CapabilityState.WARMING,
+            descriptor=descriptor,
+        )
 
     #:= docs/specs/groundstation/index.md#req-026-readiness-is-distinct-from-liveness
     #:% The service MUST report itself ready only once every capability it will offer
@@ -219,9 +232,9 @@ class CapabilityRegistry:
             The descriptors of the ready capabilities, in registration order.
         """
         return tuple(
-            entry.capability.descriptor
+            entry.descriptor
             for entry in self._entries
-            if entry.capability is not None and entry.state is CapabilityState.READY
+            if entry.descriptor is not None and entry.state is CapabilityState.READY
         )
 
     def get(self, name: CapabilityName) -> CapabilityPort | None:
@@ -237,7 +250,7 @@ class CapabilityRegistry:
             if (
                 entry.capability is not None
                 and entry.state is CapabilityState.READY
-                and entry.capability.descriptor.name == name
+                and entry.name == name
             ):
                 return entry.capability
         return None

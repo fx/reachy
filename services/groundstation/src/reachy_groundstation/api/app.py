@@ -99,6 +99,20 @@ def create_app(
         The application, ready to be served.
     """
 
+    def _publish_capability_health() -> tuple[CapabilityHealth, ...]:
+        """Read the registry's health and publish it as gauges.
+
+        Returns:
+            What the registry reports, so a caller that also needs to render it
+            does not ask twice.
+        """
+        health = registry.health()
+        set_capability_gauges(
+            obs.metrics,
+            {entry.name: entry.state is CapabilityState.READY for entry in health},
+        )
+        return health
+
     async def livez(request: Request) -> Response:
         """Report that the process is alive.
 
@@ -149,11 +163,7 @@ def create_app(
             than as one that happens to offer less.
         """
         del request
-        health = registry.health()
-        set_capability_gauges(
-            obs.metrics,
-            {entry.name: entry.state is CapabilityState.READY for entry in health},
-        )
+        health = _publish_capability_health()
         return JSONResponse(
             {
                 "ready": registry.ready,
@@ -175,6 +185,11 @@ def create_app(
         Returns:
             The exposition.
         """
+        # The gauges are refreshed here rather than only where the health
+        # endpoint happens to have been polled: a scraper reads `/metrics` and
+        # nothing else, and a series that appears only after somebody visits a
+        # different endpoint is a series nobody can alert on.
+        _publish_capability_health()
         body, content_type = render_metrics(
             obs.metrics,
             request.headers.get("accept"),

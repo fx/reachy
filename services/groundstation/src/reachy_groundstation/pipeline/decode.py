@@ -38,8 +38,19 @@ def decode_jpeg(payload: bytes) -> ImageArray:
     Raises:
         DecodeError: If the bytes are not a decodable image.
     """
+    if not payload:
+        message = "an empty payload is not a decodable image"
+        raise DecodeError(message)
     buffer = np.frombuffer(payload, dtype=np.uint8)
-    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    try:
+        image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    except cv2.error as error:
+        # OpenCV signals some malformed inputs by raising rather than by
+        # returning nothing. Both are the same event here, and neither may
+        # escape: an exception this function did not declare would unwind the
+        # session's whole pipeline over one bad frame.
+        message = f"payload of {len(payload)} bytes is not a decodable image"
+        raise DecodeError(message) from error
     if image is None:
         message = f"payload of {len(payload)} bytes is not a decodable image"
         raise DecodeError(message)

@@ -12,10 +12,12 @@ Test module names are globally unique across the workspace — see the root
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING, Final
 
 import pytest
 
 from reachy_contracts import (
+    FIXTURES,
     Capability,
     CaptureTimestamp,
     FaceDetections,
@@ -26,6 +28,9 @@ from reachy_contracts import (
     fixture_bytes,
     load_fixture,
 )
+
+if TYPE_CHECKING:
+    from reachy_contracts import Fixture
 from reachy_groundstation.session.framing import (
     FramingError,
     MessageKind,
@@ -59,31 +64,70 @@ def test_a_control_message_round_trips() -> None:
     assert SessionOffer.from_wire(payload) == offer
 
 
+# Which framing each fixture in the corpus belongs to. It is a mapping rather
+# than a list of the interesting ones, and the test below asserts it covers the
+# corpus exactly — so a fixture added to `reachy_contracts` fails here until
+# somebody says how this side frames it, instead of silently going unexercised.
+_CONTROL_KINDS: Final[dict[str, MessageKind]] = {
+    "session-offer.json": MessageKind.OFFER,
+    "session-agreement.json": MessageKind.AGREEMENT,
+    "face-result.json": MessageKind.RESULT,
+    "empty-face-result.json": MessageKind.RESULT,
+    "gesture-result.json": MessageKind.RESULT,
+    "session-error.json": MessageKind.ERROR,
+    "session-close.json": MessageKind.CLOSE,
+}
+
+# The one fixture that is not a control message: a frame's header travels in
+# front of its compressed bytes rather than inside a JSON envelope.
+_FRAME_FIXTURES: Final[frozenset[str]] = frozenset({"frame-header.json"})
+
+
 @pytest.mark.filesystem
-def test_every_golden_fixture_survives_the_control_envelope() -> None:
+def test_the_corpus_is_completely_accounted_for() -> None:
+    """Every golden fixture is exercised by this module, and none is invented.
+
+    Robot link REQ-020 puts the burden on the producing side as well as the
+    consuming one, so "which fixtures does the groundstation exercise?" has to
+    be answerable, and the answer has to be "all of them".
+    """
+    assert {fixture.name for fixture in FIXTURES} == set(_CONTROL_KINDS) | (
+        _FRAME_FIXTURES
+    )
+
+
+#:= docs/specs/robot-link/index.md#req-020-the-wire-format-is-pinned-by-shared-fixtures
+#:% Every message type MUST have a golden fixture in the shared contracts package,
+#:% and both the producing and the consuming implementation MUST be verified against
+#:% that same fixture.
+@pytest.mark.filesystem
+@pytest.mark.parametrize("fixture", FIXTURES, ids=lambda fixture: fixture.name)
+def test_every_golden_fixture_survives_this_sides_framing(fixture: Fixture) -> None:
     """The corpus pins the wire format; this framing must not disturb it.
 
     Reading committed bytes is input, so this is a contract test rather than a
     unit test and says so with the marker.
+
+    Args:
+        fixture: One entry from the shared corpus.
     """
-    for name, kind, model in (
-        ("session-offer.json", MessageKind.OFFER, SessionOffer),
-        ("session-agreement.json", MessageKind.AGREEMENT, SessionAgreement),
-    ):
-        message = load_fixture(name, model)
-        kind_out, payload = decode_control(encode_control(kind, message))
-        assert kind_out is kind
-        assert model.from_wire(payload) == message
+    message = fixture.model.from_wire(fixture_bytes(fixture.name))
 
+    if fixture.name in _FRAME_FIXTURES:
+        assert isinstance(message, FrameHeader)
+        decoded, payload = decode_frame(encode_frame(message, b"jpeg"))
+        assert decoded == message
+        assert payload == b"jpeg"
+        return
 
-@pytest.mark.filesystem
-def test_a_golden_result_survives_the_control_envelope() -> None:
-    """A result is the message the pipeline emits most, so it is pinned too."""
-    envelope = ResultEnvelope[FaceDetections].from_wire(
-        fixture_bytes("face-result.json"),
-    )
-    _, payload = decode_control(encode_control(MessageKind.RESULT, envelope))
-    assert ResultEnvelope[FaceDetections].from_wire(payload) == envelope
+    kind = _CONTROL_KINDS[fixture.name]
+    framed = encode_control(kind, message)
+    # The contract type's own canonical bytes travel inside the envelope,
+    # unaltered: this framing packs, it never re-serialises.
+    assert message.to_wire().decode("utf-8") in framed
+    kind_out, payload = decode_control(framed)
+    assert kind_out is kind
+    assert fixture.model.from_wire(payload) == message
 
 
 @pytest.mark.filesystem

@@ -7,6 +7,11 @@ session — which, by construction, is everybody.
 The function takes plain strings rather than `SecretStr`. That keeps pydantic out
 of this module, and it keeps the unwrapping visible at the call site, where a
 reader can see that the secret is being read deliberately and once.
+
+Both sides are encoded before they are compared. `hmac.compare_digest` accepts
+`str` only when both arguments are ASCII throughout and raises `TypeError`
+otherwise, so a credential with a non-ASCII character in it would take the
+session handler down rather than failing authentication.
 """
 
 from __future__ import annotations
@@ -30,4 +35,7 @@ def credential_is_valid(presented: str, expected: str) -> bool:
         True only if the two are the same, compared without leaking where they
         first differ.
     """
-    return bool(expected) and hmac.compare_digest(presented, expected)
+    return bool(expected) and hmac.compare_digest(
+        presented.encode("utf-8"),
+        expected.encode("utf-8"),
+    )

@@ -244,7 +244,9 @@ class FramePipeline:
             self._clock() - emitted,
             exemplar=self._exemplar(decoded.sequence),
         )
-        self._obs.metrics.results_emitted_total.labels(capability=name).inc()
+        self._obs.metrics.results_emitted_total.labels(capability=name).inc(
+            exemplar=self._exemplar(decoded.sequence),
+        )
 
     async def _report(self, code: ErrorCode, detail: str, sequence: int) -> None:
         """Tell the client that one frame went wrong, without ending anything.
@@ -254,7 +256,9 @@ class FramePipeline:
             detail: A human-readable explanation, never a credential.
             sequence: The frame this concerns.
         """
-        self._obs.metrics.errors_total.labels(code=code.value).inc()
+        self._obs.metrics.errors_total.labels(code=code.value).inc(
+            exemplar=self._exemplar(sequence),
+        )
         await self._deliver(
             MessageKind.ERROR,
             SessionError(code=code, detail=detail, sequence=sequence),

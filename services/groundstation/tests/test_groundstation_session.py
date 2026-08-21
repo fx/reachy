@@ -15,6 +15,7 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -23,6 +24,7 @@ from groundstation_support import (
     CREDENTIAL,
     ECHO,
     TALLY,
+    BlockingCapability,
     EchoCapability,
     MemoryTransport,
     StaticRegistry,
@@ -30,6 +32,7 @@ from groundstation_support import (
     build_observability,
     captured_logs,
     frame_message,
+    hand_control_to_the_event_loop,
     make_settings,
 )
 
@@ -43,7 +46,7 @@ from reachy_contracts import (
 )
 from reachy_groundstation.obs import Observability
 from reachy_groundstation.session.framing import MessageKind, decode_control
-from reachy_groundstation.session.runner import SessionRunner
+from reachy_groundstation.session.runner import SessionRunner, _fault_summary
 from reachy_groundstation.session.transport import (
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_ERROR,
@@ -388,7 +391,7 @@ async def test_an_oversized_frame_is_refused_before_it_is_parsed() -> None:
     runner, _ = _runner(
         transport,
         StaticRegistry(EchoCapability()),
-        max_frame_bytes=1024,
+        max_message_bytes=1024,
     )
     outcome = await runner.run()
     assert outcome.frames_received == 0
@@ -537,3 +540,132 @@ async def test_a_session_given_no_identifier_mints_one() -> None:
         obs=obs,
     )
     assert first.session_id != second.session_id
+
+
+@pytest.mark.asyncio
+async def test_an_opening_message_that_is_not_control_framing_is_refused() -> None:
+    """The first message is read as framing before it is read as an offer."""
+    transport = MemoryTransport()
+    transport.push("not json at all")
+    runner, _ = _runner(transport, StaticRegistry())
+    outcome = await runner.run()
+    assert outcome.reason is CloseReason.PROTOCOL_ERROR
+    _, payload = _sent(transport)[0]
+    assert "opening message did not parse" in SessionClose.from_wire(payload).detail
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_opening_message_is_refused_before_it_is_parsed() -> None:
+    """A message nobody bounded is a parse nobody bounded."""
+    transport = MemoryTransport()
+    transport.push("x" * 2048)
+    runner, _ = _runner(transport, StaticRegistry(), max_message_bytes=1024)
+    outcome = await runner.run()
+    assert outcome.reason is CloseReason.PROTOCOL_ERROR
+    _, payload = _sent(transport)[0]
+    assert "exceeds the configured maximum" in SessionClose.from_wire(payload).detail
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_control_message_is_refused_before_it_is_parsed() -> None:
+    """The same bound covers text mid-session, for the same reason."""
+    transport = MemoryTransport()
+    transport.offer(ECHO)
+    transport.push("y" * 2048)
+    transport.disconnect()
+    runner, _ = _runner(
+        transport,
+        StaticRegistry(EchoCapability()),
+        max_message_bytes=1024,
+    )
+    await runner.run()
+    assert "exceeds the configured maximum" in _errors(transport)[0].detail
+
+
+@pytest.mark.asyncio
+async def test_an_offer_that_does_not_parse_never_echoes_what_it_carried() -> None:
+    """An offer is the one message with a credential in it.
+
+    Pydantic writes the offending input value into a validation error's text, so
+    forwarding that text would put the presented credential into the close
+    reason. What comes back names the field and the kind of fault instead.
+    """
+    transport = MemoryTransport()
+    transport.push(
+        json.dumps(
+            {
+                "kind": "offer",
+                "message": {"credential": "x" * 500, "capabilities": []},
+            },
+        ),
+    )
+    runner, _ = _runner(transport, StaticRegistry())
+    assert (await runner.run()).reason is CloseReason.PROTOCOL_ERROR
+    detail = SessionClose.from_wire(_sent(transport)[0][1]).detail
+    assert "credential: too_long" in detail
+    assert "x" * 100 not in detail
+
+
+def test_a_validation_summary_falls_back_to_the_exception_type() -> None:
+    """Not every `ValueError` is a validation error, and none is unwrapped."""
+    assert _fault_summary(ValueError("a plain failure")) == "ValueError"
+    assert "a plain failure" not in _fault_summary(ValueError("a plain failure"))
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_vanishes_mid_answer_ends_the_session_cleanly() -> None:
+    """The pipeline's own send failing is the same event, not a second one."""
+    transport = MemoryTransport(fail_send_after=1)
+    transport.offer(ECHO)
+    transport.push(frame_message(0))
+    transport.disconnect()
+    runner, _ = _runner(transport, StaticRegistry(EchoCapability()))
+    outcome = await runner.run()
+    assert outcome.reason is CloseReason.GOING_AWAY
+    assert outcome.frames_received == 1
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_session_still_finishes_the_frame_it_had_in_hand() -> None:
+    """Cancellation drains the pipeline rather than abandoning it mid-answer."""
+    blocking = BlockingCapability()
+    transport = MemoryTransport()
+    transport.offer(ECHO)
+    transport.push(frame_message(0))
+    runner, _ = _runner(transport, StaticRegistry(blocking))
+
+    session = asyncio.create_task(runner.run())
+    await blocking.entered.wait()
+    session.cancel()
+    blocking.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await session
+
+    assert blocking.processed == [0]
+    assert not [task for task in asyncio.all_tasks() if task.get_name() == "pipeline"]
+
+
+@pytest.mark.asyncio
+async def test_a_second_cancellation_takes_the_pipeline_down_with_it() -> None:
+    """A shutdown that escalates must not leave a task answering nobody.
+
+    The first cancellation unwinds the receive loop into the drain, which waits
+    for the pipeline to finish what it had already accepted. A second one says
+    the shutdown will not wait, and the pipeline goes down with it.
+    """
+    blocking = BlockingCapability()
+    transport = MemoryTransport()
+    transport.offer(ECHO)
+    transport.push(frame_message(0))
+    runner, _ = _runner(transport, StaticRegistry(blocking))
+
+    session = asyncio.create_task(runner.run())
+    await blocking.entered.wait()
+    session.cancel()
+    await hand_control_to_the_event_loop()
+    session.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await session
+
+    assert blocking.processed == []
+    assert not [task for task in asyncio.all_tasks() if task.get_name() == "pipeline"]

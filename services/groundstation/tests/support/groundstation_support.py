@@ -72,6 +72,7 @@ __all__ = [
     "build_observability",
     "captured_logs",
     "frame_message",
+    "hand_control_to_the_event_loop",
     "jpeg_bytes",
     "make_header",
     "make_settings",
@@ -167,6 +168,25 @@ def captured_logs() -> Iterator[list[dict[str, Any]]]:
         yield entries
     finally:
         structlog.configure(**previous)
+
+
+async def hand_control_to_the_event_loop(turns: int = 100) -> None:
+    """Let every other task run, without waiting on a clock.
+
+    `asyncio.sleep(0)` yields to the event loop and resumes on its next pass: it
+    reads no clock, schedules no timer and adds no wall time, so it is not the
+    sleeping the no-input-or-output rule forbids. It is how a test drives
+    another task to its next await point deterministically — the alternative is
+    a real delay, which is both slower and less certain.
+
+    The number of turns is bounded so that a task which never reaches the state
+    a test is waiting for fails that test rather than hanging the suite.
+
+    Args:
+        turns: How many times to yield.
+    """
+    for _ in range(turns):
+        await asyncio.sleep(0)
 
 
 def recorded_spans(exporter: InMemorySpanExporter) -> tuple[str, ...]:
@@ -503,11 +523,19 @@ class MemoryTransport:
     nothing.
     """
 
-    def __init__(self) -> None:
-        """Create an empty transport."""
+    def __init__(self, fail_send_after: int | None = None) -> None:
+        """Create an empty transport.
+
+        Args:
+            fail_send_after: How many messages may be sent before sending
+                reports the connection gone. `None` means never, which is what
+                every test but the one about a client vanishing mid-answer
+                wants.
+        """
         self.inbound: asyncio.Queue[str | bytes | _Closed] = asyncio.Queue()
         self.sent: list[str] = []
         self.closed: tuple[int, str] | None = None
+        self._fail_send_after = fail_send_after
 
     def offer(self, *capabilities: Capability, credential: str = CREDENTIAL) -> None:
         """Queue an opening offer from the client.
@@ -547,11 +575,20 @@ class MemoryTransport:
         return message
 
     async def send(self, text: str) -> None:
-        """Record an outgoing message.
+        """Record an outgoing message, or report the connection gone.
 
         Args:
             text: The already-framed message.
+
+        Raises:
+            TransportClosedError: Once as many messages have been sent as this
+                transport was built to allow.
         """
+        if (
+            self._fail_send_after is not None
+            and len(self.sent) >= self._fail_send_after
+        ):
+            raise TransportClosedError("client disconnected mid-answer")
         self.sent.append(text)
 
     async def close(self, code: int, reason: str) -> None:

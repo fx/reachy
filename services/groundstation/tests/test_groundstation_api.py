@@ -21,6 +21,7 @@ from groundstation_support import (
     ExplodingCapability,
     StaticRegistry,
     build_observability,
+    hand_control_to_the_event_loop,
     make_settings,
 )
 
@@ -243,10 +244,8 @@ async def test_warm_up_runs_in_the_background_at_startup() -> None:
     ):
         assert (await client.get("/readyz")).status_code == 503
         gate.set()
-        while not registry.ready:
-            # Yielding to the event loop, not waiting on a clock: the
-            # warm-up task runs as soon as this coroutine gives way.
-            await asyncio.sleep(0)
+        await hand_control_to_the_event_loop()
+        assert registry.ready is True
         assert (await client.get("/readyz")).status_code == 200
     assert registry.ready is True
 
