@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from reachy_groundstation.config import Settings
     from reachy_groundstation.obs import Observability
     from reachy_groundstation.pipeline.queue import FrameQueue, QueuedFrame
-    from reachy_groundstation.ports import CapabilityPort
+    from reachy_groundstation.ports import AgreedCapability
 
 __all__ = ["Deliver", "FramePipeline"]
 
@@ -58,7 +58,7 @@ class FramePipeline:
     def __init__(
         self,
         *,
-        capabilities: Sequence[CapabilityPort],
+        capabilities: Sequence[AgreedCapability],
         deliver: Deliver,
         settings: Settings,
         obs: Observability,
@@ -69,7 +69,8 @@ class FramePipeline:
 
         Args:
             capabilities: The agreed capabilities, in the order they were
-                agreed. Each answers every frame.
+                agreed, each already carrying the name it was agreed under.
+                Every one of them answers every frame.
             deliver: What to hand a finished message to.
             settings: The settings in effect.
             obs: Where timings, spans and log lines go.
@@ -115,8 +116,8 @@ class FramePipeline:
             decoded = await self._decode(frame)
             if decoded is None:
                 return
-            for capability in self._capabilities:
-                await self._answer(decoded, capability)
+            for agreed in self._capabilities:
+                await self._answer(decoded, agreed)
 
     @contextmanager
     def _frame_span(self, frame: QueuedFrame) -> Iterator[None]:
@@ -185,7 +186,7 @@ class FramePipeline:
     async def _answer(
         self,
         decoded: DecodedFrame,
-        capability: CapabilityPort,
+        agreed: AgreedCapability,
     ) -> None:
         """Run one capability over the decoded frame and deliver its answer.
 
@@ -196,9 +197,9 @@ class FramePipeline:
 
         Args:
             decoded: The frame, shared with every other agreed capability.
-            capability: The capability to run.
+            agreed: The capability to run, under its negotiated name.
         """
-        name = capability.descriptor.name
+        name = agreed.name
         started = self._clock()
         with self._obs.tracer.start_as_current_span(
             "capability",
@@ -206,7 +207,7 @@ class FramePipeline:
         ) as span:
             try:
                 payload: WireModel = await asyncio.wait_for(
-                    capability.process(decoded),
+                    agreed.capability.process(decoded),
                     timeout=self._settings.capability_timeout_seconds,
                 )
             except Exception as error:

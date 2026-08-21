@@ -84,6 +84,7 @@ def create_app(
     registry: CapabilityRegistryPort,
     obs: Observability,
     warm_up: Callable[[], Coroutine[Any, Any, None]] | None = None,
+    shutdown: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> Starlette:
     """Build the ASGI application.
 
@@ -94,6 +95,9 @@ def create_app(
         warm_up: What to run in the background at startup. Running it as a task
             rather than awaiting it is what lets `/readyz` answer "not yet"
             while it is happening.
+        shutdown: What to await when the server stops. This is where a
+            capability gets to release whatever it holds; a service that only
+            ever exits by being killed would leak it.
 
     Returns:
         The application, ready to be served.
@@ -239,7 +243,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        """Start warm-up in the background and let it finish on its own.
+        """Start warm-up in the background, and close what was built on the way out.
 
         Args:
             app: The application, unused.
@@ -248,16 +252,18 @@ def create_app(
             Nothing; the application runs inside this.
         """
         del app
-        if warm_up is None:
-            yield
-            return
-        task = asyncio.create_task(warm_up(), name="warm-up")
+        task = (
+            None if warm_up is None else asyncio.create_task(warm_up(), name="warm-up")
+        )
         try:
             yield
         finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            if task is not None:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+            if shutdown is not None:
+                await shutdown()
 
     return Starlette(
         routes=[

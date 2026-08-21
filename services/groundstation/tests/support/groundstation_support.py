@@ -42,6 +42,7 @@ from reachy_groundstation.capabilities.base import CapabilityBase
 from reachy_groundstation.config import Settings
 from reachy_groundstation.obs import Observability, build_metrics
 from reachy_groundstation.ports import (
+    AgreedCapability,
     CapabilityHealth,
     CapabilityPort,
     CapabilityState,
@@ -69,6 +70,7 @@ __all__ = [
     "MemoryTransport",
     "StaticRegistry",
     "TallyCapability",
+    "agreed",
     "build_observability",
     "captured_logs",
     "frame_message",
@@ -86,6 +88,18 @@ CREDENTIAL: Final = "example-credential"
 
 ECHO: Final = Capability(name="echo", version=1)
 TALLY: Final = Capability(name="tally", version=1)
+
+
+def agreed(capability: CapabilityPort) -> AgreedCapability:
+    """Pair a capability with the name a session would agree to route it by.
+
+    Args:
+        capability: What answers frames.
+
+    Returns:
+        The pairing the pipeline is given.
+    """
+    return AgreedCapability(name=capability.descriptor.name, capability=capability)
 
 
 def make_settings(**overrides: object) -> Settings:

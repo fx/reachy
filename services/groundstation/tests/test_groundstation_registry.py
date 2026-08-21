@@ -6,7 +6,9 @@ capability yet, so it is proved with two unrelated ones from the test support
 module, which is exactly the arrangement the change document asks for.
 
 Test module names are globally unique across the workspace — see the root
-`AGENTS.md`. Nothing here touches a socket, a clock or a file.
+`AGENTS.md`. Nothing here opens a socket or reads a file. The one test that
+configures a warm-up timeout does wait on a clock, bounded at ten
+milliseconds, because a timeout elapsing is the behaviour it is about.
 """
 
 from __future__ import annotations

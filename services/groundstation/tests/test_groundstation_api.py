@@ -146,12 +146,15 @@ async def test_a_degraded_service_still_becomes_ready() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capability_health_reaches_the_metrics() -> None:
-    """What the health endpoint reports is also scrapeable."""
+async def test_capability_health_reaches_the_metrics_without_a_second_request() -> None:
+    """A scraper reads `/metrics` and nothing else.
+
+    A gauge that only appears once somebody has visited a different endpoint is
+    a gauge nobody can alert on, so `/metrics` refreshes it itself.
+    """
     registry = CapabilityRegistry(make_settings(), [_broken, _echo])
     await registry.warm_up()
     async with _client(registry) as client:
-        await client.get("/capabilities")
         metrics = await client.get("/metrics")
 
     assert 'groundstation_capability_up{capability="echo"} 1.0' in metrics.text
@@ -262,3 +265,44 @@ async def test_the_session_endpoint_is_registered_at_the_specified_path() -> Non
     paths = {getattr(route, "path", None) for route in app.routes}
     assert "/v1/session" in paths
     assert ECHO.name == "echo"
+
+
+@pytest.mark.asyncio
+async def test_the_lifespan_closes_the_capabilities_it_started() -> None:
+    """A service that only ever exits by being killed would leak what it holds.
+
+    Nothing in this build holds anything yet, but the first capability with a
+    model in it will, and by then the wiring has to already be there.
+    """
+    closed: list[str] = []
+
+    class _Closing(EchoCapability):
+        async def aclose(self) -> None:
+            closed.append(self.descriptor.name)
+
+    registry = CapabilityRegistry(make_settings(), [lambda _: _Closing()])
+    obs, _exporter = build_observability()
+    app = create_app(
+        settings=make_settings(),
+        registry=registry,
+        obs=obs,
+        warm_up=registry.warm_up,
+        shutdown=registry.aclose,
+    )
+    async with app.router.lifespan_context(app):
+        await hand_control_to_the_event_loop()
+        assert closed == []
+    assert closed == ["echo"]
+
+
+@pytest.mark.asyncio
+async def test_an_application_with_no_lifecycle_hooks_still_starts() -> None:
+    """Both hooks are optional: a test composing an app by hand passes neither."""
+    obs, _exporter = build_observability()
+    app = create_app(
+        settings=make_settings(),
+        registry=StaticRegistry(EchoCapability()),
+        obs=obs,
+    )
+    async with app.router.lifespan_context(app):
+        assert app.routes

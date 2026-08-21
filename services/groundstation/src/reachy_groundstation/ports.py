@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from reachy_contracts import Capability, CapabilityName, FrameHeader, WireModel
 
 __all__ = [
+    "AgreedCapability",
     "CapabilityHealth",
     "CapabilityPort",
     "CapabilityRegistryPort",
@@ -93,6 +94,27 @@ class DecodedFrame:
             The number of pixel columns.
         """
         return int(self.image.shape[1])
+
+
+@dataclass(frozen=True, slots=True)
+class AgreedCapability:
+    """One capability, under the name a session agreed to route to it by.
+
+    The name travels beside the capability rather than being read back off it.
+    `descriptor` is a property on third-party code: the registry reads it once,
+    inside the guard that contains a capability's failures, and everything after
+    that uses the value it read. Asking again on every frame would put that
+    read outside the containment groundstation REQ-025 requires — a property
+    that starts raising mid-session would take down the session's pipeline
+    rather than costing one capability its answer.
+
+    Attributes:
+        name: What negotiation agreed to call it.
+        capability: What answers frames under that name.
+    """
+
+    name: str
+    capability: CapabilityPort
 
 
 class CapabilityState(StrEnum):

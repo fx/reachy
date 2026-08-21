@@ -59,8 +59,9 @@ def build_application(
         factories: What to build. Defaults to everything registered.
 
     Returns:
-        The application, and the registry it was built around — the caller keeps
-        the registry so it can be closed.
+        The application, and the registry it was built around. Closing the
+        registry is wired into the application's own lifespan, so the caller
+        keeps it only in order to inspect it.
     """
     registry = CapabilityRegistry(settings, factories)
     app = create_app(
@@ -68,6 +69,7 @@ def build_application(
         registry=registry,
         obs=obs,
         warm_up=registry.warm_up,
+        shutdown=registry.aclose,
     )
     return app, registry
 

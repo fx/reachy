@@ -36,6 +36,7 @@ from reachy_contracts import (
 from reachy_groundstation.obs import frame_exemplar, get_logger, session_context
 from reachy_groundstation.pipeline.queue import FrameQueue, QueuedFrame
 from reachy_groundstation.pipeline.runner import FramePipeline
+from reachy_groundstation.ports import AgreedCapability
 from reachy_groundstation.session.auth import credential_is_valid
 from reachy_groundstation.session.framing import (
     FramingError,
@@ -57,7 +58,7 @@ if TYPE_CHECKING:
     from reachy_contracts import Capability, WireModel
     from reachy_groundstation.config import Settings
     from reachy_groundstation.obs import Observability
-    from reachy_groundstation.ports import CapabilityPort, CapabilityRegistryPort
+    from reachy_groundstation.ports import AgreedCapability, CapabilityRegistryPort
     from reachy_groundstation.session.transport import SessionTransport
 
 __all__ = ["SessionOutcome", "SessionRunner", "new_session_id"]
@@ -351,7 +352,7 @@ class SessionRunner:
     async def _agree(
         self,
         offer: SessionOffer,
-    ) -> tuple[tuple[CapabilityPort, ...], tuple[Capability, ...]]:
+    ) -> tuple[tuple[AgreedCapability, ...], tuple[Capability, ...]]:
         """Reduce the offer against what this service can currently speak.
 
         `negotiate` is the contracts package's, so both sides of the link agree
@@ -371,8 +372,12 @@ class SessionRunner:
         """
         agreement = negotiate(offer, self._registry.supported())
         await self._send(MessageKind.AGREEMENT, agreement)
+        # The name comes from the agreement, which is the name the registry
+        # already resolved. Nothing downstream asks a capability what it is
+        # called: that is a property on third-party code, and reading it once
+        # per frame would put it outside the registry's failure containment.
         routed = tuple(
-            capability
+            AgreedCapability(name=named.name, capability=capability)
             for named in agreement.capabilities
             if (capability := self._registry.get(named.name)) is not None
         )
@@ -383,7 +388,7 @@ class SessionRunner:
         )
         return routed, agreement.capabilities
 
-    async def _pump(self, capabilities: tuple[CapabilityPort, ...]) -> CloseReason:
+    async def _pump(self, capabilities: tuple[AgreedCapability, ...]) -> CloseReason:
         """Carry frames from the client into the pipeline until it stops.
 
         Args:

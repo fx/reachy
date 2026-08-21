@@ -6,7 +6,10 @@ empty answer is a successful answer, and that the capture token is copied throug
 without being read.
 
 Test module names are globally unique across the workspace — see the root
-`AGENTS.md`. Nothing here touches a socket, a clock or a file.
+`AGENTS.md`. Nothing here opens a socket or reads a file, and the pipeline's
+own clock is injected as a counter. The one test that configures a capability
+timeout does wait on a real clock, bounded at ten milliseconds, because a
+timeout elapsing is the behaviour it is about.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from groundstation_support import (
     EchoCapability,
     ExplodingCapability,
     TallyCapability,
+    agreed,
     build_observability,
     jpeg_bytes,
     make_header,
@@ -132,7 +136,7 @@ def _pipeline(
     """
     obs, exporter = build_observability()
     pipeline = FramePipeline(
-        capabilities=capabilities,
+        capabilities=[agreed(capability) for capability in capabilities],
         deliver=recorder.deliver,
         settings=make_settings(**overrides),
         obs=obs,

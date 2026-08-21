@@ -221,3 +221,23 @@ def test_the_module_entry_point_defers_to_the_service() -> None:
     """`python -m reachy_groundstation` runs the same startup the tests drive."""
     module = importlib.import_module("reachy_groundstation.__main__")
     assert module.main is main
+
+
+@pytest.mark.asyncio
+async def test_the_composition_root_wires_capability_shutdown() -> None:
+    """Closing the registry is the application's own business, not the caller's."""
+    settings = make_settings()
+    closed: list[str] = []
+
+    class _Closing(EchoCapability):
+        async def aclose(self) -> None:
+            closed.append(self.descriptor.name)
+
+    app, registry = build_application(
+        settings,
+        build_observability(settings),
+        [lambda _: _Closing()],
+    )
+    async with app.router.lifespan_context(app):
+        assert registry.health()
+    assert closed == ["echo"]
