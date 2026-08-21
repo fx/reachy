@@ -43,11 +43,13 @@ Catch-all task list for work not tracked in a specific [change document](changes
         recording of the phrase in this repository, so *recognition* has never
         been exercised anywhere. Say "stop" over a response and check that it
         stops; then check that saying it at an idle robot does nothing
-      - The three microphone settings audibly do something: turn `mic_volume`
-        down and confirm Home Assistant transcribes a quieter signal, and turn
-        `mic_gain` and `mic_noise` up and confirm the conditioner improves a
-        noisy room rather than damaging a quiet one. All three were inert until
-        the detection loop landed and none has been near a microphone
+      - The three microphone settings audibly do something: turn Home
+        Assistant's `mic_volume` down and confirm it transcribes a quieter
+        signal, and turn `mic_gain` and `mic_noise` up — the entities behind
+        `mic_auto_gain` and `mic_noise_suppression` — and confirm the
+        conditioner improves a noisy room rather than damaging a quiet one. All
+        three were inert until the detection loop landed and none of them has
+        been near a microphone
       - The three required antenna motions read as distinct across a room —
         still, opposed, together — and the head tracks smoothly at the tuned
         deadzone and smoothing
