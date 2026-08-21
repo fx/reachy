@@ -5,6 +5,12 @@ declarations in `packages/reachy-contracts`. Do not edit one by hand: the
 contract-drift gate regenerates them and fails on any difference, so a manual
 edit is reverted by the next run at best and blocks a merge at worst.
 
-No contract artifacts are generated yet. The registry in
-`reachy_contracts.contracts_export` is empty, and this file is what the drift
-gate compares against until the first generator is registered.
+| Artifact | What it pins |
+|---|---|
+| [`robot-link/face-result.schema.json`](robot-link/face-result.schema.json) | face detections answering one frame |
+| [`robot-link/frame-header.schema.json`](robot-link/frame-header.schema.json) | a frame's sequence number and its opaque capture token |
+| [`robot-link/gesture-result.schema.json`](robot-link/gesture-result.schema.json) | gesture detections answering one frame |
+| [`robot-link/session-agreement.schema.json`](robot-link/session-agreement.schema.json) | the capabilities both sides settled on |
+| [`robot-link/session-close.schema.json`](robot-link/session-close.schema.json) | the last message on a session and why it ended |
+| [`robot-link/session-error.schema.json`](robot-link/session-error.schema.json) | a failure report, optionally naming the frame it concerns |
+| [`robot-link/session-offer.schema.json`](robot-link/session-offer.schema.json) | the client's credential and the capabilities it can speak |

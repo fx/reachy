@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "CaptureTimestamp": {
+      "description": "A frame's capture instant, as the capturing side wrote it.\n\nThe value is an opaque token everywhere except on the machine that minted\nit. This type therefore stores characters and nothing else: it will not\nparse, compare, order or re-render them, so copying a token from a frame\nonto a result is the only thing that is easy to do with one. The producing\nside reads `root` and interprets it against the monotonic clock it came\nfrom; nobody else has a clock the value means anything against.\n\nAttributes:\n    root: The token exactly as the capturing side supplied it.",
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "CaptureTimestamp",
+      "type": "string"
+    },
+    "FaceDetection": {
+      "additionalProperties": false,
+      "description": "One face the detector found.\n\nA centre and a confidence, and nothing else. Landmarks and bounding boxes\nare absent deliberately: the perception spec leaves the richer payload open\nand nothing consumes one yet, so widening this type is the job of the change\nthat introduces a consumer for the extra fields.\n\nAttributes:\n    centre: Where the face is, in normalised image coordinates.\n    confidence: How much the detector believes itself.",
+      "properties": {
+        "centre": {
+          "$ref": "#/$defs/NormalisedPoint"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "centre",
+        "confidence"
+      ],
+      "title": "FaceDetection",
+      "type": "object"
+    },
+    "FaceDetections": {
+      "additionalProperties": false,
+      "description": "The face capability's payload for one frame.\n\n`faces` defaults to empty and is never optional, so \"this frame contained no\nface\" is an ordinary message that constructs with no arguments at all. The\npredecessor made the opposite choice — it posted nothing when every detector\nwas switched off, and got a 400 back for it.\n\nAttributes:\n    faces: Every face found in the frame, possibly none.",
+      "properties": {
+        "faces": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FaceDetection"
+          },
+          "title": "Faces",
+          "type": "array"
+        }
+      },
+      "title": "FaceDetections",
+      "type": "object"
+    },
+    "NormalisedPoint": {
+      "additionalProperties": false,
+      "description": "A position in the frame, independent of the capture resolution.\n\nAttributes:\n    x: Horizontal position, negative to the left of centre.\n    y: Vertical position, negative below centre.",
+      "properties": {
+        "x": {
+          "maximum": 1.0,
+          "minimum": -1.0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "maximum": 1.0,
+          "minimum": -1.0,
+          "title": "Y",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "title": "NormalisedPoint",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capability": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Capability",
+      "type": "string"
+    },
+    "captured_at": {
+      "$ref": "#/$defs/CaptureTimestamp"
+    },
+    "payload": {
+      "$ref": "#/$defs/FaceDetections"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "sequence",
+    "captured_at",
+    "capability",
+    "payload"
+  ],
+  "title": "ResultEnvelope[FaceDetections]",
+  "type": "object"
+}

@@ -1,0 +1,43 @@
+{
+  "$defs": {
+    "Capability": {
+      "additionalProperties": false,
+      "description": "A capability one side can speak, at one version.\n\nAttributes:\n    name: The capability's identifier, a value rather than an enumerator.\n    version: Which revision of that capability is being spoken.",
+      "properties": {
+        "name": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "Capability",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The groundstation's answer: the set both sides can speak.\n\nAttributes:\n    capabilities: The agreed set, possibly empty.",
+  "properties": {
+    "capabilities": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    }
+  },
+  "title": "SessionAgreement",
+  "type": "object"
+}

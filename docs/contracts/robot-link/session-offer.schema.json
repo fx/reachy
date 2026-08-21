@@ -1,0 +1,52 @@
+{
+  "$defs": {
+    "Capability": {
+      "additionalProperties": false,
+      "description": "A capability one side can speak, at one version.\n\nAttributes:\n    name: The capability's identifier, a value rather than an enumerator.\n    version: Which revision of that capability is being spoken.",
+      "properties": {
+        "name": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "Capability",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The client's opening message: its credential and what it can speak.\n\nThe credential is held as a secret so that logging a message, or dropping\none into a traceback, cannot print it; the wire serialisation puts the real\nvalue back, because presenting it is the entire point of the message.\n\nAttributes:\n    credential: The shared secret the groundstation authenticates against.\n    capabilities: What this client can speak, possibly nothing.",
+  "properties": {
+    "capabilities": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "credential": {
+      "format": "password",
+      "title": "Credential",
+      "type": "string",
+      "writeOnly": true
+    }
+  },
+  "required": [
+    "credential"
+  ],
+  "title": "SessionOffer",
+  "type": "object"
+}

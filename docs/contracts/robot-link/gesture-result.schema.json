@@ -1,0 +1,82 @@
+{
+  "$defs": {
+    "CaptureTimestamp": {
+      "description": "A frame's capture instant, as the capturing side wrote it.\n\nThe value is an opaque token everywhere except on the machine that minted\nit. This type therefore stores characters and nothing else: it will not\nparse, compare, order or re-render them, so copying a token from a frame\nonto a result is the only thing that is easy to do with one. The producing\nside reads `root` and interprets it against the monotonic clock it came\nfrom; nobody else has a clock the value means anything against.\n\nAttributes:\n    root: The token exactly as the capturing side supplied it.",
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "CaptureTimestamp",
+      "type": "string"
+    },
+    "GestureDetection": {
+      "additionalProperties": false,
+      "description": "One hand signal the classifier recognised.\n\nAttributes:\n    label: The gesture's name, a value in the contract rather than a type.\n    confidence: How much the classifier believes itself.",
+      "properties": {
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "label": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "confidence"
+      ],
+      "title": "GestureDetection",
+      "type": "object"
+    },
+    "GestureDetections": {
+      "additionalProperties": false,
+      "description": "The gesture capability's payload for one frame.\n\nEmpty for the same reason `FaceDetections` is: a frame with no hand in it is\na successful result, not a failure to report one.\n\nAttributes:\n    gestures: Every gesture recognised in the frame, possibly none.",
+      "properties": {
+        "gestures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GestureDetection"
+          },
+          "title": "Gestures",
+          "type": "array"
+        }
+      },
+      "title": "GestureDetections",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capability": {
+      "maxLength": 32,
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9_]*$",
+      "title": "Capability",
+      "type": "string"
+    },
+    "captured_at": {
+      "$ref": "#/$defs/CaptureTimestamp"
+    },
+    "payload": {
+      "$ref": "#/$defs/GestureDetections"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "sequence",
+    "captured_at",
+    "capability",
+    "payload"
+  ],
+  "title": "ResultEnvelope[GestureDetections]",
+  "type": "object"
+}

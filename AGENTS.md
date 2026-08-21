@@ -103,7 +103,23 @@ Sockets are the part of that rule the harness enforces: `pytest` runs with
 `--disable-socket`, so a test that opens one errors. An integration test that
 exercises a real transport in-process declares it with
 `@pytest.mark.enable_socket`. The filesystem and sleeping halves have no
-equivalent guard and are enforced in review.
+equivalent guard and are enforced in review — a test that genuinely must read a
+committed file says so with `@pytest.mark.filesystem`, which makes the
+dependency visible in the test rather than leaving it to be discovered.
+
+### Wire types are declared once
+
+Every type that crosses the robot link is declared in
+`packages/reachy-contracts` and imported from `reachy_contracts` by everything
+else. A second copy in a consumer is free to drift from the first, and the
+failure shows up as a robot behaving oddly rather than as a test going red.
+
+That import direction is a lint rule, not a convention: ruff's `TID251` bans
+`pydantic.BaseModel` and `pydantic.RootModel` outside the contracts package, so
+a member that starts declaring its own wire type fails `just lint` with a
+message naming where the type belongs. A component that needs a validated model
+for something that is *not* a wire type — its own configuration, say — uses
+`pydantic_settings.BaseSettings`, which the ban does not touch.
 
 ### Tool configuration is shared, never per-member
 
@@ -186,6 +202,10 @@ Annotations already in the tree still resolve, and they are written `#:=` for th
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and
 `#%`. The colon is what stops `ruff format` inserting a space after the `#` and
 silently breaking the citation; the same file's header explains it.
+
+A `#:%` line reproduces the requirement's sentence byte for byte, including its
+original line wrapping. Reflow it to fit and `duvet report` exits 1 with `could
+not find text in section`.
 
 ## Task Tracking
 

@@ -1,0 +1,47 @@
+{
+  "$defs": {
+    "ErrorCode": {
+      "description": "Why a message or a session was refused.\n\nAttributes:\n    UNAUTHENTICATED: No valid credential was presented.\n    MALFORMED_MESSAGE: A message did not parse as its declared type.\n    CAPABILITY_FAILED: An agreed capability could not process a frame.\n    INTERNAL: Anything the receiving side cannot attribute further.",
+      "enum": [
+        "unauthenticated",
+        "malformed_message",
+        "capability_failed",
+        "internal"
+      ],
+      "title": "ErrorCode",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A failure report, which does not by itself end the session.\n\nAttributes:\n    code: What kind of failure this is.\n    detail: A human-readable explanation, never a credential.\n    sequence: The frame this concerns, when it concerns one.",
+  "properties": {
+    "code": {
+      "$ref": "#/$defs/ErrorCode"
+    },
+    "detail": {
+      "default": "",
+      "maxLength": 500,
+      "title": "Detail",
+      "type": "string"
+    },
+    "sequence": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sequence"
+    }
+  },
+  "required": [
+    "code"
+  ],
+  "title": "SessionError",
+  "type": "object"
+}

@@ -1,0 +1,33 @@
+{
+  "$defs": {
+    "CloseReason": {
+      "description": "Why a session is ending.\n\nAttributes:\n    GOING_AWAY: An orderly shutdown by either side.\n    UNAUTHENTICATED: The credential was missing or wrong.\n    PROTOCOL_ERROR: The other side sent something unusable.",
+      "enum": [
+        "going_away",
+        "unauthenticated",
+        "protocol_error"
+      ],
+      "title": "CloseReason",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The last message on a session, naming why it ended.\n\nAttributes:\n    reason: Why the session is ending.\n    detail: A human-readable explanation, never a credential.",
+  "properties": {
+    "detail": {
+      "default": "",
+      "maxLength": 500,
+      "title": "Detail",
+      "type": "string"
+    },
+    "reason": {
+      "$ref": "#/$defs/CloseReason"
+    }
+  },
+  "required": [
+    "reason"
+  ],
+  "title": "SessionClose",
+  "type": "object"
+}

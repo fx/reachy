@@ -4,7 +4,12 @@ dynamic = ["version"]
 description = "Shared wire types and golden fixtures for the Reachy Mini stack"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+# The upper bound matches the range the Reachy Mini SDK already resolves against,
+# so installing this package into the robot's shared application environment
+# cannot force a pydantic the daemon disagrees with. One dependency, deliberately:
+# everything installed here is installed on the robot, in the groundstation image
+# and in the CLI wheel alike.
+dependencies = ["pydantic>=2.12.5,<3"]
 
 [build-system]
 requires = ["hatchling"]

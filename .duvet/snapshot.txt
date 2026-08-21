@@ -27,3 +27,35 @@ SPECIFICATION: [Architecture](docs/specs/architecture/index.md)
     TEXT[implication]: Continuous integration MUST regenerate every published schema and interface
     TEXT[implication]: description from source and fail when the regenerated output differs from the
     TEXT[implication]: committed copy.
+
+SPECIFICATION: [Perception](docs/specs/perception/index.md)
+  SECTION: [REQ-034: Face detections report a normalised centre and a confidence](#req-034-face-detections-report-a-normalised-centre-and-a-confidence)
+    TEXT[implementation]: Each face detection MUST report the face's centre in normalised image
+    TEXT[implementation]: coordinates together with a confidence value.
+
+SPECIFICATION: [Robot Link](docs/specs/robot-link/index.md)
+  SECTION: [REQ-012: Capabilities are negotiated at session start](#req-012-capabilities-are-negotiated-at-session-start)
+    TEXT[implementation]: Both sides MUST exchange the set of capabilities they support, each with a
+    TEXT[implementation]: version, before any capability-specific message is sent.
+
+  SECTION: [REQ-013: An empty result is a valid result](#req-013-an-empty-result-is-a-valid-result)
+    TEXT[implementation]: A result message carrying no detections MUST be treated as a successful result
+    TEXT[implementation]: for that frame.
+
+  SECTION: [REQ-014: Results are keyed to the frame that produced them](#req-014-results-are-keyed-to-the-frame-that-produced-them)
+    TEXT[implementation]: Every frame MUST carry a monotonically increasing sequence number, and every
+    TEXT[implementation]: result MUST identify the sequence number of the frame it derives from.
+
+  SECTION: [REQ-016: Results return the capture timestamp unaltered](#req-016-results-return-the-capture-timestamp-unaltered)
+    TEXT[implementation]: Every result MUST carry the capture timestamp of the frame it derives from,
+    TEXT[implementation]: byte-for-byte as the capturing side supplied it, so that the capturing side can
+    TEXT[implementation]: compute the result's age against the same clock that produced it.
+
+  SECTION: [REQ-020: The wire format is pinned by shared fixtures](#req-020-the-wire-format-is-pinned-by-shared-fixtures)
+    TEXT[implementation]: Every message type MUST have a golden fixture in the shared contracts package,
+    TEXT[implementation]: and both the producing and the consuming implementation MUST be verified against
+    TEXT[implementation]: that same fixture.
+
+  SECTION: [REQ-021: Detection geometry is resolution-independent](#req-021-detection-geometry-is-resolution-independent)
+    TEXT[implementation]: Positions in results MUST be expressed in normalised image coordinates rather
+    TEXT[implementation]: than pixels.
