@@ -10,6 +10,7 @@ dependencies = [
     "reachy-groundstation",
     "reachy-hygiene",
     "reachy-mini-ha-satellite",
+    "reachy-session-client",
     "reachyctl",
 ]
 
@@ -96,6 +97,7 @@ requires-dist = ["numpy", "onnxruntime", "huggingface-hub>=1.17"]
 [tool.uv.workspace]
 members = [
     "packages/reachy-contracts",
+    "packages/reachy-session-client",
     "apps/ha-satellite",
     "services/groundstation",
     "cli/reachyctl",
@@ -111,6 +113,7 @@ reachy-contracts = { workspace = true }
 reachy-groundstation = { workspace = true }
 reachy-hygiene = { workspace = true }
 reachy-mini-ha-satellite = { workspace = true }
+reachy-session-client = { workspace = true }
 reachyctl = { workspace = true }
 
 # --- Shared tool configuration ----------------------------------------------
@@ -123,6 +126,7 @@ line-length = 88
 target-version = "py312"
 src = [
     "packages/reachy-contracts/src",
+    "packages/reachy-session-client/src",
     "apps/ha-satellite/src",
     "services/groundstation/src",
     "cli/reachyctl/src",
@@ -321,6 +325,7 @@ warn_unreachable = true
 explicit_package_bases = true
 mypy_path = [
     "packages/reachy-contracts/src",
+    "packages/reachy-session-client/src",
     "apps/ha-satellite/src",
     "services/groundstation/src",
     "cli/reachyctl/src",
@@ -341,6 +346,8 @@ mypy_path = [
     # mypy path root makes the files directly under it top-level modules, and two
     # members' `conftest.py` would then both be the module `conftest`.
     "services/groundstation/tests/support",
+    "packages/reachy-session-client/tests/support",
+    "cli/reachyctl/tests/support",
 ]
 files = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 # `ignore-without-code` is how the "a suppression carries its rule identifier"
@@ -466,6 +473,20 @@ addopts = [
     "--cov-report=xml",
 ]
 testpaths = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
+# A member's `tests/` is deliberately not a package, so a test module reaches
+# its siblings' shared fakes by plain module name, and the directory holding
+# them has to be on `sys.path`. The satellite and the groundstation do that from
+# a `conftest.py` of their own. The members below do it here instead, and the
+# reason is mypy rather than pytest: `explicit_package_bases` derives a module
+# name by walking down from a path root and stops at the first directory whose
+# name is not a valid identifier, so a `conftest.py` under a hyphenated member
+# directory is the module `conftest` outright — and `apps/ha-satellite` already
+# spends that name. Declaring both here keeps the two new members alike rather
+# than splitting them over a constraint that happens to bind only one.
+pythonpath = [
+    "packages/reachy-session-client/tests/support",
+    "cli/reachyctl/tests/support",
+]
 filterwarnings = ["error"]
 # The filesystem half of the no-input-or-output rule has no `--disable-socket`
 # equivalent. This marker grants a unit test nothing: it declares that the test
@@ -483,6 +504,7 @@ branch = true
 # counting them inflates the number the diff gate reads.
 source = [
     "packages/reachy-contracts/src",
+    "packages/reachy-session-client/src",
     "apps/ha-satellite/src",
     "services/groundstation/src",
     "cli/reachyctl/src",

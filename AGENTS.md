@@ -15,6 +15,7 @@ one-line import of this file and holds no content of its own.
 |---|---|
 | `docs/` | Specs, change documents, runbooks and generated contracts |
 | `packages/reachy-contracts/` | Shared wire types and golden fixtures (`reachy_contracts`) |
+| `packages/reachy-session-client/` | The one client half of the robot link (`reachy_session_client`) |
 | `apps/ha-satellite/` | Robot-side ESPHome voice satellite (`reachy_mini_ha_satellite`) |
 | `services/groundstation/` | Off-robot capability host (`reachy_groundstation`) |
 | `cli/reachyctl/` | Command-line tool (`reachyctl`) |
@@ -29,10 +30,16 @@ one-line import of this file and holds no content of its own.
 | `.github/workflows/` | The merge gates: checks, hygiene, release, traceability |
 | `release-please-config.json` | Where the derived version is written, artifact by artifact |
 
-`packages/reachy-contracts`, `apps/ha-satellite`, `services/groundstation` and
-`tools/repo-hygiene` have implementations today. The other two members are
-scaffolds: a `pyproject.toml`, an `AGENTS.md` and a package directory, waiting
-for the change that fills them in.
+Every member but `bench` has an implementation today. `bench` is still a
+scaffold: a `pyproject.toml`, an `AGENTS.md` and a package directory, waiting
+for the change that fills it in.
+
+There is exactly one implementation of the session protocol's client half, and
+it is `packages/reachy-session-client`. `reachyctl probe` and the robot's
+groundstation adapter both import it, which is what makes a probe run evidence
+about the protocol rather than about a probe — see reachyctl REQ-057. A second
+client, however lightweight and however clearly labelled as being for testing,
+is the change that makes that requirement false.
 
 ## Read before touching
 

@@ -3,7 +3,28 @@ name = "reachyctl"
 version = "0.1.0"
 description = "Command-line tool for deploying, configuring and diagnosing a Reachy Mini"
 requires-python = ">=3.12"
-dependencies = ["reachy-contracts"]
+dependencies = [
+    # The wire vocabulary. Declared once, in the contracts package, and imported
+    # here rather than restated — see the root AGENTS.md.
+    "reachy-contracts",
+    # The one client implementation of the session protocol. `probe` is a second
+    # consumer of it, not a second implementation — see reachyctl REQ-057.
+    "reachy-session-client",
+    # The command surface and the terminal rendering, which is what the
+    # architecture spec names for this tool.
+    "typer>=0.12",
+    "rich>=13.7",
+]
+
+# The live-frame source and nothing else. OpenCV is tens of megabytes and every
+# command but `probe --camera` runs without it, so it is an extra rather than a
+# dependency: `pip install reachyctl[camera]` buys the camera, and asking for a
+# camera without it fails with that sentence rather than an ImportError.
+[project.optional-dependencies]
+camera = ["opencv-python-headless>=4.10"]
+
+[project.scripts]
+reachyctl = "reachyctl.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -12,7 +33,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/reachyctl"]
 
-# By path, never by version range: there is no published reachy-contracts a
-# resolver could pick instead of the one in this tree.
+# By path, never by version range: there is no published sibling a resolver
+# could pick instead of the one in this tree.
 [tool.uv.sources]
 reachy-contracts = { workspace = true }
+reachy-session-client = { workspace = true }
