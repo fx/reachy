@@ -31,6 +31,14 @@ suppression's justification there: annotating one would itself be an unlisted
 edit. The rule that a suppression carries a reason governs code this repository
 authors, and a suppression *added* here without one is still a finding.
 
+**`@pytest.mark.filesystem` is a declaration, not a licence.** It does not
+permit a unit test to touch the filesystem — it states that the test is not a
+unit test, exactly as `@pytest.mark.enable_socket` does for a test that opens a
+socket. The no-input-or-output rule constrains unit tests, and a contract test
+reading the golden fixture corpus is not one: those bytes are the contract, so a
+fake would pin whatever the fake was told to return. Do not report the marker as
+weakening the rule. A *unit* test wearing it is a finding; the marker is not.
+
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a
 suppression's rule identifier. Whether its comment *explains* anything, and

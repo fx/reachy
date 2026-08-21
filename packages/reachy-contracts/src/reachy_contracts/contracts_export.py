@@ -34,7 +34,14 @@ from reachy_contracts.session import (
     SessionError,
     SessionOffer,
 )
-from reachy_contracts.values import FaceDetections, GestureDetections, WireModel
+from reachy_contracts.values import (
+    FACE_CAPABILITY,
+    GESTURE_CAPABILITY,
+    CapabilityName,
+    FaceDetections,
+    GestureDetections,
+    WireModel,
+)
 
 __all__ = ["CONTRACTS", "INDEX_PATH", "Contract", "export", "render_all"]
 
@@ -64,7 +71,10 @@ _SCHEMA_DIRECTORY: Final = "robot-link"
 _DIALECT: Final = "https://json-schema.org/draft/2020-12/schema"
 
 
-def _schema_of(model: type[WireModel]) -> Callable[[], str]:
+def _schema_of(
+    model: type[WireModel],
+    capability: CapabilityName | None = None,
+) -> Callable[[], str]:
     """Build a renderer for one message type's JSON Schema.
 
     The validation schema rather than the serialisation one. The two agree for
@@ -74,8 +84,18 @@ def _schema_of(model: type[WireModel]) -> Callable[[], str]:
     package enforces, and a second implementation written against it could emit
     a message this package refuses.
 
+    A result envelope is published once per capability, and each published copy
+    pins its `capability` field to that name. Without it the two result schemas
+    are identical documents that both admit either name, so a producer written
+    against `face-result.schema.json` could emit a gesture payload under the
+    face name — a message `ResultEnvelope` rejects at run time, which is exactly
+    the disagreement between the code and its published contract that generating
+    one from the other is supposed to remove.
+
     Args:
         model: The message type to describe.
+        capability: The capability this parameterisation answers for, when the
+            message type is a result envelope.
 
     Returns:
         A callable rendering that type's schema, keys sorted so the output
@@ -83,51 +103,71 @@ def _schema_of(model: type[WireModel]) -> Callable[[], str]:
     """
 
     def render() -> str:
-        document = {
-            "$schema": _DIALECT,
-            **model.model_json_schema(mode="validation"),
-        }
+        schema = model.model_json_schema(mode="validation")
+        if capability is not None:
+            schema["properties"]["capability"]["const"] = capability
+        document = {"$schema": _DIALECT, **schema}
         text = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False)
         return f"{text}\n"
 
     return render
 
 
+@dataclass(frozen=True, slots=True)
+class _Published:
+    """One message type and how it is published.
+
+    Attributes:
+        slug: The schema's file name, without its extension.
+        model: The message type to describe.
+        summary: One line for the generated index.
+        capability: The capability a result envelope answers for, or `None` for
+            a message type that is not a result envelope.
+    """
+
+    slug: str
+    model: type[WireModel]
+    summary: str
+    capability: CapabilityName | None = None
+
+
 # One schema per message type. `face-result` and `gesture-result` are the same
 # envelope carrying different payloads, which is what makes a new capability a
 # new row here rather than a change to `ResultEnvelope`.
-_MESSAGE_TYPES: Final[tuple[tuple[str, type[WireModel], str], ...]] = (
-    (
+_MESSAGE_TYPES: Final[tuple[_Published, ...]] = (
+    _Published(
         "session-offer",
         SessionOffer,
         "the client's credential and the capabilities it can speak",
     ),
-    (
+    _Published(
         "session-agreement",
         SessionAgreement,
         "the capabilities both sides settled on",
     ),
-    (
+    _Published(
         "frame-header",
         FrameHeader,
         "a frame's sequence number and its opaque capture token",
     ),
-    (
+    _Published(
         "face-result",
         ResultEnvelope[FaceDetections],
         "face detections answering one frame",
+        FACE_CAPABILITY,
     ),
-    (
+    _Published(
         "gesture-result",
         ResultEnvelope[GestureDetections],
         "gesture detections answering one frame",
+        GESTURE_CAPABILITY,
     ),
-    (
+    _Published(
         "session-error",
         SessionError,
         "a failure report, optionally naming the frame it concerns",
     ),
-    (
+    _Published(
         "session-close",
         SessionClose,
         "the last message on a session and why it ended",
@@ -136,11 +176,11 @@ _MESSAGE_TYPES: Final[tuple[tuple[str, type[WireModel], str], ...]] = (
 
 CONTRACTS: Final[tuple[Contract, ...]] = tuple(
     Contract(
-        path=f"{_SCHEMA_DIRECTORY}/{slug}.schema.json",
-        summary=summary,
-        render=_schema_of(model),
+        path=f"{_SCHEMA_DIRECTORY}/{published.slug}.schema.json",
+        summary=published.summary,
+        render=_schema_of(published.model, published.capability),
     )
-    for slug, model, summary in _MESSAGE_TYPES
+    for published in _MESSAGE_TYPES
 )
 
 _PREAMBLE: Final = """\

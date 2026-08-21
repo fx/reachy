@@ -392,12 +392,13 @@ addopts = [
 testpaths = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 filterwarnings = ["error"]
 # The filesystem half of the no-input-or-output rule has no `--disable-socket`
-# equivalent, so a test that genuinely reads a file says so here rather than
-# looking like a unit test that quietly cheats. The golden fixture corpus is the
-# case this exists for: the bytes are the contract, so loading them from disk is
-# the behaviour under test and mocking the read would test nothing.
+# equivalent. This marker grants a unit test nothing: it declares that the test
+# is not one, the way `enable_socket` does for an integration test. The golden
+# fixture corpus is the case it exists for — the bytes on disk are the contract,
+# so reading them is the behaviour under test and a fake would pin whatever the
+# fake was told to return.
 markers = [
-    "filesystem: reads committed data files; not a unit test.",
+    "filesystem: declares a contract test that reads committed data files; never a unit test.",
 ]
 
 [tool.coverage.run]

@@ -103,9 +103,17 @@ Sockets are the part of that rule the harness enforces: `pytest` runs with
 `--disable-socket`, so a test that opens one errors. An integration test that
 exercises a real transport in-process declares it with
 `@pytest.mark.enable_socket`. The filesystem and sleeping halves have no
-equivalent guard and are enforced in review — a test that genuinely must read a
-committed file says so with `@pytest.mark.filesystem`, which makes the
-dependency visible in the test rather than leaving it to be discovered.
+equivalent guard and are enforced in review.
+
+`@pytest.mark.filesystem` is the filesystem's counterpart to
+`@pytest.mark.enable_socket`, and it grants a unit test nothing. It **declares
+that the test is not a unit test**: reading a committed data file is input, so a
+test that does it is a contract test and the rule above no longer describes it.
+The marker exists so that fact is visible in the test rather than discovered
+later, and a unit test carrying it is a mislabelled test, not a licensed one. It
+is warranted only where the bytes on disk are themselves the thing under test —
+the golden fixture corpus — because there a fake would pin whatever the fake was
+told to return.
 
 ### Wire types are declared once
 

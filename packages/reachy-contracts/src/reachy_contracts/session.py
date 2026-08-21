@@ -114,9 +114,20 @@ def _reject_duplicate_names(capabilities: Sequence[Capability]) -> None:
 class SessionOffer(WireModel):
     """The client's opening message: its credential and what it can speak.
 
-    The credential is held as a secret so that logging a message, or dropping
-    one into a traceback, cannot print it; the wire serialisation puts the real
-    value back, because presenting it is the entire point of the message.
+    The credential is held as a secret so that a repr, a traceback, or a
+    Python-mode `model_dump` shows a mask rather than the value. JSON
+    serialisation puts the real value back, because presenting it is the entire
+    point of the message.
+
+    That asymmetry is deliberate and is the safer of the two failure modes.
+    Gating the clear-text value on a serialisation context would mask it in
+    `model_dump_json` as well, which means a component that serialised an offer
+    with pydantic's own API rather than `to_wire` would send `**********` as its
+    credential and fail authentication for a reason nothing in the log explains.
+    A masked value that reaches the wire is a silent production failure; a real
+    value that reaches a log only does so if somebody deliberately JSON-dumps a
+    message into one, which is what the Python-mode mask is there to make the
+    unnatural path.
 
     Attributes:
         credential: The shared secret the groundstation authenticates against.

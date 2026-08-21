@@ -53,6 +53,7 @@
   "additionalProperties": false,
   "properties": {
     "capability": {
+      "const": "gesture",
       "maxLength": 32,
       "minLength": 1,
       "pattern": "^[a-z][a-z0-9_]*$",

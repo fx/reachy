@@ -73,6 +73,7 @@
   "additionalProperties": false,
   "properties": {
     "capability": {
+      "const": "face",
       "maxLength": 32,
       "minLength": 1,
       "pattern": "^[a-z][a-z0-9_]*$",
