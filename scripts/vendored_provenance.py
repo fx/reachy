@@ -68,14 +68,40 @@ EXEMPT_FILES = frozenset(
         "apps/ha-satellite/src/reachy_mini_ha_satellite/esphome/NOTICE",
         "apps/ha-satellite/tests/LICENSE",
         "apps/ha-satellite/tests/NOTICE",
-        # Original to this repository.
+        # Original to this repository. `apps/ha-satellite/tests` is a vendored
+        # root because the carried-over upstream tests live directly in it, so
+        # every test this repository writes for the same member lands there too
+        # and has to say so here. The vendored ones are exactly the
+        # `*_esphome_*` files plus `esphome_test_support.py`; everything below
+        # is ours.
         "apps/ha-satellite/src/reachy_mini_ha_satellite/esphome/__init__.py",
         "apps/ha-satellite/src/reachy_mini_ha_satellite/esphome/seams.py",
         "apps/ha-satellite/tests/conftest.py",
+        "apps/ha-satellite/tests/fixtures/behaviour_boundary_probe.py.txt",
         "apps/ha-satellite/tests/fixtures/vendored_boundary_probe.py.txt",
+        "apps/ha-satellite/tests/support/satellite_support.py",
         "apps/ha-satellite/tests/test_satellite_asset_registry.py",
         "apps/ha-satellite/tests/test_satellite_asset_verify.py",
+        "apps/ha-satellite/tests/test_satellite_audio_adapter.py",
         "apps/ha-satellite/tests/test_satellite_audio_seams.py",
+        "apps/ha-satellite/tests/test_satellite_behaviour_movement.py",
+        "apps/ha-satellite/tests/test_satellite_behaviour_pipeline.py",
+        "apps/ha-satellite/tests/test_satellite_behaviour_satellite.py",
+        "apps/ha-satellite/tests/test_satellite_behaviour_tracking.py",
+        "apps/ha-satellite/tests/test_satellite_config.py",
+        "apps/ha-satellite/tests/test_satellite_daemon_app.py",
+        "apps/ha-satellite/tests/test_satellite_main.py",
+        "apps/ha-satellite/tests/test_satellite_motion_adapter.py",
+        "apps/ha-satellite/tests/test_satellite_network.py",
+        "apps/ha-satellite/tests/test_satellite_perception_contract.py",
+        "apps/ha-satellite/tests/test_satellite_perception_local.py",
+        "apps/ha-satellite/tests/test_satellite_perception_remote.py",
+        "apps/ha-satellite/tests/test_satellite_perception_source.py",
+        "apps/ha-satellite/tests/test_satellite_pipeline_events.py",
+        "apps/ha-satellite/tests/test_satellite_ports.py",
+        "apps/ha-satellite/tests/test_satellite_sounds.py",
+        "apps/ha-satellite/tests/test_satellite_vendored_wiring.py",
+        "apps/ha-satellite/tests/test_satellite_web_settings.py",
     }
 )
 

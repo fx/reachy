@@ -99,6 +99,14 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+  #:= docs/specs/ha-satellite/index.md#req-041-the-application-is-discoverable-by-the-robot-daemon
+  #:% The application MUST advertise itself through the daemon's application entry
+  #:% point mechanism so that installing the wheel is sufficient for the daemon to
+  #:% find it.
+  #
+  #:= docs/specs/architecture/index.md#req-002-one-version-for-the-whole-repository
+  #:% Every artifact published from this repository MUST carry the same version
+  #:% string, derived from a single repository-wide version.
   publish-wheels:
     name: Publish the wheels
     runs-on: ubuntu-latest
@@ -180,6 +188,17 @@ jobs:
           path: wheel-size/
           if-no-files-found: error
 
+      # A digest published beside the wheels, so an operator installing one can
+      # check they have the artifact this workflow built. The satellite wheel in
+      # particular goes into the environment the daemon runs applications from,
+      # so "which file is this?" is a question worth being able to answer — see
+      # the deployment runbook, which has the check as a step.
+      - name: Record what the wheels hash to
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum ./*.whl | tee SHA256SUMS
+
       # Attached to the release release-please created for this tag. The
       # architecture spec names GitHub Releases as the destination for both
       # wheels, and `--clobber` makes a re-run of this job replace what it
@@ -201,4 +220,4 @@ jobs:
             echo "the release for $TAG is not there yet (attempt ${attempt}); waiting"
             sleep 10
           done
-          gh release upload "$TAG" dist/*.whl wheel-size/*.json --clobber
+          gh release upload "$TAG" dist/*.whl dist/SHA256SUMS wheel-size/*.json --clobber

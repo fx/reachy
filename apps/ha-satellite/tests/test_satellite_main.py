@@ -1,0 +1,1463 @@
+"""The composition root: what runs, in what order, and what shutdown leaves behind.
+
+**The loop and its lifecycle** are driven entirely against the fakes change 0012
+shipped — no robot, no socket, no thread pool and no clock — which is what lets
+ha-satellite REQ-050 be asserted rather than described: movement stops, the media
+interface is released, and the process leaves. Those are ordinary unit tests.
+
+**The wiring is not, and three groups of tests here say so rather than implying
+it.** Each does real input or output, each carries the marker that declares it,
+and each is that way because the alternative would be a test of a fake:
+
+* the assembly tests read the wheel's own wake-word models and sounds —
+  `@pytest.mark.filesystem`, because REQ-044 is that those files load off the
+  robot without a network, and a fake asset directory would pin whatever the
+  fake was told to contain;
+* `TestStartingUpFromTheEnvironment` binds the real ESPHome port on the loopback
+  interface — `@pytest.mark.enable_socket`, because a startup path that never
+  bound anything would prove nothing about the one thing startup has to do;
+* `TestTheDefaultThreadStarter` starts a real daemon thread, which is what the
+  microphone pump runs on. It is the one thing in this module that is neither
+  faked nor injected, because what is under test *is* the thread.
+
+Test module names are globally unique across the workspace — see the root
+`AGENTS.md`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import socket
+import threading
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Final, cast
+
+import httpx
+import pytest
+from satellite_support import (
+    FakeAudio,
+    FakeCapture,
+    FakeMotion,
+    FakePerception,
+    FakeRobot,
+    face,
+)
+
+from reachy_mini_ha_satellite import main as satellite_main
+from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
+from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
+from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
+from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
+from reachy_mini_ha_satellite.behaviour import (
+    LookAhead,
+    LookAt,
+    MoveAntennas,
+    MoveHead,
+    PipelineEvent,
+    SatelliteBehaviour,
+)
+from reachy_mini_ha_satellite.config import (
+    ENV_PREFIX,
+    ConfigurationError,
+    Settings,
+    load_settings,
+    overrides_path,
+)
+from reachy_mini_ha_satellite.esphome.models import Preferences, ServerState
+from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
+from reachy_mini_ha_satellite.main import (
+    _THREAD_JOIN_SECONDS,
+    AdvertisementService,
+    EsphomeService,
+    SatelliteApplication,
+    WebService,
+    _daemon_thread,
+    _NoPerception,
+    apply_intents,
+    build_application,
+    build_perception_source,
+    build_server_state,
+    configure_logging,
+    load_preferences,
+    run,
+)
+from reachy_mini_ha_satellite.ports import (
+    NEUTRAL_HEAD,
+    AntennaPose,
+    Detections,
+    DetectionSource,
+    HeadPose,
+    SourceSelection,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from pyfakefs.fake_filesystem import FakeFilesystem
+
+    from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
+    from reachy_mini_ha_satellite.ports import PerceptionPort
+
+# The RFC 5737 documentation range. This repository is public.
+_GROUNDSTATION: Final = "ws://192.0.2.10:8080/v1/session"
+
+_ENVIRONMENT: Final[dict[str, str]] = {
+    f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1",
+    f"{ENV_PREFIX}GROUNDSTATION_URL": _GROUNDSTATION,
+    f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": "example-credential",
+    f"{ENV_PREFIX}STATE_DIR": "/reachy-satellite-main",
+    f"{ENV_PREFIX}ADVERTISE": "false",
+    f"{ENV_PREFIX}WEB_ENABLED": "false",
+}
+
+
+# The selection that runs the detector on the robot and opens no session. Bound
+# once rather than spelled at each site, because this repository's leak scanner
+# reads the dotted form as an mDNS hostname suffix — the same reason
+# `adapters/perception_source.py` binds it, and one exempted line is better than
+# several.
+_ROBOT_ONLY: Final = SourceSelection.LOCAL  # leak-scan:allow
+
+
+def _settings(**overrides: str) -> Settings:
+    """Resolve a usable configuration.
+
+    Args:
+        overrides: Variables to set on top of the working environment, by
+            setting name.
+
+    Returns:
+        The settings.
+    """
+    return load_settings(_ENVIRONMENT, dict(overrides)).settings
+
+
+class RecordingService:
+    """A service that records its own lifecycle, and optionally fails to close."""
+
+    def __init__(self, *, fails: bool = False) -> None:
+        """Start neither started nor stopped.
+
+        Args:
+            fails: Whether `aclose` raises, which is how the shutdown guard is
+                exercised.
+        """
+        self.started = 0
+        self.closed = 0
+        self._fails = fails
+
+    async def start(self) -> None:
+        """Record a start."""
+        self.started += 1
+
+    async def aclose(self) -> None:
+        """Record a stop.
+
+        Raises:
+            RuntimeError: When this service was built to fail.
+        """
+        self.closed += 1
+        if self._fails:
+            message = "this service does not stop cleanly"
+            raise RuntimeError(message)
+
+
+def _application(
+    *,
+    audio: FakeAudio,
+    motion: FakeMotion,
+    perception: FakePerception,
+    services: Sequence[Any] = (),
+    stop_after: int = 2,
+) -> tuple[SatelliteApplication, asyncio.Event]:
+    """Build an application that stops itself after a few ticks.
+
+    Args:
+        audio: The microphone and speakers.
+        motion: The head and the antennas.
+        perception: What is in front of the robot.
+        services: The things with lifetimes.
+        stop_after: How many ticks to run before the stop event is set. The
+            loop's wait is what sets it, so no wall time is spent, and the
+            count bounds the loop so a yield cannot become a hang.
+
+    Returns:
+        The application and the event that stops it.
+    """
+    stop = asyncio.Event()
+    ticks = 0
+
+    async def _wait(seconds: float) -> None:
+        """Stand in for the loop's wait between ticks.
+
+        Args:
+            seconds: How long the loop wanted to wait, ignored.
+        """
+        del seconds
+        nonlocal ticks
+        ticks += 1
+        if ticks >= stop_after:
+            stop.set()
+        # A zero-delay yield, not a wait: it hands control back to the event
+        # loop so a test can act between two ticks, and adds no wall time.
+        await asyncio.sleep(0)
+
+    application = SatelliteApplication(
+        settings=_settings(),
+        audio=audio,
+        motion=motion,
+        perception=perception,
+        behaviour=SatelliteBehaviour(now=0.0),
+        services=services,
+        clock=_advancing(),
+        sleep=_wait,
+    )
+    return application, stop
+
+
+def _advancing() -> Callable[[], float]:
+    """A monotonic clock that moves a tenth of a second per reading.
+
+    Returns:
+        The clock, which is a function rather than an object because that is
+        what the behaviour layer takes.
+    """
+    reading = 0.0
+
+    def _read() -> float:
+        nonlocal reading
+        reading += 0.1
+        return reading
+
+    return _read
+
+
+class TestApplyingIntents:
+    """Four intents, four port methods, and nothing in between to get wrong."""
+
+    def test_a_gaze_target_reaches_look_at(self) -> None:
+        """The one intent that carries a value the adapter has to convert."""
+        motion = FakeMotion()
+
+        apply_intents(motion, [LookAt(face(0.3, 0.1).centre)])
+
+        assert motion.gaze[-1].x == pytest.approx(0.3)
+
+    def test_returning_to_neutral_reaches_look_ahead(self) -> None:
+        """Distinct from commanding the neutral pose — REQ-048's own method."""
+        motion = FakeMotion()
+
+        apply_intents(motion, [LookAhead()])
+
+        assert motion.last_head == NEUTRAL_HEAD
+
+    def test_a_head_pose_reaches_move_head(self) -> None:
+        """The pipeline's secondary channel."""
+        motion = FakeMotion()
+
+        apply_intents(motion, [MoveHead(HeadPose(pitch=0.2))])
+
+        assert motion.heads[-1] == HeadPose(pitch=0.2)
+
+    def test_an_antenna_pose_reaches_move_antennas(self) -> None:
+        """The channel REQ-046's distinguishable movements travel on."""
+        motion = FakeMotion()
+
+        apply_intents(motion, [MoveAntennas(AntennaPose(left=0.5, right=-0.5))])
+
+        assert motion.antennas[-1] == AntennaPose(left=0.5, right=-0.5)
+
+    def test_intents_are_applied_in_order(self) -> None:
+        """They reach the port in the order the behaviour layer produced them."""
+        motion = FakeMotion()
+
+        apply_intents(
+            motion,
+            [MoveHead(HeadPose(pitch=0.1)), MoveHead(HeadPose(pitch=0.2))],
+        )
+
+        assert [pose.pitch for pose in motion.heads] == [0.1, 0.2]
+
+
+class TestTheLoop:
+    """What ticking does, and what a pipeline event does between ticks."""
+
+    @pytest.mark.asyncio
+    async def test_it_starts_everything_before_ticking(self) -> None:
+        """A tick against an unstarted perception source would read nothing."""
+        audio, motion = FakeAudio(), FakeMotion()
+        perception = FakePerception()
+        service = RecordingService()
+        application, stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=perception,
+            services=[service],
+        )
+
+        await application.run(stop)
+
+        assert audio.started == 1
+        assert perception.started == 1
+        assert service.started == 1
+
+    @pytest.mark.asyncio
+    async def test_a_visible_face_is_followed(self) -> None:
+        """The loop's whole job, end to end against the fakes."""
+        audio, motion = FakeAudio(), FakeMotion()
+        perception = FakePerception()
+        perception.see(face(0.4, 0.2), source=DetectionSource.REMOTE)
+        application, stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=perception,
+        )
+
+        await application.run(stop)
+
+        assert motion.gaze
+
+    @pytest.mark.asyncio
+    async def test_stale_results_return_the_head_to_neutral(self) -> None:
+        """REQ-048, through the loop rather than through the behaviour layer."""
+        audio, motion = FakeAudio(), FakeMotion()
+        perception = FakePerception()
+        perception.see(face(0.4, 0.2), source=DetectionSource.REMOTE)
+        application, stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=perception,
+            stop_after=4,
+        )
+
+        run = asyncio.create_task(application.run(stop))
+        # Two passes of the loop: one to start everything and take the first
+        # tick, one to reach the wait. Then the results stop arriving.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        perception.go_stale()
+        await run
+
+        assert motion.last_head == NEUTRAL_HEAD
+
+    def test_a_pipeline_event_moves_the_robot_at_once(self) -> None:
+        """`deliver` is what the tap calls, on the event loop's own thread."""
+        motion = FakeMotion()
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+        )
+
+        application.deliver(PipelineEvent.LISTENING)
+
+        assert motion.antennas
+
+    def test_the_three_pipeline_states_produce_three_different_movements(
+        self,
+    ) -> None:
+        """REQ-046, at the surface a person in the room actually watches."""
+        commanded = []
+        for event in (
+            PipelineEvent.LISTENING,
+            PipelineEvent.PROCESSING,
+            PipelineEvent.RESPONDING,
+        ):
+            motion = FakeMotion()
+            application, _stop = _application(
+                audio=FakeAudio(),
+                motion=motion,
+                perception=FakePerception(),
+            )
+            application.deliver(event)
+            commanded.append((motion.antennas[-1].left, motion.antennas[-1].right))
+
+        assert len(set(commanded)) == len(commanded)
+
+    def test_the_status_is_reported_for_the_settings_interface(self) -> None:
+        """The behaviour layer's own view, handed through unchanged."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        assert application.status()["pipeline"] == "idle"
+
+
+class TestShutdown:
+    """ha-satellite REQ-050, in the order the requirement states it."""
+
+    @pytest.mark.asyncio
+    async def test_it_stops_motion_and_releases_the_media_interface(self) -> None:
+        """The two halves of leaving the robot safe."""
+        audio, motion = FakeAudio(), FakeMotion()
+        application, stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=FakePerception(),
+        )
+
+        await application.run(stop)
+
+        assert motion.released
+        assert audio.stopped == 1
+
+    @pytest.mark.asyncio
+    async def test_it_stops_the_services_and_the_perception_source(self) -> None:
+        """Nothing is left holding a socket, a thread or a model."""
+        service = RecordingService()
+        perception = FakePerception()
+        application, stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=perception,
+            services=[service],
+        )
+
+        await application.run(stop)
+
+        assert service.closed == 1
+        assert perception.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_movement_after_shutdown_is_ignored_rather_than_refused(
+        self,
+    ) -> None:
+        """A behaviour tick racing the signal ends quietly."""
+        motion = FakeMotion()
+        application, stop = _application(
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+        )
+        await application.run(stop)
+        before = len(motion.antennas)
+
+        application.deliver(PipelineEvent.LISTENING)
+
+        assert len(motion.antennas) == before
+
+    @pytest.mark.asyncio
+    async def test_a_service_that_fails_to_stop_does_not_skip_the_rest(self) -> None:
+        """The microphone must not be left open because a socket would not close."""
+        audio, motion = FakeAudio(), FakeMotion()
+        failing = RecordingService(fails=True)
+        healthy = RecordingService()
+        perception = FakePerception()
+        application, stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=perception,
+            services=[healthy, failing],
+        )
+
+        await application.run(stop)
+
+        assert healthy.closed == 1
+        assert perception.closed == 1
+        assert motion.released
+
+    @pytest.mark.asyncio
+    async def test_a_perception_source_that_fails_to_stop_is_survived(self) -> None:
+        """It is the last step, so the failure only has itself to lose."""
+
+        class _Stubborn(FakePerception):
+            async def aclose(self) -> None:
+                """Refuse to stop.
+
+                Raises:
+                    RuntimeError: Always.
+                """
+                message = "this source does not stop cleanly"
+                raise RuntimeError(message)
+
+        motion = FakeMotion()
+        application, stop = _application(
+            audio=FakeAudio(),
+            motion=motion,
+            perception=_Stubborn(),
+        )
+
+        await application.run(stop)
+
+        assert motion.released
+
+    @pytest.mark.asyncio
+    async def test_closing_twice_does_nothing_the_second_time(self) -> None:
+        """A termination signal and an ordinary shutdown can both arrive."""
+        audio = FakeAudio()
+        application, stop = _application(
+            audio=audio,
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+        await application.run(stop)
+
+        await application.aclose()
+
+        assert audio.stopped == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failure_inside_the_loop_still_leaves_the_robot_safe(
+        self,
+    ) -> None:
+        """Shutdown is in a `finally`, so it does not depend on ending tidily."""
+
+        class _Exploding(FakePerception):
+            def latest(self) -> Detections:
+                """Fail on being read.
+
+                Raises:
+                    RuntimeError: Always.
+                """
+                message = "the source failed mid-tick"
+                raise RuntimeError(message)
+
+        audio, motion = FakeAudio(), FakeMotion()
+        application, stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=_Exploding(),
+        )
+
+        with pytest.raises(RuntimeError, match="mid-tick"):
+            await application.run(stop)
+
+        assert motion.released
+        assert audio.stopped == 1
+
+    def test_the_settings_interface_can_ask_for_a_restart(self) -> None:
+        """Which is how a setting that needs one takes effect without a shell."""
+        application, stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        async def _drive() -> None:
+            """Run the loop and stop it from the settings interface's method."""
+            task = asyncio.create_task(application.run(stop))
+            await asyncio.sleep(0)
+            application.request_stop()
+            await task
+
+        asyncio.run(_drive())
+
+        assert stop.is_set()
+
+
+class TestAdoptingSettingsWithoutARestart:
+    """The live half of the settings interface."""
+
+    def test_it_retunes_the_behaviour_layer(self) -> None:
+        """Rather than rebuilding it, which would forget the conversation."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+        application.deliver(PipelineEvent.PROCESSING)
+
+        application.apply_live(_settings(face_tracking_enabled="false"))
+
+        assert application.status()["pipeline"] == "processing"
+
+    def test_it_installs_the_new_log_level(self) -> None:
+        """One of the six settings that can be swapped into a running process."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        application.apply_live(_settings(log_level="debug"))
+
+        assert logging.getLogger().level == logging.DEBUG
+
+
+class TestTheEsphomeService:
+    """The protocol server, and the microphone pump that feeds it."""
+
+    @pytest.mark.asyncio
+    async def test_it_binds_and_binds_once(self, fs: FakeFilesystem) -> None:
+        """The listening socket and the pump are one lifetime.
+
+        Args:
+            fs: An in-memory filesystem, for the wheel's asset paths.
+        """
+        del fs
+        bound: list[tuple[str, int]] = []
+        service, _state = _esphome_service(bound)
+
+        await service.start()
+        await service.aclose()
+
+        assert bound == [("127.0.0.1", 6053)]
+
+    @pytest.mark.asyncio
+    async def test_it_binds_the_tap_to_the_running_loop(self) -> None:
+        """The vendored code emits from other threads, so the loop has to be known."""
+        received: list[PipelineEvent] = []
+        tap = PipelineEventTap(received.append)
+        service, _state = _esphome_service([], tap=tap)
+
+        await service.start()
+        await asyncio.to_thread(service.pump)
+        await service.aclose()
+
+        assert received == []
+
+    @pytest.mark.asyncio
+    async def test_the_pump_feeds_captured_audio_into_the_protocol(self) -> None:
+        """The feed the discarded upstream entry point used to provide."""
+        chunks = [[b"\x00" * 320, b"\x01" * 320], [b"\x02" * 320, b"\x03" * 320]]
+        capture = FakeCapture(chunks)
+        service, state = _esphome_service([], capture=capture)
+        satellite = _RecordingSatellite()
+        # The vendored state declares this as its own protocol class; the pump
+        # calls exactly one method on it, and a real one would need a socket.
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        # `start` is what sets the pump running; the injected thread starter
+        # does not run it, so the pump is driven here instead of on a thread.
+        await service.start()
+
+        service.pump()
+
+        assert satellite.chunks == [
+            (b"\x00" * 320, b"\x01" * 320),
+            (b"\x02" * 320, b"\x03" * 320),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_the_pump_drops_audio_while_nothing_is_connected(self) -> None:
+        """A chunk arriving before Home Assistant does is dropped, not queued.
+
+        A backlog replayed at connection time is a conversation that already
+        happened.
+        """
+        capture = FakeCapture([[b"\x00" * 320]])
+        service, state = _esphome_service([], capture=capture)
+        state.satellite = None
+        await service.start()
+
+        service.pump()
+
+        assert capture.read_chunk() is None
+
+    @pytest.mark.asyncio
+    async def test_the_pump_stops_when_the_capture_source_closes(self) -> None:
+        """Which is what a released media interface looks like."""
+        service, _state = _esphome_service([], capture=FakeCapture([]))
+        await service.start()
+
+        service.pump()
+
+        assert True  # returning at all is the assertion: the loop is bounded
+
+
+class TestTheAdvertisement:
+    """The mDNS record Home Assistant discovers the satellite through."""
+
+    @pytest.mark.asyncio
+    async def test_it_registers_what_the_robot_announces(self) -> None:
+        """Name, port and hardware address, which is the identity."""
+        built: list[dict[str, object]] = []
+        service = AdvertisementService(
+            name="reachy-mini-1",
+            port=6053,
+            identity=_identity(),
+            build=lambda **kwargs: _FakeZeroconf(built, **kwargs),
+        )
+
+        await service.start()
+
+        assert built[0]["name"] == "reachy-mini-1"
+        assert built[0]["mac_address"] == "02:00:5e:10:00:00"
+
+    @pytest.mark.asyncio
+    async def test_it_withdraws_the_record_on_the_way_out(self) -> None:
+        """Otherwise Home Assistant holds a device that is not there."""
+        built: list[dict[str, object]] = []
+        advertiser: list[_FakeZeroconf] = []
+
+        def _build(**kwargs: object) -> _FakeZeroconf:
+            """Build the fake advertiser and keep it.
+
+            Args:
+                kwargs: What the service passed.
+
+            Returns:
+                The advertiser.
+            """
+            made = _FakeZeroconf(built, **kwargs)
+            advertiser.append(made)
+            return made
+
+        service = AdvertisementService(
+            name="reachy-mini-1",
+            port=6053,
+            identity=_identity(),
+            build=_build,
+        )
+        await service.start()
+
+        await service.aclose()
+
+        assert advertiser[0].closed == 1
+
+    @pytest.mark.asyncio
+    async def test_closing_one_that_never_started_is_not_an_error(self) -> None:
+        """Shutdown runs however startup went."""
+        service = AdvertisementService(
+            name="reachy-mini-1",
+            port=6053,
+            identity=_identity(),
+        )
+
+        await service.aclose()
+
+        assert True  # not raising is the assertion
+
+
+class TestTheSettingsService:
+    """The interface, run beside the protocol on its own port."""
+
+    @pytest.mark.asyncio
+    async def test_it_serves_until_it_is_asked_to_stop(self) -> None:
+        """The lifecycle, with the server injected so nothing binds a socket."""
+        stopped = asyncio.Event()
+
+        async def _serve() -> None:
+            """Serve until asked to stop."""
+            await stopped.wait()
+
+        service = WebService(
+            _nothing_asgi,
+            host="127.0.0.1",
+            port=8088,
+            serve=_serve,
+            shutdown=stopped.set,
+        )
+        await service.start()
+
+        await service.aclose()
+
+        assert stopped.is_set()
+
+    @pytest.mark.asyncio
+    async def test_closing_one_that_never_started_is_not_an_error(self) -> None:
+        """Shutdown runs however startup went."""
+        service = WebService(_nothing_asgi, host="127.0.0.1", port=8088)
+
+        await service.aclose()
+
+        assert True  # not raising is the assertion
+
+
+class TestBuildingThePerceptionSource:
+    """ha-satellite REQ-047: three selections, and one way of having none."""
+
+    def test_tracking_switched_off_builds_nothing(self) -> None:
+        """No session is opened and no model is loaded."""
+        assert (
+            build_perception_source(
+                _settings(face_tracking_enabled="false"),
+                FakeRobot().media,
+            )
+            is None
+        )
+
+    def test_the_remote_selection_builds_a_session_source(self) -> None:
+        """The default, and the one the robot's core budget is measured against."""
+        source = build_perception_source(_settings(), FakeRobot().media)
+
+        assert isinstance(source, RemotePerception)
+
+    def test_the_local_selection_builds_a_detector_and_no_session(self) -> None:
+        """An installation with no groundstation deployed."""
+        source = build_perception_source(
+            _settings(
+                detection_source=_ROBOT_ONLY.value,
+                local_model_path="/models/face.onnx",
+            ),
+            FakeRobot().media,
+        )
+
+        assert isinstance(source, LocalPerception)
+
+    def test_the_fallback_selection_builds_both(self) -> None:
+        """And the behaviour layer cannot tell which of them answered."""
+        source = build_perception_source(
+            _settings(
+                detection_source=SourceSelection.REMOTE_WITH_LOCAL_FALLBACK.value,
+                local_model_path="/models/face.onnx",
+            ),
+            FakeRobot().media,
+        )
+
+        assert isinstance(source, FallbackPerception)
+
+
+class TestPreferences:
+    """What Home Assistant sets through entities, not what an operator configures."""
+
+    def test_a_missing_file_yields_the_defaults(self, fs: FakeFilesystem) -> None:
+        """Losing a volume setting is not worth refusing to start over.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+
+        assert load_preferences(Path("/nowhere/preferences.json")) == Preferences()
+
+    def test_what_was_saved_is_read_back(self, fs: FakeFilesystem) -> None:
+        """Volume and the active wake words survive a restart.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        path = Path("/reachy-satellite-prefs/preferences.json")
+        fs.create_file(
+            path,
+            contents='{"volume": 0.4, "active_wake_words": ["okay_nabu"]}',
+        )
+
+        preferences = load_preferences(path)
+
+        assert preferences.volume == pytest.approx(0.4)
+        assert preferences.active_wake_words == ["okay_nabu"]
+
+    def test_an_unknown_key_is_ignored(self, fs: FakeFilesystem) -> None:
+        """A file written by a later version must not stop this one starting.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        path = Path("/reachy-satellite-prefs/preferences.json")
+        fs.create_file(path, contents='{"volume": 0.4, "invented": 1}')
+
+        assert not hasattr(load_preferences(path), "invented")
+
+    def test_a_file_that_is_not_an_object_yields_the_defaults(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Reported in the log, and not a reason to refuse to start.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        path = Path("/reachy-satellite-prefs/preferences.json")
+        fs.create_file(path, contents="[1, 2]")
+
+        assert load_preferences(path) == Preferences()
+
+    def test_a_file_that_is_not_json_yields_the_defaults(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Same reason.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        path = Path("/reachy-satellite-prefs/preferences.json")
+        fs.create_file(path, contents="{not json")
+
+        assert load_preferences(path) == Preferences()
+
+
+class TestLogging:
+    """One setting, installed process-wide."""
+
+    def test_the_configured_level_is_installed(self) -> None:
+        """So `log_level=debug` is a thing that has an effect."""
+        configure_logging(_settings(log_level="warning"))
+
+        assert logging.getLogger().level == logging.WARNING
+
+
+@pytest.mark.filesystem
+class TestTheWiringAgainstTheWheelsOwnAssets:
+    """The assembly, reading the wake-word models and sounds the wheel ships.
+
+    These read real files, and that is the point: ha-satellite REQ-044 says the
+    wake word runs on the robot without depending on the groundstation or on
+    Home Assistant, and a fake asset directory would pin whatever the fake was
+    told to contain rather than what the wheel carries.
+    """
+
+    def test_the_server_state_announces_the_configured_identity(self) -> None:
+        """REQ-040, at the place the announcement is actually assembled."""
+        state = build_server_state(
+            _settings(),
+            identity=_identity(),
+            audio=FakeAudio(),
+            state_dir=Path("/reachy-satellite-main"),
+        )
+
+        assert state.name == "reachy-mini-1"
+        assert state.mac_address == "02:00:5e:10:00:00"
+
+    def test_the_shipped_wake_word_loads_from_the_wheel(self) -> None:
+        """No network, no groundstation, no Home Assistant — REQ-044."""
+        state = build_server_state(
+            _settings(),
+            identity=_identity(),
+            audio=FakeAudio(),
+            state_dir=Path("/reachy-satellite-main"),
+        )
+
+        assert state.active_wake_words
+        assert state.stop_word is not None
+
+    def test_both_audio_seams_are_filled_by_the_ports(self) -> None:
+        """Which is what change 0011 left open and 0012 supplied."""
+        audio = FakeAudio()
+
+        state = build_server_state(
+            _settings(),
+            identity=_identity(),
+            audio=audio,
+            state_dir=Path("/reachy-satellite-main"),
+        )
+
+        assert state.audio_capture is audio.capture
+        assert state.music_player is audio.music
+        assert state.tts_player is audio.speech
+
+    def test_every_sound_slot_points_at_a_shipped_file(self) -> None:
+        """A missing chime is a silent robot, which is hard to notice."""
+        state = build_server_state(
+            _settings(),
+            identity=_identity(),
+            audio=FakeAudio(),
+            state_dir=Path("/reachy-satellite-main"),
+        )
+
+        for slot in (
+            state.wakeup_sound,
+            state.start_listening_sound,
+            state.processing_sound,
+            state.timer_finished_sound,
+            state.mute_sound,
+            state.unmute_sound,
+            state.button_double_press_sound,
+            state.button_triple_press_sound,
+            state.button_long_press_sound,
+        ):
+            assert Path(slot).is_file()
+
+    def test_the_whole_application_assembles_over_a_fake_robot(self) -> None:
+        """Ports to adapters, the behaviour layer, and the services it owns."""
+        resolution = load_settings(_ENVIRONMENT, {})
+
+        application = build_application(
+            resolution,
+            FakeRobot(),
+            identity=_identity(),
+        )
+
+        assert application.status()["pipeline"] == "idle"
+
+    def test_a_robot_with_tracking_off_still_assembles(self) -> None:
+        """And its behaviour layer is handed a source that answers "nothing yet"."""
+        resolution = load_settings(
+            _ENVIRONMENT,
+            {"face_tracking_enabled": "false"},
+        )
+
+        application = build_application(
+            resolution,
+            FakeRobot(),
+            identity=_identity(),
+        )
+
+        assert application.status()["gaze"] == "unknown"
+
+    def test_the_settings_interface_is_wired_when_it_is_enabled(self) -> None:
+        """It is a service like the others, so it starts and stops with the app."""
+        resolution = load_settings(
+            {**_ENVIRONMENT, f"{ENV_PREFIX}WEB_ENABLED": "true"},
+            {"advertise": "false"},
+        )
+
+        application = build_application(
+            resolution,
+            FakeRobot(),
+            identity=_identity(),
+        )
+
+        assert any(isinstance(service, WebService) for service in application.services)
+
+    @pytest.mark.asyncio
+    async def test_the_page_writes_the_file_that_startup_reads(self) -> None:
+        """The claim `build_application` makes about its own store, checked.
+
+        `run` opens the overrides with `config.overrides_path`; the settings
+        interface is handed an `OverrideStore` the composition root builds from
+        `state_dir` separately. If those two ever named different files the page
+        would write somewhere startup never looks — an operator would save a
+        setting, be told it was saved, and find it gone at the next start, with
+        nothing failing anywhere. Nothing else pins them together, so this does.
+        """
+        environ = {**_ENVIRONMENT, f"{ENV_PREFIX}WEB_ENABLED": "true"}
+        resolution = load_settings(environ, {})
+
+        application = build_application(
+            resolution,
+            FakeRobot(),
+            identity=_identity(),
+        )
+
+        web = next(
+            service
+            for service in application.services
+            if isinstance(service, WebService)
+        )
+        # Reaching past the private name deliberately: `WebService` exists to
+        # own a lifecycle, and widening its public surface so a test can read
+        # the application back would be shaping production code around this
+        # check. The alternative is not pinning the two paths at all.
+        transport = httpx.ASGITransport(app=cast("Any", web._app))
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://satellite.invalid",
+        ) as client:
+            page = await client.get("/")
+
+        assert str(overrides_path(environ)) in page.text
+
+    def test_the_advertisement_is_wired_when_it_is_enabled(self) -> None:
+        """Home Assistant discovers the robot through it."""
+        resolution = load_settings(
+            _ENVIRONMENT,
+            {"advertise": "true", "web_enabled": "false"},
+        )
+
+        application = build_application(
+            resolution,
+            FakeRobot(),
+            identity=_identity(),
+        )
+
+        assert any(
+            isinstance(service, AdvertisementService)
+            for service in application.services
+        )
+
+
+class _RecordingSatellite:
+    """Stands in for a connected `VoiceSatelliteProtocol`."""
+
+    def __init__(self) -> None:
+        """Start having been handed nothing."""
+        self.chunks: list[tuple[bytes, bytes | None]] = []
+
+    def handle_audio(
+        self,
+        audio_chunk: bytes,
+        audio_chunk_2: bytes | None = None,
+    ) -> None:
+        """Record one chunk, with the vendored signature.
+
+        Args:
+            audio_chunk: What the wake word listens to.
+            audio_chunk_2: The speaker reference, where the device has one.
+        """
+        self.chunks.append((audio_chunk, audio_chunk_2))
+
+
+class _FakeZeroconf:
+    """An mDNS advertiser that registers nothing."""
+
+    def __init__(self, built: list[dict[str, object]], **kwargs: object) -> None:
+        """Record what it was asked to advertise.
+
+        Args:
+            built: Where to record it.
+            kwargs: What the service passed.
+        """
+        built.append(kwargs)
+        self.closed = 0
+        self._aiozc = _FakeAiozc(self)
+
+    async def register_server(self) -> None:
+        """Pretend to register."""
+
+
+class _FakeAiozc:
+    """The zeroconf instance the vendored advertiser holds."""
+
+    def __init__(self, owner: _FakeZeroconf) -> None:
+        """Record which advertiser this belongs to.
+
+        Args:
+            owner: The advertiser.
+        """
+        self._owner = owner
+
+    async def async_close(self) -> None:
+        """Record a close."""
+        self._owner.closed += 1
+
+
+async def _nothing_asgi(
+    scope: object,
+    receive: object,
+    send: object,
+) -> None:
+    """An ASGI application that is never called.
+
+    Args:
+        scope: Unused.
+        receive: Unused.
+        send: Unused.
+    """
+    del scope, receive, send
+
+
+def _identity() -> NetworkIdentity:
+    """What the robot announces on the network, from documentation ranges.
+
+    Returns:
+        The identity.
+    """
+    from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
+
+    return NetworkIdentity(
+        interface="eth0",
+        ip_address="192.0.2.20",
+        mac_address="02:00:5e:10:00:00",
+    )
+
+
+def _esphome_service(
+    bound: list[tuple[str, int]],
+    *,
+    capture: FakeCapture | None = None,
+    tap: PipelineEventTap | None = None,
+) -> tuple[EsphomeService, ServerState]:
+    """Build the protocol service over a state nothing binds a socket for.
+
+    Args:
+        bound: Where to record what the service asked to listen on.
+        capture: The microphone, or a silent one.
+        tap: What pipeline events go into.
+
+    Returns:
+        The service and the vendored state it was built over.
+    """
+    from satellite_support import vendored_server_state
+
+    state = vendored_server_state()
+
+    async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+        """Stand in for opening a listening socket.
+
+        Args:
+            factory: What would build a connection, unused.
+            host: The address.
+            port: The port.
+
+        Returns:
+            Something with the shape a server has.
+        """
+        del factory
+        bound.append((host, port))
+        return _FakeServer()
+
+    service = EsphomeService(
+        state,
+        capture if capture is not None else FakeCapture([]),
+        tap if tap is not None else PipelineEventTap(lambda _: None),
+        host="127.0.0.1",
+        port=6053,
+        listen=_listen,
+        start_thread=lambda _work: None,
+    )
+    return service, state
+
+
+class _FakeServer:
+    """An asyncio server that never listened."""
+
+    def close(self) -> None:
+        """Record nothing."""
+
+    async def wait_closed(self) -> None:
+        """Return at once."""
+
+
+class TestTheDefaultThreadStarter:
+    """What the microphone pump actually runs on, when nothing is injected."""
+
+    def test_it_runs_the_work_and_does_not_hold_the_process_open(self) -> None:
+        """A pump that kept the interpreter alive would make shutdown a hang."""
+        ran = threading.Event()
+
+        thread = _daemon_thread(ran.set)
+        thread.join(timeout=_THREAD_JOIN_SECONDS)
+
+        assert ran.is_set()
+        assert thread.daemon
+
+
+class TestNoPerception:
+    """What the behaviour layer is handed when face tracking is switched off."""
+
+    @pytest.mark.asyncio
+    async def test_it_reports_that_nothing_has_ever_been_seen(self) -> None:
+        """Which is the one answer that makes the tracker command nothing."""
+        source: PerceptionPort = _NoPerception()
+        await source.start()
+
+        latest = source.latest()
+
+        assert latest.source is None
+        assert not latest.fresh
+        await source.aclose()
+
+
+@pytest.mark.filesystem
+class TestStartingUpFromTheEnvironment:
+    """`run` is the whole of startup: read, log, wire, loop, leave.
+
+    Marked because assembling the application reads the wake-word models the
+    wheel ships, which is what makes ha-satellite REQ-044 true rather than
+    asserted.
+    """
+
+    @pytest.mark.enable_socket
+    @pytest.mark.asyncio
+    async def test_it_reads_the_environment_and_runs_until_it_is_stopped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """The real startup path, including binding the port Home Assistant uses.
+
+        An integration test rather than a unit test, and it says so: it opens
+        the ESPHome listening socket in-process, on the loopback interface and
+        on a port the operating system picked, because a startup path that
+        never bound anything would prove nothing about the one thing startup
+        has to do.
+
+        The boot log is read off the captured stream rather than through
+        `caplog`, and that is not a preference: startup installs the
+        process-wide logging configuration, which replaces every handler on the
+        root logger — including the one `caplog` had put there.
+
+        Args:
+            monkeypatch: Used to supply the environment the daemon would.
+            capsys: Captures what startup actually printed.
+        """
+        for name, value in _ENVIRONMENT.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv(f"{ENV_PREFIX}FACE_TRACKING_ENABLED", "false")
+        monkeypatch.setenv(f"{ENV_PREFIX}API_HOST", "127.0.0.1")
+        monkeypatch.setenv(f"{ENV_PREFIX}API_PORT", str(_free_port()))
+        stop = asyncio.Event()
+        stop.set()
+
+        await run(FakeRobot(), stop)
+
+        emitted = capsys.readouterr().err
+        assert "configuration.resolved device_name=reachy-mini-1" in emitted
+        assert "groundstation_credential=<set>" in emitted
+        assert "esphome.listening" in emitted
+        assert "satellite.stopped" in emitted
+
+
+class TestAnIncompleteInstallation:
+    """Two wake-word failures, and neither of them is a traceback."""
+
+    def test_no_wake_words_at_all_refuses_to_start(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The vendored loader raises; this says where it looked.
+
+        Args:
+            fs: An in-memory filesystem, standing in for a wheel whose
+                wake-word directory did not survive installation.
+        """
+        del fs
+
+        with pytest.raises(ConfigurationError, match="installation is incomplete"):
+            build_server_state(
+                _settings(),
+                identity=_identity(),
+                audio=FakeAudio(),
+                state_dir=Path("/reachy-satellite-main"),
+            )
+
+    @pytest.mark.filesystem
+    def test_a_missing_stop_word_refuses_to_start(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A satellite that cannot be told to stop talking is worse than none.
+
+        The stop word is loaded by a vendored function, and the case being
+        exercised is a wheel that shipped every wake word but that one — so the
+        function is replaced rather than the tree rearranged.
+
+        Args:
+            monkeypatch: Used to make the stop word unfindable.
+        """
+        monkeypatch.setattr(satellite_main, "load_stop_model", lambda *_: None)
+
+        with pytest.raises(ConfigurationError, match="stop word"):
+            build_server_state(
+                _settings(),
+                identity=_identity(),
+                audio=FakeAudio(),
+                state_dir=Path("/reachy-satellite-main"),
+            )
+
+
+def _free_port() -> int:
+    """Ask the operating system for a port nothing is listening on.
+
+    Args:
+        None.
+
+    Returns:
+        The port number.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+class TestShutdownFinishesWhateverRefuses:
+    """Every step is guarded, and the first two most of all.
+
+    The media layer is the thing most likely to be failing at the moment a robot
+    is being shut down, so a refusal there is exactly when the steps after it
+    matter — and `aclose` marks itself done before it starts, so nothing could
+    finish them afterwards.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_motion_port_that_refuses_to_release_stops_everything_else(
+        self,
+    ) -> None:
+        """It is the first step, so it has the most to abandon."""
+
+        class _Stuck(FakeMotion):
+            def release(self) -> None:
+                """Refuse to stop commanding movement.
+
+                Raises:
+                    RuntimeError: Always.
+                """
+                message = "the motion layer will not let go"
+                raise RuntimeError(message)
+
+        audio = FakeAudio()
+        service = RecordingService()
+        perception = FakePerception()
+        application, stop = _application(
+            audio=audio,
+            motion=_Stuck(),
+            perception=perception,
+            services=[service],
+        )
+
+        await application.run(stop)
+
+        assert audio.stopped == 1
+        assert service.closed == 1
+        assert perception.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_a_media_layer_that_refuses_to_release_stops_everything_else(
+        self,
+    ) -> None:
+        """Otherwise the listening socket and the microphone pump outlive it."""
+
+        class _Stuck(FakeAudio):
+            def stop(self) -> None:
+                """Refuse to release the media interface.
+
+                Raises:
+                    RuntimeError: Always.
+                """
+                message = "the daemon will not release the media interface"
+                raise RuntimeError(message)
+
+        motion = FakeMotion()
+        service = RecordingService()
+        perception = FakePerception()
+        application, stop = _application(
+            audio=_Stuck(),
+            motion=motion,
+            perception=perception,
+            services=[service],
+        )
+
+        await application.run(stop)
+
+        assert motion.released
+        assert service.closed == 1
+        assert perception.closed == 1
+
+
+class TestASettingsInterfaceThatStopsOnItsOwn:
+    """A task nobody awaits until shutdown is a failure nobody sees."""
+
+    @pytest.mark.asyncio
+    async def test_a_server_that_will_not_start_says_why(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Binding a port already in use is the ordinary way for this to fail.
+
+        Args:
+            caplog: Captures what the failure was reported as.
+        """
+
+        async def _refuse() -> None:
+            """Fail to serve.
+
+            Raises:
+                OSError: As binding a port in use does.
+            """
+            message = "address already in use"
+            raise OSError(message)
+
+        service = WebService(_nothing_asgi, host="127.0.0.1", port=8088, serve=_refuse)
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            await service.start()
+            # Two passes of the loop: one for the task to run and fail, one for
+            # its done-callback. Both yield rather than sleeping, so nothing
+            # waits for wall time.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            reported = caplog.text
+
+        await service.aclose()
+
+        assert "address already in use" in reported
+
+    @pytest.mark.asyncio
+    async def test_a_server_cancelled_on_the_way_out_reports_nothing(self) -> None:
+        """Shutdown cancelling it is not a failure to tell anybody about."""
+        stopped = asyncio.Event()
+
+        async def _serve() -> None:
+            """Serve until cancelled."""
+            await stopped.wait()
+
+        service = WebService(_nothing_asgi, host="127.0.0.1", port=8088, serve=_serve)
+        await service.start()
+
+        await service.aclose()
+
+        assert not stopped.is_set()

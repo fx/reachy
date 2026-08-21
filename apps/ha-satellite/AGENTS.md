@@ -7,7 +7,9 @@ The robot-side ESPHome voice satellite for Home Assistant. Distribution
 **Fills this in:**
 [0011](../../docs/changes/0011-satellite-esphome-vendoring.md) (done),
 [0012](../../docs/changes/0012-satellite-ports-and-adapters.md) (done) and
-[0013](../../docs/changes/0013-satellite-behaviour-and-ui.md).
+[0013](../../docs/changes/0013-satellite-behaviour-and-ui.md) (done). The
+component is complete: `docs/specs/ha-satellite/index.md` is registered in
+`.duvet/config.toml`, so all eleven of its requirements are traced.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -21,12 +23,18 @@ that apply here.
 | `src/reachy_mini_ha_satellite/esphome/` | The vendored ESPHome protocol layer, with its `LICENSE`, `NOTICE` and per-file provenance |
 | `src/reachy_mini_ha_satellite/esphome/seams.py` | The two audio interfaces cut into it. Not vendored; filled by `adapters/audio_reachy.py` |
 | `src/reachy_mini_ha_satellite/assets/` | Wake-word models and sounds that ship in the wheel, with the registry recording each one's terms |
+| `src/reachy_mini_ha_satellite/behaviour/` | The pure decision layer: a pipeline state machine, a face tracker, and what each state looks like |
+| `src/reachy_mini_ha_satellite/config.py` | Settings, their three layers, and the one place a secret is declared to be one |
+| `src/reachy_mini_ha_satellite/web/` | The settings interface REQ-049 requires |
+| `src/reachy_mini_ha_satellite/main.py` | The composition root: ports to adapters, the loop, and the four services |
+| `src/reachy_mini_ha_satellite/daemon_app.py` | The `reachy_mini_apps` entry point, and the ONLY module that imports the SDK |
 | `tests/support/satellite_support.py` | The fake for every port, plus the fakes the adapters' own tests need |
 | `tests/` | The carried upstream tests, with their own `LICENSE` and `NOTICE`, plus this repository's own |
 
-Everything the spec's structure diagram shows and this table does not — `main.py`,
-`behaviour/`, `web/`, `config.py` — belongs to 0013. Do not add it ahead of the
-change that owns it.
+Deployment is documented in
+[`docs/ops/satellite-deployment.md`](../../docs/ops/satellite-deployment.md),
+which leads with the identity-pinning warning because that is the one thing a
+deployment can get irreversibly wrong.
 
 ## Local rules
 
@@ -81,5 +89,40 @@ change that owns it.
   which the application is handed an implementation of. Adding an ordinary import
   of the SDK anywhere in this package breaks the test suite on any machine
   without GStreamer, which is every runner.
-- **Behaviour is pure.** The behaviour layer takes the ports as arguments and
-  performs no input or output itself.
+- **Behaviour is pure, and it is enforced.** `behaviour/` takes the ports as
+  arguments, performs no input or output, reads no clock and never sleeps — time
+  is a parameter to every method that needs it. `just lint-behaviour-boundary`
+  bans the imports that would break that (adapters, the vendored protocol layer,
+  `main`, `web`, the SDK), greps for the dynamic imports and clock reads ruff
+  cannot see, and proves both halves still fire by running them against a
+  fixture that breaks them.
+- **The announced Home Assistant identity has no default.** `device_name` is
+  required and the application refuses to start without it. Home Assistant keys
+  a device on what it announces, so a derived default would be correct on a
+  fresh install and silently destructive on an upgrade. Do not add one.
+- **The overrides layer cannot supply a setting the settings page depends on.**
+  An override sits above the environment, so it can only be undone by writing
+  another one — and a page that had written one of these wrongly is the page
+  nobody can open to undo it. `config.BOOTSTRAP_SETTINGS` is the list —
+  `state_dir`, which names the directory the overrides file lives in, and the
+  three `web_*` settings, which decide whether the interface is served and
+  where. The page renders them read-only and the form refuses to write one
+  however it was submitted. A setting the interface's own reachability turns on
+  belongs in that set.
+- **The settings interface is unauthenticated, and the network is the trust
+  boundary.** So is the ESPHome API this application serves
+  (`uses_password=false`) and so is the daemon's own dashboard. What `web/` does
+  close is the cross-site half: a state-changing request a browser reports as
+  coming from another site is refused, so a page an operator visits cannot stop
+  the robot. Do not add a state-changing route without that check — `web/app.py`
+  has it on every one — and do not invent an authentication scheme here: it is a
+  question for the spec, recorded as an escalation in change 0013.
+- **A secret is declared secret in exactly one place.** `SECRET_SETTINGS` is
+  derived from the field types in `config.py`, and the boot log, the settings
+  page and `/config` all read it through `resolved_configuration`. Redact first,
+  render second: a value transformed before a redactor sees it leaks in a form
+  no search finds.
+- **The SDK is imported by one file and one file only.** `daemon_app.py` is the
+  `reachy_mini_apps` entry point, so it has to subclass the daemon's application
+  base class; nothing else in the package may name the SDK. `main.py` is handed
+  an `adapters.daemon.RobotHandle` and never learns where it came from.

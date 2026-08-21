@@ -1,0 +1,64 @@
+# A file that breaks the behaviour layer's boundary in every way it can be
+# broken. It is never imported and never collected: the extension is `.txt` and
+# `just lint-behaviour-boundary` feeds it to ruff on standard input under a
+# pretended path, which is how the rule is proved still to fire.
+#
+# A lint rule nobody has watched fail is a rule that does not exist. Every line
+# below is a thing ha-satellite REQ-042 says the behaviour layer must not do:
+# reach an adapter, reach the vendored protocol layer, reach the composition
+# root, the settings interface or the daemon entry point, reach the SDK, or read
+# a clock.
+#
+# Two halves are proved here because TID251 cannot express the whole rule on its
+# own. It inspects import statements, so the dynamic imports below slip past it
+# and a grep is what catches them; and it says nothing at all about a clock, so
+# a second grep covers that.
+#
+# The dynamic imports come in both shapes on purpose. A submodule of the SDK is
+# the obvious one; the SDK's **bare** top-level name is the one a `reachy_mini.`
+# prefix used to miss, and it is the worst of the two — importing it alone runs
+# the SDK's `__init__`, which reaches `reachy_mini.vision.face_tracking` and
+# `import gi`, so that single line drags in the entire GStreamer stack.
+"""Every import and every clock read the behaviour layer is forbidden."""
+
+import asyncio
+import time
+from asyncio import sleep
+from datetime import datetime
+from importlib import import_module
+
+import reachy_mini
+from reachy_mini_ha_satellite.adapters import daemon
+from reachy_mini_ha_satellite.adapters.audio_reachy import ReachyAudio
+from reachy_mini_ha_satellite.daemon_app import ReachyMiniHaSatellite
+from reachy_mini_ha_satellite.esphome.models import ServerState
+from reachy_mini_ha_satellite.main import SatelliteApplication
+from reachy_mini_ha_satellite.web import create_app
+
+# TID251 never sees these, which is why the grep half exists.
+motion = import_module("reachy_mini_ha_satellite.adapters.motion_reachy")
+protocol = __import__("reachy_mini_ha_satellite.esphome.satellite")
+
+# The bare SDK, by both dynamic spellings. Neither carries a dot after the
+# module name, which is precisely what the pattern used to require.
+sdk = import_module("reachy_mini")
+sdk_again = __import__("reachy_mini")
+
+# Loading a module by path sidesteps the module name altogether, so the name of
+# the function is banned rather than the argument it is given.
+spec = spec_from_file_location("motion", "/opt/adapters/motion_reachy.py")
+
+# Nor these: time is a parameter to this layer, never something it reads.
+started = time.monotonic()
+stamped = datetime.now()
+
+
+async def pause() -> None:
+    """Sleep, which a layer that takes time as a parameter never needs to do.
+
+    Both spellings, because a rule about `asyncio.sleep` is a rule about one
+    spelling: the aliased import below reads no such attribute and would slip
+    past a grep that only knew the qualified form.
+    """
+    await asyncio.sleep(1.0)
+    await sleep(1.0)
