@@ -12,9 +12,12 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+from typing import TypeAliasType
+
 import pytest
 from websockets.exceptions import WebSocketException
 
+import reachy_session_client
 from reachy_session_client import ConnectionFailedError, WebSocketTransport
 
 
@@ -152,3 +155,25 @@ async def test_closing_reaches_the_connection() -> None:
     await transport.close()
 
     assert connection.closed
+
+
+def test_every_exported_type_alias_can_be_evaluated() -> None:
+    """`TransportFactory` is the annotation every consumer writes a factory against.
+
+    A PEP 695 alias is lazy: the right-hand side is evaluated on first access,
+    so an alias mentioning a name imported only under `TYPE_CHECKING` raises
+    `NameError` the moment anything looks at it. This alias is exported from
+    the package and is referenced by `reachy_checks.SessionLink`, among others.
+
+    Written over `__all__` so an alias added later is covered without anybody
+    remembering this rule.
+    """
+    aliases = {
+        name: exported
+        for name in reachy_session_client.__all__
+        if isinstance(exported := getattr(reachy_session_client, name), TypeAliasType)
+    }
+
+    assert aliases, "no exported type alias found; this guard is checking nothing"
+    for name, alias in aliases.items():
+        assert alias.__value__ is not None, name

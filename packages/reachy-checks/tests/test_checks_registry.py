@@ -14,10 +14,11 @@ Test module names are globally unique across the workspace — see the root
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, TypeAliasType, get_type_hints
 
 import pytest
 
+import reachy_checks
 from reachy_checks import (
     APPLICATION_INSTALLED,
     APPLICATION_RUNNING,
@@ -29,6 +30,7 @@ from reachy_checks import (
     GROUNDSTATION_SESSION,
     HOME_ASSISTANT_IDENTITY,
     MODEL_FILES,
+    Check,
     Remediation,
     check_by_identifier,
     identifiers,
@@ -140,3 +142,42 @@ def test_a_remediation_with_a_command_renders_both_halves() -> None:
 def test_a_remediation_without_a_command_renders_only_the_explanation() -> None:
     """No trailing "Run:" with nothing after it."""
     assert Remediation(explanation="Check the cable.").render() == "Check the cable."
+
+
+def test_every_exported_type_alias_can_be_evaluated() -> None:
+    """A PEP 695 alias is lazy, and a public one that raises is a trap for a consumer.
+
+    The right-hand side of a `type` statement is evaluated on first access, so
+    an alias mentioning a name imported only under `TYPE_CHECKING` raises
+    `NameError` the moment anything looks at it — `__value__`, or any tool that
+    introspects the module. `Probe` is what a consumer writes a check against
+    and this package is imported as a module by the provisioning verification
+    role, so it has to survive being looked at.
+
+    Written over `__all__` rather than naming `Probe`, so an alias added later
+    is covered without anybody remembering this rule.
+    """
+    aliases = {
+        name: exported
+        for name in reachy_checks.__all__
+        if isinstance(exported := getattr(reachy_checks, name), TypeAliasType)
+    }
+
+    # Without this the loop below would pass over nothing on the day someone
+    # removes the last alias, and the guard would quietly stop guarding.
+    assert aliases, "no exported type alias found; this guard is checking nothing"
+    for name, alias in aliases.items():
+        assert alias.__value__ is not None, name
+
+
+def test_the_check_declaration_can_be_introspected() -> None:
+    """A consumer reading the type of a check gets types rather than a NameError."""
+    hints = get_type_hints(Check)
+
+    assert set(hints) == {
+        "identifier",
+        "description",
+        "requires",
+        "probe",
+        "remediation",
+    }

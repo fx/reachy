@@ -25,18 +25,13 @@ runner executes every one of them whatever the ones before it did.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from reachy_checks import probes
-from reachy_checks.context import Requirement
-from reachy_checks.outcomes import Remediation
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from reachy_checks.context import CheckContext
-    from reachy_checks.outcomes import Finding
+from reachy_checks.context import CheckContext, Requirement
+from reachy_checks.outcomes import Finding, Remediation
 
 __all__ = [
     "APPLICATION_INSTALLED",
@@ -55,6 +50,16 @@ __all__ = [
     "identifiers",
 ]
 
+# Every name the alias below mentions is imported at run time rather than under
+# `TYPE_CHECKING`, and that is not tidiness. A PEP 695 alias is lazy: its
+# right-hand side is evaluated on first access, so `Probe.__value__` — or any
+# tool that introspects it — would raise `NameError` on a name that only ever
+# existed for the type checker. `Probe` is what a consumer writes a check
+# against, and change 0010's verification role imports this package as a
+# module, so an alias it cannot evaluate is a trap laid for the one consumer
+# this package exists to serve. `reachy_groundstation.ports` settled the same
+# question the same way; see the comment above `ImageArray` there.
+#
 # What a check calls to find out. Asynchronous because half of them talk to
 # something over a network, and a runner that had to know which half would be
 # deciding per check what the registry is supposed to abstract.
