@@ -24,7 +24,7 @@
 | 0005 | [perception-capability](changes/0005-perception-capability.md) | [perception](specs/perception/) | complete | 0004 |
 | 0006 | [groundstation-images](changes/0006-groundstation-images.md) | [groundstation](specs/groundstation/) | complete | 0002, 0005 |
 | 0007 | [reachyctl-probe](changes/0007-reachyctl-probe.md) | [reachyctl](specs/reachyctl/) | complete | 0003, 0004 |
-| 0008 | [reachyctl-doctor](changes/0008-reachyctl-doctor.md) | [reachyctl](specs/reachyctl/) | draft | 0007 |
+| 0008 | [reachyctl-doctor](changes/0008-reachyctl-doctor.md) | [reachyctl](specs/reachyctl/) | complete | 0007 |
 | 0009 | [reachyctl-deploy-and-config](changes/0009-reachyctl-deploy-and-config.md) | [reachyctl](specs/reachyctl/) | draft | 0002, 0008 |
 | 0010 | [provisioning-ansible](changes/0010-provisioning-ansible.md) | [provisioning](specs/provisioning/) | draft | 0009 |
 | 0011 | [satellite-esphome-vendoring](changes/0011-satellite-esphome-vendoring.md) | [ha-satellite](specs/ha-satellite/) | complete | 0001 |

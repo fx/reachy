@@ -15,6 +15,7 @@ one-line import of this file and holds no content of its own.
 |---|---|
 | `docs/` | Specs, change documents, runbooks and generated contracts |
 | `packages/reachy-contracts/` | Shared wire types and golden fixtures (`reachy_contracts`) |
+| `packages/reachy-checks/` | The one definition of what a healthy installation is (`reachy_checks`) |
 | `packages/reachy-session-client/` | The one client half of the robot link (`reachy_session_client`) |
 | `apps/ha-satellite/` | Robot-side ESPHome voice satellite (`reachy_mini_ha_satellite`) |
 | `services/groundstation/` | Off-robot capability host (`reachy_groundstation`) |
@@ -33,6 +34,13 @@ one-line import of this file and holds no content of its own.
 Every member but `bench` has an implementation today. `bench` is still a
 scaffold: a `pyproject.toml`, an `AGENTS.md` and a package directory, waiting
 for the change that fills it in.
+
+There is exactly one definition of what a healthy installation is, and it is
+`packages/reachy-checks`. `reachyctl doctor` runs those declarations and the
+provisioning verification role imports the same ones — see reachyctl REQ-056.
+A check written into either consumer rather than into the registry is a check
+the other will never perform, and the failure shows up as a robot that
+provisioning calls fine and diagnosis calls broken.
 
 There is exactly one implementation of the session protocol's client half, and
 it is `packages/reachy-session-client`. `reachyctl probe` and the robot's

@@ -90,7 +90,7 @@ changes:
     path: changes/0008-reachyctl-doctor.md
     description: End-to-end diagnosis built on a check registry shared with provisioning
     spec: reachyctl
-    status: draft
+    status: complete
     depends_on: ["0007"]
   - id: "0009"
     name: reachyctl-deploy-and-config

@@ -8,8 +8,11 @@ them a test of the command layer rather than a slower copy of the integration
 test.
 
 Nothing here writes a file either. The paths that would need one — a directory
-of frames — are exercised by naming a directory that is not there, because that
-is the same branch and the operator's commonest mistake.
+of frames, a declaration of intent — are exercised by naming something that is
+not there, because that is the same branch and the operator's commonest
+mistake. Naming a path that does not exist reads nothing; what the parsing
+rules do with a document they can read is exercised without any input at all,
+against an injected reader, in the per-command test modules.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -224,3 +227,87 @@ def test_an_address_with_a_credential_in_it_is_refused_and_not_echoed() -> None:
     assert result.exit_code == ExitCode.CONFIGURATION
     assert "carries no credential" in result.stdout
     assert "example-secret" not in result.stdout
+
+
+def test_the_help_lists_doctor() -> None:
+    """The command an operator reaches for when something is wrong."""
+    result = runner.invoke(app, ["--help"])
+
+    assert result.exit_code == ExitCode.OK
+    assert "doctor" in result.stdout
+
+
+def test_doctor_needs_no_address_at_all() -> None:
+    """An operator with nothing configured gets a diagnosis of nothing, not an error."""
+    result = runner.invoke(app, ["doctor"], env={})
+
+    assert result.exit_code == ExitCode.OK
+    assert "not everything was checked" in result.stdout
+
+
+def test_doctor_with_an_address_and_no_credential_says_where_to_put_one() -> None:
+    """A configured groundstation with no credential is a mistake, not a diagnosis."""
+    result = runner.invoke(app, ["doctor", "--url", URL], env={})
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert CREDENTIAL_VARIABLE in result.stdout
+    assert "--credential " not in result.stdout
+
+
+def test_doctor_with_an_address_that_is_not_a_session_url_contacts_nothing() -> None:
+    """Answered beside the option that carried it, before anything is opened."""
+    result = runner.invoke(
+        app, ["doctor", "--url", "http://198.51.100.10/"], env=CONFIGURED
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+
+
+def test_doctor_pointed_at_a_declaration_that_is_not_there() -> None:
+    """The commonest mistake, and it stops before anything is contacted."""
+    result = runner.invoke(
+        app,
+        ["doctor", "--intent", "/not/a/declaration.json"],
+        env=CONFIGURED,
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "could not be read" in result.stdout
+
+
+def test_doctor_has_no_staleness_option() -> None:
+    """It was removed rather than documented, because it changed nothing observable.
+
+    The staleness window governs `latest()` and `stale`, which this command
+    never reads — it takes the first result within the run's budget. A knob
+    that quietly did nothing is the defect class `doctor` exists to catch, so
+    it fails as an unknown option rather than being accepted and ignored.
+    """
+    result = runner.invoke(app, ["doctor", "--staleness", "2.0"], env=CONFIGURED)
+
+    assert result.exit_code == ExitCode.USAGE
+
+
+def test_doctor_with_a_capability_the_contract_would_refuse() -> None:
+    """A typo costs a message rather than a session that negotiates to nothing."""
+    result = runner.invoke(
+        app,
+        ["doctor", "--url", URL, "--capability", "Face"],
+        env=CONFIGURED,
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "is not a capability" in result.stdout
+
+
+def test_doctor_reports_a_failure_as_a_document_when_asked_for_one() -> None:
+    """A structured run gets a document for a refusal exactly as for a result."""
+    result = runner.invoke(
+        app,
+        ["--output", "json", "doctor", "--url", URL, "--capability", "Face"],
+        env=CONFIGURED,
+    )
+
+    document = json.loads(result.stdout)
+    assert document["command"] == "doctor"
+    assert document["ok"] is False

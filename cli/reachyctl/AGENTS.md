@@ -13,10 +13,13 @@ that apply here.
 
 ## Local rules
 
-- **`probe` and `bench` are the commands that exist.** `bench` is a registered
-  name with no body: 0014 gives it one. `doctor` arrives in 0008, and `deploy`,
-  `config` and `app` in 0009. Do not add implementation ahead of the change that
-  owns it.
+- **`probe`, `doctor` and `bench` are the commands that exist.** `bench` is a
+  registered name with no body: 0014 gives it one. `deploy`, `config` and `app`
+  arrive in 0009. Do not add implementation ahead of the change that owns it.
+- **`doctor` decides nothing about what healthy means.** The checks are
+  declared in `reachy-checks`, which the provisioning verification role imports
+  too — see reachyctl REQ-056. A check added to this command rather than to
+  that registry is a check provisioning will never perform.
 - **Never reimplement the session protocol.** `probe` is a second *consumer* of
   `reachy_session_client`, which holds the one implementation of the robot
   link's client half and is imported by the robot application too. A second

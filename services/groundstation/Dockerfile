@@ -123,6 +123,7 @@ WORKDIR /src
 # the two lists agree, so a member added later is a red test rather than a red
 # build somebody has to diagnose.
 COPY pyproject.toml uv.lock ./
+COPY packages/reachy-checks/pyproject.toml packages/reachy-checks/
 COPY packages/reachy-contracts/pyproject.toml packages/reachy-contracts/
 COPY packages/reachy-session-client/pyproject.toml packages/reachy-session-client/
 COPY apps/ha-satellite/pyproject.toml apps/ha-satellite/

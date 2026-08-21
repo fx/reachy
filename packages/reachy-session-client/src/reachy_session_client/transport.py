@@ -15,6 +15,7 @@ a while and then does not.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Final, Protocol
 
 from websockets.asyncio.client import connect as _connect
@@ -24,8 +25,6 @@ from reachy_session_client.errors import ConnectionFailedError
 from reachy_session_client.urls import redact_url
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from websockets.asyncio.client import ClientConnection
 
 __all__ = [
@@ -83,6 +82,15 @@ class ClientTransport(Protocol):
         ...
 
 
+# `Awaitable` and `Callable` are imported at run time rather than under
+# `TYPE_CHECKING`, because the alias below is lazy: its right-hand side is
+# evaluated on first access, so `TransportFactory.__value__` would otherwise
+# raise `NameError` on a name that only ever existed for the type checker. This
+# alias is exported from `reachy_session_client` and is the annotation every
+# consumer writes a transport factory against, so it has to survive being
+# looked at. `reachy_groundstation.ports` settled the same question the same
+# way; see the comment above `ImageArray` there.
+#
 # What the session calls to get a connection, once at the start and again on
 # every reconnection.
 type TransportFactory = Callable[[str], Awaitable[ClientTransport]]

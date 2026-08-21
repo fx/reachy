@@ -113,6 +113,18 @@ SPECIFICATION: [Perception](docs/specs/perception/index.md)
     TEXT[!MUST,implementation]: the artifact.
 
 SPECIFICATION: [reachyctl](docs/specs/reachyctl/index.md)
+  SECTION: [REQ-054: Diagnosis covers the whole chain and names the failing link](#req-054-diagnosis-covers-the-whole-chain-and-names-the-failing-link)
+    TEXT[implementation]: The doctor command MUST report the status of every link between the operator and
+    TEXT[implementation]: a working robot individually, and MUST identify which link is broken when one
+    TEXT[implementation]: is.
+
+  SECTION: [REQ-055: A failed check states how to fix it](#req-055-a-failed-check-states-how-to-fix-it)
+    TEXT[implementation]: Every diagnostic check that fails MUST report a remediation.
+
+  SECTION: [REQ-056: Diagnosis and provisioning agree on what healthy means](#req-056-diagnosis-and-provisioning-agree-on-what-healthy-means)
+    TEXT[implementation]: The checks performed by the doctor command and by the provisioning verification
+    TEXT[implementation]: step MUST be defined once and used by both.
+
   SECTION: [REQ-057: The probe exercises the real session protocol](#req-057-the-probe-exercises-the-real-session-protocol)
     TEXT[implementation]: The probe command MUST establish a session using the same protocol
     TEXT[implementation]: implementation the robot application uses.

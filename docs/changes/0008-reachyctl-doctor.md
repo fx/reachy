@@ -7,7 +7,7 @@ machine to a working robot, built on a shared check definition that
 [provisioning](../specs/provisioning/) verification will also consume.
 
 **Spec:** [reachyctl](../specs/reachyctl/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0007
 
 ## Motivation
@@ -102,6 +102,40 @@ another's result.
 - **Decision**: Skipped is a distinct outcome from failed.
   - **Why**: An operator with no groundstation configured is not in an error
     state, and reporting one trains people to ignore the output.
+- **Decision**: The registry is a workspace member, `packages/reachy-checks`,
+  imported as `reachy_checks`.
+  - **Why**: [0010](./0010-provisioning-ansible.md)'s verification role imports
+    these declarations from a control machine that may have no CLI installed, so
+    a module inside `cli/reachyctl` would force provisioning either to install
+    the CLI or to write the checks a second time. A sibling of
+    `packages/reachy-session-client` is importable by both and depends on
+    neither.
+  - **Alternatives considered**: A module inside `reachyctl`, which fails the
+    control-machine test; a package under `provisioning/`, which would make the
+    CLI depend on the provisioning tree.
+- **Decision**: The groundstation's pinned model registry is an optional extra
+  of the checks package, imported where it is used rather than at module level.
+  - **Why**: The digests and the hashing are
+    `reachy_groundstation.models` and re-deriving either would be a second
+    opinion about which weights are the right ones. But that service also pulls
+    OpenCV, onnxruntime and an ASGI stack, and putting all of it into every CLI
+    install to read a directory of hashes is not a trade worth making. The files
+    live inside the groundstation's artifact, so the machine that has files to
+    check is the machine that has the service installed; anywhere else the check
+    reports the registry as missing rather than raising.
+- **Decision**: A failed check exits `FAILURE`, not `UNREACHABLE`.
+  - **Why**: `probe` exits `UNREACHABLE` for a groundstation that is not there
+    because it has learned nothing. `doctor` was asked to find that out, so the
+    same groundstation is a negative answer rather than an aborted run. The
+    statuses that still mean "nothing was learned" are the ones about the
+    invocation: an address that is not a session URL, an unreadable credential
+    file, a declaration document that is not one.
+- **Decision**: Skipped checks do not make a run negative; the counts are
+  reported instead.
+  - **Why**: An all-skipped run exits zero and says in its summary that not
+    everything was checked. A monitor that wants a complete diagnosis rather
+    than a clean one asserts `skipped == 0` from the structured output, which is
+    a decision the consumer makes rather than one the registry makes for it.
 
 ### Non-Goals
 
@@ -111,33 +145,46 @@ another's result.
 
 ## Tasks
 
-- [ ] Build the shared check registry
-  - [ ] Check declaration structure: identifier, description, probe, remediation
-  - [ ] Prerequisite declaration and the skipped outcome
-  - [ ] Runner executing checks independently and collecting results
-- [ ] Implement the checks
-  - [ ] Daemon reachable and responding
-  - [ ] Application installed, and the installed version
-  - [ ] Application running
-  - [ ] Groundstation reachable; session established; capabilities negotiated
-  - [ ] Round-trip time measured
-  - [ ] Model files present and matching their pinned hashes
-  - [ ] Effective configuration matches intent
-  - [ ] Announced Home Assistant identity matches configuration
-- [ ] Implement the command
-  - [ ] Human-facing rendering with per-check status
-  - [ ] Structured output and exit status per the 0007 conventions
-  - [ ] Passing-and-failing tests for every check
+- [x] Build the shared check registry
+  - [x] Check declaration structure: identifier, description, probe, remediation
+  - [x] Prerequisite declaration and the skipped outcome
+  - [x] Runner executing checks independently and collecting results
+- [x] Implement the checks
+  - [x] Daemon reachable and responding
+  - [x] Application installed, and the installed version
+  - [x] Application running
+  - [x] Groundstation reachable; session established; capabilities negotiated
+  - [x] Round-trip time measured
+  - [x] Model files present and matching their pinned hashes
+  - [x] Effective configuration matches intent
+  - [x] Announced Home Assistant identity matches configuration
+- [x] Implement the command
+  - [x] Human-facing rendering with per-check status
+  - [x] Structured output and exit status per the 0007 conventions
+  - [x] Passing-and-failing tests for every check
 
 ## Open Questions
 
-- [ ] Whether `doctor` can query Home Assistant directly to compare the
-      registered device against what the satellite announces. It would catch the
-      detached-history case precisely, and it needs Home Assistant credentials
-      the tool does not otherwise hold. Current lean: compare announced against
-      configured only, and document the Home Assistant side as a manual check.
-- [ ] Whether check results are retained between runs to show change over time.
-      Current lean: no; `bench` is where trends belong.
+- [x] **Whether `doctor` can query Home Assistant directly: no. Announced is
+      compared against declared, and the Home Assistant side is a manual
+      check.** The lean was followed. Holding Home Assistant credentials would
+      widen this tool's blast radius for one comparison, and the credential
+      would then be a second secret every output path has to be scrubbed
+      against. What the check catches without them is the case that actually
+      happens — the satellite quietly announcing something other than what was
+      declared — and the `home-assistant.identity` remediation says in so many
+      words that whether Home Assistant already holds a stale device is a look
+      in its device list. Nothing forecloses the richer check: the identity is
+      already a field of the declared intent, so a Home Assistant client would
+      be a second source to compare against rather than a rewrite.
+- [x] **Whether check results are retained between runs: no.** The lean was
+      followed. A `doctor` run reads nothing and writes nothing but its output,
+      which is what lets it run from a script, from a provisioning play and from
+      a laptop without any of them sharing state. The one number worth trending
+      — the round trip — is promoted into the run's scalar fields, so a
+      consumer that wants a history has one field to record and
+      [0014](./0014-benchmarks-and-gates.md) is where a stored baseline is
+      already a requirement.
 
 ## References
 
