@@ -325,6 +325,7 @@ class ConfigurationConflictError(CommandError):
 async def read_difference(
     daemon: DaemonClient,
     declared: Mapping[str, str],
+    reporter: Reporter,
     *,
     merge: bool = False,
 ) -> Difference:
@@ -333,6 +334,9 @@ async def read_difference(
     Args:
         daemon: The robot.
         declared: What was asked for.
+        reporter: Where everything is written. Seeded with the robot's secret
+            values as soon as they are known and before anything the robot
+            wrote can reach a message.
         merge: Whether `declared` is a set of changes to fold into the region
             rather than the whole of it. The fold happens here, against the
             region as it was just read, so `set` never has to guess what else
@@ -348,12 +352,18 @@ async def read_difference(
             what it found.
     """
     await daemon.connect()
+    # The effective environment first, and the redactor seeded from it before
+    # the region is read — because reading the region can fail with the robot's
+    # own words in the message, and a redactor cannot remove a value it was
+    # never given. See `guard_robot_secrets`.
+    effective = await daemon.effective_configuration()
+    guard_secrets(reporter, effective)
     try:
         managed = await daemon.read_managed_settings()
     except MalformedRegionError as error:
         raise ConfigurationConflictError(str(error)) from error
-    effective = await daemon.effective_configuration()
     desired = merge_settings(managed, declared) if merge else declared
+    guard_secrets(reporter, desired, managed)
     return compare(desired, managed, effective)
 
 
@@ -392,10 +402,8 @@ async def run_apply(
     """
     steps = StepLog(reporter=reporter)
     steps.begin(_READ, "reading the managed region and the effective environment")
-    difference = await read_difference(daemon, declared, merge=merge)
+    difference = await read_difference(daemon, declared, reporter, merge=merge)
     desired = difference.desired
-    guard_secrets(reporter, difference.desired, difference.managed)
-    guard_secrets(reporter, difference.effective)
     steps.done(_READ, difference.summary())
 
     if not difference.changes:
@@ -619,6 +627,9 @@ def execute_get(
         """
         await daemon.connect()
         effective = await daemon.effective_configuration()
+        # Seeded before the region is read, for the reason `read_difference`
+        # gives: reading it can fail with the robot's own words in the message.
+        guard_secrets(reporter, effective)
         try:
             managed = await daemon.read_managed_settings()
         except MalformedRegionError:
@@ -626,10 +637,10 @@ def execute_get(
             # worth knowing about when converging on a declaration, and is not
             # a reason to refuse to show what is in force.
             managed = {}
+        guard_secrets(reporter, managed)
         return effective, managed
 
     effective, managed = asyncio.run(closing(_read(), close))
-    guard_secrets(reporter, effective, managed)
     shown = sorted(effective) if not names else sorted(set(names))
     absent = tuple(name for name in shown if name not in effective)
     return reporter.emit(
@@ -685,9 +696,9 @@ def execute_diff(
         CommandError: If the robot could not be reached, or its managed region
             was written by something else.
     """
-    difference = asyncio.run(closing(read_difference(daemon, desired), close))
-    guard_secrets(reporter, difference.desired, difference.managed)
-    guard_secrets(reporter, difference.effective)
+    difference = asyncio.run(
+        closing(read_difference(daemon, desired, reporter), close),
+    )
     matches = not difference.changes and not difference.not_in_force
     return reporter.emit(
         report_for_difference(
