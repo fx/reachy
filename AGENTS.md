@@ -122,12 +122,24 @@ Every type that crosses the robot link is declared in
 else. A second copy in a consumer is free to drift from the first, and the
 failure shows up as a robot behaving oddly rather than as a test going red.
 
-That import direction is a lint rule, not a convention: ruff's `TID251` bans
-`pydantic.BaseModel` and `pydantic.RootModel` outside the contracts package, so
-a member that starts declaring its own wire type fails `just lint` with a
-message naming where the type belongs. A component that needs a validated model
-for something that is *not* a wire type — its own configuration, say — uses
-`pydantic_settings.BaseSettings`, which the ban does not touch.
+That import direction is a lint rule, not a convention: ruff's `TID253` bans
+importing `pydantic` at module level outside the contracts package, so a member
+that starts declaring its own wire type fails `just lint`. The ban names the
+module rather than the model bases, which covers every construct at once —
+`BaseModel`, `RootModel`, `create_model`, `pydantic.dataclasses` and the
+`pydantic.v1` shim — and keeps covering whatever pydantic adds next.
+
+It is `TID253` and not `banned-api` because `TID251` is already spoken for by
+the vendored ESPHome boundary, whose negated `per-file-ignores` entry switches
+that rule off everywhere outside the vendored directory. A `banned-api` entry
+for pydantic would therefore be silently dead in every member it needed to
+guard. The two rules carry the two bans precisely so their scopes stay
+independent.
+
+`pydantic_settings` is not banned, so validated configuration is unaffected. A
+settings model that also wants pydantic's own `Field` suppresses `TID253` on
+that one import, with a comment saying the model is configuration rather than a
+wire type.
 
 ### Tool configuration is shared, never per-member
 

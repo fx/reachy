@@ -24,9 +24,12 @@ that apply here.
 - **This package is the single definition of every wire type.** A type
   duplicated in a consumer is the drift this package exists to prevent. If the
   groundstation and `reachyctl` both need a shape, it lives here. The rule is
-  enforced rather than advised: ruff's `TID251` bans `pydantic.BaseModel` and
-  `pydantic.RootModel` everywhere else in the workspace, and this package is the
-  only path exempted from it in the root `pyproject.toml`.
+  enforced rather than advised: ruff's `TID253` bans importing `pydantic` at
+  module level everywhere else in the workspace, and this package is the only
+  path exempted from it in the root `pyproject.toml`. Naming the module rather
+  than the model bases covers every way to declare one, and it leaves `TID251`
+  free for the vendored ESPHome boundary, which scopes that rule to a single
+  directory and would otherwise switch a pydantic ban off everywhere.
 - **A capability is data, never a type.** `Capability` is a name and a version;
   `ResultEnvelope` is generic in its payload. Adding one means adding a payload
   type and a row in `CAPABILITY_PAYLOADS`, and changing nothing in `session.py`.
