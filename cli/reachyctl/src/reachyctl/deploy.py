@@ -133,6 +133,13 @@ class DeployOutcome:
     Attributes:
         steps: Every step, in order.
         wheel: What was deployed, once it is known.
+        application: The distribution that was actually controlled and verified
+            — the wheel's, or the one `--application` named. Carried rather than
+            re-derived from the wheel, because those two are the same only when
+            nothing was overridden: a report that named the wheel's distribution
+            after verifying a different one would be asserting a verification it
+            did not perform against the thing it names, which is REQ-051's own
+            failure wearing a different hat.
         running_version: The version the daemon reports after the restart, or
             an empty string when nothing is installed or the run never got
             there. This is the field REQ-051's scenario is about.
@@ -141,6 +148,7 @@ class DeployOutcome:
 
     steps: StepLog
     wheel: Wheel | None
+    application: str
     running_version: str
     preview: bool
 
@@ -201,7 +209,8 @@ async def run_deploy(
     # name is reached. Verifying a name that came from anywhere other than the
     # thing being installed is how a deploy reports success because something
     # else happens to be at the version the wheel declares.
-    daemon = daemon.for_application(plan.application or wheel.distribution)
+    application = plan.application or wheel.distribution
+    daemon = daemon.for_application(application)
     context = CheckContext(daemon=daemon)
     steps.begin(_REACH, "asking the robot whether its daemon is answering")
     # Above the check on purpose: a link that is not there has told us nothing
@@ -217,6 +226,7 @@ async def run_deploy(
         return DeployOutcome(
             steps=steps,
             wheel=wheel,
+            application=application,
             running_version="",
             preview=plan.preview,
         )
@@ -233,10 +243,11 @@ async def run_deploy(
         )
 
     if plan.preview:
-        _preview(steps, wheel, _version_of(before))
+        _preview(steps, wheel, application, _version_of(before))
         return DeployOutcome(
             steps=steps,
             wheel=wheel,
+            application=application,
             running_version=_version_of(before),
             preview=True,
         )
@@ -287,25 +298,31 @@ async def run_deploy(
         )
         steps.skipped(_START, "nothing new was installed to start")
 
-    return await _verify(steps, wheel, context)
+    return await _verify(steps, wheel, application, context)
 
 
-def _preview(steps: StepLog, wheel: Wheel, installed: str) -> None:
+def _preview(
+    steps: StepLog,
+    wheel: Wheel,
+    application: str,
+    installed: str,
+) -> None:
     """Record what a deploy would do, having done none of it.
 
     Args:
         steps: Where to record them.
         wheel: What would be deployed.
+        application: The distribution that would be controlled and verified.
         installed: What the robot has now, or an empty string.
     """
     current = installed or "nothing"
     steps.planned(_TRANSFER, f"would send {wheel.size_bytes} bytes to the robot")
     steps.planned(
         _INSTALL,
-        f"would install {wheel.distribution} {wheel.version} over {current}",
+        f"would install {application} {wheel.version} over {current}",
     )
     steps.planned(_RESTART, f"would restart the daemon — {RESTART_WARNING}")
-    steps.planned(_START, f"would start {wheel.distribution}")
+    steps.planned(_START, f"would start {application}")
     steps.planned(
         _VERIFY,
         f"would then require the robot to report {wheel.version} running",
@@ -318,6 +335,7 @@ def _preview(steps: StepLog, wheel: Wheel, installed: str) -> None:
 async def _verify(
     steps: StepLog,
     wheel: Wheel,
+    application: str,
     context: CheckContext,
 ) -> DeployOutcome:
     """Ask the robot what it is running now, and judge the deploy on the answer.
@@ -325,6 +343,7 @@ async def _verify(
     Args:
         steps: Where to record the verification.
         wheel: What was sent.
+        application: The distribution that was controlled and is being verified.
         context: What the checks run against. The same context the run started
             with, and nothing in it is cached — `reachyctl.daemon` memoises
             nothing, precisely so that this call cannot return what was true
@@ -342,7 +361,7 @@ async def _verify(
     elif version != wheel.version:
         steps.failed(
             _VERIFY,
-            f"the robot is running {wheel.distribution} "
+            f"the robot is running {application} "
             f"{version or 'an unnamed build'}, not the {wheel.version} that was "
             f"just installed; the install went somewhere the daemon is not "
             f"reading",
@@ -350,14 +369,15 @@ async def _verify(
     elif running.failed:
         steps.failed(
             _VERIFY,
-            f"{wheel.distribution} {version} is installed but is not running: "
+            f"{application} {version} is installed but is not running: "
             f"{running.summary}",
         )
     else:
-        steps.done(_VERIFY, f"the robot is running {wheel.distribution} {version}")
+        steps.done(_VERIFY, f"the robot is running {application} {version}")
     return DeployOutcome(
         steps=steps,
         wheel=wheel,
+        application=application,
         running_version=version,
         preview=False,
     )
@@ -380,7 +400,10 @@ def report_for(outcome: DeployOutcome, robot: str) -> Report:
     data: dict[str, object] = {
         "robot": robot,
         "preview": outcome.preview,
-        "application": None if wheel is None else wheel.distribution,
+        # What was actually controlled and verified, not what the wheel says.
+        # `--application` makes those two different, and this is the field a
+        # script reads to learn which application the run is a statement about.
+        "application": outcome.application or None,
         "version": None if wheel is None else wheel.version,
         "wheel_bytes": None if wheel is None else wheel.size_bytes,
         # Always present, and it is the field REQ-051 is about: a script gating
@@ -423,7 +446,7 @@ def _summary(outcome: DeployOutcome) -> str:
     if outcome.preview:
         return "nothing was changed: this was a preview"
     wheel = outcome.wheel
-    named = "nothing" if wheel is None else f"{wheel.distribution} {wheel.version}"
+    named = "nothing" if wheel is None else f"{outcome.application} {wheel.version}"
     return f"the robot is running {named}, verified after the restart"
 
 

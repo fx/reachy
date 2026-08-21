@@ -444,7 +444,13 @@ def test_a_report_for_a_deploy_that_never_got_a_wheel_still_renders() -> None:
     steps.failed("build", "the wheel could not be obtained")
 
     report = report_for(
-        DeployOutcome(steps=steps, wheel=None, running_version="", preview=False),
+        DeployOutcome(
+            steps=steps,
+            wheel=None,
+            application="",
+            running_version="",
+            preview=False,
+        ),
         ROBOT,
     )
 

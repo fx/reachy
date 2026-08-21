@@ -631,7 +631,10 @@ def test_diagnosing_a_robot_runs_the_daemon_side_checks(watcher: Watcher) -> Non
     assert rows["daemon.reachable"]["status"] == "passed"
     assert rows["application.installed"]["status"] == "passed"
     assert rows["application.running"]["status"] == "passed"
-    assert document["data"]["robot"] == ROBOT
+    # The resolved target, not the option's text: the same value `deploy`,
+    # `config` and `app` report, so one robot is named one way whichever
+    # command a script is reading.
+    assert document["data"]["robot"] == f"{ROBOT}:22"
     assert watcher.access is not None
     assert watcher.access.closed is True
 
@@ -828,3 +831,109 @@ def test_an_unmanaged_setting_is_reported_by_presence_rather_than_by_value(
     # A setting the vocabulary declares is still shown, because a configuration
     # command that cannot say what a setting holds has not done its job.
     assert rows[LEVEL]["in_force"] == "info"
+
+
+#:= docs/specs/reachyctl/index.md#req-058-output-is-machine-readable-on-request
+#:% Every command that reports results MUST offer a structured output format
+#:% suitable for consumption by another program.
+@pytest.mark.filesystem  # writes a wheel for the command to read; not a unit test
+def test_an_overridden_application_is_what_the_structured_output_names(
+    watcher: Watcher,
+    tmp_path: Path,
+) -> None:
+    """The report names the application that was controlled, not the wheel's.
+
+    `--application` is how a robot whose daemon knows the distribution by
+    another name is reached, and from that point the deploy restarts, starts
+    and version-checks *that* name. A report that named the wheel's
+    distribution instead would be asserting a verification it did not perform
+    against the thing it names — REQ-051's own failure wearing a different hat,
+    reaching a consumer through the field REQ-058 exists to make readable.
+
+    Args:
+        watcher: The seam that hands out the link.
+        tmp_path: Where the fixture wheel is written.
+    """
+    name, content = fixture_wheel()
+    (tmp_path / name).write_bytes(content)
+    watcher.robot.packages["known-by-another-name"] = FIXTURE_VERSION
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "--output",
+            "json",
+            "deploy",
+            "--robot",
+            ROBOT,
+            "--wheel",
+            str(tmp_path / name),
+            "--application",
+            "known-by-another-name",
+        ],
+    )
+
+    document = json.loads(result.stdout)
+    assert document["data"]["application"] == "known-by-another-name"
+    assert document["data"]["application"] != FIXTURE_DISTRIBUTION
+    # And it is the name the run actually controlled, not merely the name it
+    # was handed: the daemon's control was asked about this one.
+    assert watcher.access is not None
+    assert any(
+        "known-by-another-name" in " ".join(command)
+        for command in watcher.access.commands
+    )
+    assert FIXTURE_DISTRIBUTION not in document["summary"]
+
+
+@pytest.mark.filesystem  # writes a wheel for the command to read; not a unit test
+@pytest.mark.usefixtures("watcher")
+def test_without_an_override_the_wheels_own_distribution_is_named(
+    tmp_path: Path,
+) -> None:
+    """The ordinary case, so the override test above is a difference from something.
+
+    Args:
+        tmp_path: Where the fixture wheel is written.
+    """
+    name, content = fixture_wheel()
+    (tmp_path / name).write_bytes(content)
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "--output",
+            "json",
+            "deploy",
+            "--robot",
+            ROBOT,
+            "--wheel",
+            str(tmp_path / name),
+        ],
+    )
+
+    assert json.loads(result.stdout)["data"]["application"] == FIXTURE_DISTRIBUTION
+
+
+@pytest.mark.usefixtures("watcher")
+def test_every_command_names_one_robot_the_same_way() -> None:
+    """A script reading `data.robot` must not get two spellings for one robot.
+
+    `doctor` used to report the text of the option while the others reported
+    the resolved target, so a bare IPv6 address came back two ways — and the
+    one `doctor` printed was not the address the run had used.
+    """
+    address = "operator@2001:db8::1"
+    commands = {
+        "doctor": ["--output", "json", "doctor", "--robot", address],
+        "config get": ["--output", "json", "config", "get", "--robot", address],
+        "app start": ["--output", "json", "app", "start", "--robot", address],
+    }
+
+    reported = {}
+    for name, arguments in commands.items():
+        result = runner.invoke(cli.app, arguments)
+        assert result.exit_code in {ExitCode.OK, ExitCode.FAILURE}, result.stdout
+        reported[name] = json.loads(result.stdout)["data"]["robot"]
+
+    assert set(reported.values()) == {"operator@[2001:db8::1]:22"}, reported

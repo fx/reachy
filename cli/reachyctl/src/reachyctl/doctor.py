@@ -90,8 +90,13 @@ class DoctorPlan:
             checks rather than failing them: an operator diagnosing a
             groundstation from a machine with no robot on it has not been told
             their robot is broken.
-        robot: How the robot was addressed, for the report. Never a credential:
-            a key is a path and a host key is a path.
+        robot: The robot as the run actually addressed it — the resolved
+            target, not the text of the option. The two differ: an IPv6 address
+            typed bare comes back bracketed and with its port. Reporting what
+            was typed would make `doctor` and `deploy` name one robot two ways
+            in the field a script reads, and would name an address the run did
+            not use. Never a credential: a key is a path and a host key is a
+            path.
         models_directory: Where the model files are, or `None`.
         intent: What the robot is supposed to be, or `None`.
         timeout: One budget for the whole groundstation exchange — opening the
@@ -240,9 +245,10 @@ def report_for(run: CheckRun, plan: DoctorPlan) -> Report:
         # and makes the report safe by construction rather than by the
         # validator having run first.
         "groundstation": None if plan.url is None else redact_url(plan.url),
-        # The robot as the operator addressed it. A run against two robots on
+        # The robot the run actually addressed. A run against two robots on
         # two days produces two reports, and a report that did not say which
-        # one it is about is a report nobody can file.
+        # one it is about is a report nobody can file — and one that named an
+        # address the run did not use would be worse than saying nothing.
         "robot": plan.robot,
         "checks": len(run.results),
         "passed": tally["passed"],

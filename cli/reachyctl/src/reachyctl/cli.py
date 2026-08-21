@@ -810,8 +810,13 @@ def doctor(
         # Cheapest and most local first, so a mistyped address or an intent
         # document that is not one is answered before anything is contacted.
         daemon = None
+        addressed = None
         if robot is not None:
             target = _target(robot, identity_file, known_hosts, sudo)
+            # The resolved target, not the option's text — the same value every
+            # other command reports, so one robot is named one way whichever
+            # command a script is reading.
+            addressed = target.describe()
             daemon, close = _connect(
                 target,
                 _layout(application, daemon_unit, daemon_control, python),
@@ -825,7 +830,7 @@ def doctor(
                 else tuple(parse_capability(text) for text in capability)
             ),
             daemon=daemon,
-            robot=robot,
+            robot=addressed,
             models_directory=models_dir,
             intent=None if intent is None else load_intent(intent),
             timeout=timeout,
