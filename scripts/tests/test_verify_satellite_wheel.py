@@ -242,6 +242,22 @@ class TestTheCommandLine:
         """Rather than a traceback out of the zip reader."""
         assert verify_satellite_wheel.main(["/nowhere/reachy.whl"]) == 2
 
+    @pytest.mark.usefixtures("fs")
+    def test_a_file_that_is_not_an_archive_is_reported(self) -> None:
+        """A truncated download is a finding, not a `BadZipFile` traceback.
+
+        The runbooks tell people to fetch a wheel from a release and verify it,
+        so this is reachable by following the documentation. It is the same
+        defect `TestTheLaunch` covers for the probe: a gate that answers a bad
+        artifact with a stack trace tells whoever is holding a release to read
+        its source.
+        """
+        path = Path("/reachy-wheel-tests/truncated.whl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"PK\x03\x04 and then nothing")
+
+        assert verify_satellite_wheel.main([str(path)]) == 1
+
 
 class TestTheEntryPoint:
     """ha-satellite REQ-041, which is one line of metadata away from silence.
@@ -660,6 +676,178 @@ class TestTheLaunch:
         )
 
         assert any("nothing usable" in problem for problem in problems)
+
+    @pytest.mark.parametrize(
+        ("printed", "expected"),
+        [
+            pytest.param("[]", "JSON list rather than an object", id="not-an-object"),
+            pytest.param(
+                '{"package": false}',
+                "an object with no origin",
+                id="origin-missing",
+            ),
+            pytest.param(
+                '{"origin": "/x/y.py"}',
+                "an object with no package",
+                id="package-missing",
+            ),
+            pytest.param(
+                "{}",
+                "an object with no origin and no package",
+                id="both-missing",
+            ),
+            pytest.param(
+                '{"origin": 7, "package": false}',
+                "origin of JSON int rather than a path or null",
+                id="origin-wrong-type",
+            ),
+            pytest.param(
+                '{"origin": "/x/y.py", "package": "yes"}',
+                "package flag of JSON str rather than a boolean",
+                id="package-wrong-type",
+            ),
+        ],
+    )
+    def test_a_probe_of_the_wrong_shape_is_reported_not_raised(
+        self,
+        printed: str,
+        expected: str,
+    ) -> None:
+        """A `KeyError` here would be this PR's own defect one level up.
+
+        The whole change exists because a failure surfaced as silence instead
+        of a diagnosis. A verifier that answers a malformed probe with a
+        traceback makes whoever is holding a release read its source to find
+        out what went wrong, which is the same failure wearing different
+        clothes. Every shape is a finding, and every finding says what was
+        received.
+
+        Args:
+            printed: What the probe printed.
+            expected: The phrase the finding has to carry.
+        """
+        problems = verify_satellite_wheel._resolution_problems(
+            ENTRY_POINT_MODULE,
+            Path("/extracted"),
+            _finished(returncode=0, stdout=printed),
+        )
+
+        assert len(problems) == 1
+        assert expected in problems[0]
+        assert printed.strip() in problems[0]
+
+
+class TestTheMembersOfTheArchive:
+    """A wheel may only put files where the wheel says they go.
+
+    `extractall` on CPython does not write outside the directory it is given —
+    it strips leading separators, drive letters and `..` components — so a
+    member naming `../../x` is silently **relocated** rather than escaping.
+    That is the hazard, not an escape: this check resolves and then *runs* a
+    file out of the extraction directory, so a member that flattens onto
+    `reachy_mini_ha_satellite/daemon_app.py` would let the archive choose what
+    the launch check executes. The whole wheel is refused instead, before a
+    byte is written.
+
+    Every archive here is assembled in memory, so nothing reads or writes a
+    real path.
+    """
+
+    @pytest.mark.parametrize(
+        "member",
+        [
+            pytest.param("../escaped.py", id="parent"),
+            pytest.param("a/../../escaped.py", id="parent-in-the-middle"),
+            pytest.param(
+                f"../../{_PACKAGE}/daemon_app.py",
+                id="flattens-onto-the-entry-module",
+            ),
+            pytest.param("/absolute.py", id="absolute"),
+            pytest.param("C:/drive.py", id="drive"),
+            pytest.param("//host/share/unc.py", id="unc"),
+            pytest.param("back\\slash.py", id="backslash"),
+        ],
+    )
+    def test_a_member_that_is_not_a_relative_path_inside_is_refused(
+        self,
+        member: str,
+    ) -> None:
+        """And the refusal names it, so the wheel can be looked at.
+
+        Args:
+            member: The member name to smuggle in.
+        """
+        problems = verify_satellite_wheel._member_problems(
+            [f"{_PACKAGE}/__init__.py", member],
+        )
+
+        assert len(problems) == 1
+        assert member in problems[0]
+
+    def test_an_ordinary_wheel_s_members_are_accepted(self) -> None:
+        """Including a dotted name, which is not a parent reference."""
+        problems = verify_satellite_wheel._member_problems(
+            [
+                f"{_PACKAGE}/__init__.py",
+                f"{_PACKAGE}/assets/sounds/wake.flac",
+                f"{_PACKAGE}/..hidden.py",
+                f"{_METADATA}/entry_points.txt",
+            ],
+        )
+
+        assert problems == []
+
+    def test_a_refusal_counts_the_ones_it_does_not_name(self) -> None:
+        """A wheel whose every member is wrong still produces a readable line."""
+        problems = verify_satellite_wheel._member_problems(
+            [f"../escape-{index}.py" for index in range(9)],
+        )
+
+        assert "9 member(s)" in problems[0]
+        assert "and 4 more" in problems[0]
+
+    @pytest.mark.usefixtures("fs")
+    def test_nothing_is_extracted_and_nothing_is_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The order is the point: judged first, written second.
+
+        A check that extracted and then complained would already have put the
+        file wherever the member said, which is the thing being prevented. The
+        interpreter is replaced with one that refuses to be called, so reaching
+        either subprocess is a failure rather than a slow test.
+
+        Args:
+            monkeypatch: Used to make starting a subprocess an error.
+        """
+
+        def _refuse(arguments: list[str], environment: dict[str, str]) -> None:
+            """Fail rather than run anything.
+
+            Args:
+                arguments: Unused.
+                environment: Unused.
+
+            Raises:
+                AssertionError: Always.
+            """
+            del arguments, environment
+            message = "check_launch got as far as starting a subprocess"
+            raise AssertionError(message)
+
+        monkeypatch.setattr(verify_satellite_wheel, "_python", _refuse)
+        wheel = Path("/reachy-wheel-tests/smuggler.whl")
+        wheel.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(wheel, "w") as writing:
+            writing.writestr(f"{_PACKAGE}/__init__.py", b"")
+            writing.writestr(f"../../{_PACKAGE}/daemon_app.py", b"# not ours")
+
+        problems = verify_satellite_wheel.check_launch(wheel)
+
+        assert len(problems) == 1
+        assert "relative location inside the archive" in problems[0]
+        assert not Path("/extracted").exists()
 
 
 def _finished(

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import re
 import subprocess
@@ -54,7 +55,7 @@ import sys
 import tempfile
 import zipfile
 from importlib.metadata import Distribution
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from reachy_mini_ha_satellite.assets.registry import ASSETS, UNREGISTERED
 from reachy_mini_ha_satellite.config import ENV_PREFIX, variable_for
@@ -85,6 +86,11 @@ EX_CONFIG = 78
 # within about a second, because the refusal happens before anything is built;
 # this only stops a wheel whose module blocks from hanging a release.
 LAUNCH_TIMEOUT_SECONDS = 120.0
+
+# How many bad members a refusal names before it starts counting. A wheel built
+# to escape carries one or two; a wheel whose every member is wrong would
+# otherwise produce a finding nobody can read.
+_MEMBERS_NAMED = 5
 
 # The Reachy Mini SDK, in the shape the entry module uses it and nothing more.
 #
@@ -426,6 +432,10 @@ def _resolution_problems(
     except json.JSONDecodeError as error:
         return [f"the resolution probe for {module} said nothing usable: {error}"]
 
+    malformed = _probe_problems(module, resolved, completed.stdout)
+    if malformed:
+        return malformed
+
     origin = resolved["origin"]
     if origin is None:
         return [
@@ -447,6 +457,124 @@ def _resolution_problems(
             f"wheel",
         ]
     return []
+
+
+def _probe_problems(module: str, document: object, printed: str) -> list[str]:
+    """Say whether the resolution probe printed the document this expects.
+
+    **Reported, never raised.** Reading `document["origin"]` out of whatever
+    came back would turn a probe that printed something unexpected — a partial
+    line, a different shape after somebody edited `_RESOLUTION_PROBE`, an
+    interpreter that wrote a warning where the JSON was meant to go — into a
+    `KeyError` traceback out of the middle of a release. That is the defect
+    this whole check exists to prevent, one level up: a failure arriving as
+    silence or a stack trace rather than as a diagnosis, leaving whoever is
+    holding the release to read the verifier's source to find out what
+    happened. Every shape that is not the expected one is a finding here, and
+    every finding carries what was actually printed.
+
+    Args:
+        module: The module the probe was asked about.
+        document: Whatever the probe's output parsed to.
+        printed: That output, verbatim, for the report.
+
+    Returns:
+        One line per problem, or an empty list when `document` is an object
+        carrying an `origin` that is a path or null and a `package` that is a
+        boolean — which is what makes reading those two fields afterwards
+        safe.
+    """
+    if not isinstance(document, dict):
+        return [
+            f"the resolution probe for {module} printed a JSON "
+            f"{type(document).__name__} rather than an object: {_tail(printed)}",
+        ]
+
+    missing = [field for field in ("origin", "package") if field not in document]
+    if missing:
+        return [
+            f"the resolution probe for {module} printed an object with no "
+            f"{' and no '.join(missing)}: {_tail(printed)}",
+        ]
+
+    origin = document["origin"]
+    if origin is not None and not isinstance(origin, str):
+        return [
+            f"the resolution probe for {module} reported an origin of JSON "
+            f"{type(origin).__name__} rather than a path or null: "
+            f"{_tail(printed)}",
+        ]
+    if not isinstance(document["package"], bool):
+        return [
+            f"the resolution probe for {module} reported a package flag of JSON "
+            f"{type(document['package']).__name__} rather than a boolean: "
+            f"{_tail(printed)}",
+        ]
+    return []
+
+
+def _member_problems(names: list[str]) -> list[str]:
+    """Say whether every member of the wheel is a path inside the wheel.
+
+    **Checked before anything is written, and the whole wheel refused if one
+    member is wrong** — not the member skipped. An archive carrying one is not
+    an archive to go on inspecting.
+
+    The reason is not that `extractall` would write outside the extraction
+    directory. On CPython it does not: it strips leading separators, drive
+    letters and `..` components from each member, so `../../daemon_app.py` is
+    **relocated** to the root of the extraction directory rather than escaping
+    it. That silent relocation is itself the problem, twice over.
+
+    A verification tool that quietly repairs a malformed archive and then
+    reports on the repaired version has reported on an artifact that does not
+    exist — and this one's whole job is to refuse a wheel nobody should ship.
+
+    And the relocation lands somewhere real. A member named
+    `../../reachy_mini_ha_satellite/daemon_app.py` flattens onto exactly the
+    path `_resolution_problems` is about to resolve and `_execution_problems`
+    is about to run, so an archive could choose what this check executes and
+    the check would report on the file the archive chose. Refusing is what
+    keeps it a check. This script also takes a wheel path on the command line
+    and the runbooks tell people to fetch one from a release, so "we only ever
+    hand it something we just built" is not a property of the tool.
+
+    Args:
+        names: Every member of the archive.
+
+    Returns:
+        One line per problem.
+    """
+    unsafe = sorted(name for name in names if _escapes(name))
+    if not unsafe:
+        return []
+    shown = ", ".join(unsafe[:_MEMBERS_NAMED])
+    rest = len(unsafe) - _MEMBERS_NAMED
+    return [
+        f"the wheel carries {len(unsafe)} member(s) whose path is not a "
+        f"relative location inside the archive ({shown}"
+        f"{f', and {rest} more' if rest > 0 else ''}), so extracting it would "
+        f"put a file somewhere the wheel does not say it goes",
+    ]
+
+
+def _escapes(name: str) -> bool:
+    """Say whether one member's name is anything but a relative path inside.
+
+    A wheel member is a relative POSIX path — the specification says the
+    separator is `/` — so an absolute path, a drive or UNC prefix, a backslash,
+    or a `..` component is all outside what a legal wheel can contain.
+
+    Args:
+        name: The member's name, as the archive records it.
+
+    Returns:
+        Whether it names somewhere other than inside the archive.
+    """
+    if "\\" in name or ntpath.splitdrive(name)[0]:
+        return True
+    path = PurePosixPath(name)
+    return path.is_absolute() or ".." in path.parts
 
 
 def _execution_problems(
@@ -526,7 +654,8 @@ def check_launch(path: Path, module: str = ENTRY_POINT_MODULE) -> list[str]:
     The wheel is extracted rather than installed, and executed in a subprocess
     rather than imported, so this process never loads the artifact it is
     judging. Nothing is written outside a temporary directory that is removed
-    afterwards, and nothing reaches the network.
+    afterwards — every member is checked against that before a byte is written,
+    which `_member_problems` explains — and nothing reaches the network.
 
     Args:
         path: The built wheel.
@@ -540,11 +669,17 @@ def check_launch(path: Path, module: str = ENTRY_POINT_MODULE) -> list[str]:
         root = Path(scratch)
         wheel_root = root / "wheel"
         with zipfile.ZipFile(path) as archive:
-            # This repository's own freshly built wheel, and the whole of it,
-            # into a temporary directory removed on the way out. Extracting a
-            # subset would be extracting what the check expects rather than
-            # what the wheel contains, and the module's imports need its
-            # siblings anyway.
+            # Nothing is written until every member has been judged — see
+            # `_member_problems` for why a relocated member is a hazard to this
+            # check specifically, and why the answer is to refuse the wheel
+            # rather than to skip the member.
+            problems = _member_problems(archive.namelist())
+            if problems:
+                return problems
+            # Then the whole of it, into a temporary directory removed on the
+            # way out. Extracting a subset would be extracting what the check
+            # expects rather than what the wheel contains, and the module's
+            # imports need its siblings anyway.
             archive.extractall(wheel_root)
         stub_root = _write_sdk_stub(root / "sdk")
         state_dir = root / "state"
@@ -658,8 +793,21 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"{path} is not a file\n")
         return 2
 
-    with zipfile.ZipFile(path) as wheel:
-        problems = check(wheel)
+    # An unreadable archive is a finding about the wheel, not an accident of
+    # the gate. This is the same defect `_probe_problems` exists for — a
+    # verifier that answers a bad artifact with a traceback makes whoever is
+    # holding a release read its source — and it is reachable the moment
+    # somebody points this at a release artifact that arrived truncated, which
+    # is a thing the runbooks tell people to do.
+    try:
+        with zipfile.ZipFile(path) as wheel:
+            problems = check(wheel)
+    except zipfile.BadZipFile as error:
+        sys.stderr.write(
+            f"satellite wheel: {path.name} is not a readable zip archive, so "
+            f"nothing about it can be verified: {error}\n",
+        )
+        return 1
 
     # Only when the declaration is right. Launching the module the entry point
     # names is meaningless while the entry point itself is wrong, and the
