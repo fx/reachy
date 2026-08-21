@@ -11,13 +11,23 @@ role that hard-coded the distribution would have to be edited to install any of
 them. `reachyctl deploy` made the same choice for the same reason — it is defined
 over a wheel, not over the satellite.
 
-A wheel's file name is `{distribution}-{version}(-{build})?-{tags}.whl`, which is
-enough to decide **whether** to install. It is deliberately not enough to decide
-that an install worked: a file name is a claim, and the failure this whole stack
-is written against is a package that installed successfully into an environment
-the running daemon was not using. So the role asks the daemon's own interpreter
-what it now holds, and this module only supplies the version to compare that
-answer against.
+A wheel's file name is `{distribution}-{version}(-{build})?-{tags}.whl`, and
+`wheel_release` reads it — but only far enough to answer "is this a wheel at
+all", cheaply and locally, before anything is transferred to a robot. **It is
+deliberately not the authority on what installing the wheel would put there.** A
+file name is a claim; `.dist-info/METADATA` is what pip records, and what the
+daemon's own interpreter reports afterwards. Deciding whether to install from one
+and verifying against the other would be answering two different questions, which
+is exactly the failure this whole stack is written against — a package that
+installed successfully into an environment the running daemon was not using.
+`reachyctl deploy` reads the wheel rather than its name for the same reason.
+
+The distribution part *is* escaped — PEP 427 replaces every run of unsafe
+characters with an underscore, so `example.tool` and `example-tool` are both
+`example_tool` — which is why the comparison folds both sides through PEP 503
+normalisation. The version part is not usefully escaped: `packaging` refuses a
+wheel whose version segment is not a valid PEP 440 version, so a local version
+appears verbatim as `1.0+local` and no tool produces `1.0_local`.
 """
 
 from __future__ import annotations
@@ -105,7 +115,10 @@ def wheel_release(file_name: str) -> dict[str, Any]:
     Returns:
         A record carrying `ok`, the `distribution` in its PEP 503 normalised
         form — which is what `importlib.metadata` and `pip` answer to — the
-        `version`, and a `complaint` when the name is not a wheel's.
+        `version` exactly as the file name spells it, and a `complaint` when
+        the name is not a wheel's. The version is reported and not trusted: see
+        the module documentation on why the role reads the wheel's own metadata
+        for every decision it makes.
     """
     match = _WHEEL_NAME.match(file_name)
     if match is None:

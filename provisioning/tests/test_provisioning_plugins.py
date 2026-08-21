@@ -332,3 +332,20 @@ def test_a_declaration_and_a_wheel_name_compare_equal_after_normalising(
 
     assert release["ok"]
     assert release["distribution"] == reachy_app.distribution_name(declared)
+
+
+def test_a_local_version_is_read_from_the_name_exactly_as_it_is_spelled() -> None:
+    """A local version appears verbatim, because a wheel name carries a real version.
+
+    `packaging` refuses a wheel whose version segment is not a valid PEP 440
+    version — `example_tool-1.0_local-…` is rejected outright, and pip refuses to
+    install it — so no tool produces the escaped spelling and this does not have
+    to decode one. What it reports is still not the authority: the role reads
+    `.dist-info/METADATA` out of the staged wheel for every decision it makes,
+    because a file name is a claim and the metadata is what pip records.
+    """
+    release = reachy_app.wheel_release("example_tool-1.0+local-py3-none-any.whl")
+
+    assert release["ok"]
+    assert release["distribution"] == "example-tool"
+    assert release["version"] == "1.0+local"

@@ -127,6 +127,21 @@ about its own configuration at run time, not what a test hands a function as
 input. A real value belonging to somebody's environment is still a finding,
 wherever it appears.
 
+### A wheel file name carries a real version, not an escaped one
+
+PEP 427 escapes the *distribution* — every run of unsafe characters becomes an
+underscore, so `example.tool` and `example-tool` are both `example_tool` — and
+`provisioning/ansible/plugins/filter/reachy_app.py` folds both sides of that
+comparison through PEP 503 normalisation. It does **not** need to decode an
+escaped version. `packaging.utils.parse_wheel_filename` refuses a wheel whose
+version segment is not a valid PEP 440 version, and pip refuses to install one:
+`example_tool-1.0_local-py3-none-any.whl` is rejected outright with "invalid
+version", while `example_tool-1.0+local-py3-none-any.whl` is accepted and parses
+to `1.0+local`. So no tool produces the escaped spelling, and a finding that a
+local version "can be encoded as `1.0_local`" has a premise that does not hold.
+The role reads `.dist-info/METADATA` out of the staged wheel for every decision
+it makes anyway, because a file name is a claim.
+
 ### This repository is public
 
 Reject any change that puts an identifier belonging to **someone's environment

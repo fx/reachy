@@ -90,6 +90,29 @@ reachy_app_wheel_checksum: ""
 # Asked of the interpreter the daemon actually runs, so the answer is what that
 # environment holds rather than what a wheel's file name claims. One round trip
 # answers for every distribution named.
+# What a wheel claims to install, read out of the wheel rather than off its
+# file name. A file name is a claim; `.dist-info/METADATA` is what pip records,
+# and what the daemon's interpreter will report afterwards. Comparing against
+# anything else means the install decision and the verification are answering
+# two different questions — which is the shape of the failure this whole stack
+# is written against. `reachyctl deploy` reads the wheel for the same reason.
+reachy_wheel_metadata_script: |
+  import json, sys, zipfile
+  found = {'name': '', 'version': ''}
+  with zipfile.ZipFile(sys.argv[1]) as archive:
+      for member in archive.namelist():
+          if member.endswith('.dist-info/METADATA') and member.count('/') == 1:
+              text = archive.read(member).decode('utf-8', 'replace')
+              for line in text.splitlines():
+                  if not line.strip():
+                      break
+                  key, _, value = line.partition(':')
+                  key = key.strip().lower()
+                  if key in found:
+                      found[key] = value.strip()
+              break
+  sys.stdout.write(json.dumps(found))
+
 reachy_metadata_script: |
   import json, sys
   from importlib.metadata import PackageNotFoundError, version

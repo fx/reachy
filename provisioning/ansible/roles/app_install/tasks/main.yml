@@ -57,24 +57,6 @@
         msg: "{{ reachy_app_release.complaint }}"
       when: not reachy_app_release.ok
 
-    # A wheel's file name is a claim, and this is the one thing it is checked
-    # against: the distribution the operator declared. A robot that ended up
-    # running some other application because a URL pointed somewhere else is the
-    # failure this whole stack is written against.
-    - name: Refuse a wheel that is not the declared distribution
-      ansible.builtin.fail:
-        msg: >-
-          {{ reachy_app_file }} carries {{ reachy_app_release.distribution }},
-          and {{ reachy_app_distribution }} is declared. Installing it would
-          leave the robot running an application nothing here asked for.
-      # Both sides normalised, because a wheel's file name carries the escaped
-      # form: `example.tool` and `example-tool` both arrive as `example_tool`,
-      # and comparing either against the declaration verbatim would refuse a
-      # wheel for the distribution the role was told to install.
-      when: >-
-        reachy_app_release.distribution
-        != (reachy_app_distribution | reachy_distribution_name)
-
     # A wheel fetched over the network is installed as root into the
     # environment the daemon runs, so what arrived has to be the artifact that
     # was reviewed rather than whatever answered the request. That is the same
@@ -149,6 +131,55 @@
           {{ reachy_exec_start.stdout | reachy_interpreter(reachy_python) }}
       check_mode: false
 
+    # Out of the wheel, not off its file name, and both halves for one reason:
+    # a file name is a claim, and `.dist-info/METADATA` is what pip records and
+    # what the daemon's interpreter reports afterwards. Comparing the install
+    # decision against the name and the verification against the metadata would
+    # be answering two different questions, which is the shape of the failure
+    # this whole stack is written against. `reachyctl deploy` reads the wheel
+    # for the same reason.
+    - name: Read what the staged wheel says it installs
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_app_interpreter }}"
+          - -c
+          - "{{ reachy_wheel_metadata_script }}"
+          - "{{ reachy_staging }}/{{ reachy_app_file }}"
+      register: reachy_app_metadata
+      changed_when: false
+      check_mode: false
+
+    - name: Take the distribution and version the wheel declares
+      ansible.builtin.set_fact:
+        reachy_app_declares: "{{ reachy_app_metadata.stdout | from_json }}"
+      check_mode: false
+
+    - name: Refuse a wheel whose metadata cannot be read
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_app_file }} carries no readable
+          .dist-info/METADATA, so nothing says what installing it would put on
+          the robot. A wheel is a zip with a metadata directory; this one is
+          either truncated or not a wheel.
+      when: >-
+        reachy_app_declares.name | length == 0
+        or reachy_app_declares.version | length == 0
+
+    # A robot that ended up running some other application because a URL pointed
+    # somewhere else is the failure this whole stack is written against. Both
+    # sides normalised: PEP 503 folds runs of `-`, `_` and `.` to a single `-`,
+    # so `example.tool` and `example-tool` are one name.
+    - name: Refuse a wheel that is not the declared distribution
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_app_file }} declares
+          {{ reachy_app_declares.name }}, and {{ reachy_app_distribution }} is
+          declared here. Installing it would leave the robot running an
+          application nothing asked for.
+      when: >-
+        (reachy_app_declares.name | reachy_distribution_name)
+        != (reachy_app_distribution | reachy_distribution_name)
+
     - name: Ask that interpreter what it already holds
       ansible.builtin.command:
         argv:
@@ -163,10 +194,9 @@
     - name: Report what installing the wheel would change
       ansible.builtin.debug:
         msg: >-
-          {{ reachy_app_distribution }}:
-          {{ (reachy_app_before.stdout | from_json)[reachy_app_distribution]
-             | default('nothing', true) }}
-          installed, {{ reachy_app_release.version }} declared.
+          {{ reachy_app_distribution }}: {{ (reachy_app_before.stdout
+          | from_json)[reachy_app_distribution] | default('nothing', true) }}
+          installed, {{ reachy_app_declares.version }} in the wheel.
 
     #:= docs/specs/provisioning/index.md#req-062-a-stock-image-is-sufficient
     #:% Provisioning MUST succeed against an unmodified stock robot image without any
@@ -186,7 +216,7 @@
       register: reachy_app_install
       when: >-
         (reachy_app_before.stdout | from_json)[reachy_app_distribution]
-        | default('', true) != reachy_app_release.version
+        | default('', true) != reachy_app_declares.version
       changed_when: reachy_app_install is not skipped
       notify: Restart the robot daemon
 
@@ -211,12 +241,13 @@
           {{ reachy_app_distribution }} was installed from {{ reachy_app_file }}
           and {{ reachy_app_interpreter }} now reports
           {{ (reachy_app_after.stdout | from_json)[reachy_app_distribution]
-             | default('nothing', true) }} rather than
-          {{ reachy_app_release.version }}. The install reported success into an
-          environment the daemon is not the one running.
+             | default('nothing', true) }} rather than the
+          {{ reachy_app_declares.version }} the wheel declares. The install
+          reported success into an environment the daemon is not the one
+          running.
       when:
         - reachy_app_install is not skipped
         - not ansible_check_mode
         - >-
           (reachy_app_after.stdout | from_json)[reachy_app_distribution]
-          | default('', true) != reachy_app_release.version
+          | default('', true) != reachy_app_declares.version
