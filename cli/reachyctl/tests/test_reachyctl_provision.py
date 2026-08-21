@@ -138,10 +138,19 @@ def test_a_missing_default_directory_names_the_three_ways_out() -> None:
     ("status", "code"),
     [
         (0, ExitCode.OK),
+        # RUN_ERROR.
         (1, ExitCode.FAILURE),
+        # RUN_FAILED_HOSTS.
         (2, ExitCode.FAILURE),
-        (3, ExitCode.UNREACHABLE),
-        (4, ExitCode.FAILURE),
+        # RUN_UNREACHABLE_HOSTS, the only one worth translating.
+        (4, ExitCode.UNREACHABLE),
+        # Both a failed host and an unreachable one: Ansible's statuses are a
+        # bit field, and a run where something failed produced a diagnosis
+        # whatever else it also found.
+        (6, ExitCode.FAILURE),
+        # RUN_FAILED_BREAK_PLAY, a bad option, an interrupt.
+        (8, ExitCode.FAILURE),
+        (5, ExitCode.FAILURE),
         (99, ExitCode.FAILURE),
     ],
 )
@@ -269,12 +278,12 @@ def test_a_run_against_a_robot_that_is_not_there_exits_unreachable() -> None:
     code = execute(
         plan(),
         reporter,
-        run=lambda _command, _directory: 3,
+        run=lambda _command, _directory: 4,
         which=lambda _: "/usr/bin/ansible-playbook",
     )
 
     assert code is ExitCode.UNREACHABLE
-    assert "exited 3" in streams.result
+    assert "exited 4" in streams.result
 
 
 @pytest.mark.parametrize(

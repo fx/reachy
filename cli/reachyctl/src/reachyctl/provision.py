@@ -83,12 +83,19 @@ _EXECUTABLE: Final = "ansible-playbook"
 # them.
 _FILE_PREFIX: Final = "@"
 
-# Ansible's own statuses. 3 is "all hosts were unreachable", which is exactly
-# what `UNREACHABLE` means here and is the one worth translating: a script that
-# read it as "the robot is unhealthy" would page somebody about a network. The
-# rest — a failed host, a parser error, a bad option — are `FAILURE`, because the
-# run happened and its answer was negative.
-_ANSIBLE_UNREACHABLE: Final = 3
+# Ansible's own status for "a host was unreachable and nothing failed", and the
+# one worth translating: a script that read it as "the robot is unhealthy" would
+# page somebody about a network. Everything else — a failed host, an error, a
+# parser problem, a bad option — is `FAILURE`, because the run happened and its
+# answer was negative.
+#
+# The number is `TaskQueueManager.RUN_UNREACHABLE_HOSTS`, and those statuses are
+# a **bit field**: `RUN_ERROR` is 1, `RUN_FAILED_HOSTS` is 2, this is 4 and
+# `RUN_FAILED_BREAK_PLAY` is 8, so a run with both a failed host and an
+# unreachable one exits 6. That is why this is an equality rather than a mask —
+# a run where something failed produced a diagnosis, whatever else it also
+# found, and only a run that reached nothing at all learned nothing.
+_ANSIBLE_UNREACHABLE: Final = 4
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
