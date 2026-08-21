@@ -749,8 +749,10 @@ class TestTheMembersOfTheArchive:
     the launch check executes. The whole wheel is refused instead, before a
     byte is written.
 
-    Every archive here is assembled in memory, so nothing reads or writes a
-    real path.
+    Nothing here touches a real path. Most of these hand `_member_problems` a
+    list of names and need no archive at all; the one that has to prove the
+    *ordering* builds a real archive and calls `check_launch`, and it does that
+    on `pyfakefs`, so the bytes it writes go to an in-memory filesystem.
     """
 
     @pytest.mark.parametrize(
@@ -814,15 +816,43 @@ class TestTheMembersOfTheArchive:
         """The order is the point: judged first, written second.
 
         A check that extracted and then complained would already have put the
-        file wherever the member said, which is the thing being prevented. The
-        interpreter is replaced with one that refuses to be called, so reaching
-        either subprocess is a failure rather than a slow test.
+        file wherever the member said, which is the thing being prevented.
+
+        **Both halves are observed at the call site rather than inferred
+        afterwards**, and the second half is why: `check_launch` extracts into
+        a `TemporaryDirectory` whose name is random, and this archive's
+        smuggled member would be relocated within it — so no path this test
+        could name is one extraction would create, and looking for the absence
+        of a file would pass whether or not `extractall` ran. Replacing both
+        `extractall` and the interpreter with something that raises on the
+        spot makes reaching either a failure rather than a slow test, and
+        makes the two failure modes read alike.
 
         Args:
-            monkeypatch: Used to make starting a subprocess an error.
+            monkeypatch: Used to make extracting, and starting a subprocess,
+                errors.
         """
 
-        def _refuse(arguments: list[str], environment: dict[str, str]) -> None:
+        def _refuse_to_extract(
+            self: zipfile.ZipFile,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            """Fail rather than write anything.
+
+            Args:
+                self: The archive; unused.
+                args: Unused.
+                kwargs: Unused.
+
+            Raises:
+                AssertionError: Always.
+            """
+            del self, args, kwargs
+            message = "check_launch got as far as extracting the archive"
+            raise AssertionError(message)
+
+        def _refuse_to_run(arguments: list[str], environment: dict[str, str]) -> None:
             """Fail rather than run anything.
 
             Args:
@@ -836,7 +866,8 @@ class TestTheMembersOfTheArchive:
             message = "check_launch got as far as starting a subprocess"
             raise AssertionError(message)
 
-        monkeypatch.setattr(verify_satellite_wheel, "_python", _refuse)
+        monkeypatch.setattr(zipfile.ZipFile, "extractall", _refuse_to_extract)
+        monkeypatch.setattr(verify_satellite_wheel, "_python", _refuse_to_run)
         wheel = Path("/reachy-wheel-tests/smuggler.whl")
         wheel.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(wheel, "w") as writing:
@@ -847,7 +878,6 @@ class TestTheMembersOfTheArchive:
 
         assert len(problems) == 1
         assert "relative location inside the archive" in problems[0]
-        assert not Path("/extracted").exists()
 
 
 def _finished(
