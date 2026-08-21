@@ -161,6 +161,23 @@
                  else [] }}
           check_mode: false
 
+        # A query that could not run says nothing about the robot, and the
+        # branch above turns it into an empty list — which is exactly what "none
+        # of them is installed" looks like. Reporting stock behaviour on the
+        # strength of a command that never executed is the inverse of what
+        # REQ-064's supported path promises, so the run stops here instead.
+        - name: Require the daemon's interpreter to have answered at all
+          ansible.builtin.fail:
+            msg: >-
+              The interpreter the daemon runs could not be asked what it still
+              holds — it exited {{ reachy_removed_versions.rc }} — so this run
+              cannot say whether what provisioning installed is gone. The
+              managed configuration was removed; the application was not
+              verified.
+          when:
+            - reachy_removed_versions is not skipped
+            - reachy_removed_versions.rc != 0
+
         - name: Require everything provisioning installed to be uninstalled
           ansible.builtin.fail:
             msg: >-

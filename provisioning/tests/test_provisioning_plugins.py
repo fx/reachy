@@ -302,6 +302,7 @@ def test_a_version_answer_that_cannot_be_read_says_nothing_is_installed(
         },
     )
 
+    assert robot.application is not None
     assert not robot.application.installed
 
 

@@ -57,6 +57,11 @@
           - "{{ reachy_app_distribution | default('', true) }}"
       register: reachy_verify_versions
       changed_when: false
+      # Not fatal, so the run still reports every other link — but the failure
+      # is carried into the evidence below rather than dropped. An empty answer
+      # here and an answer that could not be obtained are opposite facts, and
+      # collapsing them would report an application as not installed on the
+      # strength of a command that never ran.
       failed_when: false
 
     - name: Ask the daemon whether it is running the application
@@ -88,6 +93,27 @@
           {{ reachy_daemon_environment | reachy_validated_settings }}
       no_log: true
 
+    # The verdict is acted on, and that is not tidiness. A refused declaration
+    # yields an EMPTY settings map, and an empty map is what a run that declares
+    # nothing also produces — so without this the intent checks would find
+    # nothing to disagree with, report themselves skipped or passed, and the run
+    # would announce a working robot having compared it against nothing. REQ-066
+    # is that a run asserts the end state it created; asserting against an
+    # unread declaration asserts nothing.
+    #
+    # `daemon_env` refuses the same declaration before it writes, so on a full
+    # run this cannot be reached. It is here because `--tags verify` is a
+    # legitimate way to run this role on its own, and because a validation whose
+    # answer nothing reads is one that will eventually be wrong unnoticed.
+    - name: Refuse to judge a robot against a declaration the robot would refuse
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_verify_intent.complaint }}. Nothing about this robot has
+          been asserted: a refused declaration names no setting, and comparing
+          the robot against nothing would report it healthy without having
+          checked anything.
+      when: not reachy_verify_intent.ok
+
     #:= docs/specs/provisioning/index.md#req-066-a-run-asserts-the-end-state-it-created
     #:% A provisioning run MUST verify the robot reaches a working end state before
     #:% reporting success.
@@ -99,7 +125,11 @@
                'application': reachy_app_distribution | default('', true),
                'daemon_distribution': reachy_daemon_distribution,
                'properties': reachy_verify_properties.stdout,
-               'versions': reachy_verify_versions.stdout,
+               'versions': reachy_verify_versions.stdout
+                         if reachy_verify_versions.rc == 0 else '',
+               'versions_complaint': ''
+                         if reachy_verify_versions.rc == 0
+                         else 'it exited ' ~ reachy_verify_versions.rc,
                'status': reachy_verify_status.stdout
                          if reachy_verify_status.rc == 0 else '',
                'status_complaint': ''

@@ -64,6 +64,7 @@ __all__ = [
     "DaemonControlUnavailableError",
     "FilterModule",
     "GatheredDaemon",
+    "VersionQueryUnavailableError",
     "check_run",
     "daemon_from",
     "parse_properties",
@@ -108,6 +109,18 @@ NO_APPLICATION_DECLARED: Final = (
 _APPLICATION_CHECKS: Final = frozenset({APPLICATION_INSTALLED, APPLICATION_RUNNING})
 
 
+class VersionQueryUnavailableError(RuntimeError):
+    """The daemon's interpreter could not be asked what it holds.
+
+    Raised rather than answered with "nothing is installed", for the reason
+    `DaemonControlUnavailableError` is: an empty answer and an answer that could
+    not be obtained are opposite facts, and the first is a diagnosis of the robot
+    while the second is a diagnosis of the run. Collapsing them would report an
+    application as missing on the strength of a command that never executed, and
+    then send an operator to reinstall something that was there all along.
+    """
+
+
 class DaemonControlUnavailableError(RuntimeError):
     """The daemon's application control could not be run, or answered unreadably.
 
@@ -131,7 +144,9 @@ class GatheredDaemon:
 
     Attributes:
         info: What the daemon's unit reported about itself.
-        application: Whether the application is installed, and at what version.
+        application: Whether the application is installed, and at what version,
+            or `None` when the daemon's interpreter could not be asked.
+        version_complaint: Why it could not be asked, when it could not.
         state: Whether the daemon says it is running the application, or `None`
             when the control could not be asked.
         control_complaint: Why the control could not be asked, when it could not.
@@ -140,7 +155,8 @@ class GatheredDaemon:
     """
 
     info: DaemonInfo
-    application: InstalledApplication
+    application: InstalledApplication | None = None
+    version_complaint: str = ""
     state: ApplicationState | None = None
     control_complaint: str = ""
     effective: Mapping[str, str] = field(default_factory=dict)
@@ -158,7 +174,14 @@ class GatheredDaemon:
 
         Returns:
             What the daemon's own interpreter answered.
+
+        Raises:
+            VersionQueryUnavailableError: If that interpreter could not be
+                asked. See the class documentation for why this is not "nothing
+                is installed".
         """
+        if self.application is None:
+            raise VersionQueryUnavailableError(self.version_complaint)
         return self.application
 
     async def application_state(self) -> ApplicationState:
@@ -252,11 +275,23 @@ def daemon_from(evidence: Mapping[str, Any]) -> GatheredDaemon:
     application = str(evidence.get("application", ""))
     daemon_distribution = str(evidence.get("daemon_distribution", ""))
     properties = parse_properties(str(evidence.get("properties", "")))
+    version_complaint = _version_complaint(evidence)
     versions = _versions(str(evidence.get("versions", "")))
     effective = split_environment(properties.get("Environment", ""))
     return GatheredDaemon(
+        # The unit's own state is what `daemon.reachable` asks about, and
+        # systemd answered that whatever the interpreter did. The version is
+        # supplementary and comes back empty when the query failed, which the
+        # probe renders as an unnamed build; what must not happen is the
+        # *application* check reading a failed query as an absence, and that is
+        # what the `None` below prevents.
         info=_daemon_info(unit, properties, versions.get(daemon_distribution, "")),
-        application=_installed(application, versions.get(application, "")),
+        application=(
+            None
+            if version_complaint
+            else _installed(application, versions.get(application, ""))
+        ),
+        version_complaint=version_complaint,
         state=_application_state(str(evidence.get("status", ""))),
         control_complaint=_control_complaint(evidence, application),
         effective=effective,
@@ -442,6 +477,26 @@ def _application_state(status: str) -> ApplicationState | None:
     return ApplicationState(
         running=decoded.get("running") is True,
         detail=detail if isinstance(detail, str) else "",
+    )
+
+
+def _version_complaint(evidence: Mapping[str, Any]) -> str:
+    """Say why the daemon's interpreter could not be asked what it holds.
+
+    Args:
+        evidence: What the gathering tasks produced.
+
+    Returns:
+        The complaint the role supplied, or an empty string when the query ran.
+        Nothing the robot printed is quoted, for the reason `_control_complaint`
+        gives.
+    """
+    supplied = str(evidence.get("versions_complaint", "")).strip()
+    if not supplied:
+        return ""
+    return (
+        f"the daemon's interpreter could not be asked what it holds: {supplied}. "
+        f"Nothing can be said about what is installed until it answers"
     )
 
 

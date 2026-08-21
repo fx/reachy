@@ -165,6 +165,21 @@
       changed_when: false
       check_mode: false
 
+    # In a preview there is deliberately no wheel here and the fallback below is
+    # right. In a run that is not a preview the wheel was staged two tasks ago,
+    # so its absence means the transfer did not put it there — and falling back
+    # to the file name would let the run decide from a claim rather than from
+    # the artifact, which is the distinction the metadata read exists to make.
+    - name: Require the wheel to have been staged
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_staging }}/{{ reachy_app_file }} is not on the robot after
+          the transfer step reported success, so nothing can be read out of it.
+          The run stops rather than deciding what to install from a file name.
+      when:
+        - not ansible_check_mode
+        - not reachy_app_staged.stat.exists
+
     - name: Take the distribution and version the wheel declares
       ansible.builtin.set_fact:
         reachy_app_declares: >-

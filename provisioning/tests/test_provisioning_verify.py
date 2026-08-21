@@ -22,6 +22,7 @@ from reachy_verify import (
     GATHERED_DAEMON_ABSENT,
     GROUNDSTATION_SKIPPED,
     MODELS_SKIPPED,
+    VersionQueryUnavailableError,
     check_run,
     daemon_from,
     parse_properties,
@@ -73,6 +74,7 @@ def evidence(
     versions: Mapping[str, str] | None = None,
     status: str | None = None,
     status_complaint: str = "",
+    versions_complaint: str = "",
 ) -> dict[str, Any]:
     """Assemble one gathering of evidence, with a healthy robot as the default.
 
@@ -81,6 +83,8 @@ def evidence(
         versions: What the daemon's interpreter answered, by distribution.
         status: The JSON the daemon's application control printed.
         status_complaint: Why it printed nothing, when it printed nothing.
+        versions_complaint: Why the version query could not be run, when it
+            could not.
 
     Returns:
         The record the role hands to the filter.
@@ -106,6 +110,7 @@ def evidence(
         if status is None
         else status,
         "status_complaint": status_complaint,
+        "versions_complaint": versions_complaint,
     }
 
 
@@ -341,3 +346,52 @@ async def test_an_unreadable_version_answer_reads_as_nothing_installed() -> None
     robot = daemon_from(gathered)
 
     assert not (await robot.installed_application()).installed
+
+
+def test_a_version_query_that_could_not_run_is_not_read_as_nothing_installed() -> None:
+    """An empty answer and an answer that could not be obtained are opposite facts.
+
+    Collapsing them would report an application as missing on the strength of a
+    command that never executed, and send an operator to reinstall something
+    that was there all along. `reachy_checks.run_check` turns the raise into a
+    failed result naming what was raised, so the run still reports every other
+    link and the line an operator reads says the interpreter could not be asked.
+    """
+    run = check_run(
+        evidence(versions={}, versions_complaint="it exited 127"),
+        intent(),
+    )
+
+    assert not run["ok"]
+    assert "application.installed" in run["failures"]
+    detail = next(
+        str(row["detail"])
+        for row in run["results"]
+        if row["check"] == "application.installed"
+    )
+    assert "could not be asked" in detail
+    assert "not installed" not in detail
+
+
+def test_a_failed_version_query_still_leaves_the_other_links_reported() -> None:
+    """The unit state came from systemd, which answered whatever the interpreter did.
+
+    So `daemon.reachable` is still a real answer, and a run that could not ask
+    one question reports every other link rather than going dark.
+    """
+    run = check_run(
+        evidence(versions={}, versions_complaint="it exited 127"),
+        intent(),
+    )
+
+    assert outcome_of(run, "daemon.reachable") == "passed"
+    assert outcome_of(run, "configuration.effective") == "passed"
+
+
+@pytest.mark.asyncio
+async def test_the_gathered_robot_refuses_to_answer_what_it_could_not_ask() -> None:
+    """Raised rather than returned, because it is not a diagnosis of the robot."""
+    robot = daemon_from(evidence(versions={}, versions_complaint="it exited 127"))
+
+    with pytest.raises(VersionQueryUnavailableError, match="could not be asked"):
+        await robot.installed_application()

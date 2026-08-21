@@ -26,6 +26,20 @@
   changed_when: false
   check_mode: false
 
+# A staging directory that is not there is the ordinary case — nothing was ever
+# installed, or a previous removal took it — and `find` reports that as no
+# matches. A search that could not look is a different fact, and treating it as
+# "nothing was installed" would let this run report a robot restored without
+# having examined the one place that records what provisioning put on it.
+- name: Require the search for staged wheels to have run
+  ansible.builtin.fail:
+    msg: >-
+      {{ reachy_staging }} could not be searched, so this run cannot tell what
+      provisioning installed on this robot. Name it with
+      reachy_app_distribution, or make the directory readable and run this
+      again.
+  when: reachy_staged_wheels is not succeeded
+
 #:= docs/specs/provisioning/index.md#req-064-the-robot-can-be-returned-to-stock-behaviour
 #:% Provisioning MUST offer a supported path that removes everything it applied and
 #:% restores the robot's stock behaviour.
