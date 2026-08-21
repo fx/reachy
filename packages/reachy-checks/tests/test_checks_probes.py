@@ -74,6 +74,9 @@ async def test_daemon_reachable_fails_and_carries_the_reason() -> None:
 
     assert finding.outcome is Outcome.FAILED
     assert "the host refused the connection" in finding.summary
+    # Carried on the failing path too, so a script reading it does not have to
+    # know which outcome it is looking at.
+    assert finding.detail["daemon_version"] is None
 
 
 @pytest.mark.asyncio
@@ -111,6 +114,10 @@ async def test_application_installed_fails_when_nothing_is_installed() -> None:
 
     assert finding.outcome is Outcome.FAILED
     assert "no such package" in finding.summary
+    # The docstring says the version is carried on every path; this is the
+    # path where there is none, and the field is present and empty rather
+    # than missing.
+    assert finding.detail["application_version"] is None
 
 
 @pytest.mark.asyncio
@@ -567,3 +574,27 @@ async def test_the_three_groundstation_checks_share_one_session() -> None:
     # The fake counts every call; the real link answers all three from one
     # session, and this is the assertion that would catch it opening more.
     assert link.inspections == 3
+
+
+@pytest.mark.asyncio
+async def test_the_version_fields_are_present_on_every_outcome() -> None:
+    """A promise in a docstring is only a promise if the field is actually there.
+
+    Both of these probes claim to report a version; a consumer reading the
+    structured output should find the key whatever the check decided, holding
+    what the robot said or nothing at all.
+    """
+    healthy = healthy_context()
+    broken = CheckContext(
+        daemon=FakeDaemon(
+            info=DaemonInfo(responding=False),
+            installed=InstalledApplication(installed=False),
+        ),
+    )
+
+    for context in (healthy, broken):
+        assert "daemon_version" in (await probes.daemon_reachable(context)).detail
+        assert (
+            "application_version"
+            in (await probes.application_installed(context)).detail
+        )

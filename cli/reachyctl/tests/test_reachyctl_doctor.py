@@ -36,7 +36,13 @@ from reachy_session_client import (
     ConnectionFailedError,
     Credential,
 )
-from reachyctl.doctor import DoctorPlan, execute, load_intent, report_for
+from reachyctl.doctor import (
+    DoctorPlan,
+    _configuration,
+    execute,
+    load_intent,
+    report_for,
+)
 from reachyctl.errors import ConfigurationError
 from reachyctl.exits import ExitCode
 from reachyctl.output import OutputFormat
@@ -219,12 +225,37 @@ def test_a_configuration_that_is_not_an_object_is_refused() -> None:
         _load(json.dumps({"configuration": "wake_word=okay nabu"}))
 
 
-def test_a_setting_that_is_not_a_string_is_refused_without_quoting_it() -> None:
-    """A setting is exactly where a credential ends up, so nothing is echoed."""
-    with pytest.raises(ConfigurationError) as raised:
-        _load(json.dumps({"configuration": {"threshold": 4}}))
+def test_a_setting_that_is_not_a_string_names_the_key_and_not_the_value() -> None:
+    """The asymmetry is the point, and both halves of it are asserted.
 
-    assert "4" not in str(raised.value)
+    A key is a setting's name and is safe to print — without it the message is
+    not actionable on a configuration of any size. A value is exactly where a
+    credential ends up, so only its type is reported.
+    """
+    with pytest.raises(ConfigurationError) as raised:
+        _load(json.dumps({"configuration": {"api_token": "fine", "threshold": 4}}))
+
+    message = str(raised.value)
+    assert "threshold" in message
+    assert "int" in message
+    assert "4" not in message
+
+
+def test_a_setting_name_that_is_not_a_string_is_reported_by_its_type() -> None:
+    """An object of any kind could be there, and its `repr` is not vouched for.
+
+    Reached through the private helper on purpose: `json.loads` only ever
+    produces string keys, so this guard is unreachable through the document an
+    operator writes. It is the shape of the function that is being pinned, not
+    a path JSON can take — and a message that interpolated an arbitrary object
+    would be a leak waiting for the first caller that is not `json.loads`.
+    """
+    with pytest.raises(ConfigurationError) as raised:
+        _configuration({7: "value"}, DOCUMENT)
+
+    message = str(raised.value)
+    assert "int" in message
+    assert "7" not in message
 
 
 def test_an_identity_that_is_empty_is_refused() -> None:
@@ -233,10 +264,15 @@ def test_an_identity_that_is_empty_is_refused() -> None:
         _load(json.dumps({"announced_identity": ""}))
 
 
-def test_an_identity_that_is_not_a_string_is_refused() -> None:
+def test_an_identity_that_is_not_a_string_is_reported_by_its_type() -> None:
     """A number would compare unequal to whatever the satellite announces."""
-    with pytest.raises(ConfigurationError, match="non-empty string"):
+    with pytest.raises(ConfigurationError) as raised:
         _load(json.dumps({"announced_identity": 7}))
+
+    message = str(raised.value)
+    assert "non-empty string" in message
+    assert "type int" in message
+    assert "7" not in message
 
 
 def test_a_declaration_that_cannot_be_read_says_why() -> None:

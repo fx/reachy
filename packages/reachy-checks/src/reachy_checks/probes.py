@@ -47,26 +47,31 @@ async def daemon_reachable(context: CheckContext) -> Finding:
         What was found.
     """
     info = await context.require_daemon().ping()
+    detail: dict[str, object] = {"daemon_version": info.version or None}
     if not info.responding:
         return Finding.failed(
             f"the robot daemon did not answer: {info.complaint}"
             if info.complaint
             else "the robot daemon did not answer",
+            detail,
         )
     return Finding.passed(
         f"the robot daemon answered, running {info.version or 'an unnamed build'}",
-        {"daemon_version": info.version or None},
+        detail,
     )
 
 
 async def application_installed(context: CheckContext) -> Finding:
     """Ask whether the satellite is installed, and at what version.
 
-    The version is reported on the passing path as well as the failing one.
+    The version is reported when the check *passes*, not only when it fails.
     The predecessor's most expensive deployment failure was a package that
     installed successfully into an environment the running daemon was not
     using, which looks identical to success unless something says out loud
     which version is actually there.
+
+    The field is carried on every path, empty when nothing is installed, so a
+    script reading it does not have to know which outcome it is looking at.
 
     Args:
         context: What the run was given.
@@ -75,16 +80,18 @@ async def application_installed(context: CheckContext) -> Finding:
         What was found.
     """
     installed = await context.require_daemon().installed_application()
+    detail: dict[str, object] = {"application_version": installed.version or None}
     if not installed.installed:
         return Finding.failed(
             f"the application is not installed on the robot: {installed.complaint}"
             if installed.complaint
             else "the application is not installed on the robot",
+            detail,
         )
     return Finding.passed(
         f"the application is installed at version "
         f"{installed.version or 'an unnamed build'}",
-        {"application_version": installed.version or None},
+        detail,
     )
 
 

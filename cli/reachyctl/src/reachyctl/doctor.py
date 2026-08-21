@@ -151,9 +151,10 @@ def load_intent(
     Raises:
         ConfigurationError: If the file cannot be read, is not JSON, is not an
             object, carries a key this does not understand, or holds a
-            configuration that is not a mapping of strings to strings. None of
-            the messages quotes a value it read: a setting is exactly where a
-            credential ends up.
+            configuration that is not a mapping of strings to strings. A
+            message may name a setting's key and never names what that setting
+            holds: a key is a name, and a value is exactly where a credential
+            ends up.
     """
     try:
         content = read(path)
@@ -200,8 +201,13 @@ def _configuration(value: object, path: Path) -> Mapping[str, str]:
         The settings by name.
 
     Raises:
-        ConfigurationError: If it is not a mapping of strings to strings. Only
-            the offending key is named, never what it holds.
+        ConfigurationError: If it is not a mapping of strings to strings. The
+            offending key is named and its value never is — a key is a
+            setting's *name* and is safe to print, where a value is exactly
+            where a credential ends up. A key that is not a string is reported
+            by its type rather than by itself, because an object of any kind at
+            all could be there and its `repr` is not something this message can
+            vouch for.
     """
     if not isinstance(value, dict):
         message = (
@@ -212,10 +218,21 @@ def _configuration(value: object, path: Path) -> Mapping[str, str]:
         raise ConfigurationError(message)
     settings: dict[str, str] = {}
     for name, setting in value.items():
-        if not isinstance(name, str) or not isinstance(setting, str):
+        if not isinstance(name, str):
             message = (
-                f"the intent document {path} declares a setting that is not a "
-                f"string; every setting name and value must be one"
+                f"the intent document {path} declares a setting name of type "
+                f"{type(name).__name__}; every setting name must be a string"
+            )
+            raise ConfigurationError(message)
+        if not isinstance(setting, str):
+            # The name is quoted and the value is not, and the asymmetry is the
+            # point: naming which setting is wrong is what makes the message
+            # actionable on a configuration of any size, and printing what it
+            # holds is how a credential reaches the output.
+            message = (
+                f"the intent document {path} declares the setting {name!r} "
+                f"with a value of type {type(setting).__name__}; every setting "
+                f"value must be a string"
             )
             raise ConfigurationError(message)
         settings[name] = setting
@@ -238,9 +255,12 @@ def _identity(value: object, path: Path) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str) or not value:
+        # The type rather than the value, for the same reason as a setting
+        # name that is not a string: what is there could be any object at all.
         message = (
             f"the intent document {path} declares an announced identity that "
-            f"is not a non-empty string"
+            f"is not a non-empty string (it is of type "
+            f"{type(value).__name__})"
         )
         raise ConfigurationError(message)
     return value
