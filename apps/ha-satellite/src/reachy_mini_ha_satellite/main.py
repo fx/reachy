@@ -735,6 +735,14 @@ class EsphomeService:
             activations: What fired, already filtered by the mute switch and the
                 refractory window.
         """
+        if not self._running:
+            # Shutdown has begun. REQ-050 asks for movement stopped and the
+            # media interface released, and a wake word queued a moment before
+            # the signal would undo neither of those but would move the
+            # pipeline's state and write to a transport that is closing. The
+            # last word spoken to a robot being shut down is not a
+            # conversation.
+            return
         satellite = self._state.satellite
         if satellite is None:
             # The models ran; there is simply nobody to tell.

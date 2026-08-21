@@ -753,6 +753,25 @@ class TestTheWakeWordFeed:
         assert fresh.woken == [model]
 
     @pytest.mark.asyncio
+    async def test_a_wake_word_queued_as_shutdown_begins_is_dropped(self) -> None:
+        """REQ-050: the last word spoken to a robot being shut down is not one.
+
+        The activation is already on the event loop's own queue when the
+        termination signal arrives, so nothing can stop it being *delivered* —
+        what stops it starting a conversation is that the service knows it is
+        closing.
+        """
+        model = FakeMicroWakeWord("okay_nabu", fires=[True])
+        service, _state, satellite = await self._feed(model)
+
+        service.pump()
+        service.detect()
+        await service.aclose()
+        await asyncio.sleep(0)
+
+        assert satellite.woken == []
+
+    @pytest.mark.asyncio
     async def test_it_ends_detection_even_when_the_queue_is_full(self) -> None:
         """A detector that has fallen behind must still be able to stop.
 
