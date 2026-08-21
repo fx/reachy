@@ -779,6 +779,14 @@ class SessionClient:
         rather than by trying each type in turn, which would make an unfamiliar
         capability indistinguishable from a malformed message.
 
+        There is no guard around the parse, and that is an invariant rather than
+        an oversight: every `payload` reaching here came out of `decode_control`,
+        which produces it with `json.dumps` over something `json.loads` had just
+        accepted. It is JSON by construction — including the non-finite numbers
+        `json.dumps` writes unquoted, which `json.loads` reads back. A message
+        that is not JSON never gets this far; it fails in `_decode` and is
+        reported as a protocol error there.
+
         Args:
             payload: The canonical bytes of the result envelope.
 
