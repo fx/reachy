@@ -6,6 +6,8 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
 from session_client_support import CREDENTIAL as SECRET
 from session_client_support import ManualClock
@@ -271,3 +273,58 @@ def test_an_address_that_cannot_be_taken_apart_is_replaced_entirely() -> None:
     assert redact_url("ws://198.51.100.10:not-a-port/v1/session") == REDACTED
     assert redact_url("not an address at all") == REDACTED
     assert redact_url("") == REDACTED
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # RFC 3849 documentation prefix, and the loopback. No address belonging
+        # to anybody's network enters a tracked file — see the root AGENTS.md.
+        "ws://[::1]:8080/v1/session",
+        "wss://[2001:db8::1]/v1/session",
+        "ws://[fe80::1%25eth0]:8080/v1/session",
+        "ws://198.51.100.10:8080/v1/session",
+        "wss://example.invalid/v1/session",
+    ],
+)
+def test_a_rendered_address_parses_back_to_the_one_it_came_from(url: str) -> None:
+    """What this prints is what somebody pastes, so it has to be an address.
+
+    An IPv6 literal is written in brackets and `hostname` strips them, so
+    reassembling without them turns `[::1]:8080` into `::1:8080` — which does
+    not parse. Worse is the case with no port: `[2001:db8::1]` becomes an
+    address whose host reads as `2001`, which parses and is wrong, and sends
+    somebody to debug a host that was never involved.
+
+    Asserted by re-parsing rather than by comparing strings, because the
+    property that matters is that the output is usable, not that it is
+    spelled a particular way.
+
+    Args:
+        url: An address to render and read back.
+    """
+    rendered = redact_url(url)
+
+    was, now = urlsplit(url), urlsplit(rendered)
+    assert now.scheme == was.scheme
+    assert now.hostname == was.hostname
+    assert now.port == was.port
+    assert now.path == was.path
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+def test_redaction_and_bracketing_compose_on_one_address() -> None:
+    """Each is proved alone elsewhere; this is the address that needs both.
+
+    A credential in the user information of an IPv6 address exercises the
+    dropping and the re-bracketing at once, which is where a fix to either one
+    could quietly undo the other.
+    """
+    rendered = redact_url("wss://someone:example-secret@[2001:db8::1]:9000/v1/session")
+
+    assert "example-secret" not in rendered
+    assert "someone" not in rendered
+    assert rendered == "wss://[2001:db8::1]:9000/v1/session"
+    assert urlsplit(rendered).hostname == "2001:db8::1"

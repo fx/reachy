@@ -39,12 +39,19 @@ def redact_url(url: str) -> str:
     ends up in the log line, and something unparseable is exactly the input
     least worth trusting.
 
+    **What comes out has to go back in.** This is what an operator reads when a
+    connection fails, and what `doctor` will build a remediation out of when it
+    arrives in change 0008 — reachyctl REQ-055 requires every failing check to
+    report one. An address that cannot be pasted back is worse than none at
+    all, because it sends somebody to debug a host that was never involved.
+
     Args:
         url: The address, which may never have been validated.
 
     Returns:
         The address reduced to its scheme, authority and path, or a placeholder
-        when it is not an address this can take apart.
+        when it is not an address this can take apart. What is returned parses
+        back to the same host and port.
     """
     try:
         parts = urlsplit(url)
@@ -56,5 +63,14 @@ def redact_url(url: str) -> str:
         return REDACTED
     if not parts.scheme or not host:
         return REDACTED
-    authority = host if port is None else f"{host}:{port}"
+    # `hostname` strips the brackets an IPv6 literal is written in, and they
+    # are not decoration: they are what separates the address from the port.
+    # Put back unbracketed, `[::1]:8080` becomes `::1:8080`, which does not
+    # parse — and `[2001:db8::1]` with no port becomes an address whose host
+    # reads as `2001`, which is worse, because it looks like something.
+    # A colon cannot appear in any other kind of host, so its presence is
+    # exactly the question being asked.
+    authority = f"[{host}]" if ":" in host else host
+    if port is not None:
+        authority = f"{authority}:{port}"
     return f"{parts.scheme}://{authority}{parts.path}"
