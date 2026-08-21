@@ -13,13 +13,24 @@ that apply here.
 
 ## Local rules
 
-- **This is a scaffold.** It has a `pyproject.toml`, this file and an empty
-  package. Do not add implementation ahead of the change that owns it.
-- **Never reimplement the session protocol.** `probe` is a second client of the
-  same contract the groundstation speaks, and it uses the shared session client
-  built on `reachy-contracts`. A second implementation is the drift the
-  contracts package exists to prevent — and the reason this tool stays in
-  Python rather than becoming a compiled binary.
+- **`probe` and `bench` are the commands that exist.** `bench` is a registered
+  name with no body: 0014 gives it one. `doctor` arrives in 0008, and `deploy`,
+  `config` and `app` in 0009. Do not add implementation ahead of the change that
+  owns it.
+- **Never reimplement the session protocol.** `probe` is a second *consumer* of
+  `reachy_session_client`, which holds the one implementation of the robot
+  link's client half and is imported by the robot application too. A second
+  implementation is the drift the contracts package exists to prevent — and the
+  reason this tool stays in Python rather than becoming a compiled binary.
+- **The output conventions are set once, in `output.py` and `exits.py`.** A new
+  command builds a `Report` and returns a `Reporter`'s exit code; it does not
+  print, does not choose a format and does not invent an exit status. Every
+  string leaves through `Reporter`, which scrubs it — that is what makes
+  REQ-059 a rule rather than a habit each command has to remember.
+- **No option ever takes a credential.** An argument is visible in the process
+  list and lands in the shell history. `--credential-file` takes a path, and
+  `REACHYCTL_CREDENTIAL` and `REACHYCTL_CREDENTIAL_FILE` are the other two ways
+  in.
 - **Diagnosis and provisioning agree on what healthy means.** `doctor` asserts
   against a shared check registry, not against its own private list; the Ansible
   verification role asserts the same conditions.

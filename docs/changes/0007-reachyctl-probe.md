@@ -7,7 +7,7 @@ session client that feeds the groundstation live or recorded frames with no
 robot involved.
 
 **Spec:** [reachyctl](../specs/reachyctl/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0003, 0004
 
 ## Motivation
@@ -80,6 +80,9 @@ package to a transport. Either way it is a workspace member, not CLI code — th
 placement decision is deliberately left to implementation, but the constraint
 that there is exactly one implementation is not.
 
+**Decided:** the sibling package, `packages/reachy-session-client`. The
+reasoning is under [Open Questions](#open-questions).
+
 The CLI itself is a thin command layer over it, which is what makes the later
 commands in 0008 and 0009 additive.
 
@@ -110,32 +113,44 @@ commands in 0008 and 0009 additive.
 
 ## Tasks
 
-- [ ] Implement the shared session client
-  - [ ] Connection, credential presentation, capability negotiation
-  - [ ] Frame submission with sequence numbers and monotonic timestamps
-  - [ ] Result handling, including out-of-order and empty results
-  - [ ] Automatic reconnection with bounded growing delay
-  - [ ] Contract tests against the golden fixtures
-- [ ] Create the CLI skeleton
-  - [ ] Command registration, help, version
-  - [ ] Structured-output convention and exit-status convention
-  - [ ] Terminal-aware rendering, non-interactive by default
-  - [ ] Credential loading with redaction on every output path
-- [ ] Implement `probe`
-  - [ ] Recorded-frame source from a directory
-  - [ ] Live-frame source from a local camera
-  - [ ] Per-frame result and timing reporting
-  - [ ] Integration test running `probe` against an in-process groundstation
+- [x] Implement the shared session client
+  - [x] Connection, credential presentation, capability negotiation
+  - [x] Frame submission with sequence numbers and monotonic timestamps
+  - [x] Result handling, including out-of-order and empty results
+  - [x] Automatic reconnection with bounded growing delay
+  - [x] Contract tests against the golden fixtures
+- [x] Create the CLI skeleton
+  - [x] Command registration, help, version
+  - [x] Structured-output convention and exit-status convention
+  - [x] Terminal-aware rendering, non-interactive by default
+  - [x] Credential loading with redaction on every output path
+- [x] Implement `probe`
+  - [x] Recorded-frame source from a directory
+  - [x] Live-frame source from a local camera
+  - [x] Per-frame result and timing reporting
+  - [x] Integration test running `probe` against an in-process groundstation
 
 ## Open Questions
 
-- [ ] Whether the session client ships inside `reachy-contracts` or as its own
-      member. Keeping it with the types avoids a member; separating it keeps a
-      pure data package free of transport dependencies. Current lean: separate
-      member, decided at implementation.
-- [ ] Whether `probe` can record what it receives for later replay. It would
-      make regressions reproducible; it is scope this change does not need.
-      Current lean: defer.
+- [x] **Where the session client lives: its own member,
+      `packages/reachy-session-client` (import name `reachy_session_client`).**
+      The lean was followed. `reachy-contracts` declares one dependency —
+      pydantic — and it is installed on the robot, in the groundstation image
+      and in the CLI wheel alike; a transport dependency there would be
+      installed for every consumer of the types, including the ones that never
+      open a session. The new member depends on `reachy-contracts` and
+      `websockets` and declares no wire type of its own, so the TID253 ban
+      applies to it in full with no per-file ignore.
+- [x] **Whether `probe` records what it receives for later replay: deferred.**
+      The lean was followed and the reason is that the recording half already
+      exists on the other side — `probe --frames` replays a directory, so a
+      recorded frame is reproducible today. What is missing is capturing the
+      *results*, which is only worth building once something compares two runs;
+      that belongs with the benchmark suite in
+      [0014](./0014-benchmarks-and-gates.md), which is where a stored baseline is
+      already a requirement. Nothing in this change forecloses it: a result is
+      already a contract type with canonical bytes, so recording one is writing
+      `to_wire` to a file.
 
 ## References
 

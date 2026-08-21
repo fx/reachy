@@ -1,0 +1,26 @@
+[project]
+name = "reachy-session-client"
+version = "0.1.0"
+description = "The one client implementation of the robot link session protocol"
+requires-python = ">=3.12"
+dependencies = [
+    # The wire vocabulary. Declared once, in the contracts package, and imported
+    # here rather than restated — see the root AGENTS.md.
+    "reachy-contracts",
+    # The transport the session runs over, as a client. The groundstation serves
+    # the same library through uvicorn, so both ends of the link are the same
+    # implementation of the same protocol.
+    "websockets>=13.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reachy_session_client"]
+
+# By path, never by version range: there is no published reachy-contracts a
+# resolver could pick instead of the one in this tree.
+[tool.uv.sources]
+reachy-contracts = { workspace = true }

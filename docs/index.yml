@@ -83,7 +83,7 @@ changes:
     path: changes/0007-reachyctl-probe.md
     description: CLI skeleton and the shared session client behind probe
     spec: reachyctl
-    status: draft
+    status: complete
     depends_on: ["0003", "0004"]
   - id: "0008"
     name: reachyctl-doctor

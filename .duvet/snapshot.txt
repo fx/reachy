@@ -108,6 +108,19 @@ SPECIFICATION: [Perception](docs/specs/perception/index.md)
     TEXT[!MUST,implementation]: The confidence threshold for each detector MUST be settable without rebuilding
     TEXT[!MUST,implementation]: the artifact.
 
+SPECIFICATION: [reachyctl](docs/specs/reachyctl/index.md)
+  SECTION: [REQ-057: The probe exercises the real session protocol](#req-057-the-probe-exercises-the-real-session-protocol)
+    TEXT[implementation]: The probe command MUST establish a session using the same protocol
+    TEXT[implementation]: implementation the robot application uses.
+
+  SECTION: [REQ-058: Output is machine-readable on request](#req-058-output-is-machine-readable-on-request)
+    TEXT[implementation]: Every command that reports results MUST offer a structured output format
+    TEXT[implementation]: suitable for consumption by another program.
+
+  SECTION: [REQ-059: Secrets are never written to output](#req-059-secrets-are-never-written-to-output)
+    TEXT[implementation]: The tool MUST NOT write credentials to its output, its logs, or its error
+    TEXT[implementation]: messages.
+
 SPECIFICATION: [Robot Link](docs/specs/robot-link/index.md)
   SECTION: [REQ-010: The robot is a client only](#req-010-the-robot-is-a-client-only)
     TEXT[implementation]: The robot MUST open the session outbound to the groundstation, and the
@@ -138,6 +151,14 @@ SPECIFICATION: [Robot Link](docs/specs/robot-link/index.md)
     TEXT[implementation]: Every result MUST carry the capture timestamp of the frame it derives from,
     TEXT[implementation]: byte-for-byte as the capturing side supplied it, so that the capturing side can
     TEXT[implementation]: compute the result's age against the same clock that produced it.
+
+  SECTION: [REQ-017: Stale results stop being acted on](#req-017-stale-results-stop-being-acted-on)
+    TEXT[implementation]: A consumer MUST stop acting on results once none has arrived within a configured
+    TEXT[implementation]: staleness window.
+
+  SECTION: [REQ-018: Reconnection is automatic and rate-limited](#req-018-reconnection-is-automatic-and-rate-limited)
+    TEXT[implementation]: A client MUST re-establish a dropped session automatically, and MUST increase
+    TEXT[implementation]: the delay between successive failed attempts up to a bound.
 
   SECTION: [REQ-019: Sessions are authenticated](#req-019-sessions-are-authenticated)
     TEXT[implementation]: The groundstation MUST reject a session whose client does not present a valid
