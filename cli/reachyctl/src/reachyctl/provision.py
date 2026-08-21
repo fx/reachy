@@ -243,7 +243,10 @@ def checked_extra_vars(values: Sequence[str]) -> tuple[str, ...]:
     inline = [
         position
         for position, value in enumerate(values, start=1)
-        if not value.startswith(_FILE_PREFIX)
+        # `@` on its own is the prefix and no path. Refused here rather than
+        # forwarded, so the operator gets this command's message instead of
+        # Ansible's, several seconds later.
+        if not value.startswith(_FILE_PREFIX) or len(value) == len(_FILE_PREFIX)
     ]
     if inline:
         positions = ", ".join(str(position) for position in inline)
@@ -348,8 +351,9 @@ def execute(
         The exit status.
 
     Raises:
-        CommandError: If `ansible-playbook` is not installed. Its own failure
-            rather than a `FAILURE`, because nothing was asked of any robot.
+        ConfigurationError: If `ansible-playbook` is not installed. Nothing was
+            asked of any robot, so this is not a diagnosis of one and a script
+            must not read it as a `FAILURE`.
     """
     if which(_EXECUTABLE) is None:
         message = (

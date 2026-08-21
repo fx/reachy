@@ -67,6 +67,15 @@ DECLARATIONS: Final[tuple[Mapping[str, str], ...]] = (
     {"A_SETTING": r'both \ and " together'},
     {"A_SETTING": r"trailing\\"},
     {"A_SETTING": "ünïcödé and 日本語"},
+    # systemd expands `%` specifiers in an `Environment=` value, so these are
+    # the cases where "written" and "in force" come apart if the format does
+    # not carry the percent itself.
+    {"A_SETTING": "one%percent"},
+    {"A_SETTING": "%"},
+    {"A_SETTING": "%%"},
+    {"A_SETTING": "ws://192.0.2.10:8000/v1/session?token=a%20b"},
+    {"A_SETTING": "%H"},
+    {"A_SETTING": r'every%thing \ at " once'},
     {"C_SETTING": "3", "A_SETTING": "1", "B_SETTING": "2"},
 )
 
@@ -156,6 +165,11 @@ def test_both_implementations_agree_on_the_literal_parts() -> None:
         'Environment="A_SETTING=1"\n',
         # A directive that is not an assignment at all.
         "ExecStart=/bin/true",
+        # A bare percent, which systemd would expand as a specifier. This
+        # format writes `%%`, so a line carrying one is not one it wrote.
+        'Environment="A_SETTING=one%percent"',
+        # A percent in the NAME, which the escaping never produces either.
+        'Environment="A%SETTING=value"',
     ],
 )
 def test_both_readers_refuse_the_same_files(content: str) -> None:

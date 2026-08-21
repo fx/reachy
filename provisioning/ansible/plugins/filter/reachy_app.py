@@ -28,12 +28,34 @@ from typing import TYPE_CHECKING, Any, Final
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-__all__ = ["FilterModule", "interpreter", "wheel_release"]
+__all__ = ["FilterModule", "distribution_name", "interpreter", "wheel_release"]
+
+# PEP 503: a distribution name is compared with runs of `-`, `_` and `.` folded
+# to a single `-`, lowercased. A wheel's file name carries the *escaped* form,
+# where every unsafe character became an underscore, so `example.tool` and
+# `example-tool` both arrive as `example_tool` and neither is spelled the way
+# the declaration spells it. Comparing the two normalised is what makes the role
+# accept a wheel for the distribution it was told to install rather than
+# refusing it over punctuation.
+_UNNORMALISED: Final = re.compile(r"[-_.]+")
 
 # systemd renders a command as `{ path=/usr/bin/x ; argv[]=... ; ... }`, one such
 # block per `ExecStart=` the unit declares. The first block's path is the
 # interpreter the daemon runs.
 _EXEC_PATH: Final = re.compile(r"path=(\S+)")
+
+
+def distribution_name(name: str) -> str:
+    """Fold a distribution name the way everything that compares them folds it.
+
+    Args:
+        name: The name as a declaration or a wheel's file name spells it.
+
+    Returns:
+        The PEP 503 normalised form, which is also what
+        `importlib.metadata.version` and `pip` answer to.
+    """
+    return _UNNORMALISED.sub("-", name).lower()
 
 
 def interpreter(exec_start: str, fallback: str) -> str:
@@ -81,10 +103,9 @@ def wheel_release(file_name: str) -> dict[str, Any]:
         file_name: The wheel's file name, with no directory part.
 
     Returns:
-        A record carrying `ok`, the `distribution` in its normalised form —
-        underscores folded to hyphens and lowercased, which is what
-        `importlib.metadata` answers to — the `version`, and a `complaint` when
-        the name is not a wheel's.
+        A record carrying `ok`, the `distribution` in its PEP 503 normalised
+        form — which is what `importlib.metadata` and `pip` answer to — the
+        `version`, and a `complaint` when the name is not a wheel's.
     """
     match = _WHEEL_NAME.match(file_name)
     if match is None:
@@ -99,7 +120,7 @@ def wheel_release(file_name: str) -> dict[str, Any]:
         }
     return {
         "ok": True,
-        "distribution": match.group("distribution").replace("_", "-").lower(),
+        "distribution": distribution_name(match.group("distribution")),
         "version": match.group("version"),
         "complaint": "",
     }
@@ -115,6 +136,7 @@ class FilterModule:
             The filters by the name a template writes.
         """
         return {
+            "reachy_distribution_name": distribution_name,
             "reachy_interpreter": interpreter,
             "reachy_wheel_release": wheel_release,
         }

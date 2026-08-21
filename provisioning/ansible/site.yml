@@ -58,11 +58,23 @@
       tags:
         - always
 
+    # `always`, and that is the whole of REQ-066 rather than a convenience. A
+    # tagged apply is still a provisioning run: `--tags daemon_env` restarts the
+    # daemon and `--tags app_install` installs a wheel, and either can leave a
+    # robot that does not work. A verification that ran only when it was asked
+    # for would be one nobody asks for on the run that needed it. The `verify`
+    # tag stays so that the assertion can be run **alone**, which is what an
+    # operator wants after fixing something by hand.
+    #
+    # It reads and changes nothing, so running it always costs a few round trips
+    # and no risk — and it declines to assert anything under `--check`, where
+    # the robot has deliberately not been changed.
     - name: Assert the robot reached a working end state
       ansible.builtin.include_role:
         name: verify
         apply:
           tags:
-            - verify
+            - always
       tags:
+        - always
         - verify

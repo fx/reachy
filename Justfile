@@ -1104,7 +1104,23 @@ provision-target-up:
     # Host-key verification stays on, exactly as it does against a robot. The
     # container's key is new every run, so the run records it rather than
     # switching the check off — there is no option in the playbook that does.
-    ssh-keyscan -p "$port" 127.0.0.1 > '{{ target_dir }}/known_hosts' 2>/dev/null
+    #
+    # Retried, and the file checked for content. `ssh-keyscan` exits 0 whether or
+    # not it collected anything — its own documentation says the status only
+    # reports usage errors — and `systemctl is-system-running` says the boot
+    # finished, not that sshd is accepting. An empty known_hosts would fail every
+    # later run on host-key verification, several minutes and one confusing
+    # message away from the recipe that produced it.
+    for _ in $(seq 1 30); do
+        ssh-keyscan -p "$port" 127.0.0.1 > '{{ target_dir }}/known_hosts' 2>/dev/null || true
+        [ -s '{{ target_dir }}/known_hosts' ] && break
+        sleep 1
+    done
+    if [ ! -s '{{ target_dir }}/known_hosts' ]; then
+        echo "just provision-target-up: no host key came back from the target on port $port, so nothing could verify it" >&2
+        docker logs '{{ target_name }}' >&2 || true
+        exit 1
+    fi
 
     # A real wheel with nothing in it, built in memory by the helper `reachyctl`
     # already uses for the same purpose. Installing it is what exercises the
@@ -1235,7 +1251,7 @@ provision-idempotency: provision-target-up
                 exit 1
             }
             if (total["changed"] > 0) {
-                printf "just provision-idempotency: the second application reported changed=%d; provisioning REQ-060 requires it to change nothing\n", total["changed"] > "/dev/stderr"
+                printf "just provision-idempotency: the second application reported changed=%d. This gate is provisioning REQ-061, and the property it enforces is REQ-060: a run against an already-provisioned robot changes nothing. Find the task the recap counted and make it compare before it writes\n", total["changed"] > "/dev/stderr"
                 exit 1
             }
             printf "the second application changed nothing across %d host(s)\n", hosts

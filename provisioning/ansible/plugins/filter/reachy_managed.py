@@ -22,6 +22,13 @@ REQ-063, and it is what makes a setting withdrawn from the declaration leave the
 robot rather than linger. Pruning is therefore not a step in the role — it is
 what rendering the whole file *is*.
 
+**A percent is escaped, and that one is not about quoting.** systemd performs
+specifier expansion on an `Environment=` value, so `%H` becomes the host name and
+an *unknown* specifier makes systemd drop the whole assignment without failing
+the unit. A percent-encoded groundstation URL is therefore not a setting that
+arrives wrong, it is a setting that does not arrive, on a robot that started
+cleanly. `_escape` writes `%%`.
+
 **Absent, empty and unreadable are three states.** `region_state` answers with
 the one it found, and an existing empty file belongs with "something else wrote
 this", not with "nothing has been applied": this format never writes an empty
@@ -98,17 +105,19 @@ HEADER: Final = (
 
 # `Environment="NAME=value"`, with the whole assignment inside one pair of double
 # quotes, and the value written the way `_escape` writes one: anything that is
-# neither a quote nor a backslash, or one of the two escapes this format
+# not a quote, a backslash or a percent, or one of the three escapes this format
 # produces. Deliberately not a permissive `(.*)` — a pattern that accepted an
-# unbalanced quote or an escape systemd reads differently would report a line
-# this format could never have written as a setting the role owns, after which
-# the next run rewrites somebody else's file.
+# unbalanced quote, an escape systemd reads differently, or a bare percent
+# systemd would expand as a specifier would report a line this format could
+# never have written as a setting the role owns, after which the next run
+# rewrites somebody else's file.
 _ENVIRONMENT_LINE: Final = re.compile(
-    r'^Environment="([^="\\]+)=((?:[^"\\]|\\["\\])*)"$',
+    r'^Environment="([^="\\%]+)=((?:[^"\\%]|\\["\\]|%%)*)"$',
 )
 
-# The two escapes `_escape` writes, and the only two the pattern above admits.
-_ESCAPED: Final = re.compile(r'\\(["\\])')
+# The three escapes `_escape` writes, and the only three the pattern above
+# admits. A lone `%` is deliberately not among them: see `_escape`.
+_ESCAPED: Final = re.compile(r'\\(["\\])|%(%)')
 
 # What `region_state` answers with. Three states, because absent, ours and
 # somebody else's call for three different actions.
@@ -358,10 +367,20 @@ def _unreadable(reason: str) -> dict[str, Any]:
 def _escape(value: str) -> str:
     """Make a value safe inside a double-quoted systemd assignment.
 
-    systemd reads a backslash inside a quoted string as an escape and a double
-    quote as the end of the string, so both are escaped — the backslash first,
-    or the escape this adds would itself be escaped by the pass that follows.
-    Nothing else is escaped.
+    Two different mechanisms, and the second is the one that bites silently.
+
+    systemd's string lexer reads a backslash inside a quoted string as an escape
+    and a double quote as the end of the string, so both are escaped — the
+    backslash first, or the escape this adds would itself be escaped by the pass
+    that follows.
+
+    Separately, systemd performs **specifier expansion** on an `Environment=`
+    value: `%H` becomes the host name, `%%` is a literal percent, and an unknown
+    specifier makes systemd drop the whole assignment **without failing the
+    unit**. A percent-encoded groundstation URL is therefore not a setting that
+    arrives wrong, it is a setting that does not arrive at all, on a robot that
+    started cleanly — the silently-inert configuration this stack is written
+    against. So the percent is escaped here rather than left to systemd.
 
     Args:
         value: The setting's value.
@@ -369,15 +388,22 @@ def _escape(value: str) -> str:
     Returns:
         The value as it appears between the quotes.
     """
-    return value.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    # After the other two, and independent of them: neither introduces a
+    # percent, so this cannot double-escape one they wrote.
+    return escaped.replace("%", "%%")
 
 
 def _unescape(value: str) -> str:
     """Read a value back out of a double-quoted systemd assignment.
 
     Total rather than defensive: `_ENVIRONMENT_LINE` has already refused any line
-    whose backslashes are not the two escapes `_escape` writes, so there is no
-    dangling escape to decide what to do with.
+    whose backslashes or percents are not the escapes `_escape` writes, so there
+    is no dangling escape to decide what to do with.
+
+    One pass over the three alternatives rather than three passes, so that a
+    value carrying two adjacent escapes cannot have the second pass rewrite what
+    the first produced.
 
     Args:
         value: What appeared between the quotes.
@@ -385,7 +411,9 @@ def _unescape(value: str) -> str:
     Returns:
         The setting's value.
     """
-    return _ESCAPED.sub(r"\1", value)
+    # Exactly one group matches per occurrence; an unmatched group substitutes
+    # as empty.
+    return _ESCAPED.sub(r"\1\2", value)
 
 
 class FilterModule:

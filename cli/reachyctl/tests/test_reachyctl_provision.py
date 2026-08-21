@@ -283,7 +283,6 @@ def test_a_run_against_a_robot_that_is_not_there_exits_unreachable() -> None:
         "reachy_groundstation_credential=example-secret",
         "reachy_app_distribution=example",
         '{"reachy_groundstation_credential": "example-secret"}',
-        "",
     ],
 )
 def test_extra_vars_takes_a_path_and_refuses_a_value(value: str) -> None:
@@ -297,7 +296,18 @@ def test_extra_vars_takes_a_path_and_refuses_a_value(value: str) -> None:
 
     # The refusal names the position and never the value, because the reason for
     # refusing it is that it may be a credential.
-    assert value not in str(refusal.value) or not value
+    assert value not in str(refusal.value)
+
+
+@pytest.mark.parametrize("value", ["", "@"])
+def test_extra_vars_refuses_a_prefix_with_no_path_behind_it(value: str) -> None:
+    """Forwarded, these fail inside Ansible seconds later and with its message.
+
+    Args:
+        value: What the operator wrote.
+    """
+    with pytest.raises(ConfigurationError, match="not a path"):
+        checked_extra_vars([value])
 
 
 def test_extra_vars_accepts_a_variables_file() -> None:

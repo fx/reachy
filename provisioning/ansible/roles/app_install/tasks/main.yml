@@ -28,10 +28,13 @@
     - name: Refuse anything but exactly one wheel source
       ansible.builtin.fail:
         msg: >-
-          reachy_app_wheel_path and reachy_app_wheel_url name two wheels; give
-          exactly one. Refused rather than resolved by precedence, because a run
-          that quietly ignored half of what it was told is a run nobody can
-          trust — and this one ends by asserting a version.
+          {{ reachy_app_distribution }} is declared, and exactly one of
+          reachy_app_wheel_path and reachy_app_wheel_url must say where its
+          wheel is — {{ 'both are set' if reachy_app_wheel_path | length > 0
+          else 'neither is set' }}. Two sources are refused rather than resolved
+          by precedence, because a run that quietly ignored half of what it was
+          told is a run nobody can trust, and this one ends by asserting a
+          version.
       when: >-
         (reachy_app_wheel_path | length > 0)
         == (reachy_app_wheel_url | length > 0)
@@ -64,7 +67,13 @@
           {{ reachy_app_file }} carries {{ reachy_app_release.distribution }},
           and {{ reachy_app_distribution }} is declared. Installing it would
           leave the robot running an application nothing here asked for.
-      when: reachy_app_release.distribution != reachy_app_distribution
+      # Both sides normalised, because a wheel's file name carries the escaped
+      # form: `example.tool` and `example-tool` both arrive as `example_tool`,
+      # and comparing either against the declaration verbatim would refuse a
+      # wheel for the distribution the role was told to install.
+      when: >-
+        reachy_app_release.distribution
+        != (reachy_app_distribution | reachy_distribution_name)
 
     # A wheel fetched over the network is installed as root into the
     # environment the daemon runs, so what arrived has to be the artifact that

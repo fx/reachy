@@ -112,6 +112,21 @@ permanently. One self-contained normative sentence per requirement section, not
 a bullet list, because an annotation quotes it byte for byte. Requirements
 describe observable behaviour and name no library APIs or file layout.
 
+### A placeholder credential in a test or a recipe is not a credential
+
+`example-credential`, `leaked`, the `CREDENTIAL` constant in
+`cli/reachyctl/tests/support/reachyctl_support.py`, and the value
+`just image-verify` gives a throwaway container are **placeholders**, and this
+repository's rule prescribes exactly that: examples use RFC 5737 reserved ranges
+and placeholder names. They belong to nobody's environment, no scanner can find
+them anywhere but here, and a test that generated a random one instead would be
+a test whose failure nobody could reproduce. Do not report one as a leaked
+credential, and do not report it under "a self-reporting configuration surface
+reports a secret as set or unset" — that rule governs what a **component** prints
+about its own configuration at run time, not what a test hands a function as
+input. A real value belonging to somebody's environment is still a finding,
+wherever it appears.
+
 ### This repository is public
 
 Reject any change that puts an identifier belonging to **someone's environment

@@ -10,6 +10,13 @@ Documentation=file:///opt/reachy/README
 [Service]
 Type=simple
 ExecStart=/opt/reachy/venv/bin/python -m reachy_mini.daemon
+# `systemctl restart` returns when the unit is active, and for Type=simple that
+# is the moment the process was exec'd rather than the moment it is ready. The
+# verification role reads the file this daemon writes at start, so without this
+# the gate would race the interpreter's own startup and go red intermittently
+# with no defect behind it. ExecStartPost delays "active" until the daemon has
+# recorded what it picked up.
+ExecStartPost=/bin/sh -c 'for _ in $(seq 1 100); do [ -s /run/reachy-mini/state.json ] && exit 0; sleep 0.05; done; exit 1'
 Restart=always
 RestartSec=1
 

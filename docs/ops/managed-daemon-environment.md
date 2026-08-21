@@ -69,8 +69,20 @@ five header lines, `[Service]`, the two markers, and the form of an
   [REQ-060](../specs/provisioning/index.md#req-060-applying-twice-changes-nothing-the-second-time)
   a property of the format rather than something each implementation has to
   remember.
-- **Inside the quotes, `\` becomes `\\` and `"` becomes `\"`.** The backslash is
-  escaped first. Nothing else is escaped.
+- **Inside the quotes, `\` becomes `\\`, `"` becomes `\"`, and `%` becomes
+  `%%`.** The backslash is escaped first. Nothing else is escaped.
+
+  The first two are systemd's string lexer: a backslash is an escape and a
+  double quote ends the string. The third is a different mechanism and is the
+  one that bites silently. systemd performs **specifier expansion** on an
+  `Environment=` value, so `%H` becomes the host name and `%%` is the literal
+  percent — and an unknown specifier makes systemd **drop the whole assignment
+  without failing**. A percent-encoded URL such as
+  `ws://192.0.2.10:8000/v1/session?token=a%20b` is therefore not a setting that
+  arrives wrong; it is a setting that does not arrive, on a robot whose unit
+  loaded cleanly. That is the silently-inert configuration this whole stack is
+  written against, so the format carries the percent rather than leaving it to
+  systemd.
 - **A value may not contain a control character.** A line break would end the
   directive it is on, and the rest of the value would become a directive of its
   own. `reachy_contracts.validate_settings` refuses one before anything is
@@ -79,7 +91,7 @@ five header lines, `[Service]`, the two markers, and the form of an
   form.** `reachyctl` parses the region and then re-renders it: unless the result
   is the file it was given, byte for byte, the file is refused. So every rule on
   this page is load-bearing for a reader as well as a writer — the name order,
-  the escaping, the `\n` line endings, one line per setting, no blank lines
+  the escaping — including the percent — the `\n` line endings, one line per setting, no blank lines
   inside the region, the exact header. **A `daemon_env` role whose output differs
   from this page in any respect produces a region `reachyctl` will refuse**, and
   that is the intended direction: a reader that tolerated a disagreement would

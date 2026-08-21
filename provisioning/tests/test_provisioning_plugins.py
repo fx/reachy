@@ -303,3 +303,32 @@ def test_a_version_answer_that_cannot_be_read_says_nothing_is_installed(
     )
 
     assert not robot.application.installed
+
+
+@pytest.mark.parametrize(
+    ("declared", "in_a_wheel_name"),
+    [
+        ("example-tool", "example_tool"),
+        ("example.tool", "example_tool"),
+        ("Example_Tool", "example__TOOL"),
+        ("reachy-mini-ha-satellite", "reachy_mini_ha_satellite"),
+    ],
+)
+def test_a_declaration_and_a_wheel_name_compare_equal_after_normalising(
+    declared: str,
+    in_a_wheel_name: str,
+) -> None:
+    """A wheel's file name carries the escaped form, so neither spells the other.
+
+    `example.tool` and `example-tool` both arrive as `example_tool`. Comparing
+    either against the declaration verbatim would refuse a wheel for the
+    distribution the role was told to install.
+
+    Args:
+        declared: The name as a declaration spells it.
+        in_a_wheel_name: The name as a wheel's file name spells it.
+    """
+    release = reachy_app.wheel_release(f"{in_a_wheel_name}-1.0-py3-none-any.whl")
+
+    assert release["ok"]
+    assert release["distribution"] == reachy_app.distribution_name(declared)

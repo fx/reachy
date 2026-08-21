@@ -65,7 +65,15 @@ def main() -> int:
     """
     state = Path(STATE_PATH)
     state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text(json.dumps({"applications": snapshot()}), encoding="utf-8")
+    # Written beside and renamed into place. `write_text` truncates first, and
+    # the verification role reads this same file moments after the daemon
+    # restarts — a read landing in that window would get an empty or partial
+    # document, and the gate would go red intermittently with no defect behind
+    # it. A rename within one directory is atomic, so a reader sees the old
+    # document or the new one.
+    pending = state.with_name(f"{state.name}.pending")
+    pending.write_text(json.dumps({"applications": snapshot()}), encoding="utf-8")
+    pending.replace(state)
     signal.pause()
     return 0
 
