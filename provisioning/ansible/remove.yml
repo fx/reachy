@@ -1,0 +1,201 @@
+---
+# The supported way back to a stock robot.
+#
+#     ansible-playbook remove.yml
+#     ansible-playbook remove.yml --check      # preview the removal
+#
+# It removes what provisioning applied and nothing else: the managed drop-in,
+# every application provisioning installed, and the staging directory. The
+# vendor's daemon, its unit and its environment are left exactly as the image
+# shipped them — uninstalling the application environment would take the daemon
+# with it, which is the opposite of restoring stock behaviour.
+#
+# **This playbook has no per-concern tags, and `site.yml` does.** Applying one
+# concern without the others is how the playbook is usable during development;
+# *removing* one is not a supported path — REQ-064 asks for a path that removes
+# everything it applied, and half a removal leaves a robot in a state nothing
+# describes. It also has one practical consequence worth knowing: the daemon
+# restart is a handler belonging to `daemon_env`, and a run that skipped that
+# role would notify a handler nothing had defined.
+#
+# The last play is what makes this a claim worth making rather than a hope: it
+# reads the robot back and requires the drop-in to be gone, the declared settings
+# to be out of the unit's environment, and everything the removal identified as
+# provisioning's to be absent from the interpreter the daemon runs.
+
+#:= docs/specs/provisioning/index.md#req-064-the-robot-can-be-returned-to-stock-behaviour
+#:% Provisioning MUST offer a supported path that removes everything it applied and
+#:% restores the robot's stock behaviour.
+- name: Remove everything provisioning applied
+  hosts: reachy
+  become: true
+  gather_facts: false
+
+  tasks:
+    # First, because it is what makes the robot stock again — and because its
+    # handler is the one both removals notify, so it has to have been loaded
+    # before anything notifies it.
+    - name: Remove the managed daemon environment
+      ansible.builtin.include_role:
+        name: daemon_env
+        tasks_from: remove
+
+    - name: Remove everything provisioning installed
+      ansible.builtin.include_role:
+        name: app_install
+        tasks_from: remove
+
+    - name: Restart the daemon so it re-reads a stock environment
+      ansible.builtin.meta: flush_handlers
+
+- name: Assert the robot behaves as it did before provisioning
+  hosts: reachy
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Report that the removal was a preview
+      ansible.builtin.debug:
+        msg: >-
+          This is a preview, so nothing was removed and stock behaviour has not
+          been asserted. Run without --check to remove and assert.
+      when: ansible_check_mode
+
+    # In a preview nothing was removed, so asserting that everything is gone
+    # would fail every time — reporting a robot as un-restorable precisely when
+    # the operator asked what restoring it would do. REQ-065 asks for a preview
+    # that changes nothing, and a preview that fails is not one.
+    - name: Assert stock behaviour
+      when: not ansible_check_mode
+      block:
+        # Set by `app_install`'s removal, which is where the set is derived.
+        # Defaulted here because `--tags daemon_env` skips that role, and a run
+        # that never looked must say it never looked rather than claim nothing
+        # was there.
+        - name: Take the set of distributions the removal identified
+          ansible.builtin.set_fact:
+            reachy_removed_applications: >-
+              {{ reachy_remove_distributions | default([], true) }}
+          check_mode: false
+
+        - name: Look for the managed drop-in
+          ansible.builtin.stat:
+            path: "{{ reachy_drop_in }}"
+          register: reachy_removed_stat
+          changed_when: false
+          check_mode: false
+
+        - name: Require the managed drop-in to be gone
+          ansible.builtin.fail:
+            msg: >-
+              {{ reachy_drop_in }} is still on the robot, so the managed
+              configuration was not removed.
+          when: reachy_removed_stat.stat.exists
+
+        - name: Ask systemd what the daemon unit is running with now
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - show
+              - "{{ reachy_daemon_unit }}"
+              - --property=ExecStart
+              - --property=Environment
+          register: reachy_removed_properties
+          changed_when: false
+          # The unit's whole environment. Read to prove no declared setting is
+          # still in force, compared by name, and never printed.
+          no_log: true
+          check_mode: false
+
+        # Names only. What is being asserted is that nothing this run declared is
+        # still in force; the values are exactly what must not be printed to say so.
+        - name: Work out which declared settings are still in force
+          ansible.builtin.set_fact:
+            reachy_removed_lingering: >-
+              {{ (reachy_removed_properties.stdout
+                  | regex_findall('^Environment=(.*)$', multiline=True)
+                  | join(' ') | reachy_environment).keys() | list
+                 | intersect(reachy_daemon_environment.keys() | list) | sort }}
+          no_log: true
+          check_mode: false
+
+        - name: Require no declared setting to be in force
+          ansible.builtin.fail:
+            msg: >-
+              {{ reachy_removed_lingering | length }} setting(s) this declaration
+              named are still in the environment of {{ reachy_daemon_unit }}:
+              {{ reachy_removed_lingering | join(', ') }}. Something outside the
+              managed drop-in is setting them, so removing the drop-in did not
+              restore stock behaviour.
+          when: reachy_removed_lingering | length > 0
+
+        # What was removed, not what was declared. `app_install`'s removal
+        # discovers the distributions provisioning installed from the wheels it
+        # staged, so an operator running a bare `remove.yml` — without replaying
+        # the declaration the apply used — removes them and this checks the same
+        # set. Checking `reachy_app_distribution` instead would report a robot
+        # restored on the strength of having asked about nothing.
+        - name: Ask the daemon's interpreter what it still holds
+          ansible.builtin.command:
+            argv: >-
+              {{ [(reachy_removed_properties.stdout
+                   | regex_findall('^ExecStart=(.*)$', multiline=True)
+                   | join(' ') | reachy_interpreter(reachy_python)),
+                  '-c', reachy_metadata_script]
+                 + reachy_removed_applications }}
+          register: reachy_removed_versions
+          when: reachy_removed_applications | length > 0
+          changed_when: false
+          failed_when: false
+          check_mode: false
+
+        - name: Work out which of them are still installed
+          ansible.builtin.set_fact:
+            reachy_removed_still_installed: >-
+              {{ ((reachy_removed_versions.stdout | default('{}', true)
+                   | from_json)
+                  | dict2items | rejectattr('value', 'eq', '')
+                  | map(attribute='key') | list | sort)
+                 if reachy_removed_versions is not skipped
+                    and reachy_removed_versions.rc == 0
+                 else [] }}
+          check_mode: false
+
+        # A query that could not run says nothing about the robot, and the
+        # branch above turns it into an empty list — which is exactly what "none
+        # of them is installed" looks like. Reporting stock behaviour on the
+        # strength of a command that never executed is the inverse of what
+        # REQ-064's supported path promises, so the run stops here instead.
+        - name: Require the daemon's interpreter to have answered at all
+          ansible.builtin.fail:
+            msg: >-
+              The interpreter the daemon runs could not be asked what it still
+              holds — it exited {{ reachy_removed_versions.rc }} — so this run
+              cannot say whether what provisioning installed is gone. The
+              managed configuration was removed; the application was not
+              verified.
+          when:
+            - reachy_removed_versions is not skipped
+            - reachy_removed_versions.rc != 0
+
+        - name: Require everything provisioning installed to be uninstalled
+          ansible.builtin.fail:
+            msg: >-
+              {{ reachy_removed_still_installed | join(', ') }} is still
+              installed in the environment the daemon runs, so the removal did
+              not take back what provisioning put there.
+          when: reachy_removed_still_installed | length > 0
+
+        - name: Report that the robot is back to stock behaviour
+          ansible.builtin.debug:
+            msg: >-
+              {{ reachy_drop_in }} is gone, no declared setting is in the
+              environment of {{ reachy_daemon_unit }}, and
+              {{ ('none of the ' ~ reachy_removed_applications | length
+                  ~ " distribution(s) this run identified as provisioning's ("
+                  ~ reachy_removed_applications | join(', ')
+                  ~ ') is installed')
+                 if reachy_removed_applications | length > 0
+                 else 'this run identified no distribution as '
+                      ~ "provisioning's, so nothing in the daemon's "
+                      ~ 'environment was checked' }}.

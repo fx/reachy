@@ -1,0 +1,20 @@
+---
+# Lowest precedence, so `group_vars/all.yml` and an operator's inventory both
+# win. They are here so the role runs on its own — `--tags verify` against a
+# robot nothing has been applied to is a legitimate thing to want.
+reachy_daemon_unit: reachy-mini-daemon.service
+reachy_daemon_distribution: reachy-mini
+reachy_daemon_control: reachy_mini.apps
+reachy_python: /opt/reachy/venv/bin/python
+reachy_app_distribution: ""
+reachy_daemon_environment: {}
+reachy_metadata_script: |
+  import json, sys
+  from importlib.metadata import PackageNotFoundError, version
+  found = {}
+  for name in sys.argv[1:]:
+      try:
+          found[name] = version(name)
+      except PackageNotFoundError:
+          found[name] = ''
+  sys.stdout.write(json.dumps(found))

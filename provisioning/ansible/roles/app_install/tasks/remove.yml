@@ -1,0 +1,122 @@
+---
+# The removal path's half of the application. Reached by `remove.yml`, never by
+# `site.yml`.
+#
+# **What to remove is discovered, not assumed.** The obvious version of this role
+# uninstalls whatever `reachy_app_distribution` names, which is right only when
+# the removal is run with the same declaration the apply was — and an operator
+# who applied with `--extra-vars @declaration.yml` and then ran a bare
+# `ansible-playbook remove.yml` would get a run that uninstalled nothing and
+# reported the robot restored. REQ-064 says the supported path removes everything
+# provisioning applied, so this reads what provisioning left behind: `app_install`
+# stages every wheel it installs under `reachy_staging` and keeps it, and a wheel's
+# file name says which distribution installing it put there. The declaration is
+# folded in as well when there is one, so neither source has to be complete.
+#
+# The robot's application environment is shared with the daemon and with anything
+# else installed into it, so this uninstalls the distributions it identified and
+# nothing else. Removing the environment would take the vendor's daemon with it,
+# which is the opposite of restoring stock behaviour.
+
+- name: Look for the wheels provisioning staged on this robot
+  ansible.builtin.find:
+    paths: "{{ reachy_staging }}"
+    patterns: "*.whl"
+  register: reachy_staged_wheels
+  changed_when: false
+  check_mode: false
+
+# A staging directory that is not there is the ordinary case — nothing was ever
+# installed, or a previous removal took it — and `find` reports that as no
+# matches. A search that could not look is a different fact, and treating it as
+# "nothing was installed" would let this run report a robot restored without
+# having examined the one place that records what provisioning put on it.
+- name: Require the search for staged wheels to have run
+  ansible.builtin.fail:
+    msg: >-
+      {{ reachy_staging }} could not be searched, so this run cannot tell what
+      provisioning installed on this robot. Name it with
+      reachy_app_distribution, or make the directory readable and run this
+      again.
+  when: reachy_staged_wheels is not succeeded
+
+#:= docs/specs/provisioning/index.md#req-064-the-robot-can-be-returned-to-stock-behaviour
+#:% Provisioning MUST offer a supported path that removes everything it applied and
+#:% restores the robot's stock behaviour.
+- name: Work out which distributions provisioning installed on this robot
+  ansible.builtin.set_fact:
+    reachy_remove_distributions: >-
+      {{ ((reachy_staged_wheels.files | default([])
+           | map(attribute='path') | map('basename')
+           | map('reachy_wheel_release')
+           | selectattr('ok') | map(attribute='distribution') | list)
+          + ([reachy_app_distribution]
+             if reachy_app_distribution | length > 0 else []))
+         | unique | sort }}
+  check_mode: false
+
+- name: Report that this run found nothing provisioning had installed
+  ansible.builtin.debug:
+    msg: >-
+      No wheel is staged under {{ reachy_staging }} and no application is
+      declared, so this run identified nothing for provisioning to uninstall.
+      If an application was installed by a run that has since had its staging
+      directory cleared, name it with reachy_app_distribution.
+  when: reachy_remove_distributions | length == 0
+
+- name: Uninstall what provisioning installed
+  when: reachy_remove_distributions | length > 0
+  block:
+    - name: Ask systemd which interpreter the daemon runs
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ reachy_daemon_unit }}"
+          - --property=ExecStart
+          - --value
+      register: reachy_exec_start
+      changed_when: false
+      check_mode: false
+
+    - name: Decide which interpreter to uninstall from
+      ansible.builtin.set_fact:
+        reachy_app_interpreter: >-
+          {{ reachy_exec_start.stdout | reachy_interpreter(reachy_python) }}
+      check_mode: false
+
+    - name: Ask that interpreter what it holds
+      ansible.builtin.command:
+        argv: >-
+          {{ [reachy_app_interpreter, '-c', reachy_metadata_script]
+             + reachy_remove_distributions }}
+      register: reachy_app_before
+      changed_when: false
+      check_mode: false
+
+    - name: Work out which of them are actually installed
+      ansible.builtin.set_fact:
+        reachy_remove_installed: >-
+          {{ (reachy_app_before.stdout | from_json)
+             | dict2items | rejectattr('value', 'eq', '')
+             | map(attribute='key') | list | sort }}
+      check_mode: false
+
+    # Guarded by a comparison, exactly as the install is, so running the removal
+    # twice reports nothing changed the second time. A removal path that was not
+    # idempotent would be one nobody could safely re-run after a failure partway
+    # through.
+    - name: Uninstall them from the environment the daemon runs
+      ansible.builtin.command:
+        argv: >-
+          {{ [reachy_app_interpreter, '-m', 'pip', 'uninstall', '--yes']
+             + reachy_remove_installed }}
+      register: reachy_app_uninstall
+      when: reachy_remove_installed | length > 0
+      changed_when: reachy_app_uninstall is not skipped
+      notify: Restart the robot daemon
+
+- name: Remove the staging directory
+  ansible.builtin.file:
+    path: "{{ reachy_staging }}"
+    state: absent

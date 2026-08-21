@@ -69,6 +69,41 @@ def test_the_region_round_trips_through_the_parser() -> None:
     assert parse_region(render_region(EXAMPLE)) == EXAMPLE
 
 
+@pytest.mark.parametrize(
+    ("value", "written"),
+    [
+        ("one%percent", "one%%percent"),
+        ("%", "%%"),
+        ("%H", "%%H"),
+        (
+            "ws://192.0.2.10:8000/v1/session?token=a%20b",
+            "ws://192.0.2.10:8000/v1/session?token=a%%20b",
+        ),
+    ],
+)
+def test_a_percent_is_escaped_because_systemd_expands_specifiers(
+    value: str,
+    written: str,
+) -> None:
+    """`%H` becomes the host name and an unknown specifier drops the assignment.
+
+    systemd performs specifier expansion on an `Environment=` value, and an
+    unknown specifier makes it drop the whole assignment **without failing the
+    unit** — so a percent-encoded URL is not a setting that arrives wrong, it is
+    a setting that does not arrive, on a robot that started cleanly. That is the
+    silently-inert configuration this tool exists to catch, so the format
+    carries the percent rather than leaving it to systemd.
+
+    Args:
+        value: The setting's value.
+        written: What appears between the quotes.
+    """
+    rendered = render_region({"A_SETTING": value})
+
+    assert f'Environment="A_SETTING={written}"' in rendered
+    assert parse_region(rendered) == {"A_SETTING": value}
+
+
 def test_a_backslash_and_a_quote_survive_the_round_trip() -> None:
     """Systemd reads both inside a quoted string, so both are escaped — backslash first."""
     awkward = {"A_SETTING": 'a\\b"c\\"d'}
@@ -184,6 +219,13 @@ def test_the_committed_document_quotes_exactly_what_this_module_renders() -> Non
         r'Environment="A_SETTING=ends with\"',
         # A name carrying a quote, which `_escape` never produces.
         'Environment="A"SETTING=value"',
+        # A bare percent, which systemd would expand as a specifier. This format
+        # writes `%%`, so a line carrying one is not one it wrote — and reading
+        # it back as ours would mean the next apply rewrote a value systemd is
+        # already interpreting differently from the file.
+        'Environment="A_SETTING=one%percent"',
+        # A percent in the name, which `_escape` never produces either.
+        'Environment="A%SETTING=value"',
     ],
 )
 def test_a_directive_this_format_could_not_have_written_is_refused(line: str) -> None:

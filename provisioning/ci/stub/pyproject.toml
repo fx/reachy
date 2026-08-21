@@ -1,0 +1,21 @@
+# The vendor daemon's stand-in, installed into the container target's application
+# environment so that the layout the roles reach for is the layout that is there.
+#
+# It is not the vendor's daemon and does not pretend to be. What it reproduces is
+# the three things the roles interact with: a distribution named `reachy-mini`
+# whose version can be read from the environment the unit runs, a long-running
+# process for a systemd unit to supervise, and an application control module
+# reached as `python -m reachy_mini.apps`. Everything the real daemon does with
+# hardware is absent, and the container's README says so.
+[project]
+name = "reachy-mini"
+version = "1.9.0"
+description = "A stand-in for the vendor daemon, for the provisioning idempotency gate"
+requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["reachy_mini"]

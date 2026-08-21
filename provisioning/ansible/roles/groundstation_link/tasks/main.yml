@@ -1,0 +1,47 @@
+---
+# The link from the robot to the groundstation: an endpoint and a credential.
+#
+# Both are settings in the same managed region `daemon_env` owns, so this role
+# does not write anything — writing them from here as well would mean two roles
+# owning one file, and each run would prune what the other had just put there.
+# What it does is refuse the half-configured states, and say whether a credential
+# is in play without saying what it is.
+#
+# That is why `site.yml` gives the `daemon_env` role the `groundstation_link` tag
+# as well: applying the link without converging the file it lives in would report
+# success and change nothing on the robot.
+
+- name: Refuse a groundstation endpoint with no credential
+  ansible.builtin.fail:
+    msg: >-
+      reachy_groundstation_url is set and reachy_groundstation_credential is
+      empty. The groundstation refuses a session that presents nothing, so a
+      robot configured this way would open no session at all. Supply the
+      credential as --extra-vars @secrets.yml over an ansible-vault file; never
+      as a NAME=VALUE argument, which the process list carries, and never in a
+      plain variables file, which somebody eventually commits.
+  when:
+    - reachy_groundstation_url | length > 0
+    - reachy_groundstation_credential | length == 0
+
+- name: Refuse a groundstation credential with no endpoint
+  ansible.builtin.fail:
+    msg: >-
+      reachy_groundstation_credential is set and reachy_groundstation_url is
+      empty. The credential would be written to the robot with nothing to
+      present it to, which is a secret on a device for no reason.
+  when:
+    - reachy_groundstation_credential | length > 0
+    - reachy_groundstation_url | length == 0
+
+# Set or unset, never the value. A component that reports its own configuration
+# reports a secret this way — see `REVIEW.md` — and this is one such surface: the
+# endpoint is an address and is shown, the credential is not and is not.
+- name: Report the groundstation link this run will declare
+  ansible.builtin.debug:
+    msg: >-
+      groundstation endpoint:
+      {{ reachy_groundstation_url | default('unset', true) }}; credential:
+      {{ 'set' if reachy_groundstation_credential | length > 0 else 'unset' }}.
+      Both are written into {{ reachy_drop_in }} by the daemon_env role, which
+      owns that file in full.

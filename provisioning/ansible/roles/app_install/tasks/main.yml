@@ -1,0 +1,295 @@
+---
+# A wheel from a configured source, installed into the environment the daemon
+# actually runs.
+#
+# Two things make this idempotent, and neither is `pip`'s doing. `pip install` of
+# a wheel by path reinstalls it every time — a direct requirement is always
+# reinstalled — so a run that simply called it would report a change on every
+# pass and provisioning REQ-060 would be false. What decides here is a comparison:
+# the daemon's own interpreter is asked what it holds, and the install runs only
+# when that differs from what the wheel would put there.
+#
+# The interpreter is asked of systemd rather than assumed, for the reason
+# `reachyctl deploy` asks it: installing into a configured path and verifying
+# against the same configured path agrees with itself no matter which environment
+# the daemon is really using.
+
+- name: Report that no application is declared
+  ansible.builtin.debug:
+    msg: >-
+      No application is declared, so nothing is installed. Set
+      reachy_app_distribution and one of reachy_app_wheel_path or
+      reachy_app_wheel_url to install a wheel.
+  when: reachy_app_distribution | length == 0
+
+- name: Install the declared application
+  when: reachy_app_distribution | length > 0
+  block:
+    - name: Refuse anything but exactly one wheel source
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_app_distribution }} is declared, and exactly one of
+          reachy_app_wheel_path and reachy_app_wheel_url must say where its
+          wheel is — {{ 'both are set' if reachy_app_wheel_path | length > 0
+          else 'neither is set' }}. Two sources are refused rather than resolved
+          by precedence, because a run that quietly ignored half of what it was
+          told is a run nobody can trust, and this one ends by asserting a
+          version.
+      when: >-
+        (reachy_app_wheel_path | length > 0)
+        == (reachy_app_wheel_url | length > 0)
+
+    - name: Read what the wheel claims to install
+      ansible.builtin.set_fact:
+        reachy_app_file: >-
+          {{ (reachy_app_wheel_path | basename)
+             if reachy_app_wheel_path | length > 0
+             else (reachy_app_wheel_url | urlsplit('path') | basename) }}
+      check_mode: false
+
+    - name: Read the distribution and version out of the wheel's name
+      ansible.builtin.set_fact:
+        reachy_app_release: "{{ reachy_app_file | reachy_wheel_release }}"
+      check_mode: false
+
+    - name: Refuse a source that is not a wheel
+      ansible.builtin.fail:
+        msg: "{{ reachy_app_release.complaint }}"
+      when: not reachy_app_release.ok
+
+    # A wheel fetched over the network is installed as root into the
+    # environment the daemon runs, so what arrived has to be the artifact that
+    # was reviewed rather than whatever answered the request. That is the same
+    # rule this repository already applies to a GitHub Action — pinned by commit
+    # SHA — and to a container image, pinned by digest. A wheel handed over as a
+    # local path needs none of this: the operator has the file.
+    - name: Refuse a release artifact with no digest to check it against
+      ansible.builtin.fail:
+        msg: >-
+          reachy_app_wheel_url is set and reachy_app_wheel_checksum is empty, so
+          nothing would check what arrived. Set it to sha256:<digest> — the
+          release's own checksum file, or `sha256sum` over a copy you have.
+      when:
+        - reachy_app_wheel_url | length > 0
+        - reachy_app_wheel_checksum | length == 0
+
+    - name: Refuse a digest that is not a SHA-256
+      ansible.builtin.fail:
+        msg: >-
+          reachy_app_wheel_checksum must be sha256:<64 hex digits>. A weaker
+          digest is one an artifact can be constructed to match.
+      when:
+        - reachy_app_wheel_url | length > 0
+        - not (reachy_app_wheel_checksum is match('^sha256:[0-9a-fA-F]{64}$'))
+
+    - name: Create the staging directory
+      ansible.builtin.file:
+        path: "{{ reachy_staging }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # The staged wheel is kept rather than removed, and that is what makes the
+    # transfer idempotent: `copy` and `get_url` both compare what is already
+    # there. A wheel is a public artifact — nothing in it is a credential, which
+    # is the reason `reachyctl` removes its own staged file and this does not.
+    - name: Send the wheel from the machine running the playbook
+      ansible.builtin.copy:
+        src: "{{ reachy_app_wheel_path }}"
+        dest: "{{ reachy_staging }}/{{ reachy_app_file }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: reachy_app_wheel_path | length > 0
+
+    - name: Fetch the release artifact onto the robot
+      ansible.builtin.get_url:
+        url: "{{ reachy_app_wheel_url }}"
+        dest: "{{ reachy_staging }}/{{ reachy_app_file }}"
+        checksum: "{{ reachy_app_wheel_checksum }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: reachy_app_wheel_url | length > 0
+
+    - name: Ask systemd which interpreter the daemon runs
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ reachy_daemon_unit }}"
+          - --property=ExecStart
+          - --value
+      register: reachy_exec_start
+      changed_when: false
+      check_mode: false
+
+    - name: Decide which interpreter to install into
+      ansible.builtin.set_fact:
+        reachy_app_interpreter: >-
+          {{ reachy_exec_start.stdout | reachy_interpreter(reachy_python) }}
+      check_mode: false
+
+    # Out of the wheel, not off its file name, and both halves for one reason:
+    # a file name is a claim, and `.dist-info/METADATA` is what pip records and
+    # what the daemon's interpreter reports afterwards. Comparing the install
+    # decision against the name and the verification against the metadata would
+    # be answering two different questions, which is the shape of the failure
+    # this whole stack is written against. `reachyctl deploy` reads the wheel
+    # for the same reason.
+    #
+    # **A preview has no wheel to read.** `--check` deliberately does not
+    # transfer one, so on a first preview there is nothing at that path — and a
+    # preview that failed rather than reporting what it would do is not a
+    # preview, which is REQ-065. So the read is guarded, and a preview with
+    # nothing staged falls back to the file name and says so. Every run that
+    # actually installs has staged the wheel two tasks earlier, so the fallback
+    # never decides anything that reaches a robot.
+    - name: Look for the staged wheel
+      ansible.builtin.stat:
+        path: "{{ reachy_staging }}/{{ reachy_app_file }}"
+      register: reachy_app_staged
+      changed_when: false
+      check_mode: false
+
+    - name: Read what the staged wheel says it installs
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_app_interpreter }}"
+          - -c
+          - "{{ reachy_wheel_metadata_script }}"
+          - "{{ reachy_staging }}/{{ reachy_app_file }}"
+      register: reachy_app_metadata
+      when: reachy_app_staged.stat.exists
+      changed_when: false
+      check_mode: false
+
+    # In a preview there is deliberately no wheel here and the fallback below is
+    # right. In a run that is not a preview the wheel was staged two tasks ago,
+    # so its absence means the transfer did not put it there — and falling back
+    # to the file name would let the run decide from a claim rather than from
+    # the artifact, which is the distinction the metadata read exists to make.
+    - name: Require the wheel to have been staged
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_staging }}/{{ reachy_app_file }} is not on the robot after
+          the transfer step reported success, so nothing can be read out of it.
+          The run stops rather than deciding what to install from a file name.
+      when:
+        - not ansible_check_mode
+        - not reachy_app_staged.stat.exists
+
+    - name: Take the distribution and version the wheel declares
+      ansible.builtin.set_fact:
+        reachy_app_declares: >-
+          {{ (reachy_app_metadata.stdout | from_json)
+             if reachy_app_staged.stat.exists
+             else {'name': reachy_app_release.distribution,
+                   'version': reachy_app_release.version} }}
+        reachy_app_declares_source: >-
+          {{ 'the wheel' if reachy_app_staged.stat.exists
+             else 'its file name, because a preview transfers nothing' }}
+      check_mode: false
+
+    - name: Refuse a wheel whose metadata cannot be read
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_app_file }} carries no readable
+          .dist-info/METADATA, so nothing says what installing it would put on
+          the robot. A wheel is a zip with a metadata directory; this one is
+          either truncated or not a wheel.
+      when:
+        - reachy_app_staged.stat.exists
+        - >-
+          reachy_app_declares.name | length == 0
+          or reachy_app_declares.version | length == 0
+
+    # A robot that ended up running some other application because a URL pointed
+    # somewhere else is the failure this whole stack is written against. Both
+    # sides normalised: PEP 503 folds runs of `-`, `_` and `.` to a single `-`,
+    # so `example.tool` and `example-tool` are one name.
+    - name: Refuse a wheel that is not the declared distribution
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_app_file }} declares
+          {{ reachy_app_declares.name }} according to
+          {{ reachy_app_declares_source }}, and {{ reachy_app_distribution }} is
+          declared here. Installing it would leave the robot running an
+          application nothing asked for.
+      when: >-
+        (reachy_app_declares.name | reachy_distribution_name)
+        != (reachy_app_distribution | reachy_distribution_name)
+
+    - name: Ask that interpreter what it already holds
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_app_interpreter }}"
+          - -c
+          - "{{ reachy_metadata_script }}"
+          - "{{ reachy_app_distribution }}"
+      register: reachy_app_before
+      changed_when: false
+      check_mode: false
+
+    - name: Report what installing the wheel would change
+      ansible.builtin.debug:
+        msg: >-
+          {{ reachy_app_distribution }}: {{ (reachy_app_before.stdout
+          | from_json)[reachy_app_distribution] | default('nothing', true) }}
+          installed, {{ reachy_app_declares.version }} according to
+          {{ reachy_app_declares_source }}.
+
+    #:= docs/specs/provisioning/index.md#req-062-a-stock-image-is-sufficient
+    #:% Provisioning MUST succeed against an unmodified stock robot image without any
+    #:% manual preparation of the target beyond network access and credentials.
+    # Nothing above this line asked the robot to have anything prepared: the
+    # drop-in directory is created if it is missing, the staging directory is
+    # created, and the interpreter is the one the vendor's own unit declares.
+    - name: Install the wheel into the environment the daemon runs
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_app_interpreter }}"
+          - -m
+          - pip
+          - install
+          - --upgrade
+          - "{{ reachy_staging }}/{{ reachy_app_file }}"
+      register: reachy_app_install
+      when: >-
+        (reachy_app_before.stdout | from_json)[reachy_app_distribution]
+        | default('', true) != reachy_app_declares.version
+      changed_when: reachy_app_install is not skipped
+      notify: Restart the robot daemon
+
+    # The install exiting zero is exactly what this refuses to treat as success.
+    # A package can install perfectly into an environment the running daemon is
+    # not using, which looks identical to success at every step — so the question
+    # is put to the interpreter again, and the answer is what decides.
+    - name: Ask the interpreter again what it now holds
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_app_interpreter }}"
+          - -c
+          - "{{ reachy_metadata_script }}"
+          - "{{ reachy_app_distribution }}"
+      register: reachy_app_after
+      when: reachy_app_install is not skipped
+      changed_when: false
+
+    - name: Require the version the wheel carries to be the one now installed
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_app_distribution }} was installed from {{ reachy_app_file }}
+          and {{ reachy_app_interpreter }} now reports
+          {{ (reachy_app_after.stdout | from_json)[reachy_app_distribution]
+             | default('nothing', true) }} rather than the
+          {{ reachy_app_declares.version }} the wheel declares. The install
+          reported success into an environment the daemon is not the one
+          running.
+      when:
+        - reachy_app_install is not skipped
+        - not ansible_check_mode
+        - >-
+          (reachy_app_after.stdout | from_json)[reachy_app_distribution]
+          | default('', true) != reachy_app_declares.version

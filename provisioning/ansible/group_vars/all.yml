@@ -1,0 +1,125 @@
+---
+# Neutral defaults only. Nothing here names a real endpoint, account or
+# credential — this repository is public, and architecture REQ-003 keeps
+# environment-specific values out of version control. What an operator supplies
+# lives in the untracked `inventory.ini`, in a `group_vars/` file of their own,
+# or in an `ansible-vault` file passed with `--extra-vars`.
+
+# --- Where things are on the robot -------------------------------------------
+# Every one of these is this stack's own convention rather than an observation of
+# a particular machine, and each is a variable rather than a literal because the
+# robot is a device this repository does not own: a vendor image that names its
+# unit differently should cost an inventory line, not a release.
+
+# The unit is the daemon, not the application. The application inherits its
+# environment from the daemon, which is also why putting a configuration change
+# in force restarts the daemon.
+reachy_daemon_unit: reachy-mini-daemon.service
+reachy_drop_in_name: 10-reachy-managed.conf
+
+# The daemon's own distribution, whose version the daemon check reports.
+reachy_daemon_distribution: reachy-mini
+
+# The module the daemon's application control is reached through, run under the
+# robot's application environment.
+reachy_daemon_control: reachy_mini.apps
+
+# The application environment's interpreter. Used only when the daemon's unit
+# does not say which one it runs: installing into a configured path and then
+# verifying against the same configured path agrees with itself no matter which
+# environment the daemon is really using, which is the shape of the failure
+# rather than a check on it.
+reachy_python: /opt/reachy/venv/bin/python
+
+# Where a wheel lands before it is installed. Under /var/tmp rather than /tmp: a
+# wheel is large enough that a tmpfs on a device with a gigabyte of memory is the
+# wrong place for it, and /var/tmp survives a reboot mid-run rather than leaving
+# an install step pointing at nothing.
+reachy_staging: /var/tmp/reachy-provisioning
+
+# Derived, and derived through the same function `reachyctl` derives it with —
+# see `plugins/filter/reachy_managed.py`. Neither implementation carries the
+# path as a literal, so a unit renamed above moves the file on both sides.
+reachy_drop_in_directory: "{{ reachy_daemon_unit | reachy_drop_in_directory }}"
+reachy_drop_in: "{{ reachy_daemon_unit | reachy_drop_in_path(reachy_drop_in_name) }}"
+
+# --- What the robot is supposed to be ----------------------------------------
+# The declaration. Every name here is one `reachy_contracts.ROBOT_SETTINGS`
+# declares, and the roles validate the whole of it against that vocabulary before
+# anything is written, so a value the robot would refuse costs no write and no
+# daemon restart.
+reachy_settings: {}
+
+# The groundstation link, kept apart from the settings above only because its
+# credential arrives differently. Both end up in the same managed region.
+reachy_groundstation_url: ""
+reachy_groundstation_credential: ""
+
+# The whole declaration, composed once. The managed region is written from this
+# and from nothing else, which is what makes a setting withdrawn from it leave
+# the robot — provisioning REQ-063. Composing it here rather than inside a role
+# is what lets `--tags daemon_env` and `--tags groundstation_link` converge the
+# same file instead of each writing half of it.
+reachy_groundstation_settings: >-
+  {{
+    ({'REACHY_GROUNDSTATION_URL': reachy_groundstation_url}
+     if reachy_groundstation_url | length > 0 else {})
+    | combine(
+      {'REACHY_GROUNDSTATION_CREDENTIAL': reachy_groundstation_credential}
+      if reachy_groundstation_credential | length > 0 else {})
+  }}
+reachy_daemon_environment: >-
+  {{ reachy_settings | combine(reachy_groundstation_settings) }}
+
+# --- What to install ----------------------------------------------------------
+# The application is not named here, and that is the point: this installs a wheel
+# from a configured source rather than a particular application. Leave the
+# distribution empty and the install is skipped, which is what keeps a
+# configuration-only run useful.
+reachy_app_distribution: ""
+reachy_app_wheel_path: ""
+reachy_app_wheel_url: ""
+# Required whenever the wheel is fetched by URL, as `sha256:<64 hex digits>`. A
+# wheel that arrived over the network is installed as root into the environment
+# the daemon runs, so what arrived has to be the artifact that was reviewed —
+# the same reason this repository pins an action by commit SHA and an image by
+# digest. A wheel handed over as a local path needs none of this.
+reachy_app_wheel_checksum: ""
+
+# --- The one question asked of the daemon's own interpreter -------------------
+# Asked of the interpreter the daemon actually runs, so the answer is what that
+# environment holds rather than what a wheel's file name claims. One round trip
+# answers for every distribution named.
+# What a wheel claims to install, read out of the wheel rather than off its
+# file name. A file name is a claim; `.dist-info/METADATA` is what pip records,
+# and what the daemon's interpreter will report afterwards. Comparing against
+# anything else means the install decision and the verification are answering
+# two different questions — which is the shape of the failure this whole stack
+# is written against. `reachyctl deploy` reads the wheel for the same reason.
+reachy_wheel_metadata_script: |
+  import json, sys, zipfile
+  found = {'name': '', 'version': ''}
+  with zipfile.ZipFile(sys.argv[1]) as archive:
+      for member in archive.namelist():
+          if member.endswith('.dist-info/METADATA') and member.count('/') == 1:
+              text = archive.read(member).decode('utf-8', 'replace')
+              for line in text.splitlines():
+                  if not line.strip():
+                      break
+                  key, _, value = line.partition(':')
+                  key = key.strip().lower()
+                  if key in found:
+                      found[key] = value.strip()
+              break
+  sys.stdout.write(json.dumps(found))
+
+reachy_metadata_script: |
+  import json, sys
+  from importlib.metadata import PackageNotFoundError, version
+  found = {}
+  for name in sys.argv[1:]:
+      try:
+          found[name] = version(name)
+      except PackageNotFoundError:
+          found[name] = ''
+  sys.stdout.write(json.dumps(found))

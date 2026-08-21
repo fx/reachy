@@ -1,0 +1,13 @@
+---
+# Lowest precedence, so `group_vars/all.yml` and an operator's inventory both
+# win. They are here so the role is runnable on its own and so a reader can see
+# what it needs without reading the playbook.
+reachy_daemon_unit: reachy-mini-daemon.service
+reachy_drop_in_name: 10-reachy-managed.conf
+reachy_drop_in_directory: "{{ reachy_daemon_unit | reachy_drop_in_directory }}"
+reachy_drop_in: "{{ reachy_daemon_unit | reachy_drop_in_path(reachy_drop_in_name) }}"
+
+# An empty declaration is a legitimate one, and it is the one provisioning
+# REQ-063 is about: withdrawing every setting still writes the header, the
+# section and both markers, and takes every setting off the robot.
+reachy_daemon_environment: {}

@@ -48,6 +48,29 @@ dev = [
     "types-pyyaml>=6.0",
 ]
 
+# The Ansible control machine, pinned here rather than assumed present on
+# whoever runs the playbook. Provisioning's roles reach the shared check
+# registry and the setting vocabulary as ordinary Python imports — that is
+# reachyctl REQ-056, and it is why the playbook runs under this environment's
+# interpreter rather than a system Ansible that cannot see the workspace.
+#
+# A group of its own, and deliberately not in `default-groups` below: a lint, a
+# type check and a test run have no use for an Ansible engine, and adding sixty
+# megabytes to every one of them to serve two recipes is the wrong trade. `just
+# provision-lint` and `just provision-idempotency` ask for it by name, and `uv
+# run --group provisioning` installs it from the same lockfile everything else
+# resolves against.
+provisioning = [
+    # The engine. Bounded above at the next minor, because a control-node
+    # release is where module and plugin interfaces move, and the roles here
+    # call `ansible.builtin.systemd_service` and a filter plugin of their own.
+    "ansible-core>=2.19,<2.22",
+    # The lint the `provision-lint` recipe runs. It carries its own opinions
+    # about role layout and task naming, which is what makes it worth a pin: an
+    # unpinned linter is a gate whose verdict changes without a diff here.
+    "ansible-lint>=25.0,<27",
+]
+
 # The reference implementation the YuNet parity test measures against, and
 # nothing else. Perception REQ-036 requires the hand-written decoding be checked
 # against an independent reference, and the Reachy Mini SDK's own detector is
@@ -146,6 +169,11 @@ src = [
     "cli/reachyctl/src",
     "bench/src",
     "tools/repo-hygiene/src",
+    # Not a member: the Ansible filter plugins the provisioning roles reach
+    # their Python through. They are a directory of loose modules the way
+    # `scripts/` is, and they are on the path here for the same reason — so an
+    # import of one resolves rather than degrading to `Any`.
+    "provisioning/ansible/plugins/filter",
 ]
 
 [tool.ruff.lint]
@@ -365,8 +393,31 @@ mypy_path = [
     "packages/reachy-session-client/tests/support",
     "cli/reachyctl/tests/support",
     "apps/ha-satellite/tests/support",
+    # Not a member either, and the same arrangement as `scripts/` above: the
+    # Ansible filter plugins are loose modules loaded by name, so this is what
+    # makes `import reachy_managed` in their tests resolve to the file Ansible
+    # loads rather than to nothing.
+    "provisioning/ansible/plugins/filter",
 ]
-files = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
+files = [
+    "packages",
+    "apps",
+    "services",
+    "cli",
+    "bench",
+    "tools",
+    "scripts",
+    "provisioning",
+]
+# The idempotency gate's container fixture. It declares a package named
+# `reachy_mini` — a stand-in for the vendor daemon, installed nowhere but inside
+# that container — and this repository also depends on the real `reachy-mini`
+# distribution for the perception parity reference. Leaving the fixture on the
+# type checker's path would let it shadow the real SDK for every module that
+# imports it, so it is excluded rather than renamed: the name is the point, since
+# the roles reach it as `reachy_mini.apps`. Ruff still lints it — ruff resolves no
+# imports, so nothing there can shadow anything.
+exclude = ["^provisioning/ci/"]
 # `ignore-without-code` is how the "a suppression carries its rule identifier"
 # rule is enforced for mypy; ruff's PGH003/PGH004 enforce the same for lint.
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
@@ -509,7 +560,16 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=xml",
 ]
-testpaths = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
+testpaths = [
+    "packages",
+    "apps",
+    "services",
+    "cli",
+    "bench",
+    "tools",
+    "scripts",
+    "provisioning",
+]
 # A member's `tests/` is deliberately not a package, so a test module reaches
 # its siblings' shared fakes by plain module name, and the directory holding
 # them has to be on `sys.path`. The satellite and the groundstation do that from
@@ -524,6 +584,12 @@ pythonpath = [
     "packages/reachy-checks/tests/support",
     "packages/reachy-session-client/tests/support",
     "cli/reachyctl/tests/support",
+    # The Ansible filter plugins. Ansible loads them by file name into a
+    # namespace of its own, so there is no package to import them from; this is
+    # what lets their tests import them under the same module names Ansible
+    # gives them, and what makes the contract test able to render this side of
+    # the managed region beside `reachyctl.managed`'s.
+    "provisioning/ansible/plugins/filter",
 ]
 filterwarnings = ["error"]
 # The filesystem half of the no-input-or-output rule has no `--disable-socket`
@@ -549,6 +615,10 @@ source = [
     "cli/reachyctl/src",
     "bench/src",
     "tools/repo-hygiene/src",
+    # The provisioning roles' Python. Not a member, and measured all the same:
+    # it decides the bytes of a file on the robot and whether a run reports
+    # success, which is exactly the code a diff-scoped gate should be watching.
+    "provisioning/ansible/plugins/filter",
 ]
 # Relative paths so the XML report is readable from any checkout root, which is
 # what diff-cover needs to line results up against a diff.

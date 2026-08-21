@@ -1,0 +1,29 @@
+---
+# Two rules are switched off here, each with its identifier and the reason it is
+# in force — the same standard the root `AGENTS.md` sets for a `# noqa` or a
+# `# type: ignore`.
+
+skip_list:
+  # var-naming[no-role-prefix]: ansible-lint expects a variable set inside a role
+  # to be prefixed with that role's name, which is right for a role that owns its
+  # own configuration and wrong for these. There is one declaration of what a
+  # robot is — `reachy_daemon_unit`, `reachy_daemon_environment`,
+  # `reachy_app_distribution` — and four roles that read it. Prefixing them would
+  # mean `daemon_env_daemon_unit` and `verify_daemon_unit` naming the same unit,
+  # which is exactly the second copy free to drift that this repository's
+  # invariants exist to prevent. The shared `reachy_` prefix is what keeps them
+  # distinguishable from Ansible's own and from an operator's.
+  - var-naming[no-role-prefix]
+
+  # yaml[comments]: yamllint requires a space after the `#`, and duvet's
+  # requirement annotations are written `#:=` and `#:%` — the colon is
+  # load-bearing, because `ruff format` rewrites `#= …` to `# = …` and silently
+  # breaks the citation, so this repository uses one spelling everywhere. A
+  # space after the `#` is exactly what duvet does not recognise. See the header
+  # of `.duvet/config.toml`.
+  - yaml[comments]
+
+# The playbooks and roles, and nothing else in this directory: the filter plugins
+# are Python and are linted by ruff with the rest of the repository.
+exclude_paths:
+  - plugins/

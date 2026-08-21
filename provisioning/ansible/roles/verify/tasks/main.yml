@@ -1,0 +1,179 @@
+---
+# The end state, asserted from the one definition of what a healthy robot is.
+#
+# The checks are `reachy_checks.CHECKS`, imported as a Python module by
+# `plugins/filter/reachy_verify.py`. This role declares none of its own and does
+# not invoke `reachyctl`: reachyctl REQ-056 requires the checks the doctor command
+# performs and the ones this performs to be defined once and used by both, and
+# shelling out would additionally require a CLI installation on whatever machine
+# runs the playbook.
+#
+# Everything the robot is asked is an ordinary task below, changing nothing, so
+# what was asked is readable in the run's output rather than hidden inside a
+# plugin.
+
+- name: Report that verification does not run in check mode
+  ansible.builtin.debug:
+    msg: >-
+      This is a preview, so the robot has not been changed and the end state has
+      not been asserted. Run without --check to apply and verify.
+  when: ansible_check_mode
+
+- name: Assert the end state
+  when: not ansible_check_mode
+  block:
+    - name: Ask systemd what the daemon unit is doing and what it is running with
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ reachy_daemon_unit }}"
+          - --property=LoadState
+          - --property=ActiveState
+          - --property=SubState
+          - --property=ExecStart
+          - --property=Environment
+      register: reachy_verify_properties
+      changed_when: false
+      # The unit's whole environment, credential included. The registered value
+      # is used below and never printed; without this, `-v` would print the
+      # task's result and the credential with it.
+      no_log: true
+
+    - name: Decide which interpreter the daemon runs
+      ansible.builtin.set_fact:
+        reachy_verify_interpreter: >-
+          {{ reachy_verify_properties.stdout
+             | regex_findall('^ExecStart=(.*)$', multiline=True)
+             | join(' ') | reachy_interpreter(reachy_python) }}
+
+    - name: Ask that interpreter what the daemon's environment holds
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_verify_interpreter }}"
+          - -c
+          - "{{ reachy_metadata_script }}"
+          - "{{ reachy_daemon_distribution }}"
+          - "{{ reachy_app_distribution | default('', true) }}"
+      register: reachy_verify_versions
+      changed_when: false
+      # Not fatal, so the run still reports every other link — but the failure
+      # is carried into the evidence below rather than dropped. An empty answer
+      # here and an answer that could not be obtained are opposite facts, and
+      # collapsing them would report an application as not installed on the
+      # strength of a command that never ran.
+      failed_when: false
+
+    - name: Ask the daemon whether it is running the application
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_verify_interpreter }}"
+          - -m
+          - "{{ reachy_daemon_control }}"
+          - status
+          - --json
+          - "{{ reachy_app_distribution | default('', true) }}"
+      register: reachy_verify_status
+      changed_when: false
+      failed_when: false
+      # Free text the daemon wrote. A traceback from its control carries its
+      # arguments, and a setting is exactly where a credential lives —
+      # `reachyctl` quotes such text verbatim only because it holds a redactor
+      # seeded with the robot's secret values, and nothing here does. So this
+      # run reports the exit status and withholds the output, the way
+      # `CommandOutcome.status_only` does for the one read reachyctl cannot
+      # scrub either. An operator who needs the text runs the command
+      # themselves, which is a decision they make rather than one this role
+      # makes for them.
+      no_log: true
+
+    - name: Validate the declaration the robot is being judged against
+      ansible.builtin.set_fact:
+        reachy_verify_intent: >-
+          {{ reachy_daemon_environment | reachy_validated_settings }}
+      no_log: true
+
+    # The verdict is acted on, and that is not tidiness. A refused declaration
+    # yields an EMPTY settings map, and an empty map is what a run that declares
+    # nothing also produces — so without this the intent checks would find
+    # nothing to disagree with, report themselves skipped or passed, and the run
+    # would announce a working robot having compared it against nothing. REQ-066
+    # is that a run asserts the end state it created; asserting against an
+    # unread declaration asserts nothing.
+    #
+    # `daemon_env` refuses the same declaration before it writes, so on a full
+    # run this cannot be reached. It is here because `--tags verify` is a
+    # legitimate way to run this role on its own, and because a validation whose
+    # answer nothing reads is one that will eventually be wrong unnoticed.
+    - name: Refuse to judge a robot against a declaration the robot would refuse
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_verify_intent.complaint }}. Nothing about this robot has
+          been asserted: a refused declaration names no setting, and comparing
+          the robot against nothing would report it healthy without having
+          checked anything.
+      when: not reachy_verify_intent.ok
+
+    #:= docs/specs/provisioning/index.md#req-066-a-run-asserts-the-end-state-it-created
+    #:% A provisioning run MUST verify the robot reaches a working end state before
+    #:% reporting success.
+    - name: Run every registered check against what the robot answered
+      ansible.builtin.set_fact:
+        reachy_verify_run: >-
+          {{ {
+               'unit': reachy_daemon_unit,
+               'application': reachy_app_distribution | default('', true),
+               'daemon_distribution': reachy_daemon_distribution,
+               'properties': reachy_verify_properties.stdout,
+               'versions': reachy_verify_versions.stdout
+                         if reachy_verify_versions.rc == 0 else '',
+               'versions_complaint': ''
+                         if reachy_verify_versions.rc == 0
+                         else 'it exited ' ~ reachy_verify_versions.rc,
+               'status': reachy_verify_status.stdout
+                         if reachy_verify_status.rc == 0 else '',
+               'status_complaint': ''
+                         if reachy_verify_status.rc == 0
+                         else 'it exited ' ~ reachy_verify_status.rc,
+             }
+             | reachy_check_run({
+               'configuration': reachy_verify_intent.settings,
+               'announced_identity':
+                 reachy_verify_intent.settings['REACHY_HOME_ASSISTANT_IDENTITY']
+                 | default('', true),
+             }) }}
+      # The declaration passed in carries the credential. What comes back carries
+      # names and outcomes only — the probes report no value — and is printed
+      # below.
+      no_log: true
+
+    - name: Report every link between this run and a working robot
+      ansible.builtin.debug:
+        msg: >-
+          {{ row.check }}: {{ row.status }} — {{ row.detail }}{{
+            (' Fix: ' ~ row.remediation) if row.remediation else '' }}{{
+            (' Run: ' ~ row.command) if row.command else '' }}
+      loop: "{{ reachy_verify_run.results }}"
+      loop_control:
+        loop_var: row
+        label: "{{ row.check }}"
+
+    - name: Report the checks this run had no subject for
+      ansible.builtin.debug:
+        msg: "{{ row.check }}: not asked — {{ row.reason }}"
+      loop: "{{ reachy_verify_run.not_asked }}"
+      loop_control:
+        loop_var: row
+        label: "{{ row.check }}"
+
+    - name: Fail the run when the end state is not working
+      ansible.builtin.fail:
+        msg: >-
+          {{ reachy_verify_run.summary }}. Provisioning does not report success
+          over a robot that does not work.
+      when: not reachy_verify_run.ok
+
+    - name: Report that the end state was verified
+      ansible.builtin.debug:
+        msg: "{{ reachy_verify_run.summary }}"
+      when: reachy_verify_run.ok

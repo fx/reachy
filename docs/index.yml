@@ -104,7 +104,7 @@ changes:
     path: changes/0010-provisioning-ansible.md
     description: Ansible roles with an enforced idempotency gate and shared verification checks
     spec: provisioning
-    status: draft
+    status: complete
     depends_on: ["0009"]
   - id: "0011"
     name: satellite-esphome-vendoring

@@ -1,0 +1,55 @@
+---
+# The application is not named here, and that is deliberate rather than a
+# placeholder. This role installs a wheel from a configured source; a robot runs
+# whichever application the operator declares, and a role that hard-coded one
+# would have to be edited to install any other. `reachyctl deploy` is defined
+# over a wheel for the same reason.
+#
+# Leave the distribution empty and the role reports that nothing is declared and
+# does nothing else, which is what keeps a configuration-only run useful.
+reachy_app_distribution: ""
+
+# Exactly one source. A path is read on the machine running the playbook; a URL
+# is fetched by the robot itself — and a URL requires a `sha256:<digest>`,
+# because what arrived is installed as root and has to be the artifact that was
+# reviewed.
+reachy_app_wheel_path: ""
+reachy_app_wheel_url: ""
+reachy_app_wheel_checksum: ""
+
+reachy_daemon_unit: reachy-mini-daemon.service
+reachy_python: /opt/reachy/venv/bin/python
+reachy_staging: /var/tmp/reachy-provisioning
+# What a wheel claims to install, read out of the wheel rather than off its
+# file name. A file name is a claim; `.dist-info/METADATA` is what pip records,
+# and what the daemon's interpreter will report afterwards. Comparing against
+# anything else means the install decision and the verification are answering
+# two different questions — which is the shape of the failure this whole stack
+# is written against. `reachyctl deploy` reads the wheel for the same reason.
+reachy_wheel_metadata_script: |
+  import json, sys, zipfile
+  found = {'name': '', 'version': ''}
+  with zipfile.ZipFile(sys.argv[1]) as archive:
+      for member in archive.namelist():
+          if member.endswith('.dist-info/METADATA') and member.count('/') == 1:
+              text = archive.read(member).decode('utf-8', 'replace')
+              for line in text.splitlines():
+                  if not line.strip():
+                      break
+                  key, _, value = line.partition(':')
+                  key = key.strip().lower()
+                  if key in found:
+                      found[key] = value.strip()
+              break
+  sys.stdout.write(json.dumps(found))
+
+reachy_metadata_script: |
+  import json, sys
+  from importlib.metadata import PackageNotFoundError, version
+  found = {}
+  for name in sys.argv[1:]:
+      try:
+          found[name] = version(name)
+      except PackageNotFoundError:
+          found[name] = ''
+  sys.stdout.write(json.dumps(found))
