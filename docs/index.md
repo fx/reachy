@@ -27,7 +27,7 @@
 | 0008 | [reachyctl-doctor](changes/0008-reachyctl-doctor.md) | [reachyctl](specs/reachyctl/) | draft | 0007 |
 | 0009 | [reachyctl-deploy-and-config](changes/0009-reachyctl-deploy-and-config.md) | [reachyctl](specs/reachyctl/) | draft | 0002, 0008 |
 | 0010 | [provisioning-ansible](changes/0010-provisioning-ansible.md) | [provisioning](specs/provisioning/) | draft | 0009 |
-| 0011 | [satellite-esphome-vendoring](changes/0011-satellite-esphome-vendoring.md) | [ha-satellite](specs/ha-satellite/) | draft | 0001 |
+| 0011 | [satellite-esphome-vendoring](changes/0011-satellite-esphome-vendoring.md) | [ha-satellite](specs/ha-satellite/) | complete | 0001 |
 | 0012 | [satellite-ports-and-adapters](changes/0012-satellite-ports-and-adapters.md) | [ha-satellite](specs/ha-satellite/) | draft | 0007, 0011 |
 | 0013 | [satellite-behaviour-and-ui](changes/0013-satellite-behaviour-and-ui.md) | [ha-satellite](specs/ha-satellite/) | draft | 0002, 0012 |
 | 0014 | [benchmarks-and-gates](changes/0014-benchmarks-and-gates.md) | [benchmarks](specs/benchmarks/) | draft | 0006, 0009, 0013 |

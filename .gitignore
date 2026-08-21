@@ -18,6 +18,10 @@ dist/
 .venv/
 venv/
 
+# The upstream clone `just vendored-drift` compares against. A scratch copy of
+# somebody else's repository, re-fetched on every run.
+.upstream-drift/
+
 # Tool caches.
 .mypy_cache/
 .pytest_cache/

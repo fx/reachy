@@ -23,9 +23,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  #= docs/specs/architecture/index.md#req-002-one-version-for-the-whole-repository
-  #% Every artifact published from this repository MUST carry the same version
-  #% string, derived from a single repository-wide version.
+  #:= docs/specs/architecture/index.md#req-002-one-version-for-the-whole-repository
+  #:% Every artifact published from this repository MUST carry the same version
+  #:% string, derived from a single repository-wide version.
   release-please:
     name: Release please
     runs-on: ubuntu-latest

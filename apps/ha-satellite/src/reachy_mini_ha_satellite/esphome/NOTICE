@@ -1,0 +1,117 @@
+NOTICE
+======
+
+This directory contains code derived from a third-party project. The full
+licence text of that project is in `LICENSE`, beside this file.
+
+Upstream project
+----------------
+
+  Name:    Linux Voice Assistant
+  Owner:   The Open Home Foundation / the Home Assistant Authors
+  Source:  https://github.com/OHF-Voice/linux-voice-assistant
+  Licence: Apache License, Version 2.0
+  Commit:  d1f5761f7591495794734e79c98f7199100153c0
+
+Every file below was taken at that commit, and every file repeats the commit and
+its own upstream path in its own header — files get moved and refactored, and a
+header travels with the file where a directory-level notice does not.
+
+Files derived from upstream
+---------------------------
+
+  this file  <-  the upstream file it was derived from
+
+  api_server.py     <- linux_voice_assistant/api_server.py
+  entity.py         <- linux_voice_assistant/entity.py
+  models.py         <- linux_voice_assistant/models.py
+  peripheral_api.py <- linux_voice_assistant/peripheral_api.py
+  satellite.py      <- linux_voice_assistant/satellite.py
+  util.py           <- linux_voice_assistant/util.py
+  wake_word.py      <- linux_voice_assistant/wake_word.py
+  webrtc.py         <- linux_voice_assistant/webrtc.py
+  zeroconf.py       <- linux_voice_assistant/zeroconf.py
+
+`__init__.py` and `seams.py` in this directory are NOT derived from upstream.
+They are original to this repository.
+
+The carried tests in `apps/ha-satellite/tests/` are also derived from upstream,
+from `tests/unit/` at the same commit. That directory carries its own `LICENSE`
+and `NOTICE`, so an auditor reading it does not have to come here.
+
+What was not carried
+--------------------
+
+  linux_voice_assistant/__main__.py
+      The command-line entry point: argument parsing, logging setup, device
+      enumeration and process wiring. This application is started by the Reachy
+      Mini daemon, not from a shell, so none of it applies.
+
+  linux_voice_assistant/mpv_player.py
+  linux_voice_assistant/player/
+      The media-player playback path, which drives an `mpv` subprocess. On this
+      robot the daemon owns the speaker. Replaced by the `MediaPlayback` seam.
+
+  The desktop capture path (`soundcard`, inside `__main__.py`)
+      The daemon owns the microphone array. Replaced by the `AudioCapture` seam.
+
+  tests/unit/test_main.py, tests/unit/test_mpv_player.py
+      They cover only the code above.
+
+  Everything else in the upstream repository — its packaging, container images,
+  documentation, examples and continuous integration.
+
+What was changed
+----------------
+
+The intent is that the diff from upstream stays small, deliberate and
+enumerable. It is:
+
+1. Each file gained the provenance header described above.
+
+2. `entity.py` and `models.py` take `seams.MediaPlayback` where upstream took
+   `mpv_player.MpvMediaPlayer`. The seam is that class's public surface and
+   nothing more, so no call site changed.
+
+3. `models.ServerState` gained one optional field, `audio_capture`, typed
+   `seams.AudioCapture`. It is where the capture the discarded entry point
+   performed is reached from instead.
+
+4. `wake_word.py` lost a `#!/usr/bin/env python3` shebang it did not use; the
+   module is imported, never executed.
+
+5. The carried tests import from this package rather than from
+   `linux_voice_assistant`, were renamed so their module names are unique across
+   the repository, and run against an in-memory filesystem — this repository
+   requires that a unit test perform no input or output, and upstream's tests
+   wrote preference files and wake-word configurations to real temporary
+   directories. The change is one fixture in `conftest.py`; no test body was
+   rewritten. Two upstream test files were dropped entirely, listed above.
+
+6. Example addresses use the RFC 5737 documentation ranges: in the carried
+   tests, and in one comment in `util.py` illustrating what `netifaces` returns.
+   This repository is public and requires that of every tracked file.
+
+7. Two of upstream's type-check suppressions gained the error code they were
+   missing, in `util.py` and `peripheral_api.py`. This repository runs mypy with
+   `ignore-without-code`, so a blanket `# type: ignore` is an error rather than a
+   style preference, and the relaxation these modules carry deliberately does not
+   extend to it: a suppression naming what it suppresses is the one rule worth
+   keeping even here.
+
+Nothing else was touched. In particular the code is not reformatted, its
+docstrings are not rewritten, and its typing is not modernised — the shared ruff
+and mypy configuration names these files and stands down, which is why the
+diff above is the whole diff.
+
+Neither seam is implemented here. Change 0012 supplies the daemon-backed
+adapters; until then this package imports, and its carried tests pass, with both
+holes open.
+
+Assets
+------
+
+The wake-word models and sounds that ship in the wheel come from the same
+upstream repository but are not code and do not live here. They are in
+`../assets/`, with their own notice and a registry recording each one's source
+and licence.

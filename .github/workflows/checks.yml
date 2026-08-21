@@ -20,9 +20,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  #= docs/specs/architecture/index.md#req-006-quality-gates-block-merge
-  #% Continuous integration MUST run linting, type checking, and the test suite on
-  #% every pull request, and a failure of any of them MUST block merge.
+  #:= docs/specs/architecture/index.md#req-006-quality-gates-block-merge
+  #:% Continuous integration MUST run linting, type checking, and the test suite on
+  #:% every pull request, and a failure of any of them MUST block merge.
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -74,10 +74,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: just coverage-diff "origin/${{ github.base_ref }}"
 
-  #= docs/specs/architecture/index.md#req-008-generated-contract-artifacts-cannot-drift
-  #% Continuous integration MUST regenerate every published schema and interface
-  #% description from source and fail when the regenerated output differs from the
-  #% committed copy.
+  #:= docs/specs/architecture/index.md#req-008-generated-contract-artifacts-cannot-drift
+  #:% Continuous integration MUST regenerate every published schema and interface
+  #:% description from source and fail when the regenerated output differs from the
+  #:% committed copy.
   contract-drift:
     name: Contract drift
     runs-on: ubuntu-latest

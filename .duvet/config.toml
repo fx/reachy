@@ -55,36 +55,47 @@
 # requirement as "Not implemented" and can never pass `duvet query -c
 # implementation`. One block per distinct comment syntax — `comment-style` is
 # per-block, so add a block per language, not a pattern per language.
+#
+# ⚠️ The prefixes are `#:=` and `#:%`, not duvet's documented `#=` and `#%`, and
+# the colon is load-bearing. `ruff format` normalises a comment to have a space
+# after the `#` — `#= …` becomes `# = …`, which duvet no longer recognises — and
+# it makes exactly three exceptions, for comments whose body starts with `!`,
+# `:` or `#`. So a Python annotation written the documented way is silently
+# broken by the formatter, and `just lint` and `just duvet` cannot both pass.
+# The Ansible and workflow blocks use the same prefixes. YAML has no formatter
+# here to appease, so they could have kept the documented spelling — but one
+# syntax across the repository is worth more than that, and an annotation copied
+# from a workflow into a module would otherwise arrive silently broken.
 
 # --- Python: every uv workspace member -------------------------------------
 [[source]]
 pattern = "packages/**/*.py"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 
 [[source]]
 pattern = "services/**/*.py"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 
 [[source]]
 pattern = "apps/**/*.py"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 
 [[source]]
 pattern = "cli/**/*.py"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 
 [[source]]
 pattern = "bench/**/*.py"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 
 [[source]]
 pattern = "tools/**/*.py"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 
 # --- Ansible: the provisioning roles ----------------------------------------
 [[source]]
 pattern = "provisioning/ansible/**/*.yml"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 
 # --- CI workflows: satisfied-by-construction gates --------------------------
 # type = "implication" because every citation under this pattern is a CI job
@@ -93,7 +104,7 @@ comment-style = { meta = "#=", content = "#%" }
 # artifact to point at: the workflow IS the implementation.
 [[source]]
 pattern = ".github/workflows/*.yml"
-comment-style = { meta = "#=", content = "#%" }
+comment-style = { meta = "#:=", content = "#:%" }
 type = "implication"
 
 [report.snapshot]

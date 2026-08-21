@@ -17,11 +17,19 @@ dependencies = [
 dev = [
     "diff-cover>=9.2",
     "mypy>=1.11",
+    # An in-memory filesystem. The satellite's carried upstream tests exercise
+    # code that reads and writes files; this is what lets them do so without
+    # performing any input or output, which is the standing rule for unit tests.
+    "pyfakefs>=5.7",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
     "pytest-socket>=0.7",
     "ruff>=0.6",
+    # Stubs for the generated protobuf modules the vendored ESPHome protocol
+    # imports. Upstream declares them too; without them mypy cannot follow
+    # `google.protobuf` and reports every import as untyped.
+    "types-protobuf>=5",
 ]
 
 # The root is not itself a distribution: it exists to hold one resolution, one
@@ -92,16 +100,123 @@ select = [
     "W",    # pycodestyle warnings
 ]
 
+[tool.ruff.format]
+# Vendored third-party code is left formatted the way its upstream formats it —
+# upstream wraps at 200 columns, this repository at 88. Reformatting would
+# rewrite every line, which turns the scheduled upstream-drift comparison into
+# noise and makes a derived file look authored here. These are the only files in
+# the tree the formatter does not own; see the NOTICE beside them.
+exclude = [
+    "apps/ha-satellite/src/reachy_mini_ha_satellite/esphome/{api_server,entity,models,peripheral_api,satellite,util,wake_word,webrtc,zeroconf}.py",
+    "apps/ha-satellite/tests/esphome_test_support.py",
+    "apps/ha-satellite/tests/test_satellite_esphome_*.py",
+]
+
 [tool.ruff.lint.per-file-ignores]
 # Tests assert, and pytest rewrites those asserts; S101 is the rule that objects
 # to `assert` in shipped code, which is not what a test file is.
 "**/tests/**/*.py" = ["S101"]
+
+# The `banned-api` list further down bans Reachy-specific imports so that the
+# vendored ESPHome directory cannot grow a robot dependency. Those imports are
+# ordinary everywhere else, so every file outside that directory ignores the
+# rule. The pattern is negated rather than enumerating the allowed paths: a
+# directory added later is allowed automatically, and the one place the boundary
+# holds stays named in exactly one line.
+"!apps/ha-satellite/src/reachy_mini_ha_satellite/esphome/**" = ["TID251"]
+
+# A duvet annotation's target is one unbreakable token — the specification's
+# path followed by the requirement's anchor — and REQ-007's heading is long
+# enough to carry it past 88 columns. Wrapping it would stop duvet resolving the
+# citation, so the line stands and the rule stands down for this file, which
+# holds a module docstring and that annotation and nothing else.
+"apps/ha-satellite/src/reachy_mini_ha_satellite/esphome/__init__.py" = ["E501"]
+
+# Vendored third-party code. Ruff's job here is not style: it is the
+# import-direction boundary (TID251) and the correctness rules, which stay on.
+# Everything below is upstream's dialect — its line length, its docstring habits,
+# its pre-PEP-585 typing, its `open()` over `Path.open()` — and rewriting any of
+# it would fork the file from upstream for no behavioural gain. S104, S110 and
+# S310 are inherited findings, not new exposure: an mDNS advertisement binds
+# every interface by design, and the external wake-word download is upstream's
+# feature reached through a URL Home Assistant supplies. `seams.py` and
+# `__init__.py` in the same directory are ours and are NOT listed here.
+"apps/ha-satellite/src/reachy_mini_ha_satellite/esphome/{api_server,entity,models,peripheral_api,satellite,util,wake_word,webrtc,zeroconf}.py" = [
+    "ANN",    # upstream annotates partially
+    "ARG002", # unused method arguments in protocol handlers
+    "B010",   # setattr with a constant, used to tag a loaded model
+    "C413",   # list(sorted(...)) in a log line
+    "D",      # upstream's docstring conventions are not this repository's
+    "E501",   # upstream wraps at 200 columns
+    "I001",   # upstream's import order is isort-with-black at 200 columns
+    "N806",   # upstream names some locals in caps
+    "PGH003", # one blanket `# type: ignore` upstream carries
+    "PTH123", # upstream uses `open()` rather than `Path.open()`
+    "RET504", # unnecessary assignment before return
+    "RUF001", # ambiguous unicode in strings
+    "RUF002", # ambiguous unicode in docstrings
+    "RUF003", # ambiguous unicode in comments
+    "RUF022", # `__all__` is not sorted
+    "RUF046", # redundant int() casts
+    "RUF100", # a `# noqa` for a rule this repository does not select
+    "S101",   # upstream narrows an Optional with an assert
+    "S104",   # binds every interface: that is what an mDNS advertisement does
+    "S110",   # try/except/pass around a best-effort log push
+    "S310",   # urlopen of a URL Home Assistant supplies, upstream's feature
+    "SIM102", # collapsible ifs
+    "SIM105", # contextlib.suppress would read better
+    "UP",     # upstream still supports 3.11 and types accordingly
+]
+
+# The tests carried from the same upstream, for the same reasons.
+"apps/ha-satellite/tests/{esphome_test_support,test_satellite_esphome_*}.py" = [
+    "ANN",    # upstream's tests are unannotated
+    "ARG002",
+    "C408",
+    "D",
+    "E501",
+    "I001",
+    "N805",
+    "PTH123",
+    "RUF012",
+    "RUF059", # unused values unpacked from a tuple return
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
+
+# The import-direction boundary, enforced rather than left to convention.
+#
+# Nothing under the vendored ESPHome directory may import anything
+# Reachy-specific: not this package's own robot-side modules, not the Reachy Mini
+# SDK, not the shared contracts. The dependency runs one way — the robot side
+# depends on the vendored protocol — so upstream code never grows a robot
+# dependency, and a future upstream comparison stays meaningful.
+#
+# `banned-api` is global, so the scoping lives in the negated per-file-ignores
+# entry above: every file outside the vendored directory ignores TID251, and the
+# vendored directory does not. Relative imports inside the directory are
+# unaffected, which is how the vendored modules reach each other and their seams.
+#
+# The list names modules, not the package root, and deliberately so: ruff resolves
+# a relative import to its absolute path before matching, so banning
+# `reachy_mini_ha_satellite` outright would ban `from .entity import ...` inside
+# the vendored directory as well. `just lint-boundary` closes that gap with a
+# second check the same recipe proves fires — no absolute `reachy`-prefixed import
+# in the directory at all, whatever form it takes.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"reachy_mini".msg = "The vendored ESPHome code must not import the Reachy Mini SDK; reach hardware through a seam in esphome/seams.py, implemented by an adapter outside this directory."
+"reachy_contracts".msg = "The vendored ESPHome code must not import the shared contracts; the dependency runs from the robot side towards the vendored protocol, never the reverse."
+"reachy_mini_ha_satellite.adapters".msg = "The vendored ESPHome code must not import a Reachy adapter; that is the import direction the seams exist to invert."
+"reachy_mini_ha_satellite.assets".msg = "The vendored ESPHome code must not import the asset registry; asset paths are wired in from outside the directory."
+"reachy_mini_ha_satellite.main".msg = "The vendored ESPHome code must not import the application entry point."
+"reachy_mini_ha_satellite.behaviour".msg = "The vendored ESPHome code must not import the behaviour layer."
+"reachy_mini_ha_satellite.config".msg = "The vendored ESPHome code must not import this application's configuration."
+"reachy_mini_ha_satellite.ports".msg = "The vendored ESPHome code must not import this application's ports."
+"reachy_mini_ha_satellite.web".msg = "The vendored ESPHome code must not import this application's web interface."
 
 [tool.mypy]
 python_version = "3.12"
@@ -117,11 +232,90 @@ mypy_path = [
     "cli/reachyctl/src",
     "bench/src",
     "tools/repo-hygiene/src",
+    # Not a member: `scripts/` holds the helpers the Justfile calls. It is on the
+    # path so their tests can import them by name, the same way `scripts/tests/`
+    # puts it on `sys.path` at run time.
+    "scripts",
 ]
-files = ["packages", "apps", "services", "cli", "bench", "tools"]
+files = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 # `ignore-without-code` is how the "a suppression carries its rule identifier"
 # rule is enforced for mypy; ruff's PGH003/PGH004 enforce the same for lint.
 enable_error_code = ["ignore-without-code", "redundant-expr", "truthy-bool"]
+
+# --- Vendored third-party code ----------------------------------------------
+# The one recorded exception to strict mode. These modules are derived from the
+# Home Assistant project's Linux voice assistant (see the NOTICE beside them);
+# they were written against a partially-annotated codebase and against protobuf
+# stubs that mypy cannot follow, so strict mode has nothing useful to say about
+# them and demanding it would mean rewriting upstream's signatures.
+#
+# They are relaxed here, by name, and NOT excluded: mypy still reads them, still
+# checks what it can, and still catches a change that breaks a call. `seams.py`
+# and `__init__.py` in the same directory are ours and stay strict, which is why
+# the modules are listed rather than the package globbed.
+[[tool.mypy.overrides]]
+module = [
+    "reachy_mini_ha_satellite.esphome.api_server",
+    "reachy_mini_ha_satellite.esphome.entity",
+    "reachy_mini_ha_satellite.esphome.models",
+    "reachy_mini_ha_satellite.esphome.peripheral_api",
+    "reachy_mini_ha_satellite.esphome.satellite",
+    "reachy_mini_ha_satellite.esphome.util",
+    "reachy_mini_ha_satellite.esphome.wake_word",
+    "reachy_mini_ha_satellite.esphome.webrtc",
+    "reachy_mini_ha_satellite.esphome.zeroconf",
+]
+# `strict` itself is a global-only switch, so the relaxation is spelled out:
+# every flag `--strict` would turn on, turned back off for these modules alone.
+disallow_any_generics = false
+disallow_incomplete_defs = false
+disallow_subclassing_any = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_untyped_defs = false
+extra_checks = false
+no_implicit_reexport = false
+strict_equality = false
+warn_return_any = false
+warn_unreachable = false
+warn_unused_ignores = false
+disable_error_code = ["redundant-expr", "truthy-bool"]
+# Upstream's own mypy configuration silences these, and the reasons are the
+# same here: `aioesphomeapi.api_pb2` is generated and has no stubs, and neither
+# does `webrtc_noise_gain`.
+ignore_missing_imports = true
+
+# The tests carried from the same upstream, for the same reason: they are
+# unannotated, so strict mode would reject every one of them.
+[[tool.mypy.overrides]]
+module = [
+    "esphome_test_support",
+    "test_satellite_esphome_api_server",
+    "test_satellite_esphome_entity",
+    "test_satellite_esphome_models",
+    "test_satellite_esphome_protocol",
+    "test_satellite_esphome_util",
+    "test_satellite_esphome_wake_word",
+    "test_satellite_esphome_webrtc",
+    "test_satellite_esphome_zeroconf",
+]
+# Upstream's tests are unannotated, so mypy skips their bodies rather than
+# type-checking code written without types in mind.
+check_untyped_defs = false
+disallow_any_generics = false
+disallow_incomplete_defs = false
+disallow_subclassing_any = false
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+disallow_untyped_defs = false
+extra_checks = false
+no_implicit_reexport = false
+strict_equality = false
+warn_return_any = false
+warn_unreachable = false
+warn_unused_ignores = false
+disable_error_code = ["redundant-expr", "truthy-bool"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -150,7 +344,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=xml",
 ]
-testpaths = ["packages", "apps", "services", "cli", "bench", "tools"]
+testpaths = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 filterwarnings = ["error"]
 
 [tool.coverage.run]
@@ -175,6 +369,10 @@ exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
     "@overload",
+    # The module-as-script guard. Its body is one line handing a return value to
+    # the interpreter, and covering it would mean running the module as a
+    # subprocess from a unit test, which is input and output for nothing.
+    "if __name__ == .__main__.:",
 ]
 
 [tool.coverage.xml]

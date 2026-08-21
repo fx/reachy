@@ -10,9 +10,18 @@ SPECIFICATION: [Architecture](docs/specs/architecture/index.md)
     TEXT[implication]: private IP ranges, internal hostname suffixes, and email addresses rather than
     TEXT[implication]: any specific name.
 
+  SECTION: [REQ-005: Behaviour is testable without hardware](#req-005-behaviour-is-testable-without-hardware)
+    TEXT[implementation]: Every workspace member MUST expose its behaviour through interfaces that allow
+    TEXT[implementation]: its full test suite to run without a robot, a camera, or a microphone attached.
+
   SECTION: [REQ-006: Quality gates block merge](#req-006-quality-gates-block-merge)
     TEXT[implication]: Continuous integration MUST run linting, type checking, and the test suite on
     TEXT[implication]: every pull request, and a failure of any of them MUST block merge.
+
+  SECTION: [REQ-007: Vendored third-party code is attributed in place](#req-007-vendored-third-party-code-is-attributed-in-place)
+    TEXT[implementation]: Any directory containing code derived from a third-party project MUST carry that
+    TEXT[implementation]: project's licence text and a notice recording the upstream project, the files
+    TEXT[implementation]: derived from it, and the upstream commit they were taken at.
 
   SECTION: [REQ-008: Generated contract artifacts cannot drift](#req-008-generated-contract-artifacts-cannot-drift)
     TEXT[implication]: Continuous integration MUST regenerate every published schema and interface

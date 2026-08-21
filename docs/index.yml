@@ -111,7 +111,7 @@ changes:
     path: changes/0011-satellite-esphome-vendoring.md
     description: Vendor the Apache-2.0 ESPHome satellite core with per-file provenance and cut the audio seams
     spec: ha-satellite
-    status: draft
+    status: complete
     depends_on: ["0001"]
   - id: "0012"
     name: satellite-ports-and-adapters
