@@ -62,12 +62,20 @@ class WireModel(BaseModel):
     nothing that has been received can be edited and re-sent as though it were
     the original.
 
+    `strict=True` is the third, and it is what keeps the published schema honest.
+    Left lax, pydantic reads JSON `true` as the float `1.0` and the string
+    `"0.5"` as `0.5` — so a message this package accepts would be one the schema
+    in `docs/contracts/` says is invalid, and a second implementation written
+    against that schema would disagree with this one about what arrived. JSON
+    integers are still accepted where a number is wanted, which is the one
+    coercion the format itself requires.
+
     `to_wire` is the single canonical serialisation. Every component uses it, so
     the golden fixtures pin the same bytes for all of them rather than pinning
     whichever dump options each consumer happened to pass.
     """
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     def to_wire(self) -> bytes:
         """Serialise to the canonical wire bytes.
@@ -111,7 +119,7 @@ class CaptureTimestamp(RootModel[str]):
         root: The token exactly as the capturing side supplied it.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, strict=True)
 
     root: Annotated[str, StringConstraints(min_length=1, max_length=64)]
 

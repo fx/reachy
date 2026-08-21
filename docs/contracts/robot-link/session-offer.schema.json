@@ -39,6 +39,8 @@
     },
     "credential": {
       "format": "password",
+      "maxLength": 256,
+      "minLength": 1,
       "title": "Credential",
       "type": "string",
       "writeOnly": true

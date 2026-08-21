@@ -67,10 +67,12 @@ _DIALECT: Final = "https://json-schema.org/draft/2020-12/schema"
 def _schema_of(model: type[WireModel]) -> Callable[[], str]:
     """Build a renderer for one message type's JSON Schema.
 
-    The serialisation schema rather than the validation one, because what is
-    published describes the bytes that travel: an implementation in another
-    language reads this to learn what it will receive, not what this package
-    happens to accept on the way in.
+    The validation schema rather than the serialisation one. The two agree for
+    every message type here except the session offer, where the serialisation
+    schema drops the credential's minimum length and the fact that it is a
+    secret — so publishing it would describe a contract laxer than the one this
+    package enforces, and a second implementation written against it could emit
+    a message this package refuses.
 
     Args:
         model: The message type to describe.
@@ -83,7 +85,7 @@ def _schema_of(model: type[WireModel]) -> Callable[[], str]:
     def render() -> str:
         document = {
             "$schema": _DIALECT,
-            **model.model_json_schema(mode="serialization"),
+            **model.model_json_schema(mode="validation"),
         }
         text = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False)
         return f"{text}\n"

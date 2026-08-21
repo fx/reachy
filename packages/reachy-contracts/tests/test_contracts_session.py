@@ -102,6 +102,12 @@ def test_the_credential_survives_a_round_trip() -> None:
     assert parsed.credential.get_secret_value() == "example-credential"
 
 
+def test_an_empty_credential_is_not_a_credential() -> None:
+    """Presenting nothing fails at the parse boundary, not at an auth check."""
+    with pytest.raises(ValidationError):
+        SessionOffer(credential=SecretStr(""))
+
+
 def test_negotiation_keeps_only_what_both_sides_speak() -> None:
     """A capability the other side lacks is absent, and the rest continues."""
     agreement = negotiate(_offer(FACE_V1, GESTURE_V1), [FACE_V1])
@@ -204,6 +210,50 @@ def test_a_result_envelope_validates_the_payload_it_was_parameterised_with() -> 
 
     with pytest.raises(ValidationError):
         ResultEnvelope[GestureDetections].from_wire(face.to_wire())
+
+
+def test_a_result_cannot_name_one_capability_and_carry_another() -> None:
+    """A message that routes as one capability and reads as another is refused."""
+    with pytest.raises(ValidationError, match="carries FaceDetections"):
+        ResultEnvelope[GestureDetections](
+            sequence=3,
+            captured_at=CaptureTimestamp("1"),
+            capability="face",
+            payload=GestureDetections(),
+        )
+
+
+def test_a_result_for_an_unregistered_capability_still_parses() -> None:
+    """An older build ignores a newer one's capability rather than choking."""
+    envelope = ResultEnvelope[GestureDetections](
+        sequence=3,
+        captured_at=CaptureTimestamp("1"),
+        capability="audio",
+        payload=GestureDetections(),
+    )
+
+    assert envelope.capability == "audio"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"x":true,"y":0}',
+        b'{"x":"0.5","y":0}',
+    ],
+)
+def test_the_wire_refuses_what_the_published_schema_calls_invalid(raw: bytes) -> None:
+    """Strict parsing, so the code and the generated schema agree on what is a number."""
+    with pytest.raises(ValidationError):
+        NormalisedPoint.from_wire(raw)
+
+
+def test_a_json_integer_is_still_a_number() -> None:
+    """The one coercion JSON itself requires survives strict mode."""
+    assert NormalisedPoint.from_wire(b'{"x":0,"y":-1}') == NormalisedPoint(
+        x=0.0,
+        y=-1.0,
+    )
 
 
 def test_an_error_can_name_the_frame_it_concerns_or_no_frame_at_all() -> None:

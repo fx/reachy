@@ -37,6 +37,7 @@ from pydantic import (
 )
 
 from reachy_contracts.values import (
+    CAPABILITY_PAYLOADS,
     CapabilityName,
     CaptureTimestamp,
     WireModel,
@@ -67,6 +68,12 @@ SequenceNumber = Annotated[int, Field(ge=0)]
 CapabilityVersion = Annotated[int, Field(ge=1)]
 
 _Detail = Annotated[str, StringConstraints(max_length=500)]
+
+# A credential is opaque to this package, but an empty one is not a credential.
+# Rejecting it here means "no credential presented" fails at the parse boundary
+# rather than reaching an authentication check that has to decide what an empty
+# string means.
+_Credential = Annotated[SecretStr, Field(min_length=1, max_length=256)]
 
 
 class Capability(WireModel):
@@ -116,7 +123,7 @@ class SessionOffer(WireModel):
         capabilities: What this client can speak, possibly nothing.
     """
 
-    credential: SecretStr
+    credential: _Credential
     capabilities: tuple[Capability, ...] = ()
 
     @field_serializer("credential", when_used="json")
@@ -258,6 +265,33 @@ class ResultEnvelope[PayloadT: WireModel](WireModel):
             capability=capability,
             payload=payload,
         )
+
+    @model_validator(mode="after")
+    def _payload_matches_the_capability(self) -> Self:
+        """Reject a result whose payload is not the named capability's.
+
+        The check reads `CAPABILITY_PAYLOADS` rather than enumerating anything,
+        so it stays true as capabilities are added. A name the registry does not
+        carry passes: that is a capability this build cannot route in any case,
+        and refusing to parse it would make an older component unable to read a
+        newer one's traffic rather than simply ignoring it.
+
+        Returns:
+            The validated envelope.
+
+        Raises:
+            ValueError: If the named capability is registered and the payload is
+                not the type registered for it — a message that would route as
+                one capability while carrying another's contents.
+        """
+        expected = CAPABILITY_PAYLOADS.get(self.capability)
+        if expected is not None and not isinstance(self.payload, expected):
+            message = (
+                f"capability {self.capability!r} carries "
+                f"{expected.__name__}, not {type(self.payload).__name__}"
+            )
+            raise ValueError(message)
+        return self
 
 
 class ErrorCode(StrEnum):
