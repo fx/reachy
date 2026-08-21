@@ -194,7 +194,9 @@ class Profile:
         Raises:
             ValueError: If it is malformed.
         """
-        measurements = document.get("measurements", {})
+        measurements = (
+            document.get("measurements", {}) if isinstance(document, dict) else None
+        )
         if not isinstance(measurements, dict):
             message = f"baseline profile {name!r} has no measurement mapping"
             raise ValueError(message)
@@ -286,6 +288,9 @@ class Baseline:
                 it does not know, a section that is not a mapping, or an entry
                 that is not one.
         """
+        if not isinstance(document, dict):
+            message = f"the baseline is a JSON object, not {document!r}"
+            raise ValueError(message)
         schema = document.get("schema")
         if schema != SCHEMA_VERSION:
             message = (
@@ -308,7 +313,11 @@ class Baseline:
         tolerances: dict[Unit, float] = {}
         for key, stated in sections["tolerances"].items():
             try:
-                tolerances[Unit(key)] = float(stated)
+                # `finite`, not `float`. A tolerance of `nan` makes both
+                # comparison bounds false, so every regression is reported as
+                # within it; an infinite one permits every regression there is.
+                # Both fail open, which is the direction a gate must not.
+                tolerances[Unit(key)] = finite(stated)
             except (TypeError, ValueError) as error:
                 message = f"baseline tolerance {key!r} is not one: {stated!r}"
                 raise ValueError(message) from error

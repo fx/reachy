@@ -399,6 +399,9 @@ class RunResult:
                 missing section, or a schema from a later version. Reading past
                 either would compare numbers whose meaning had changed.
         """
+        if not isinstance(document, dict):
+            message = f"a result document is a JSON object, not {document!r}"
+            raise ValueError(message)
         schema = document.get("schema")
         if schema != SCHEMA_VERSION:
             message = (
@@ -411,6 +414,10 @@ class RunResult:
             host = context["host"]
             software = context["software"]
             benchmarks: Iterable[Mapping[str, Any]] = document["benchmarks"]
+            # Consumed inside the guard rather than after it: `"benchmarks":
+            # null` reads out of the document happily and raises `TypeError`
+            # only when something iterates it.
+            results = tuple(BenchmarkResult.from_document(one) for one in benchmarks)
             # Inside the guard, not after it. A host block missing a field, or
             # a context that is a string rather than a mapping, is the same
             # event as a missing section — a document this build cannot read —
@@ -436,10 +443,7 @@ class RunResult:
         except (AttributeError, KeyError, TypeError, ValueError) as error:
             message = "a result document carries a context and a benchmark list"
             raise ValueError(message) from error
-        return cls(
-            context=recorded,
-            benchmarks=tuple(BenchmarkResult.from_document(one) for one in benchmarks),
-        )
+        return cls(context=recorded, benchmarks=results)
 
     @classmethod
     def from_json(cls, text: str) -> Self:

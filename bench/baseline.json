@@ -43,9 +43,9 @@
       "note": "31.2 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it"
     },
     "footprint.wheel.reachyctl": {
-      "value": 97451,
+      "value": 102656,
       "unit": "bytes",
-      "note": "95.2 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it"
+      "note": "100.2 KiB, from `just wheel-size`. Collected from the release workflow, which is the change that produces it. It grew from 95.2 KiB in this change, which added `reachyctl.bench` \u2014 the command that runs the suite against a live installation"
     }
   },
   "profiles": {

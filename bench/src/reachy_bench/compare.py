@@ -287,7 +287,11 @@ def _judge(
                 f"quantity"
             ),
         )
-    if not math.isfinite(measurement.value) or not math.isfinite(entry.value):
+    if (
+        not math.isfinite(measurement.value)
+        or not math.isfinite(entry.value)
+        or not math.isfinite(tolerance)
+    ):
         # The one direction a gate must never fail in. `nan` compares false
         # against every bound, so a measurement carrying one would be reported
         # as within tolerance however wrong it is; an infinity would be reported
@@ -302,8 +306,10 @@ def _judge(
             unit=entry.unit,
             tolerance=tolerance,
             detail=(
-                "one of these is not a finite number, so nothing about them can "
-                "be compared; a gate that passed on that would fail open"
+                f"one of the measurement, the recorded figure and the "
+                f"{tolerance} tolerance is not a finite number, so nothing "
+                f"about them can be compared; a gate that passed on that would "
+                f"fail open"
             ),
         )
     if entry.value == 0.0:

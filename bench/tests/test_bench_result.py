@@ -19,10 +19,15 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import contextlib
 import json
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from bench_support import make_benchmark, make_context, make_distribution, make_run
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 from reachy_bench.result import (
     SCHEMA_VERSION,
@@ -301,3 +306,66 @@ def test_a_distribution_carrying_an_infinity_is_refused() -> None:
                 },
             },
         )
+
+
+def test_a_null_benchmark_list_is_refused_rather_than_raising_a_type_error() -> None:
+    """It reads out of the document happily and only fails when iterated."""
+    document = json.loads(make_run([]).as_json())
+    document["benchmarks"] = None
+
+    with pytest.raises(ValueError, match="carries a context"):
+        RunResult.from_document(document)
+
+
+def test_a_malformed_benchmark_entry_is_refused_as_a_document() -> None:
+    """The comprehension is inside the guard, so its failure travels as one."""
+    document = json.loads(make_run([]).as_json())
+    document["benchmarks"] = [{"benchmark": "detect"}]
+
+    with pytest.raises(ValueError, match="carries a context"):
+        RunResult.from_document(document)
+
+
+def test_a_result_document_that_is_not_an_object_is_refused() -> None:
+    """`from_document` is reachable without going through `from_json`.
+
+    What arrives at it is `json.loads`'s `Any`, which the type checker cannot
+    narrow, so the guard is the only thing between a JSON array and an
+    `AttributeError` out of `.get`.
+    """
+    with pytest.raises(ValueError, match="JSON object"):
+        RunResult.from_document(json.loads("[]"))
+
+
+# Every shape a half-written or hand-edited document can take at a slot that
+# should hold something else. The readers are asked about each of them because
+# the class is "a nested read outside its guard", and a class is closed by
+# sweeping it rather than by fixing the site somebody happened to report.
+_MALFORMED: Final[tuple[object, ...]] = (None, 4, "text", [], [1], {}, {"a": 1}, True)
+
+
+@pytest.mark.parametrize("value", _MALFORMED)
+@pytest.mark.parametrize(
+    "reader",
+    [RunResult.from_document, Measurement.from_document, BenchmarkResult.from_document],
+    ids=["run", "measurement", "benchmark"],
+)
+def test_every_reader_refuses_every_malformed_shape_as_a_value_error(
+    reader: Callable[[Any], object],
+    value: object,
+) -> None:
+    """The command surface catches `ValueError` and nothing else.
+
+    The invariant is not that every shape below is refused — a few of them are
+    legitimate documents — but that reading one either succeeds or raises
+    `ValueError`. A `KeyError`, a `TypeError` or an `AttributeError` escaping
+    one of these exits the gate with a traceback instead of the diagnostic it
+    means to print, and anything but `ValueError` propagates here and fails
+    this test.
+
+    Args:
+        reader: The reader under test.
+        value: The malformed document to feed it.
+    """
+    with contextlib.suppress(ValueError):
+        reader(value)

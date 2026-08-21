@@ -20,10 +20,11 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pytest
 import yaml
@@ -360,4 +361,80 @@ def test_a_recorded_figure_that_is_not_finite_is_refused(value: str) -> None:
     )
 
     with pytest.raises(ValueError, match="is not one"):
+        Baseline.from_document(document)
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity"])
+def test_a_tolerance_that_is_not_finite_is_refused(value: str) -> None:
+    """`nan` makes both bounds false; an infinity permits every regression.
+
+    Args:
+        value: The unquoted JSON literal to commit as the tolerance.
+    """
+    document = json.loads(
+        json.dumps(_document()).replace('"ms": 1.0', f'"ms": {value}'),
+    )
+
+    with pytest.raises(ValueError, match="is not one"):
+        Baseline.from_document(document)
+
+
+def test_a_profile_committed_as_a_scalar_is_refused() -> None:
+    """`.get` on a number would raise `AttributeError` past every guard."""
+    with pytest.raises(ValueError, match="no measurement mapping"):
+        Baseline.from_document(_document(profiles={PROFILE: 4}))
+
+
+def test_a_baseline_that_is_not_an_object_is_refused() -> None:
+    """`from_document` is reachable without going through `from_json`.
+
+    What arrives at it is `json.loads`'s `Any`, which the type checker cannot
+    narrow, so the guard is the only thing between a JSON array and an
+    `AttributeError` out of `.get`.
+    """
+    with pytest.raises(ValueError, match="JSON object"):
+        Baseline.from_document(json.loads("[]"))
+
+
+# The same sweep as the result readers', over the baseline's own. The class is
+# "a nested read outside its guard", and it is closed by covering every slot
+# rather than the one somebody happened to report.
+_MALFORMED: Final[tuple[object, ...]] = (None, 4, "text", [], [1], {}, {"a": 1}, True)
+
+_SLOTS: Final = (
+    ("tolerances",),
+    ("artifacts",),
+    ("profiles",),
+    ("artifacts", "footprint.wheel.reachyctl"),
+    ("profiles", PROFILE),
+    ("profiles", PROFILE, "measurements"),
+    ("profiles", PROFILE, "measurements", "detect.face.threads.4"),
+    ("tolerances", "ms"),
+)
+
+
+@pytest.mark.parametrize("value", _MALFORMED)
+@pytest.mark.parametrize("slot", _SLOTS, ids=[".".join(one) for one in _SLOTS])
+def test_a_malformed_value_at_any_slot_is_refused_as_a_value_error(
+    slot: tuple[str, ...],
+    value: object,
+) -> None:
+    """The gate catches `ValueError`, so nothing else may escape a reader.
+
+    The invariant is not that every shape below is refused — an empty mapping
+    is a profile with no recorded figures, and a whole number is a perfectly
+    good tolerance — but that reading one either succeeds or raises
+    `ValueError`. Anything else propagates here and fails this test.
+
+    Args:
+        slot: Where in the document to put the malformed value.
+        value: What to put there.
+    """
+    document = _document()
+    target: Any = document
+    for key in slot[:-1]:
+        target = target[key]
+    target[slot[-1]] = value
+
+    with contextlib.suppress(ValueError):
         Baseline.from_document(document)
