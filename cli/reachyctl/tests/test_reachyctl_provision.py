@@ -402,3 +402,23 @@ def test_tags_and_a_removal_are_each_fine_on_their_own() -> None:
     """The refusal is about the pair; neither is a problem by itself."""
     checked_scope(remove=True, tags=())
     checked_scope(remove=False, tags=("daemon_env",))
+
+
+def test_a_plan_refuses_an_extra_var_that_is_not_a_path_when_it_is_built() -> None:
+    """The check is on the plan, so a second caller cannot walk past it.
+
+    `ProvisionPlan` and `ansible_command` are both exported. A check that lived
+    only in the Typer command would leave the argument in the process list for
+    anything that built a plan another way.
+    """
+    with pytest.raises(ConfigurationError, match="not a path"):
+        ProvisionPlan(
+            directory=DIRECTORY,
+            extra_vars=("reachy_groundstation_credential=example-secret",),
+        )
+
+
+def test_a_plan_refuses_a_removal_narrowed_to_a_concern_when_it_is_built() -> None:
+    """For the same reason: the combination selects no task and reports success."""
+    with pytest.raises(ConfigurationError, match="takes no --tags"):
+        ProvisionPlan(directory=DIRECTORY, remove=True, tags=("daemon_env",))

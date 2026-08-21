@@ -84,7 +84,7 @@ from reachyctl.managed import DEFAULT_DAEMON_UNIT
 from reachyctl.output import OutputFormat, Report, Reporter, build_reporter
 from reachyctl.probe import DEFAULT_CAPABILITIES, ProbePlan, execute, parse_capability
 from reachyctl.provision import DIRECTORY_VARIABLE as PROVISIONING_DIRECTORY_VARIABLE
-from reachyctl.provision import ProvisionPlan, checked_extra_vars, checked_scope
+from reachyctl.provision import ProvisionPlan
 from reachyctl.provision import execute as execute_provision
 from reachyctl.provision import resolve_directory as resolve_provisioning_directory
 from reachyctl.robot import (
@@ -1050,7 +1050,6 @@ def provision(
     """
     reporter = _reporter(ctx)
     try:
-        checked_scope(remove=remove, tags=tuple(tags or ()))
         code = execute_provision(
             ProvisionPlan(
                 directory=resolve_provisioning_directory(directory),
@@ -1059,7 +1058,7 @@ def provision(
                 tags=tuple(tags or ()),
                 limit=limit,
                 inventory=inventory,
-                extra_vars=checked_extra_vars(extra_vars or ()),
+                extra_vars=tuple(extra_vars or ()),
                 verbose=reporter.verbose,
             ),
             reporter,

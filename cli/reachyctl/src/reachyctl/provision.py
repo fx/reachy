@@ -123,6 +123,23 @@ class ProvisionPlan:
     extra_vars: tuple[str, ...] = ()
     verbose: bool = False
 
+    def __post_init__(self) -> None:
+        """Refuse a plan that is not one, at the moment it is built.
+
+        Here rather than in the command surface, so the invariant holds however
+        the plan was made: `ProvisionPlan` and `ansible_command` are both
+        exported, and a check that lived only in the Typer command would be one
+        a second caller could walk past — taking a `NAME=VALUE` extra variable
+        into the process list, or a tagged removal that selects no task and
+        reports success having removed nothing.
+
+        Raises:
+            ConfigurationError: If the extra variables are not paths, or a
+                removal was narrowed to a concern.
+        """
+        checked_scope(remove=self.remove, tags=self.tags)
+        checked_extra_vars(self.extra_vars)
+
     @property
     def playbook(self) -> str:
         """Say which playbook this run is of.
@@ -276,6 +293,10 @@ def ansible_command(plan: ProvisionPlan) -> list[str]:
     Args:
         plan: What the run was asked to do.
 
+    Every plan reaching this has already refused an extra variable that is not a
+    path and a removal narrowed to a concern — `ProvisionPlan` checks both when
+    it is built, so there is no unvalidated plan for this to be handed.
+
     Returns:
         The arguments, in a stable order so that a run reported in the output is
         one an operator can paste. `--check` is how Ansible spells preview, and
@@ -331,7 +352,7 @@ def execute(
         # afterwards: a run against a robot on a slow link is minutes of
         # waiting, and a progress report that arrives all at once at the end is
         # not one.
-        subprocess.run(  # noqa: S603 - argv is this module's own literals plus checked paths; no shell, and wrapping the playbook is the command
+        subprocess.run(  # noqa: S603  # argv is this module's own literals plus a checked path; no shell is involved, and wrapping the playbook is what the command is
             command,
             cwd=directory,
             stdout=sys.stderr,

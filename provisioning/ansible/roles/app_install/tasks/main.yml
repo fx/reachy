@@ -138,6 +138,21 @@
     # be answering two different questions, which is the shape of the failure
     # this whole stack is written against. `reachyctl deploy` reads the wheel
     # for the same reason.
+    #
+    # **A preview has no wheel to read.** `--check` deliberately does not
+    # transfer one, so on a first preview there is nothing at that path — and a
+    # preview that failed rather than reporting what it would do is not a
+    # preview, which is REQ-065. So the read is guarded, and a preview with
+    # nothing staged falls back to the file name and says so. Every run that
+    # actually installs has staged the wheel two tasks earlier, so the fallback
+    # never decides anything that reaches a robot.
+    - name: Look for the staged wheel
+      ansible.builtin.stat:
+        path: "{{ reachy_staging }}/{{ reachy_app_file }}"
+      register: reachy_app_staged
+      changed_when: false
+      check_mode: false
+
     - name: Read what the staged wheel says it installs
       ansible.builtin.command:
         argv:
@@ -146,12 +161,20 @@
           - "{{ reachy_wheel_metadata_script }}"
           - "{{ reachy_staging }}/{{ reachy_app_file }}"
       register: reachy_app_metadata
+      when: reachy_app_staged.stat.exists
       changed_when: false
       check_mode: false
 
     - name: Take the distribution and version the wheel declares
       ansible.builtin.set_fact:
-        reachy_app_declares: "{{ reachy_app_metadata.stdout | from_json }}"
+        reachy_app_declares: >-
+          {{ (reachy_app_metadata.stdout | from_json)
+             if reachy_app_staged.stat.exists
+             else {'name': reachy_app_release.distribution,
+                   'version': reachy_app_release.version} }}
+        reachy_app_declares_source: >-
+          {{ 'the wheel' if reachy_app_staged.stat.exists
+             else 'its file name, because a preview transfers nothing' }}
       check_mode: false
 
     - name: Refuse a wheel whose metadata cannot be read
@@ -161,9 +184,11 @@
           .dist-info/METADATA, so nothing says what installing it would put on
           the robot. A wheel is a zip with a metadata directory; this one is
           either truncated or not a wheel.
-      when: >-
-        reachy_app_declares.name | length == 0
-        or reachy_app_declares.version | length == 0
+      when:
+        - reachy_app_staged.stat.exists
+        - >-
+          reachy_app_declares.name | length == 0
+          or reachy_app_declares.version | length == 0
 
     # A robot that ended up running some other application because a URL pointed
     # somewhere else is the failure this whole stack is written against. Both
@@ -173,7 +198,8 @@
       ansible.builtin.fail:
         msg: >-
           {{ reachy_app_file }} declares
-          {{ reachy_app_declares.name }}, and {{ reachy_app_distribution }} is
+          {{ reachy_app_declares.name }} according to
+          {{ reachy_app_declares_source }}, and {{ reachy_app_distribution }} is
           declared here. Installing it would leave the robot running an
           application nothing asked for.
       when: >-
@@ -196,7 +222,8 @@
         msg: >-
           {{ reachy_app_distribution }}: {{ (reachy_app_before.stdout
           | from_json)[reachy_app_distribution] | default('nothing', true) }}
-          installed, {{ reachy_app_declares.version }} in the wheel.
+          installed, {{ reachy_app_declares.version }} according to
+          {{ reachy_app_declares_source }}.
 
     #:= docs/specs/provisioning/index.md#req-062-a-stock-image-is-sufficient
     #:% Provisioning MUST succeed against an unmodified stock robot image without any

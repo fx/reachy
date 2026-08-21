@@ -66,6 +66,18 @@ that apply here.
   print, does not choose a format and does not invent an exit status. Every
   string leaves through `Reporter`, which scrubs it — that is what makes
   REQ-059 a rule rather than a habit each command has to remember.
+
+  **`provision` is the one recorded exception, and only for the wrapped tool's
+  own output.** It still builds a `Report` and still returns a `Reporter`'s exit
+  code; what does not pass through the reporter is `ansible-playbook`'s progress,
+  which is written to this process's standard error so the result stream stays
+  parseable. Capturing and replaying it would replace a live account of a run
+  that takes minutes with one that arrives all at once at the end, which is most
+  of the reason the command wraps the playbook instead of reimplementing it. And
+  there is nothing to scrub it with: no option here takes a credential, one
+  reaching the playbook does so inside a file Ansible does not echo, and the
+  roles carry `no_log` on every task whose result could hold the daemon's
+  environment — so a redactor at this seam would be one seeded with nothing.
 - **No option ever takes a credential.** An argument is visible in the process
   list and lands in the shell history. `--credential-file` takes a path, and
   `REACHYCTL_CREDENTIAL` and `REACHYCTL_CREDENTIAL_FILE` are the other two ways
