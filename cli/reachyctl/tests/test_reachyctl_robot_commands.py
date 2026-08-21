@@ -291,6 +291,7 @@ def test_a_deploy_with_neither_a_member_nor_a_wheel_says_so(watcher: Watcher) ->
     assert watcher.built == []
 
 
+@pytest.mark.filesystem  # `tmp_path` is a real directory; not a unit test
 def test_a_deploy_given_both_a_member_and_a_wheel_refuses_to_choose(
     watcher: Watcher,
     tmp_path: Path,

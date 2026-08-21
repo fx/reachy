@@ -47,6 +47,12 @@ if TYPE_CHECKING:
 
 # Loopback only. Nothing here listens on a routable address, and the port is
 # ephemeral so two runs on one machine cannot collide.
+# Every test in this module writes real files — the generated keys and the
+# known-hosts file the fixture below produces — so the whole module declares it.
+# The marker grants nothing: it says these are not unit tests, which they are
+# not, and `enable_socket` says the same about the socket each of them opens.
+pytestmark = pytest.mark.filesystem
+
 HOST: Final = "127.0.0.1"
 
 ACCOUNT: Final = "operator"

@@ -514,11 +514,13 @@ async def _verify(
     if complaints:
         steps.failed(_VERIFY, "; ".join(complaints))
         return
-    steps.done(
-        _VERIFY,
+    declared = (
         f"all {len(desired)} declared setting(s) are in force"
-        + (f", and {len(removed)} withdrawn one(s) are gone" if removed else ""),
+        if desired
+        else "nothing is declared"
     )
+    withdrawn = f", and {len(removed)} withdrawn setting(s) are gone" if removed else ""
+    steps.done(_VERIFY, f"{declared}{withdrawn}")
 
 
 def _rows_for(difference: Difference) -> tuple[Mapping[str, object], ...]:
