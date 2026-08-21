@@ -90,6 +90,29 @@ def test_an_artifact_no_registry_produces_any_more_is_deleted(tmp_path: Path) ->
     assert (tmp_path / "robot-link").is_dir()
 
 
+def test_a_stale_symlink_is_removed_rather_than_walked_around(tmp_path: Path) -> None:
+    """`is_file` and `is_dir` follow a link, so both shapes need handling first.
+
+    A broken link is neither, and would survive the sweep meant to remove it. A
+    link to a directory answers `is_dir` about its target, and `rmdir` on the
+    link then raises `NotADirectoryError` and fails the run outright.
+    """
+    main([str(tmp_path)])
+    elsewhere = tmp_path.parent / "elsewhere"
+    elsewhere.mkdir()
+    broken = tmp_path / "robot-link" / "withdrawn.schema.json"
+    broken.symlink_to(tmp_path / "nothing-is-here.json")
+    to_directory = tmp_path / "linked"
+    to_directory.symlink_to(elsewhere, target_is_directory=True)
+
+    main([str(tmp_path)])
+
+    assert not broken.is_symlink()
+    assert not to_directory.is_symlink()
+    assert elsewhere.is_dir(), "the link was followed instead of being removed"
+    assert (tmp_path / INDEX_PATH).exists()
+
+
 def test_the_default_output_directory_is_the_published_one() -> None:
     """`just contracts` passes it explicitly; a caller that does not gets the same."""
     assert DEFAULT_OUT_DIR == "docs/contracts"

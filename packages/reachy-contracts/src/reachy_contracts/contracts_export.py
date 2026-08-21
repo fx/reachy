@@ -292,9 +292,23 @@ def _prune(
 ) -> None:  # pragma: no cover - reads and writes the filesystem
     """Delete everything under a directory that this run did not write.
 
-    Directories are removed after their contents, and only when empty, so a
-    directory holding a generated artifact survives and one whose last artifact
-    was withdrawn does not.
+    Deepest entries first, so a directory is considered only after its contents
+    and is removed exactly when it is left empty — a directory still holding a
+    generated artifact survives, and one whose last artifact was withdrawn does
+    not.
+
+    **A symlink is handled before either of those branches, and that ordering is
+    the whole of why it is here.** `is_file` and `is_dir` follow a link, so a
+    broken one is neither and would be left behind — a stale artifact surviving
+    the very sweep that exists to remove it. A link to a directory is worse than
+    that: it answers `is_dir` truthfully about its target, and `rmdir` on the
+    link itself then raises `NotADirectoryError` and fails the run. Neither
+    shape has any business being in a generated directory, which is exactly why
+    the sweep has to remove one rather than trip over it.
+
+    Enumeration happens up front, so removing a directory or a link can leave a
+    later entry pointing at nothing. Each is checked for existence without
+    following links before it is touched.
 
     Args:
         out_dir: The directory to prune.
@@ -305,8 +319,13 @@ def _prune(
     for path in sorted(
         out_dir.rglob("*"), key=lambda path: len(path.parts), reverse=True
     ):
-        if path.is_file() and path not in written:
+        if path.is_symlink():
             path.unlink()
+        elif not path.exists():
+            continue
+        elif path.is_file():
+            if path not in written:
+                path.unlink()
         elif path.is_dir() and not any(path.iterdir()):
             path.rmdir()
 
