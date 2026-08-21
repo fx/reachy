@@ -217,7 +217,7 @@ its step.
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main` only | Version derivation and tag creation; publishes nothing | — |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — two specs registered so far, see below | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — three specs registered so far, see below | `just duvet` |
 
 `release.yml` never runs on a pull request, which is why it is not in the set of
 checks to require below.
@@ -230,14 +230,16 @@ completion notes of
 
 ## Requirements traceability
 
-⚠️ **The "Requirements traceability" check covers two specs so far.**
-`.duvet/config.toml` registers `docs/specs/perception/index.md` and
-`docs/specs/groundstation/index.md` and nothing else, so a green run is evidence
-that those 18 requirements are traced and is evidence of nothing about the other
-6 specs — duvet does not load them. A spec is registered by the change that
-implements it, in that change's pull request, alongside the annotations that make
-it pass. The header comment in that file explains why the rest are deliberately
-unregistered.
+⚠️ **The "Requirements traceability" check covers three specs so far.**
+`.duvet/config.toml` registers `docs/specs/perception/index.md`,
+`docs/specs/groundstation/index.md` and `docs/specs/robot-link/index.md` and
+nothing else, so a green run is evidence that those 30 requirements are traced
+and is evidence of nothing about the other 5 specs — duvet does not load them. A
+spec is registered by the change that implements it, in that change's pull
+request, alongside the annotations that make it pass. Robot-link was registered
+by change 0012, which is the change that closed its set: the contract has three
+consumers and the robot was the last of them to exist. The header comment in
+that file explains why the rest are deliberately unregistered.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and

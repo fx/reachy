@@ -358,6 +358,7 @@ mypy_path = [
     "services/groundstation/tests/support",
     "packages/reachy-session-client/tests/support",
     "cli/reachyctl/tests/support",
+    "apps/ha-satellite/tests/support",
 ]
 files = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 # `ignore-without-code` is how the "a suppression carries its rule identifier"

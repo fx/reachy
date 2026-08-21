@@ -7,7 +7,7 @@ motion over the robot daemon's media and control interfaces, remote perception
 over the robot-link session, and local perception over the SDK's own detector.
 
 **Spec:** [HA Satellite](../specs/ha-satellite/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0007, 0011
 
 ## Motivation
@@ -120,37 +120,47 @@ the behaviour.
 
 ## Tasks
 
-- [ ] Define the ports
-  - [ ] Audio port covering capture and playback
-  - [ ] Motion port covering head, antennas and gaze
-  - [ ] Perception port covering detections and their freshness
-  - [ ] Fake implementations of all three in test support
-- [ ] Implement the audio adapter
-  - [ ] Capture through the daemon media interface at the pipeline's sample rate
-  - [ ] Playback through the daemon media interface
-  - [ ] Satisfy both seams cut in 0011
-  - [ ] Verify no contention with the daemon for the devices
-- [ ] Implement the motion adapter
-  - [ ] Head pose and gaze targeting from normalised coordinates
-  - [ ] Antenna control
-  - [ ] Release on shutdown
-- [ ] Implement the perception adapters
-  - [ ] Groundstation adapter reusing the 0007 session client
-  - [ ] Local adapter wrapping the SDK detector
-  - [ ] Source selection: remote, local, remote-with-fallback
-  - [ ] Frame capture as encoded JPEG, passed through unmodified
-  - [ ] Contract tests against the golden fixtures
+- [x] Define the ports
+  - [x] Audio port covering capture and playback
+  - [x] Motion port covering head, antennas and gaze
+  - [x] Perception port covering detections and their freshness
+  - [x] Fake implementations of all three in test support
+- [x] Implement the audio adapter
+  - [x] Capture through the daemon media interface at the pipeline's sample rate
+  - [x] Playback through the daemon media interface
+  - [x] Satisfy both seams cut in 0011
+  - [x] Verify no contention with the daemon for the devices
+- [x] Implement the motion adapter
+  - [x] Head pose and gaze targeting from normalised coordinates
+  - [x] Antenna control
+  - [x] Release on shutdown
+- [x] Implement the perception adapters
+  - [x] Groundstation adapter reusing the 0007 session client
+  - [x] Local adapter wrapping the SDK detector
+  - [x] Source selection: remote, local, remote-with-fallback
+  - [x] Frame capture as encoded JPEG, passed through unmodified
+  - [x] Contract tests against the golden fixtures
 
 ## Open Questions
 
-- [ ] What the fallback trigger should be. The staleness window is the obvious
-      candidate and would make fallback and the neutral-head behaviour in
-      [REQ-048](../specs/ha-satellite/index.md#req-048-the-head-returns-to-neutral-when-tracking-data-goes-stale)
-      fire on the same signal. Current lean: session loss triggers fallback,
-      staleness triggers neutral, so the two are distinguishable.
-- [ ] Whether frame capture rate is fixed or adapts to observed round-trip time.
-      Adapting would help on a link with 700 ms spikes and adds a control loop.
-      Current lean: fixed, measured in 0014.
+- [x] **What the fallback trigger should be. Resolved: session loss, not
+      staleness.** The two are different failures and keeping them
+      distinguishable is worth more than making one signal do both jobs. A
+      session that has *dropped* means nothing is coming until something
+      changes, so a detector on the robot is better than no detector. Results
+      that have gone *stale* while the session is up mean the groundstation is
+      there and has stopped answering, which is
+      [REQ-048](../specs/ha-satellite/index.md#req-048-the-head-returns-to-neutral-when-tracking-data-goes-stale)'s
+      case and whose answer is a neutral head — an honest signal that something
+      upstream stopped. Starting a second detector on the strength of a stall
+      that may last one frame would spend the cores the rest of the application
+      needs in order to hide it.
+- [x] **Whether frame capture rate is fixed or adapts to observed round-trip
+      time. Resolved: fixed, at ten frames per second.** An adaptive rate is a
+      control loop with its own failure modes, and it would be tuned against a
+      network nobody has instrumented yet. A constant is honest about being a
+      guess where a control loop would not be, and 0014 is where the number
+      gets measured.
 
 ## References
 

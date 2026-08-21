@@ -6,7 +6,7 @@ The robot-side ESPHome voice satellite for Home Assistant. Distribution
 **Spec:** [ha-satellite](../../docs/specs/ha-satellite/).
 **Fills this in:**
 [0011](../../docs/changes/0011-satellite-esphome-vendoring.md) (done),
-[0012](../../docs/changes/0012-satellite-ports-and-adapters.md) and
+[0012](../../docs/changes/0012-satellite-ports-and-adapters.md) (done) and
 [0013](../../docs/changes/0013-satellite-behaviour-and-ui.md).
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
@@ -16,14 +16,17 @@ that apply here.
 
 | Path | What it is |
 |---|---|
+| `src/reachy_mini_ha_satellite/ports.py` | `AudioPort`, `MotionPort`, `PerceptionPort` and the value types they speak in |
+| `src/reachy_mini_ha_satellite/adapters/` | Everything that touches the robot: the daemon's shape, audio, motion and the two perception sources |
 | `src/reachy_mini_ha_satellite/esphome/` | The vendored ESPHome protocol layer, with its `LICENSE`, `NOTICE` and per-file provenance |
-| `src/reachy_mini_ha_satellite/esphome/seams.py` | The two audio interfaces cut into it. Not vendored, and unimplemented until 0012 |
+| `src/reachy_mini_ha_satellite/esphome/seams.py` | The two audio interfaces cut into it. Not vendored; filled by `adapters/audio_reachy.py` |
 | `src/reachy_mini_ha_satellite/assets/` | Wake-word models and sounds that ship in the wheel, with the registry recording each one's terms |
+| `tests/support/satellite_support.py` | The fake for every port, plus the fakes the adapters' own tests need |
 | `tests/` | The carried upstream tests, with their own `LICENSE` and `NOTICE`, plus this repository's own |
 
 Everything the spec's structure diagram shows and this table does not — `main.py`,
-`ports.py`, `adapters/`, `behaviour/`, `web/`, `config.py` — belongs to 0012 and
-0013. Do not add it ahead of the change that owns it.
+`behaviour/`, `web/`, `config.py` — belongs to 0013. Do not add it ahead of the
+change that owns it.
 
 ## Local rules
 
@@ -69,5 +72,14 @@ Everything the spec's structure diagram shows and this table does not — `main.
   run with no robot attached. The Reachy Mini SDK is not a dependency of this
   package and must not become one outside an adapter: importing it pulls in
   system libraries a continuous integration runner does not have.
+- **The SDK is an extra, and it is loaded by file path.** `local-detection` in
+  `pyproject.toml` is the only place the distribution is named, and
+  `adapters/perception_local.py` is the only module that reaches it — through
+  `importlib`, inside the function that needs it, because `import
+  reachy_mini.<anything>` executes an `import gi` three modules away. Everything
+  else the daemon offers is reached through the protocols in `adapters/daemon.py`,
+  which the application is handed an implementation of. Adding an ordinary import
+  of the SDK anywhere in this package breaks the test suite on any machine
+  without GStreamer, which is every runner.
 - **Behaviour is pure.** The behaviour layer takes the ports as arguments and
   performs no input or output itself.

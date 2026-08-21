@@ -1,7 +1,7 @@
 """Test configuration for the satellite, and the in-memory filesystem it uses.
 
-Two things happen here, both of them for the sake of the tests carried over from
-the vendored ESPHome upstream.
+Three things happen here, and two of them are for the sake of the tests carried
+over from the vendored ESPHome upstream.
 
 The first is that this directory goes on `sys.path`. A member's `tests/` is
 deliberately not a package (see the root `AGENTS.md`), so the carried tests
@@ -9,6 +9,12 @@ cannot import their shared helpers the way they did upstream, as
 `tests.unit.conftest`. They import `esphome_test_support` instead, and this is
 what makes that name resolvable without turning the directory into a package or
 moving test helpers into the shipped wheel.
+
+`tests/support/` goes on it too, which is where this repository's own fakes live
+— the ones every port ships with. It is a subdirectory rather than this one
+because the root `pyproject.toml` names the same path to mypy, and a mypy path
+root makes whatever sits directly under it a top-level module: `tests/` itself
+would make this file the module `conftest` and collide with the groundstation's.
 
 The second is `tmp_path`. This repository requires that a unit test perform no
 input or output at all, and upstream's tests write preference files and
@@ -36,10 +42,11 @@ _FAKE_TMP = Path("/reachy-satellite-tests")
 
 
 def _make_helpers_importable() -> None:
-    """Let the carried tests import `esphome_test_support` by name."""
-    path = str(_TESTS_DIR)
-    if path not in sys.path:
-        sys.path.insert(0, path)
+    """Let the tests import their shared helpers by plain module name."""
+    for directory in (_TESTS_DIR, _TESTS_DIR / "support"):
+        path = str(directory)
+        if path not in sys.path:
+            sys.path.insert(0, path)
 
 
 def _preload_lazily_imported_modules() -> None:
