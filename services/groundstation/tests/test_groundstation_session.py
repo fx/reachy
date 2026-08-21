@@ -46,7 +46,7 @@ from reachy_contracts import (
 )
 from reachy_groundstation.obs import Observability
 from reachy_groundstation.session.framing import MessageKind, decode_control
-from reachy_groundstation.session.runner import SessionRunner
+from reachy_groundstation.session.runner import SessionRunner, message_size
 from reachy_groundstation.session.transport import (
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_ERROR,
@@ -59,6 +59,13 @@ from reachy_groundstation.session.transport import (
 # on how loaded the runner is. Zero is not available: a zero timeout would be a
 # usable configuration value, and refusing one is the point of the constraint.
 _ALREADY_ELAPSED = 1e-6
+
+# A message that sits under the bound counted in characters and over it counted
+# in bytes: 1500 characters of two bytes each against a bound of 2000. The bound
+# is the smallest the setting allows above the character count, so the test
+# cannot pass by accident on a wider one.
+_MULTI_BYTE = "é" * 1500
+_MULTI_BYTE_BOUND = 2000
 
 ECHO_V2 = Capability(name="echo", version=2)
 UNKNOWN = Capability(name="lidar", version=1)
@@ -571,7 +578,71 @@ async def test_an_oversized_opening_message_is_refused_before_it_is_parsed() -> 
     outcome = await runner.run()
     assert outcome.reason is CloseReason.PROTOCOL_ERROR
     _, payload = _sent(transport)[0]
-    assert "exceeds the configured maximum" in SessionClose.from_wire(payload).detail
+    assert "2048 bytes exceeds" in SessionClose.from_wire(payload).detail
+
+
+def test_a_message_is_measured_in_the_bytes_the_client_sent() -> None:
+    """The bound is about what a client can make this service hold and parse.
+
+    A text message arrives already decoded, so its `len` counts characters and
+    UTF-8 spends up to four bytes on each of them. Measuring characters would be
+    a bound a client exceeds fourfold by writing in a script that is not Latin.
+    """
+    assert message_size(b"abcd") == 4
+    assert message_size("abcd") == 4
+    assert message_size(_MULTI_BYTE) == 2 * len(_MULTI_BYTE)
+
+
+@pytest.mark.asyncio
+async def test_a_multi_byte_opening_message_is_measured_as_bytes() -> None:
+    """The offer sits under the bound in characters and over it in bytes."""
+    transport = MemoryTransport()
+    transport.push(_MULTI_BYTE)
+    runner, _ = _runner(
+        transport,
+        StaticRegistry(),
+        max_message_bytes=_MULTI_BYTE_BOUND,
+    )
+    outcome = await runner.run()
+
+    assert len(_MULTI_BYTE) < _MULTI_BYTE_BOUND < message_size(_MULTI_BYTE)
+    assert outcome.reason is CloseReason.PROTOCOL_ERROR
+    detail = SessionClose.from_wire(_sent(transport)[0][1]).detail
+    assert f"{message_size(_MULTI_BYTE)} bytes exceeds" in detail
+
+
+@pytest.mark.asyncio
+async def test_a_multi_byte_control_message_is_measured_as_bytes() -> None:
+    """The same rule mid-session, on the same message."""
+    transport = MemoryTransport()
+    transport.offer(ECHO)
+    transport.push(_MULTI_BYTE)
+    transport.disconnect()
+    runner, _ = _runner(
+        transport,
+        StaticRegistry(EchoCapability()),
+        max_message_bytes=_MULTI_BYTE_BOUND,
+    )
+    await runner.run()
+
+    assert f"{message_size(_MULTI_BYTE)} bytes exceeds" in _errors(transport)[0].detail
+
+
+@pytest.mark.asyncio
+async def test_a_message_inside_the_bound_in_bytes_is_accepted() -> None:
+    """The rule bounds; it does not merely refuse."""
+    transport = MemoryTransport()
+    transport.offer(ECHO)
+    transport.push(frame_message(0))
+    transport.disconnect()
+    runner, _ = _runner(
+        transport,
+        StaticRegistry(EchoCapability()),
+        max_message_bytes=64 * 1024,
+    )
+    outcome = await runner.run()
+    assert outcome.frames_received == 1
+    assert _errors(transport) == []
 
 
 @pytest.mark.asyncio

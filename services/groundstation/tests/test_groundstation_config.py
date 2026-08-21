@@ -130,4 +130,4 @@ def test_settings_are_frozen() -> None:
     """Configuration resolved once stays resolved."""
     settings = load_settings(MINIMAL)
     with pytest.raises(ValueError, match="frozen"):
-        settings.port = 1  # type: ignore[misc]  # the point of the test
+        settings.port = 1  # type: ignore[misc]  # assigning to a frozen field is what this asserts is refused, so mypy is right and the test needs it anyway

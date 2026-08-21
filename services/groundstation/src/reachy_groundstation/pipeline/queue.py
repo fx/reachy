@@ -124,6 +124,25 @@ class FrameQueue:
             QueueClosedError: If the queue was closed and is empty.
         """
         while True:
+            # Clearing the event before waiting on it is only safe because
+            # there is no await point between the two checks above and the
+            # `clear()` below. On one event loop nothing else can run in that
+            # window, so `_items` cannot gain an entry that the `clear()` then
+            # discards the notification for. Two things this class does not
+            # enforce are what make that true, and both would break it
+            # silently:
+            #
+            #   * `put` and `close` are plain functions, not coroutines. Make
+            #     either of them `async` and the window acquires an await
+            #     point.
+            #   * every caller runs on the loop this consumer is running on.
+            #     `asyncio.Event` is not thread-safe, so a `put` from another
+            #     thread is a race whatever this method does about it — reach
+            #     one in through `loop.call_soon_threadsafe` if that is ever
+            #     needed.
+            #
+            # The surrounding loop re-checks `_items` after every wake, so a
+            # `set()` with nothing behind it costs a lap and nothing else.
             if self._items:
                 return self._items.popleft()
             if self._closed:

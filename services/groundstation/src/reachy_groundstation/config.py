@@ -32,7 +32,11 @@ from typing import TYPE_CHECKING, Final, Literal
 # configuration and never crosses the wire; `SecretStr` is what marks a setting
 # secret, and `Field` is what constrains the scalars. The ban is suppressed for
 # this one import, as the root AGENTS.md describes.
-from pydantic import Field, SecretStr, ValidationError  # noqa: TID253
+from pydantic import (  # noqa: TID253  # configuration, not a wire type: `SecretStr` is what marks a setting secret and `Field` is what bounds the scalars, and none of it crosses the link
+    Field,
+    SecretStr,
+    ValidationError,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 if TYPE_CHECKING:
@@ -88,8 +92,9 @@ class Settings(BaseSettings):
         warm_up_timeout_seconds: How long one capability may spend warming up
             before it is recorded as unhealthy.
         max_message_bytes: The largest message of either kind the session will
-            accept, counted in bytes for a frame and in characters for a
-            control message.
+            accept, counted in the bytes the client sent — a control message
+            arrives already decoded, and UTF-8 spends up to four bytes on each
+            of its characters.
         log_level: The lowest severity emitted.
         log_format: `json` for machines, `console` for a terminal.
         service_name: What this process calls itself in traces and metrics.

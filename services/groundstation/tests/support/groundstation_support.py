@@ -150,10 +150,7 @@ def captured_logs() -> Iterator[list[dict[str, Any]]]:
     entries: list[dict[str, Any]] = []
 
     def _capture(
-        # ANN401: structlog's processor signature types the wrapped logger as
-        # `Any` — it is whatever the configured factory produced — so narrowing
-        # it here would stop this function being a processor.
-        logger: Any,  # noqa: ANN401
+        logger: Any,  # noqa: ANN401  # structlog types the wrapped logger as `Any` — it is whatever the configured factory produced — so narrowing it would stop this being a processor
         method_name: str,
         event_dict: MutableMapping[str, Any],
     ) -> Mapping[str, Any]:

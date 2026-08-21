@@ -106,7 +106,7 @@ def _transport(stub: _Stub) -> WebSocketTransport:
     Returns:
         The transport.
     """
-    return WebSocketTransport(stub)  # type: ignore[arg-type]  # a stand-in, see the module docstring
+    return WebSocketTransport(stub)  # type: ignore[arg-type]  # `_Stub` is a `WebSocket` only in the three methods the adapter calls; a real one cannot be made to fail on demand
 
 
 @pytest.mark.asyncio

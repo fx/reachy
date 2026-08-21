@@ -122,6 +122,9 @@ async def _serving(
         port=0,
         log_config=None,
         ws="websockets-sansio",
+        # Mirrors how `reachy_groundstation.service` serves the application, so
+        # what these tests drive is what a robot will meet.
+        ws_max_size=make_settings(**overrides).max_message_bytes,
         lifespan="on",
     )
     server = uvicorn.Server(config)

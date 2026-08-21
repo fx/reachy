@@ -62,13 +62,34 @@ if TYPE_CHECKING:
     from reachy_groundstation.ports import AgreedCapability, CapabilityRegistryPort
     from reachy_groundstation.session.transport import SessionTransport
 
-__all__ = ["SessionOutcome", "SessionRunner", "new_session_id"]
+__all__ = ["SessionOutcome", "SessionRunner", "message_size", "new_session_id"]
 
 _logger = get_logger(__name__)
 
 # What a refused client is told. It says the credential was not accepted and
 # nothing about which part of it was wrong.
 _UNAUTHENTICATED_DETAIL = "the credential presented is not the configured one"
+
+
+def message_size(message: str | bytes) -> int:
+    """Measure an incoming message in bytes, whichever form it arrived in.
+
+    A text message reaches this side of the seam already decoded, so its `len`
+    is a count of characters. UTF-8 spends between one and four bytes on each of
+    them, so a bound compared against that count is a bound a client can exceed
+    by a factor of four simply by writing in a script that is not Latin — which
+    is not a bound. What the limit is about is how much a client can make this
+    service hold and parse, so it is counted in the bytes the client sent.
+
+    Args:
+        message: The message as the transport handed it over.
+
+    Returns:
+        How many bytes of it this end of the link is holding.
+    """
+    if isinstance(message, bytes):
+        return len(message)
+    return len(message.encode("utf-8"))
 
 
 def new_session_id() -> str:
@@ -242,12 +263,13 @@ class SessionRunner:
             )
             return None
 
-        if len(first) > self._settings.max_message_bytes:
+        size = message_size(first)
+        if size > self._settings.max_message_bytes:
             await self._refuse(
                 CloseReason.PROTOCOL_ERROR,
                 CLOSE_PROTOCOL_ERROR,
-                f"opening message of {len(first)} characters exceeds the "
-                f"configured maximum of {self._settings.max_message_bytes}",
+                f"opening message of {size} bytes exceeds the configured "
+                f"maximum of {self._settings.max_message_bytes}",
             )
             return None
 
@@ -441,14 +463,12 @@ class SessionRunner:
             message = await self._transport.receive()
             # The bound is checked before anything reads the message, and it
             # covers text as well as frames: a control message is parsed as
-            # JSON, so an unbounded one is an unbounded parse. `len` counts
-            # bytes for a frame and characters for a control message, which is
-            # the right order of magnitude for a guard and cheaper than
-            # encoding a message in order to measure it.
-            if len(message) > self._settings.max_message_bytes:
+            # JSON, so an unbounded one is an unbounded parse.
+            size = message_size(message)
+            if size > self._settings.max_message_bytes:
                 await self._report_malformed(
-                    f"message of {len(message)} bytes exceeds the configured "
-                    f"maximum of {self._settings.max_message_bytes}",
+                    f"message of {size} bytes exceeds the configured maximum "
+                    f"of {self._settings.max_message_bytes}",
                 )
                 continue
             if isinstance(message, str):

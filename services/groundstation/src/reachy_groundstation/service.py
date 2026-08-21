@@ -119,5 +119,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # `websockets` integration is deprecated and warns on import, and
         # "auto" would let the choice drift with the dependency.
         ws="websockets-sansio",
+        # The same bound the session checks, enforced a layer lower so an
+        # oversize message is refused as it arrives rather than after the whole
+        # of it has been assembled in memory. The session's own check is what
+        # holds for a transport that does not offer one.
+        ws_max_size=settings.max_message_bytes,
     )
     return 0
