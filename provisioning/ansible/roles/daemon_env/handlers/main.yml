@@ -1,0 +1,18 @@
+---
+# The restart is a handler and not a task, and that is the whole of provisioning
+# REQ-060's second half: a run that changed nothing notifies nothing, so nothing
+# is restarted. Restarting unconditionally would interrupt whatever the robot is
+# doing — including a conversation in progress — on every run against an
+# already-provisioned robot.
+#
+# `daemon_reload` and the restart are one step because they are one requirement:
+# reloading makes systemd re-read the drop-in, and restarting is what puts the
+# new environment in force in the process that inherits it.
+#
+# One handler, and `app_install` notifies this one rather than declaring a second
+# — a robot whose environment and application both changed restarts once.
+- name: Restart the robot daemon
+  ansible.builtin.systemd_service:
+    name: "{{ reachy_daemon_unit }}"
+    daemon_reload: true
+    state: restarted

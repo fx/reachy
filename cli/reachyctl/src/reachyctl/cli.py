@@ -83,6 +83,10 @@ from reachyctl.frames import (
 from reachyctl.managed import DEFAULT_DAEMON_UNIT
 from reachyctl.output import OutputFormat, Report, Reporter, build_reporter
 from reachyctl.probe import DEFAULT_CAPABILITIES, ProbePlan, execute, parse_capability
+from reachyctl.provision import DIRECTORY_VARIABLE as PROVISIONING_DIRECTORY_VARIABLE
+from reachyctl.provision import ProvisionPlan
+from reachyctl.provision import execute as execute_provision
+from reachyctl.provision import resolve_directory as resolve_provisioning_directory
 from reachyctl.robot import (
     DEFAULT_APPLICATION,
     DEFAULT_DAEMON_CONTROL,
@@ -952,6 +956,112 @@ def deploy(
     except CommandError as error:
         raise typer.Exit(
             reporter.failure("deploy", str(error), error.exit_code),
+        ) from error
+    raise typer.Exit(code)
+
+
+# --- provision ---------------------------------------------------------------
+
+
+@app.command()
+def provision(
+    ctx: typer.Context,
+    directory: Annotated[
+        Path | None,
+        typer.Option(
+            "--directory",
+            envvar=PROVISIONING_DIRECTORY_VARIABLE,
+            help=(
+                "Where the playbook is. Defaults to provisioning/ansible under "
+                "this directory."
+            ),
+        ),
+    ] = None,
+    inventory: Annotated[
+        Path | None,
+        typer.Option(
+            "--inventory",
+            help="An inventory to use, rather than the playbook's own.",
+        ),
+    ] = None,
+    tags: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--tags",
+            help=(
+                "Apply one concern rather than all of them: daemon_env, "
+                "app_install, groundstation_link, verify. Repeatable."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        str,
+        typer.Option("--limit", help="Which hosts in the inventory to run against."),
+    ] = "",
+    extra_vars: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--extra-vars",
+            "-e",
+            help=(
+                "Passed to Ansible unchanged. A credential arrives this way as "
+                "@path/to/vault.yml — a path, never a value: an argument is "
+                "visible in the process list and lands in the shell history."
+            ),
+        ),
+    ] = None,
+    remove: Annotated[
+        bool,
+        typer.Option(
+            "--remove",
+            help=(
+                "Run the removal path: undo everything provisioning applied and "
+                "assert the robot is back to stock behaviour."
+            ),
+        ),
+    ] = False,
+    preview: PreviewOption = False,
+) -> None:
+    """Run the provisioning playbook, or report what it would do.
+
+    A thin wrapper, deliberately. Provisioning owns durable machine state and
+    `reachyctl` operates a robot already in it, so there is one description of
+    what a robot is and this runs it rather than reimplementing it. Ansible's own
+    output is the report; what this adds is finding the playbook, spelling
+    preview the way every other mutating command here spells it, naming the
+    removal path, and turning Ansible's exit status into this tool's.
+
+    Args:
+        ctx: The invocation, carrying the reporter.
+        directory: Where the playbook is.
+        inventory: An inventory to use.
+        tags: The concerns to apply.
+        limit: Which hosts to run against.
+        extra_vars: Values passed to Ansible unchanged.
+        remove: Whether to run the removal path.
+        preview: Report the changes this would make and make none of them.
+
+    Raises:
+        typer.Exit: Always, carrying the exit status the run earned.
+    """
+    reporter = _reporter(ctx)
+    try:
+        code = execute_provision(
+            ProvisionPlan(
+                directory=resolve_provisioning_directory(directory),
+                preview=preview,
+                remove=remove,
+                tags=tuple(tags or ()),
+                limit=limit,
+                inventory=inventory,
+                extra_vars=tuple(extra_vars or ()),
+                verbose=reporter.verbose,
+            ),
+            reporter,
+        )
+    except CommandError as error:
+        raise typer.Exit(
+            reporter.failure("provision", str(error), error.exit_code),
         ) from error
     raise typer.Exit(code)
 

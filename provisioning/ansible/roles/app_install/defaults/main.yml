@@ -1,0 +1,30 @@
+---
+# The application is not named here, and that is deliberate rather than a
+# placeholder. This role installs a wheel from a configured source; a robot runs
+# whichever application the operator declares, and a role that hard-coded one
+# would have to be edited to install any other. `reachyctl deploy` is defined
+# over a wheel for the same reason.
+#
+# Leave the distribution empty and the role reports that nothing is declared and
+# does nothing else, which is what keeps a configuration-only run useful.
+reachy_app_distribution: ""
+
+# Exactly one source. A path is read on the machine running the playbook; a URL
+# is fetched by the robot itself.
+reachy_app_wheel_path: ""
+reachy_app_wheel_url: ""
+reachy_app_wheel_checksum: ""
+
+reachy_daemon_unit: reachy-mini-daemon.service
+reachy_python: /opt/reachy/venv/bin/python
+reachy_staging: /var/tmp/reachy-provisioning
+reachy_metadata_script: |
+  import json, sys
+  from importlib.metadata import PackageNotFoundError, version
+  found = {}
+  for name in sys.argv[1:]:
+      try:
+          found[name] = version(name)
+      except PackageNotFoundError:
+          found[name] = ''
+  sys.stdout.write(json.dumps(found))

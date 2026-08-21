@@ -23,7 +23,8 @@ one-line import of this file and holds no content of its own.
 | `cli/reachyctl/` | Command-line tool (`reachyctl`) |
 | `bench/` | Performance suite (`reachy_bench`); a member, never published |
 | `tools/repo-hygiene/` | The repository's own leak scanner (`reachy_hygiene`); a member, never published |
-| `provisioning/ansible/` | Stock image to configured robot; not a Python member |
+| `provisioning/ansible/` | Stock image to configured robot: four tagged roles, a removal path, and the filter plugins they reach their Python through. Not a Python member, and its plugins are nonetheless linted, type-checked and covered with everything else |
+| `provisioning/ci/` | The container target the idempotency gate applies the playbook against, and the list of what it does and does not model |
 | `scripts/` | Helpers the `Justfile` calls; not a Python member |
 | `pyproject.toml` | Workspace root and all shared tool configuration |
 | `uv.lock` | One lockfile for every member |
@@ -107,11 +108,13 @@ and the robot application's wheel arrives with the change that builds it.
 `just sync`, `just coverage-diff`, `just duvet`, `just leak-scan`,
 `just secret-scan`, `just contracts`, `just contracts-check`,
 `just lint-boundary`, `just lint-behaviour-boundary`,
-`just lint-capability-boundary`, `just check-assets`, `just vendored-drift` and
-the wheel trio `just wheels`, `just wheel-size` and `just wheel-verify`.
-Continuous integration calls these recipes rather than restating the commands. A
-command worth running twice belongs in the `Justfile`, not in workflow YAML and
-not in prose here.
+`just lint-capability-boundary`, `just check-assets`, `just vendored-drift`, the
+wheel trio `just wheels`, `just wheel-size` and `just wheel-verify`, and the
+provisioning set `just provision-lint`, `just provision-target-up`,
+`just provision-run`, `just provision-target-down` and
+`just provision-idempotency`. Continuous integration calls these recipes rather
+than restating the commands. A command worth running twice belongs in the
+`Justfile`, not in workflow YAML and not in prose here.
 
 ### Behaviour is testable without hardware
 
@@ -202,6 +205,16 @@ cannot end up on versions that merely look alike. Python 3.12 is the floor,
 matching the robot image, and the robot itself is an aarch64 Raspberry Pi CM4 —
 anything shipped to it is built and tested for that architecture.
 
+The one tool that is **not** pinned there is Ansible. `ansible-core` and
+`ansible-lint` are a `provisioning` dependency group in the root
+`pyproject.toml`, resolved by the same `uv.lock` as everything else, and they are
+deliberately outside `default-groups`: a lint, a type check and a test run have
+no use for an Ansible engine. `uv run --group provisioning` installs it for the
+two recipes that do. The group is also what lets the roles' filter plugins import
+`reachy_checks` and `reachy_contracts` — the playbook runs under this workspace's
+interpreter, which is how one definition of a healthy robot serves both
+`reachyctl doctor` and the verification role.
+
 ```
 mise install     # once, to get the pinned versions
 just sync        # install the workspace exactly as uv.lock describes it
@@ -209,6 +222,7 @@ just models      # fetch and hash-verify the pinned model weights, never committ
 just check       # lint, typecheck, test — three of the merge gates
 just image       # build the groundstation container image (needs docker)
 just image-verify  # start it with no network and drive a real session through it
+just provision-idempotency  # apply the playbook twice against a container (needs docker)
 ```
 
 Model weights are not in the repository: `just models` fetches them into
@@ -220,7 +234,7 @@ missing is not a merge gate.
 
 ## Merge gates
 
-Five workflows, and they do not all run on the same events. Each job calls a
+Six workflows, and they do not all run on the same events. Each job calls a
 `Justfile` recipe, so every one of them reproduces locally with the command in
 its step.
 
@@ -230,7 +244,8 @@ its step.
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, every released wheel — the `reachyctl` set and the robot application — built, installed into an empty environment, verified, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — five specs registered so far, see below | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — six specs registered so far, see below | `just duvet` |
+| `provisioning.yml` | pull requests, pushes to `main` | `Provisioning lint`; `Idempotency`, which applies the playbook twice against a container target and fails on any changed step in the second application | `just provision-lint`, `just provision-idempotency` |
 
 `release.yml` never runs on a pull request, which is why it is not in the set of
 checks to require below. Its two jobs never run on each other's event: version
@@ -245,12 +260,13 @@ completion notes of
 
 ## Requirements traceability
 
-⚠️ **The "Requirements traceability" check covers five specs so far.**
+⚠️ **The "Requirements traceability" check covers six specs so far.**
 `.duvet/config.toml` registers `docs/specs/perception/index.md`,
-`docs/specs/groundstation/index.md`, `docs/specs/robot-link/index.md` and
-`docs/specs/reachyctl/index.md` and `docs/specs/ha-satellite/index.md`, and
-nothing else, so a green run is evidence that those 50 requirements are traced
-and is evidence of nothing about the other 3 specs — duvet does not load them. A
+`docs/specs/groundstation/index.md`, `docs/specs/robot-link/index.md`,
+`docs/specs/reachyctl/index.md`, `docs/specs/ha-satellite/index.md` and
+`docs/specs/provisioning/index.md` and nothing else, so a green run is evidence
+that those 57 requirements are traced
+and is evidence of nothing about the other 2 specs — duvet does not load them. A
 spec is registered by the change that implements it, in that change's pull
 request, alongside the annotations that make it pass. Robot-link was registered
 by change 0012, which is the change that closed its set: the contract has three
@@ -258,8 +274,10 @@ consumers and the robot was the last of them to exist. Reachyctl was registered
 by 0009, which completed the tool's operator-facing surface. ha-satellite was
 registered by 0013, which added the behaviour layer, the configuration, the
 settings interface and the packaging to the ports and adapters 0011 and 0012 had
-already built. The header comment in that file explains why the rest are
-deliberately unregistered.
+already built. Provisioning was registered by 0010, which implements the whole of
+it at once — the roles, the removal path and the idempotency gate arrive
+together, so there was no partial implementation to register earlier. The header
+comment in that file explains why the rest are deliberately unregistered.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and

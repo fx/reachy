@@ -7,7 +7,7 @@ state, with idempotency enforced in CI and verification sharing its check
 definitions with `reachyctl doctor`.
 
 **Spec:** [Provisioning](../specs/provisioning/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0009
 
 ## Motivation
@@ -123,37 +123,55 @@ which is the property that rots as roles are edited.
 
 ## Tasks
 
-- [ ] Build the playbook skeleton
-  - [ ] `site.yml` with per-concern tags
-  - [ ] `inventory.example.ini` and neutral `group_vars/all.yml`
-  - [ ] Secret handling wired through Ansible's own mechanism
-- [ ] Implement `daemon_env`
-  - [ ] Managed drop-in region on the daemon unit, owned wholesale
-  - [ ] Pruning of withdrawn settings
-  - [ ] Daemon restart on change, and only on change
-- [ ] Implement `app_install` and `groundstation_link`
-  - [ ] Install a wheel from a configured source into the robot's application
+- [x] Build the playbook skeleton
+  - [x] `site.yml` with per-concern tags
+  - [x] `inventory.example.ini` and neutral `group_vars/all.yml`
+  - [x] Secret handling wired through Ansible's own mechanism
+- [x] Implement `daemon_env`
+  - [x] Managed drop-in region on the daemon unit, owned wholesale
+  - [x] Pruning of withdrawn settings
+  - [x] Daemon restart on change, and only on change
+- [x] Implement `app_install` and `groundstation_link`
+  - [x] Install a wheel from a configured source into the robot's application
         environment, without hard-coding which application it is
-  - [ ] Groundstation endpoint and credential configuration
-- [ ] Implement `verify`
-  - [ ] Invoke the shared check registry from 0008
-  - [ ] Fail the run when the end state is not working
-- [ ] Implement the removal path
-  - [ ] Remove the managed configuration and installed application
-  - [ ] Assert stock behaviour is restored
-- [ ] Wire the CI gate
-  - [ ] Container target approximating the stock layout
-  - [ ] Apply twice; fail on any changed step in the second application
+  - [x] Groundstation endpoint and credential configuration
+- [x] Implement `verify`
+  - [x] Invoke the shared check registry from 0008
+  - [x] Fail the run when the end state is not working
+- [x] Implement the removal path
+  - [x] Remove the managed configuration and installed application
+  - [x] Assert stock behaviour is restored
+- [x] Wire the CI gate
+  - [x] Container target approximating the stock layout
+  - [x] Apply twice; fail on any changed step in the second application
 
 ## Open Questions
 
-- [ ] How faithfully the container target needs to model the robot. Too rough
-      and the gate passes on roles that fail against real hardware; too faithful
-      and it becomes its own maintenance burden. Current lean: model the
-      filesystem and unit layout only.
-- [ ] Whether `reachyctl provision` wraps the playbook in this change or later.
-      The spec calls for a thin wrapper. Current lean: here, since the playbook
-      is the thing being wrapped.
+- [x] How faithfully the container target needs to model the robot.
+      **Resolved: the filesystem and unit layout only, and the list is written
+      down.** The target runs real systemd as PID 1 and is reached over SSH,
+      because `daemon-reload`, `restart` and `systemctl show` are what the roles
+      read and write — a stubbed `systemctl` would make the gate a test of the
+      stub, and a container connection plugin would exercise a transport no
+      robot ever sees. Above that it carries only what the roles touch: the
+      daemon unit, an application environment whose interpreter that unit
+      declares, a `reachy-mini` distribution in it, and an application control
+      reached as `python -m reachy_mini.apps`. No hardware, no groundstation, no
+      aarch64, and no vendor daemon. What made the "too faithful" half of the
+      question answerable was writing the boundary down rather than judging it:
+      `provisioning/ci/README.md` is a table of what is modelled, what is not,
+      and where each unmodelled thing is proved instead — so the gate's silence
+      about hardware is a recorded fact rather than an assumption a reader has
+      to make.
+- [x] Whether `reachyctl provision` wraps the playbook in this change or later.
+      **Resolved: here.** The playbook is the thing being wrapped, and a wrapper
+      landing later would mean an interval in which the tool's help describes a
+      smaller thing than the spec does. It is thin on purpose — it finds the
+      playbook, spells preview as `--check --diff`, names the removal path, and
+      translates Ansible's exit status into this tool's — and it is the one
+      command that shells out, because Ansible's own output is the report and
+      reproducing its progress rendering would make the wrapped run harder to
+      read than the unwrapped one.
 
 ## References
 

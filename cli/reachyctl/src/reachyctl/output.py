@@ -143,6 +143,20 @@ class Reporter:
         """
         return self._format
 
+    @property
+    def verbose(self) -> bool:
+        """Whether this run was asked for detail.
+
+        Exposed for the one command that wraps another program: `provision`
+        hands `--verbose` on to `ansible-playbook`, whose own output is the
+        report. Every other caller writes through `detail`, which already
+        answers this question and scrubs what it writes.
+
+        Returns:
+            True when `--verbose` was given.
+        """
+        return self._verbose
+
     def detail(self, message: str) -> None:
         """Write a line only a verbose run wants, to standard error.
 

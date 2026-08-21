@@ -1,0 +1,36 @@
+---
+# The removal path's half of the daemon environment. Reached by `remove.yml`,
+# never by `site.yml`.
+#
+# Deleting the managed drop-in is what restores stock behaviour, and that is not
+# a coincidence — it is the same property that makes the region owned in full.
+# The file is everything this role ever put on the robot, so removing it leaves
+# the unit exactly as the vendor's image shipped it.
+
+#:= docs/specs/provisioning/index.md#req-064-the-robot-can-be-returned-to-stock-behaviour
+#:% Provisioning MUST offer a supported path that removes everything it applied and
+#:% restores the robot's stock behaviour.
+- name: Remove the managed drop-in
+  ansible.builtin.file:
+    path: "{{ reachy_drop_in }}"
+    state: absent
+  notify: Restart the robot daemon
+
+- name: Look at what else is in the drop-in directory
+  ansible.builtin.find:
+    paths: "{{ reachy_drop_in_directory }}"
+    file_type: any
+  register: reachy_drop_in_remaining
+  changed_when: false
+  check_mode: false
+
+# Other drop-ins in the same `.d/` directory belong to whoever put them there,
+# and neither implementation of this format reads or writes them. So the
+# directory goes only when this role's file was the only thing in it, which is
+# the case where the vendor's image did not ship one.
+- name: Remove the drop-in directory when nothing else is using it
+  ansible.builtin.file:
+    path: "{{ reachy_drop_in_directory }}"
+    state: absent
+  when: reachy_drop_in_remaining.matched | default(0) == 0
+  notify: Restart the robot daemon

@@ -48,3 +48,13 @@ htmlcov/
 .env.*
 !.env.example
 provisioning/ansible/inventory.ini
+
+# The idempotency gate's scratch directory: an ephemeral SSH key pair, a
+# generated inventory, a fixture wheel and the declaration applied to the
+# container target. Every one of them is made by `just provision-target-up` and
+# thrown away by `just provision-target-down`; none of them is ever committed.
+.provisioning-target/
+
+# Ansible's own caches and retry files, written beside the playbook.
+provisioning/ansible/*.retry
+.ansible/

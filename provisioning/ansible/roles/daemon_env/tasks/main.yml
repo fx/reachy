@@ -1,0 +1,124 @@
+---
+# The robot's daemon environment, owned in full.
+#
+# The file is `/etc/systemd/system/reachy-mini-daemon.service.d/10-reachy-managed.conf`
+# and its exact bytes are `docs/ops/managed-daemon-environment.md`. `reachyctl
+# config apply` writes the same file; the two implementations are independent and
+# a test in `provisioning/tests/` renders both and compares them, because two
+# tools that disagree about this format spend their time reverting each other.
+#
+# Three things this role encodes rather than documents. The drop-in attaches to
+# the **daemon** unit, because the application inherits its environment from the
+# daemon. Applying a change therefore **restarts the daemon**, which the handler
+# below does — and only when the file actually changed. And the region is written
+# **whole**, so pruning a withdrawn setting is not a step that could be forgotten;
+# it is what writing the file is.
+
+#:= docs/specs/provisioning/index.md#req-063-the-managed-configuration-is-fully-owned
+#:% Configuration under provisioning's control MUST converge to exactly what is
+#:% declared, including removing values that were previously declared and no longer
+#:% are.
+- name: Validate the declaration against the shared setting vocabulary
+  ansible.builtin.set_fact:
+    reachy_declaration: "{{ reachy_daemon_environment | reachy_validated_settings }}"
+  # The declaration carries the groundstation credential. Names are reported
+  # below, from the comparison; values never leave this fact.
+  no_log: true
+  check_mode: false
+
+- name: Refuse a value the robot would not accept
+  ansible.builtin.fail:
+    msg: >-
+      {{ reachy_declaration.complaint }}. Nothing was written and the daemon was
+      not restarted: the vocabulary is checked before the robot is touched, so a
+      refused value costs no round trip.
+  when: not reachy_declaration.ok
+
+- name: Look for the managed drop-in
+  ansible.builtin.stat:
+    path: "{{ reachy_drop_in }}"
+  register: reachy_drop_in_stat
+  changed_when: false
+  check_mode: false
+
+- name: Read the managed drop-in
+  ansible.builtin.slurp:
+    src: "{{ reachy_drop_in }}"
+  register: reachy_drop_in_slurp
+  when: reachy_drop_in_stat.stat.exists
+  # A line inside the region holds a setting's value, and one of them is a
+  # credential.
+  no_log: true
+  check_mode: false
+
+# Absent, ours, and somebody else's are three states, and an existing empty file
+# belongs with the third: this format never writes an empty file, so a blank one
+# is one something else blanked. Collapsing it into "nothing has been applied"
+# means the next run silently replaces it, in exactly the case where an operator
+# most needs to be told.
+- name: Read back what the managed region declares
+  ansible.builtin.set_fact:
+    reachy_region: >-
+      {{ reachy_drop_in_stat.stat.exists
+         | reachy_region_state(reachy_drop_in_slurp.content
+                               | default('') | b64decode) }}
+  no_log: true
+  check_mode: false
+
+- name: Refuse a managed region something other than this tooling wrote
+  ansible.builtin.fail:
+    msg: "{{ reachy_region.complaint }}. The file is {{ reachy_drop_in }}."
+  when: reachy_region.state == 'unreadable'
+
+- name: Work out what converging the managed region would change
+  ansible.builtin.set_fact:
+    reachy_change: >-
+      {{ reachy_declaration.settings
+         | reachy_settings_change(reachy_region.settings) }}
+  check_mode: false
+
+#:= docs/specs/provisioning/index.md#req-065-changes-are-previewable
+#:% Provisioning MUST support reporting the changes a run would make without making
+#:% any of them.
+# Preview is `--check`, which is Ansible's own and applies to every task in this
+# playbook rather than to a mode this role would have to keep working. This line
+# is what makes the report readable: it names the settings, never their values,
+# so it is safe to print in a run that carries a credential — and it is printed
+# in an ordinary run too, because "what did this change?" is the same question.
+- name: Report what the managed region would change
+  ansible.builtin.debug:
+    msg: >-
+      {{ reachy_drop_in }}: {{ reachy_change.summary }}.
+      {{ ('Adding: ' ~ reachy_change.added | join(', ') ~ '. ')
+         if reachy_change.added else '' }}{{
+         ('Changing: ' ~ reachy_change.changed | join(', ') ~ '. ')
+         if reachy_change.changed else '' }}{{
+         ('Removing: ' ~ reachy_change.removed | join(', ') ~ '. ')
+         if reachy_change.removed else '' }}
+
+- name: Create the drop-in directory
+  ansible.builtin.file:
+    path: "{{ reachy_drop_in_directory }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+#:= docs/specs/provisioning/index.md#req-060-applying-twice-changes-nothing-the-second-time
+#:% A provisioning run against an already-provisioned robot MUST report that it
+#:% changed nothing.
+# Written whole, from the declaration and from nothing that is already in the
+# file. That is what prunes a withdrawn setting, and it is also what makes the
+# second run change nothing: the format writes settings in name order, so one
+# declaration always renders the same bytes and `copy` compares checksums.
+- name: Write the managed region, whole
+  ansible.builtin.copy:
+    content: "{{ reachy_declaration.settings | reachy_managed_region }}"
+    dest: "{{ reachy_drop_in }}"
+    owner: root
+    group: root
+    mode: "0644"
+  # The rendered region holds every value, credential included. The task's own
+  # result is censored; what changed is the line above.
+  no_log: true
+  notify: Restart the robot daemon

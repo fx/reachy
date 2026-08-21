@@ -11,16 +11,16 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** Four specs are
-registered in `.duvet/config.toml` — perception, groundstation, robot-link and
-reachyctl — so `duvet report --ci` and `duvet query -c implementation` check
-those 39 requirements and nothing else. The snapshot is nonetheless larger than
-that: duvet loads a specification an annotation points at whether or not it is
-registered, so the file lists the requirement text every annotation cites —
-including the annotations that already point at architecture and provisioning,
-neither of which is registered. Regeneration is
+**`.duvet/snapshot.txt` records annotations, not coverage.** Six specs are
+registered in `.duvet/config.toml` — perception, groundstation, robot-link,
+reachyctl, ha-satellite and provisioning — so `duvet report --ci` and
+`duvet query -c implementation` check those 57 requirements and nothing else. The
+snapshot is nonetheless larger than that: duvet loads a specification an
+annotation points at whether or not it is registered, so the file lists the
+requirement text every annotation cites — including the annotations that already
+point at architecture, which is not registered. Regeneration is
 byte-identical, so CI is deterministic — and a green run is evidence about those
-three specs only. A spec is registered by the change that implements it. See
+six specs only. A spec is registered by the change that implements it. See
 `.duvet/config.toml` for why the rest are unregistered, and for why annotations
 are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
 
@@ -72,8 +72,13 @@ corpus is the first example, not the list. The second is the deployment files �
 `test_groundstation_deployment.py` reads the Dockerfile, the compose files, the
 scrape configuration and `.env.example` and compares them with the settings
 model, `mise.toml` and the member list, where a fake would compare the
-documentation with itself. Do not report those. A marker on a test that merely
-*used* a real path for convenience still is a finding.
+documentation with itself. The third is
+`docs/ops/managed-daemon-environment.md`, which two independent implementations
+of the managed drop-in are written against: `test_reachyctl_managed.py` and
+`test_provisioning_managed_contract.py` each read the block out of it and require
+their own renderer to reproduce it, so the committed bytes are the contract and a
+fake would compare a renderer with itself. Do not report those. A marker on a
+test that merely *used* a real path for convenience still is a finding.
 
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a

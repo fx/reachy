@@ -26,9 +26,9 @@
 
 '$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
 
-# ⚠️ MOST SPECS ARE STILL UNREGISTERED, AND THAT IS DELIBERATE.
+# TWO SPECS ARE STILL UNREGISTERED, AND THAT IS DELIBERATE.
 #
-# `docs/specs/` holds 8 specs carrying 73 requirements. Four of them are
+# `docs/specs/` holds 8 specs carrying 73 requirements. Six of them are
 # registered below:
 #
 #   - perception, whose 8 requirements are implemented and annotated by
@@ -44,20 +44,29 @@
 #     implemented;
 #   - reachyctl, whose 9 are implemented across changes 0007, 0008 and 0009 and
 #     registered by the last of them, which completed the tool's
-#     operator-facing surface.
+#     operator-facing surface;
+#   - ha-satellite, whose 11 are implemented across changes 0011, 0012 and 0013
+#     and registered by the last of them, which added the behaviour layer, the
+#     configuration, the settings interface and the packaging to the ports and
+#     adapters the first two built;
+#   - provisioning, whose 7 — REQ-060 to REQ-066 — are implemented by change
+#     0010 and registered by it. There was no partial implementation to
+#     register earlier: the roles, the removal path and the idempotency gate
+#     arrive together, and REQ-061 is satisfied by the workflow job that runs
+#     the gate.
 #
-# For those four specs, and only those four, `duvet query -c implementation`
+# For those six specs, and only those six, `duvet query -c implementation`
 # and `duvet report --ci` mean what they appear to mean.
 #
-# The other 4 are unregistered because not all of their requirements have an
-# implementation to annotate yet. Architecture and provisioning already carry
-# some annotations — they show up in the snapshot, because duvet loads a
-# specification an annotation points at whether or not it is registered — but
-# registering either turns the job red immediately on the requirements no
-# change has reached, and it stays red until the implementing change lands. A
-# spec is registered by the change that completes it, in that change's pull
-# request, alongside the annotations that make it pass. Nothing outside those
-# four is evidence of anything today.
+# The other 2 are unregistered because not all of their requirements have an
+# implementation to annotate yet. Architecture already carries some annotations
+# — they show up in the snapshot, because duvet loads a specification an
+# annotation points at whether or not it is registered — but registering it
+# turns the job red immediately on the requirements no change has reached, and
+# it stays red until the implementing change lands. A spec is registered by the
+# change that completes it, in that change's pull request, alongside the
+# annotations that make it pass. Nothing outside those six is evidence of
+# anything today.
 #
 # Each entry takes a `source` path plus a MANDATORY `format = "markdown"`:
 #
@@ -110,6 +119,19 @@ format = "markdown"
 # all eleven annotations from documentation into a gate.
 [[specification]]
 source = "docs/specs/ha-satellite/index.md"
+format = "markdown"
+
+# --- Provisioning: implemented by change 0010 -------------------------------
+# Registered by 0010, which is the change that implements the whole spec at
+# once: there was no partial implementation to register earlier, because the
+# roles, the removal path and the idempotency gate arrive together. Six of its
+# seven requirements are cited from the playbook and the roles; REQ-061 is cited
+# from `.github/workflows/provisioning.yml` under the `implication` block below,
+# because the job that applies the playbook twice and fails on any change in the
+# second application both enforces and verifies it, and there is no other
+# artifact to point at.
+[[specification]]
+source = "docs/specs/provisioning/index.md"
 format = "markdown"
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses

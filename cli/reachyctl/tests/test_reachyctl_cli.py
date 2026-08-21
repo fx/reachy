@@ -311,3 +311,113 @@ def test_doctor_reports_a_failure_as_a_document_when_asked_for_one() -> None:
     document = json.loads(result.stdout)
     assert document["command"] == "doctor"
     assert document["ok"] is False
+
+
+class CompletedRun:
+    """What a run that succeeded looks like to the wrapper.
+
+    Attributes:
+        returncode: The status Ansible exited with.
+    """
+
+    returncode = 0
+
+
+def wrapped_ansible(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """Replace everything `provision` reaches outside this process.
+
+    `subprocess.run` is replaced rather than allowed to launch anything: no unit
+    test here performs input or output, and the run being wrapped has its own
+    gate — `just provision-idempotency` applies the playbook twice against a
+    container and fails on any change in the second application.
+
+    Args:
+        monkeypatch: How the replacements are made.
+
+    Returns:
+        The list the commands are recorded into.
+    """
+    ran: list[list[str]] = []
+
+    def fake_run(command: list[str], **keywords: object) -> CompletedRun:
+        """Record the command instead of running it.
+
+        Args:
+            command: What the wrapper assembled.
+            keywords: Everything else `subprocess.run` was given.
+
+        Returns:
+            A successful result.
+        """
+        del keywords
+        ran.append(command)
+        return CompletedRun()
+
+    # By name rather than by attribute, because `reachyctl.provision` does not
+    # re-export the modules it imports and strict mode says so. Each one is
+    # restored when the test ends.
+    monkeypatch.setattr("reachyctl.provision.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "reachyctl.provision.shutil.which",
+        lambda _: "/usr/bin/ansible-playbook",
+    )
+    monkeypatch.setattr("reachyctl.provision.Path.is_dir", lambda _: True)
+    return ran
+
+
+def test_provision_refuses_a_directory_that_has_no_playbook_in_it() -> None:
+    """Nothing was contacted, so the status means "could not start", not "unhealthy"."""
+    result = runner.invoke(
+        app,
+        ["provision", "--directory", "nowhere-in-particular"],
+        env=CONFIGURED,
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "provisioning directory" in result.stdout
+
+
+def test_provision_runs_the_playbook_it_was_asked_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command is a wrapper, so what it is worth is the command it assembles.
+
+    Args:
+        monkeypatch: How the subprocess and the executable lookup are replaced.
+    """
+    ran = wrapped_ansible(monkeypatch)
+
+    result = runner.invoke(
+        app,
+        ["--verbose", "provision", "--preview", "--tags", "daemon_env"],
+        env=CONFIGURED,
+    )
+
+    assert result.exit_code == ExitCode.OK
+    assert ran == [
+        [
+            "ansible-playbook",
+            "site.yml",
+            "--check",
+            "--diff",
+            "--tags",
+            "daemon_env",
+            "--verbose",
+        ],
+    ]
+
+
+def test_provision_names_the_removal_path_so_it_is_discoverable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A supported way back to a stock robot that nobody can find is not supported.
+
+    Args:
+        monkeypatch: How the subprocess and the executable lookup are replaced.
+    """
+    ran = wrapped_ansible(monkeypatch)
+
+    result = runner.invoke(app, ["provision", "--remove"], env=CONFIGURED)
+
+    assert result.exit_code == ExitCode.OK
+    assert ran == [["ansible-playbook", "remove.yml"]]

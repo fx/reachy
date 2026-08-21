@@ -1021,3 +1021,223 @@ contracts:
 contracts-check: contracts
     git add --intent-to-add -- docs/contracts
     git diff --exit-code -- docs/contracts
+
+# --- Provisioning -------------------------------------------------------------
+# Ansible runs under this workspace's own environment rather than a system
+# install, and `ansible-core` is pinned in the `provisioning` dependency group so
+# a runner and a contributor cannot end up on versions that merely look alike.
+# The group is deliberately not installed by default: a lint, a type check and a
+# test run have no use for an Ansible engine. `uv run --group provisioning` puts
+# it there for the two recipes that do, from the same lockfile everything else
+# resolves against — and, because it is the workspace environment, the roles'
+# filter plugins can import `reachy_checks` and `reachy_contracts` as ordinary
+# modules. That is what reachyctl REQ-056 asks for: one definition of what a
+# healthy robot is, used by `doctor` and by the verification role alike.
+
+ansible := "uv run --locked --all-packages --group provisioning"
+
+# Where a running container target keeps its ephemeral key, inventory and
+# declaration. Untracked; `just provision-target-down` removes it.
+target_dir := ".provisioning-target"
+target_name := "reachy-provisioning-target"
+target_image := "reachy-provisioning-target:dev"
+
+# Lint the playbooks and roles. `ansible-lint` carries its own opinions about
+# role layout, task naming and module spelling, which is why it is pinned: an
+# unpinned linter is a gate whose verdict changes with no diff here to review.
+provision-lint:
+    cd provisioning/ansible && {{ ansible }} ansible-lint --offline site.yml remove.yml
+
+# Build the container target and start it, then leave behind everything an
+# ordinary `ansible-playbook` run needs to reach it.
+#
+# The container runs real systemd as PID 1, which is what `--privileged` and the
+# cgroup mount are for: `daemon-reload`, `restart` and `systemctl show` are what
+# the roles read and write, and a stub `systemctl` would make the gate a test of
+# the stub. It is reached over SSH rather than through a container connection
+# plugin, so the gate differs from a run against a real robot in as few ways as
+# it can.
+#
+# The key pair is generated per run and thrown away with the directory. Nothing
+# resembling a credential is baked into the image or committed anywhere.
+provision-target-up:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    docker build --tag '{{ target_image }}' provisioning/ci
+
+    docker rm --force '{{ target_name }}' >/dev/null 2>&1 || true
+    rm --recursive --force '{{ target_dir }}'
+    mkdir --parents '{{ target_dir }}'
+    chmod 0700 '{{ target_dir }}'
+
+    docker run --detach --name '{{ target_name }}' \
+        --privileged --cgroupns=host \
+        --volume /sys/fs/cgroup:/sys/fs/cgroup:rw \
+        --tmpfs /run --tmpfs /run/lock \
+        --publish 127.0.0.1::22 \
+        '{{ target_image }}' >/dev/null
+
+    port="$(docker port '{{ target_name }}' 22/tcp | head -n 1 | sed 's/.*://')"
+
+    # systemd reports `degraded` when a unit failed and `running` when none did.
+    # Both mean it finished starting, which is all this waits for — the units
+    # this cares about are checked by the run itself.
+    for _ in $(seq 1 60); do
+        state="$(docker exec '{{ target_name }}' systemctl is-system-running 2>/dev/null || true)"
+        case "$state" in running|degraded) break ;; esac
+        sleep 1
+    done
+    if [ "${state:-}" != running ] && [ "${state:-}" != degraded ]; then
+        echo "just provision-target-up: systemd did not finish starting (${state:-no answer})" >&2
+        docker logs '{{ target_name }}' >&2 || true
+        exit 1
+    fi
+
+    ssh-keygen -t ed25519 -N '' -C 'reachy-provisioning-target' \
+        -f '{{ target_dir }}/id' -q
+    docker cp '{{ target_dir }}/id.pub' \
+        '{{ target_name }}:/home/reachy/.ssh/authorized_keys' >/dev/null
+    docker exec '{{ target_name }}' chown reachy:reachy /home/reachy/.ssh/authorized_keys
+    docker exec '{{ target_name }}' chmod 0600 /home/reachy/.ssh/authorized_keys
+
+    # Host-key verification stays on, exactly as it does against a robot. The
+    # container's key is new every run, so the run records it rather than
+    # switching the check off — there is no option in the playbook that does.
+    ssh-keyscan -p "$port" 127.0.0.1 > '{{ target_dir }}/known_hosts' 2>/dev/null
+
+    # A real wheel with nothing in it, built in memory by the helper `reachyctl`
+    # already uses for the same purpose. Installing it is what exercises the
+    # `app_install` role, and using a distribution that is obviously not the
+    # satellite is the point: the role installs a wheel from a configured source
+    # rather than a particular application.
+    wheel="$({{ ansible }} python - '{{ target_dir }}' <<'PY'
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, "cli/reachyctl/tests/support")
+    from reachyctl_fixture_wheel import (  # noqa: E402 - path set above
+        FIXTURE_DISTRIBUTION,
+        FIXTURE_VERSION,
+        fixture_wheel,
+    )
+
+    name, body = fixture_wheel()
+    Path(sys.argv[1], name).write_bytes(body)
+    print(f"{name} {FIXTURE_DISTRIBUTION} {FIXTURE_VERSION}")
+    PY
+    )"
+    set -- $wheel
+
+    cat > '{{ target_dir }}/inventory.ini' <<EOF
+    [reachy]
+    target ansible_host=127.0.0.1 ansible_port=$port
+
+    [reachy:vars]
+    ansible_user=reachy
+    ansible_become=true
+    ansible_ssh_private_key_file=$PWD/{{ target_dir }}/id
+    ansible_ssh_common_args=-o UserKnownHostsFile=$PWD/{{ target_dir }}/known_hosts -o StrictHostKeyChecking=yes
+    EOF
+
+    # The declaration the gate applies. Every value here is a placeholder — the
+    # address is from RFC 5737's TEST-NET-1 range and the credential lasts as
+    # long as one container. See the root AGENTS.md on what may enter a tracked
+    # file; this one is untracked, and it is written here rather than committed
+    # so that the same rule is visible in the recipe that produces it.
+    cat > '{{ target_dir }}/declaration.yml' <<EOF
+    ---
+    reachy_settings:
+      REACHY_HOME_ASSISTANT_IDENTITY: Reachy Mini Example
+      REACHY_SATELLITE_LOG_LEVEL: info
+      REACHY_SATELLITE_FRAME_INTERVAL_MS: 100
+    reachy_groundstation_url: ws://192.0.2.10:8000/v1/session
+    reachy_groundstation_credential: example-credential
+    reachy_app_distribution: $2
+    reachy_app_wheel_path: $PWD/{{ target_dir }}/$1
+    EOF
+
+    echo
+    echo "The container target is up on 127.0.0.1:$port."
+    echo "  just provision-run site.yml            # apply"
+    echo "  just provision-run site.yml --check    # preview, change nothing"
+    echo "  just provision-run remove.yml          # undo it"
+    echo "  just provision-target-down             # stop and remove it"
+
+# Run a playbook against the container target `just provision-target-up` left
+# behind. Everything after the playbook name is passed to `ansible-playbook`, so
+# `--check`, `--diff`, `--tags` and `-v` all work.
+provision-run playbook="site.yml" *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f '{{ target_dir }}/inventory.ini' ]; then
+        echo 'just provision-run: no container target; run `just provision-target-up` first' >&2
+        exit 1
+    fi
+    cd provisioning/ansible && {{ ansible }} ansible-playbook \
+        --inventory "$OLDPWD/{{ target_dir }}/inventory.ini" \
+        --extra-vars "@$OLDPWD/{{ target_dir }}/declaration.yml" \
+        '{{ playbook }}' {{ args }}
+
+# Stop the container target and forget everything about it.
+provision-target-down:
+    -docker rm --force '{{ target_name }}' >/dev/null 2>&1
+    rm --recursive --force '{{ target_dir }}'
+
+# The idempotency gate: apply the playbook twice and fail on any changed step in
+# the second application.
+#
+# This is provisioning REQ-061, and it is the check the whole change is built
+# around. Idempotency is the property that decays first as roles are edited and
+# the one that is invisible without a gate: a task written non-idempotently
+# works, converges the robot, and then reports a change on every run forever
+# after. Nobody notices until a run that was supposed to change nothing restarts
+# the daemon in the middle of a conversation.
+#
+# The recap is what is read, because it is what an operator reads. A second
+# application that reports `changed=0` for every host is the requirement, and
+# `failed` and `unreachable` are checked alongside it so a run that fell over
+# cannot be mistaken for a run that changed nothing.
+provision-idempotency: provision-target-up
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    echo '=== first application: this one is expected to change things ==='
+    just provision-run site.yml
+
+    echo
+    echo '=== second application: this one must change nothing ==='
+    second="$(just provision-run site.yml 2>&1 | tee /dev/stderr)"
+
+    recap="$(printf '%s\n' "$second" | sed -n '/PLAY RECAP/,$p')"
+    if [ -z "$recap" ]; then
+        echo 'just provision-idempotency: the second application printed no recap' >&2
+        exit 1
+    fi
+
+    printf '%s\n' "$recap" | awk '
+        /changed=/ {
+            for (i = 1; i <= NF; i++) {
+                split($i, pair, "=")
+                if (pair[1] == "changed" || pair[1] == "failed" || pair[1] == "unreachable") {
+                    total[pair[1]] += pair[2]
+                }
+            }
+            hosts++
+        }
+        END {
+            if (hosts == 0) {
+                print "just provision-idempotency: the recap named no host" > "/dev/stderr"
+                exit 1
+            }
+            if (total["failed"] > 0 || total["unreachable"] > 0) {
+                printf "just provision-idempotency: the second application failed (failed=%d unreachable=%d)\n", total["failed"], total["unreachable"] > "/dev/stderr"
+                exit 1
+            }
+            if (total["changed"] > 0) {
+                printf "just provision-idempotency: the second application reported changed=%d; provisioning REQ-060 requires it to change nothing\n", total["changed"] > "/dev/stderr"
+                exit 1
+            }
+            printf "the second application changed nothing across %d host(s)\n", hosts
+        }
+    '

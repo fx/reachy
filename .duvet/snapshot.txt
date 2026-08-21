@@ -162,10 +162,34 @@ SPECIFICATION: [Perception](docs/specs/perception/index.md)
     TEXT[!MUST,implementation]: the artifact.
 
 SPECIFICATION: [Provisioning](docs/specs/provisioning/index.md)
+  SECTION: [REQ-060: Applying twice changes nothing the second time](#req-060-applying-twice-changes-nothing-the-second-time)
+    TEXT[!MUST,implementation]: A provisioning run against an already-provisioned robot MUST report that it
+    TEXT[!MUST,implementation]: changed nothing.
+
+  SECTION: [REQ-061: Idempotency is enforced automatically](#req-061-idempotency-is-enforced-automatically)
+    TEXT[!MUST,implication]: Continuous integration MUST apply the provisioning twice against a test target
+    TEXT[!MUST,implication]: and fail if the second application reports any change.
+
+  SECTION: [REQ-062: A stock image is sufficient](#req-062-a-stock-image-is-sufficient)
+    TEXT[!MUST,implementation]: Provisioning MUST succeed against an unmodified stock robot image without any
+    TEXT[!MUST,implementation]: manual preparation of the target beyond network access and credentials.
+
   SECTION: [REQ-063: The managed configuration is fully owned](#req-063-the-managed-configuration-is-fully-owned)
-    TEXT[implementation]: Configuration under provisioning's control MUST converge to exactly what is
-    TEXT[implementation]: declared, including removing values that were previously declared and no longer
-    TEXT[implementation]: are.
+    TEXT[!MUST,implementation]: Configuration under provisioning's control MUST converge to exactly what is
+    TEXT[!MUST,implementation]: declared, including removing values that were previously declared and no longer
+    TEXT[!MUST,implementation]: are.
+
+  SECTION: [REQ-064: The robot can be returned to stock behaviour](#req-064-the-robot-can-be-returned-to-stock-behaviour)
+    TEXT[!MUST,implementation]: Provisioning MUST offer a supported path that removes everything it applied and
+    TEXT[!MUST,implementation]: restores the robot's stock behaviour.
+
+  SECTION: [REQ-065: Changes are previewable](#req-065-changes-are-previewable)
+    TEXT[!MUST,implementation]: Provisioning MUST support reporting the changes a run would make without making
+    TEXT[!MUST,implementation]: any of them.
+
+  SECTION: [REQ-066: A run asserts the end state it created](#req-066-a-run-asserts-the-end-state-it-created)
+    TEXT[!MUST,implementation]: A provisioning run MUST verify the robot reaches a working end state before
+    TEXT[!MUST,implementation]: reporting success.
 
 SPECIFICATION: [reachyctl](docs/specs/reachyctl/index.md)
   SECTION: [REQ-051: Deployment verifies its own result](#req-051-deployment-verifies-its-own-result)

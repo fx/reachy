@@ -1,0 +1,72 @@
+---
+# The removal path's half of the application. Reached by `remove.yml`, never by
+# `site.yml`.
+#
+# The robot's application environment is shared with the daemon and with anything
+# else installed into it, so this uninstalls the one distribution it was told
+# about and nothing else. Removing the environment would take the vendor's daemon
+# with it, which is the opposite of restoring stock behaviour.
+
+- name: Report that no application is declared to remove
+  ansible.builtin.debug:
+    msg: >-
+      No application is declared, so nothing is uninstalled. Set
+      reachy_app_distribution to name what this run should take off the robot.
+  when: reachy_app_distribution | length == 0
+
+- name: Uninstall the declared application
+  when: reachy_app_distribution | length > 0
+  block:
+    - name: Ask systemd which interpreter the daemon runs
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ reachy_daemon_unit }}"
+          - --property=ExecStart
+          - --value
+      register: reachy_exec_start
+      changed_when: false
+      check_mode: false
+
+    - name: Decide which interpreter to uninstall from
+      ansible.builtin.set_fact:
+        reachy_app_interpreter: >-
+          {{ reachy_exec_start.stdout | reachy_interpreter(reachy_python) }}
+      check_mode: false
+
+    - name: Ask that interpreter what it holds
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_app_interpreter }}"
+          - -c
+          - "{{ reachy_metadata_script }}"
+          - "{{ reachy_app_distribution }}"
+      register: reachy_app_before
+      changed_when: false
+      check_mode: false
+
+    # Guarded by the same comparison the install is guarded by, so running the
+    # removal twice reports nothing changed the second time. A removal path that
+    # was not idempotent would be one nobody could safely re-run after a failure
+    # partway through.
+    - name: Uninstall the application from the environment the daemon runs
+      ansible.builtin.command:
+        argv:
+          - "{{ reachy_app_interpreter }}"
+          - -m
+          - pip
+          - uninstall
+          - --yes
+          - "{{ reachy_app_distribution }}"
+      register: reachy_app_uninstall
+      when: >-
+        (reachy_app_before.stdout | from_json)[reachy_app_distribution]
+        | default('', true) | length > 0
+      changed_when: reachy_app_uninstall is not skipped
+      notify: Restart the robot daemon
+
+    - name: Remove the staging directory
+      ansible.builtin.file:
+        path: "{{ reachy_staging }}"
+        state: absent

@@ -1,0 +1,69 @@
+name: Provisioning
+
+# The provisioning gates. Both steps call a Justfile recipe rather than
+# restating its command, so what runs here and what a contributor runs locally
+# cannot drift apart.
+#
+# Its own workflow rather than a job in `checks.yml`, for the same reason lint,
+# type check and test are three jobs there: a job is the unit branch protection
+# can require, and the idempotency gate is the one that has to be able to fail
+# on its own and say so.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provisioning-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Provisioning lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      - name: Lint the playbooks and roles
+        run: just provision-lint
+
+  #:= docs/specs/provisioning/index.md#req-061-idempotency-is-enforced-automatically
+  #:% Continuous integration MUST apply the provisioning twice against a test target
+  #:% and fail if the second application reports any change.
+  #
+  # The job is the requirement. It builds a container approximating the stock
+  # robot's filesystem and unit layout, applies `site.yml` against it twice, and
+  # fails if the second application reports any changed step.
+  #
+  # It cannot exercise hardware and does not try to: what it verifies is
+  # convergence, which is the property that decays silently as roles are edited
+  # and is invisible without a check. `provisioning/ci/README.md` is the list of
+  # what the target does and does not model, and where each of the unmodelled
+  # things is proved instead.
+  idempotency:
+    name: Idempotency
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      # The container runs real systemd as PID 1, which needs the host's cgroup
+      # hierarchy and a privileged container — see the recipe. Docker is present
+      # on the runner image; nothing here installs it.
+      - name: Apply the playbook twice and fail on any change in the second
+        run: just provision-idempotency
+
+      - name: Remove the container target
+        if: always()
+        run: just provision-target-down

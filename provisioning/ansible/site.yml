@@ -1,0 +1,68 @@
+---
+# A stock Reachy Mini image, brought to the declared state and then asserted.
+#
+#     ansible-playbook site.yml                        # apply
+#     ansible-playbook site.yml --check --diff         # preview, change nothing
+#     ansible-playbook site.yml --tags daemon_env      # one concern
+#     ansible-playbook remove.yml                      # undo all of it
+#
+# Or, through the wrapper the reachyctl spec asks for, which is the same run with
+# the same flags: `reachyctl provision`, `--preview`, `--tags`, `--remove`.
+#
+# Four concerns behind four tags. Tags are what make this usable during
+# development rather than only at first setup: reapplying one setting should not
+# mean re-downloading a wheel, and re-running the verification should not mean
+# restarting the daemon.
+
+#:= docs/specs/provisioning/index.md#req-062-a-stock-image-is-sufficient
+#:% Provisioning MUST succeed against an unmodified stock robot image without any
+#:% manual preparation of the target beyond network access and credentials.
+- name: Bring a Reachy Mini from a stock image to the declared state
+  hosts: reachy
+  become: true
+  # Nothing here reads a fact. Skipping the gather is one fewer thing the target
+  # has to satisfy before the first task, and one fewer round trip on a link
+  # measured at 100-170 ms idle.
+  gather_facts: false
+
+  roles:
+    # First, because it refuses a half-configured link before anything is
+    # written. It writes nothing itself: the endpoint and the credential are two
+    # settings in the region `daemon_env` owns in full.
+    - role: groundstation_link
+      tags:
+        - groundstation_link
+        - configuration
+
+    # The `groundstation_link` tag appears here too, and deliberately. The link
+    # is two settings in this file, so applying the link means converging this
+    # file; a tag that validated the endpoint and wrote nothing would report
+    # success and change nothing on the robot.
+    - role: daemon_env
+      tags:
+        - daemon_env
+        - groundstation_link
+        - configuration
+
+    - role: app_install
+      tags:
+        - app_install
+        - application
+
+  tasks:
+    # Handlers run at the end of a play, and the verification below is in the
+    # same play. Without this the run would assert the environment the daemon had
+    # before the restart, which is the one state it is certain not to be in.
+    - name: Put every pending change in force before anything asserts the end state
+      ansible.builtin.meta: flush_handlers
+      tags:
+        - always
+
+    - name: Assert the robot reached a working end state
+      ansible.builtin.include_role:
+        name: verify
+        apply:
+          tags:
+            - verify
+      tags:
+        - verify

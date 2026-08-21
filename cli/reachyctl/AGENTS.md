@@ -5,9 +5,11 @@ Distribution and import name `reachyctl`.
 
 **Spec:** [reachyctl](../../docs/specs/reachyctl/).
 **Filled in by:** [0007](../../docs/changes/0007-reachyctl-probe.md),
-[0008](../../docs/changes/0008-reachyctl-doctor.md) and
-[0009](../../docs/changes/0009-reachyctl-deploy-and-config.md). Every command the
-spec names exists except `bench`, which is [0014](../../docs/changes/0014-benchmarks-and-gates.md).
+[0008](../../docs/changes/0008-reachyctl-doctor.md),
+[0009](../../docs/changes/0009-reachyctl-deploy-and-config.md) and
+[0010](../../docs/changes/0010-provisioning-ansible.md), which added `provision`.
+Every command the spec names exists except `bench`, which is
+[0014](../../docs/changes/0014-benchmarks-and-gates.md).
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -72,6 +74,12 @@ that apply here.
   against a shared check registry, not against its own private list; the Ansible
   verification role asserts the same conditions.
 - **`reachyctl` wraps provisioning, it does not replace it.** Anything
-  declarative belongs in `provisioning/ansible/`.
+  declarative belongs in `provisioning/ansible/`, and `provision` runs that
+  playbook — it is the one command here that shells out, deliberately, because
+  Ansible's own output is the report and a second implementation of "apply the
+  declared configuration" would be a second description of what a robot is. What
+  the wrapper adds is finding the playbook, spelling preview as `--check`,
+  naming the removal path, and translating Ansible's exit status into this
+  tool's.
 - **No robot address is ever tracked.** Targets come from arguments or from an
   untracked local file with a tracked `.example` sibling.
