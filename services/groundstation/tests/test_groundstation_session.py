@@ -10,9 +10,7 @@ pipeline is scheduled to drain it, which is the actual overload condition, and
 the assertions are about which frames survived.
 
 Test module names are globally unique across the workspace — see the root
-`AGENTS.md`. Nothing here opens a socket or reads a file. The one test that
-configures a handshake timeout does wait on a clock, bounded at ten
-milliseconds, because a timeout elapsing is the behaviour it is about.
+`AGENTS.md`. Nothing here opens a socket, reads a file or waits on a clock.
 """
 
 from __future__ import annotations
@@ -53,6 +51,14 @@ from reachy_groundstation.session.transport import (
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_ERROR,
 )
+
+# A timeout that has already expired by the time the event loop looks at it.
+# The assertion in each of these tests is about what happens when a timeout
+# fires, so the timeout is made to fire on the next pass of the loop rather than
+# in ten milliseconds — the suite waits on no clock, and the outcome cannot turn
+# on how loaded the runner is. Zero is not available: a zero timeout would be a
+# usable configuration value, and refusing one is the point of the constraint.
+_ALREADY_ELAPSED = 1e-6
 
 ECHO_V2 = Capability(name="echo", version=2)
 UNKNOWN = Capability(name="lidar", version=1)
@@ -273,7 +279,7 @@ async def test_a_client_that_never_speaks_is_closed_on_the_handshake_timeout() -
     runner, _ = _runner(
         transport,
         StaticRegistry(),
-        handshake_timeout_seconds=0.01,
+        handshake_timeout_seconds=_ALREADY_ELAPSED,
     )
     assert (await runner.run()).reason is CloseReason.PROTOCOL_ERROR
 

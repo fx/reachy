@@ -56,6 +56,13 @@ instance of the problem. A test that yields in an *unbounded* loop is a finding
 unit test is still a finding. In an integration test it is not: those poll a
 real server, and the bounded wait is what makes them deterministic.
 
+The same distinction governs a **timeout under test**. A unit test that
+configures a real delay and waits for it to elapse is a finding, however short
+the delay; a unit test that configures a timeout already expired by the time the
+event loop looks at it is not, because nothing waits and no outcome can turn on
+how loaded the runner is. The groundstation's three such tests use
+`_ALREADY_ELAPSED`.
+
 **Specs are written in duvet mode.** RFC 2119 keywords appear **only** inside
 `### REQ-NNN:` sections; their absence from Overview, Background, Design,
 Constraints, Open Questions and scenario bodies is required, since a keyword

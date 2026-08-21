@@ -6,10 +6,8 @@ empty answer is a successful answer, and that the capture token is copied throug
 without being read.
 
 Test module names are globally unique across the workspace — see the root
-`AGENTS.md`. Nothing here opens a socket or reads a file, and the pipeline's
-own clock is injected as a counter. The one test that configures a capability
-timeout does wait on a real clock, bounded at ten milliseconds, because a
-timeout elapsing is the behaviour it is about.
+`AGENTS.md`. Nothing here opens a socket, reads a file or waits on a clock, and
+the pipeline's own clock is injected as a counter.
 """
 
 from __future__ import annotations
@@ -51,6 +49,14 @@ from reachy_groundstation.pipeline.queue import FrameQueue, QueuedFrame
 from reachy_groundstation.pipeline.runner import FramePipeline
 from reachy_groundstation.ports import CapabilityPort, DecodedFrame
 from reachy_groundstation.session.framing import MessageKind
+
+# A timeout that has already expired by the time the event loop looks at it.
+# The assertion in each of these tests is about what happens when a timeout
+# fires, so the timeout is made to fire on the next pass of the loop rather than
+# in ten milliseconds — the suite waits on no clock, and the outcome cannot turn
+# on how loaded the runner is. Zero is not available: a zero timeout would be a
+# usable configuration value, and refusing one is the point of the constraint.
+_ALREADY_ELAPSED = 1e-6
 
 SESSION = "0123456789abcdef"
 STAMP = "17352.884"
@@ -285,7 +291,7 @@ async def test_a_capability_that_overruns_is_abandoned() -> None:
     pipeline, _obs, _spans = _pipeline(
         _Stuck(),
         recorder=recorder,
-        capability_timeout_seconds=0.01,
+        capability_timeout_seconds=_ALREADY_ELAPSED,
     )
     await pipeline.process(_queued(7))
     assert recorder.results() == []
