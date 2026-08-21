@@ -124,6 +124,7 @@ WORKDIR /src
 # build somebody has to diagnose.
 COPY pyproject.toml uv.lock ./
 COPY packages/reachy-contracts/pyproject.toml packages/reachy-contracts/
+COPY packages/reachy-session-client/pyproject.toml packages/reachy-session-client/
 COPY apps/ha-satellite/pyproject.toml apps/ha-satellite/
 COPY services/groundstation/pyproject.toml services/groundstation/
 COPY cli/reachyctl/pyproject.toml cli/reachyctl/

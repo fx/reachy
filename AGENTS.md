@@ -215,7 +215,7 @@ its step.
 |---|---|---|---|
 | `checks.yml` | pull requests, pushes to `main` | `Lint`, `Type check`, `Test` (diff-scoped coverage), `Contract drift` | `just check`, `just contracts-check` |
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
-| `images.yml` | pull requests, pushes to `main`, version tags | `Verify cpu`, `Verify cuda`, `Build for both architectures`; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
+| `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main` only | Version derivation and tag creation; publishes nothing | — |
 | `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — two specs registered so far, see below | `just duvet` |
 
