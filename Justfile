@@ -291,18 +291,30 @@ image variant="cpu" tag="reachy-groundstation:dev" *buildx_args:
     # which continuous integration uses because it is what builds for another
     # architecture — writes nowhere unless told to, so `just image` followed by
     # `just image-verify` would verify whatever image was there before. Asking
-    # for `--load` covers both, and it is skipped when the caller already said
-    # where the result goes, because buildx refuses two destinations and cannot
-    # load a multi-platform result at all.
+    # for `--load` covers both.
+    #
+    # It is dropped in exactly two cases, and naming an architecture is not one
+    # of them: a single-platform build for the OTHER architecture is precisely
+    # the one that has to be loaded, because it is the one `just image-verify`
+    # then runs under emulation. The two are a caller who already said where the
+    # result goes, since buildx refuses two destinations, and a genuinely
+    # multi-platform build, which buildx cannot load into a daemon at all.
     output=(--load)
+    platforms=''
+    previous=''
     for argument in {{ buildx_args }}; do
         case "$argument" in
-            --load|--push|--output|--output=*|--platform|--platform=*)
-                output=()
-                break
-                ;;
+            --load|--push|--output|--output=*) output=() ;;
+            --platform=*) platforms="${argument#--platform=}" ;;
         esac
+        if [ "$previous" = '--platform' ]; then
+            platforms="$argument"
+        fi
+        previous="$argument"
     done
+    case "$platforms" in
+        *,*) output=() ;;
+    esac
 
     docker buildx build \
         --file services/groundstation/Dockerfile \
