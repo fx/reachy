@@ -264,6 +264,11 @@ async def test_a_capability_that_raises_costs_only_its_own_answer() -> None:
     (error,) = recorder.errors()
     assert error.code is ErrorCode.CAPABILITY_FAILED
     assert error.sequence == 6
+    # Which capability failed and what kind of failure it was, and nothing the
+    # exception itself said: that text is the capability's, and it stays in the
+    # log rather than crossing the link.
+    assert error.detail == "broken: RuntimeError"
+    assert "cannot answer this frame" not in error.detail
 
 
 @pytest.mark.asyncio

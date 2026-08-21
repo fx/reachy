@@ -28,10 +28,9 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import numpy as np
+import numpy.typing as npt
 
 if TYPE_CHECKING:
-    import numpy.typing as npt
-
     from reachy_contracts import Capability, CapabilityName, FrameHeader, WireModel
 
 __all__ = [
@@ -44,6 +43,11 @@ __all__ = [
     "ImageArray",
 ]
 
+# `numpy.typing` is imported at run time rather than under `TYPE_CHECKING`: the
+# alias below is lazy, so anything that evaluates it — `typing.get_type_hints`
+# over `DecodedFrame`, for one — would otherwise raise `NameError` on a name that
+# only existed for the type checker.
+#
 # The decoded frame's pixels: an 8-bit array as OpenCV produces it, which is
 # height by width by three colour channels. The alias exists so that a
 # capability's signature says what it receives without repeating numpy's

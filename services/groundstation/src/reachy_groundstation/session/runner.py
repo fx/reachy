@@ -33,6 +33,7 @@ from reachy_contracts import (
     SessionOffer,
     negotiate,
 )
+from reachy_groundstation.faults import validation_summary
 from reachy_groundstation.obs import frame_exemplar, get_logger, session_context
 from reachy_groundstation.pipeline.queue import FrameQueue, QueuedFrame
 from reachy_groundstation.pipeline.runner import FramePipeline
@@ -68,30 +69,6 @@ _logger = get_logger(__name__)
 # What a refused client is told. It says the credential was not accepted and
 # nothing about which part of it was wrong.
 _UNAUTHENTICATED_DETAIL = "the credential presented is not the configured one"
-
-
-def _fault_summary(error: ValueError) -> str:
-    """Say which fields of a message failed to validate, and never with what.
-
-    A `pydantic.ValidationError` renders the offending input value into its own
-    text. That is helpful everywhere except on the one message that carries a
-    credential, so this reports the location and the kind of each fault and
-    discards the values.
-
-    Args:
-        error: What validation raised.
-
-    Returns:
-        A short, value-free description of what was wrong.
-    """
-    faults = getattr(error, "errors", None)
-    if faults is None:
-        return type(error).__name__
-    return "; ".join(
-        f"{'.'.join(str(part) for part in fault['loc']) or '(message)'}: "
-        f"{fault['type']}"
-        for fault in faults()
-    )
 
 
 def new_session_id() -> str:
@@ -304,7 +281,7 @@ class SessionRunner:
             await self._refuse(
                 CloseReason.PROTOCOL_ERROR,
                 CLOSE_PROTOCOL_ERROR,
-                f"offer did not parse: {_fault_summary(error)}",
+                f"offer did not parse: {validation_summary(error)}",
             )
             return None
 

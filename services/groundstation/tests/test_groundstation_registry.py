@@ -175,12 +175,17 @@ async def test_a_failed_warm_up_is_reported_as_unhealthy() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_warm_up_records_why() -> None:
-    """An operator should not have to reproduce the failure to see it."""
+async def test_a_failed_warm_up_records_the_kind_of_failure() -> None:
+    """The health endpoint is reachable by anything that can reach the service.
+
+    So what it publishes is the kind of failure. A model loader's own message
+    names the path it could not open, and that belongs in the log.
+    """
     registry = CapabilityRegistry(make_settings(), [_broken_warm_up])
     await registry.warm_up()
     (entry,) = registry.health()
-    assert "cannot load its model" in entry.detail
+    assert entry.detail == "RuntimeError"
+    assert "cannot load its model" not in entry.detail
 
 
 @pytest.mark.asyncio
@@ -191,7 +196,7 @@ async def test_a_constructor_failure_does_not_stop_the_next_capability() -> None
     assert registry.supported() == (ECHO,)
     unhealthy = [entry for entry in registry.health() if entry.version is None]
     assert len(unhealthy) == 1
-    assert "cannot be constructed" in unhealthy[0].detail
+    assert unhealthy[0].detail == "RuntimeError"
 
 
 @pytest.mark.asyncio

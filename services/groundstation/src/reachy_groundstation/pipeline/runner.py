@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from opentelemetry.trace import Status, StatusCode
 
 from reachy_contracts import ErrorCode, ResultEnvelope, SessionError
+from reachy_groundstation.faults import describe_fault
 from reachy_groundstation.obs import (
     STAGE_DECODE,
     STAGE_EMIT,
@@ -224,9 +225,14 @@ class FramePipeline:
                     capability=name,
                     error=repr(error),
                 )
+                # The client is told which capability failed and what kind
+                # of failure it was. The text an exception carries is the
+                # capability's own — a model path, a value it rejected — and it
+                # stays in the log, which is the operator's rather than
+                # anything that can reach this service.
                 await self._report(
                     ErrorCode.CAPABILITY_FAILED,
-                    f"{name}: {error!r}"[:500],
+                    f"{name}: {describe_fault(error)}",
                     decoded.sequence,
                 )
                 return

@@ -188,12 +188,12 @@ That is what makes this change independently verifiable.
   split is what makes the boundary expressible: a rule forbidding those three
   packages from importing `reachy_groundstation.capabilities` is only
   enforceable if what they legitimately need is somewhere else.
-- Groundstation REQ-028 asks that every metric emitted while handling a frame
-  carries the session identifier and the frame's sequence number. Both are
-  carried as OpenMetrics **exemplars** rather than as labels: a label value per
-  frame is unbounded cardinality, and the series would outnumber the frames.
-  `/metrics` negotiates the exposition format, so a scraper that asks for
-  OpenMetrics gets them.
+- The session identifier and the sequence number reach the metrics as
+  OpenMetrics **exemplars** rather than as labels, which is how
+  [REQ-028](../specs/groundstation/index.md#req-028-work-is-attributable-end-to-end)
+  is satisfied without a series per frame — as labels they would be unbounded
+  cardinality, and the series would outnumber the frames. `/metrics` negotiates
+  the exposition format, because exemplars travel only in the newer one.
 - Framing is `session/framing.py` and is built from `json` and `struct` rather
   than from a model of its own. The contracts package deliberately leaves
   framing to the transport, and a pydantic model here would be a second wire

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from reachy_groundstation.faults import describe_fault
 from reachy_groundstation.obs import get_logger
 from reachy_groundstation.ports import (
     CapabilityHealth,
@@ -95,7 +96,9 @@ class _Entry:
         capability: The built capability, or `None` when building failed.
         descriptor: What it negotiates as, or `None` when it never said.
         state: Where it is in its lifecycle.
-        detail: Why it is unhealthy, when it is.
+        detail: How it failed, when it did — the kind of failure and not what
+            it said, because the health endpoint is reachable by anything that
+            can reach the service. The log carries the text.
     """
 
     __slots__ = ("capability", "descriptor", "detail", "name", "state")
@@ -178,7 +181,7 @@ class CapabilityRegistry:
             descriptor = capability.descriptor
         except Exception as error:
             _logger.error("capability.build_failed", factory=label, error=repr(error))
-            return _Entry(label, None, CapabilityState.UNHEALTHY, repr(error)[:500])
+            return _Entry(label, None, CapabilityState.UNHEALTHY, describe_fault(error))
         return _Entry(
             descriptor.name,
             capability,
@@ -210,7 +213,7 @@ class CapabilityRegistry:
                     error=repr(error),
                 )
                 entry.state = CapabilityState.UNHEALTHY
-                entry.detail = repr(error)[:500]
+                entry.detail = describe_fault(error)
             else:
                 entry.state = CapabilityState.READY
                 _logger.info("capability.ready", capability=entry.name)

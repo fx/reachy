@@ -48,7 +48,7 @@ from reachy_contracts import (
 )
 from reachy_groundstation.obs import Observability
 from reachy_groundstation.session.framing import MessageKind, decode_control
-from reachy_groundstation.session.runner import SessionRunner, _fault_summary
+from reachy_groundstation.session.runner import SessionRunner
 from reachy_groundstation.session.transport import (
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_ERROR,
@@ -606,12 +606,6 @@ async def test_an_offer_that_does_not_parse_never_echoes_what_it_carried() -> No
     detail = SessionClose.from_wire(_sent(transport)[0][1]).detail
     assert "credential: too_long" in detail
     assert "x" * 100 not in detail
-
-
-def test_a_validation_summary_falls_back_to_the_exception_type() -> None:
-    """Not every `ValueError` is a validation error, and none is unwrapped."""
-    assert _fault_summary(ValueError("a plain failure")) == "ValueError"
-    assert "a plain failure" not in _fault_summary(ValueError("a plain failure"))
 
 
 @pytest.mark.asyncio
