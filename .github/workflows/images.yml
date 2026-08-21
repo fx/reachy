@@ -1,0 +1,282 @@
+name: Images
+
+# The container image: built, run, driven, measured, and on a version tag
+# published for both architectures.
+#
+# Every step calls a Justfile recipe rather than restating its command, so what
+# runs here reproduces locally with the command in the step.
+#
+# The shape of this workflow is one decision: **packaging is verified by running
+# the artifact, not by inspecting the build file.** A Dockerfile that builds
+# successfully and produces a service that cannot start is a passing build and a
+# broken release, and every interesting packaging failure — a missing model, a
+# wrong user, an absent shared library, an interpreter that segfaults because the
+# base image has no `/etc/machine-id` — is invisible to a build that only checks
+# the build succeeded. All four of those happened while this Dockerfile was
+# written. So `verify` starts the built image, waits for it to report ready, and
+# drives a real session with a real frame through it, on a network with no route
+# off the host.
+#
+# There is deliberately no build cache here. A `type=gha` cache would need
+# `mode=max` to be worth having on a multi-stage build, and the accelerated
+# variant alone is over three gigabytes against a ten gigabyte repository quota —
+# so the cache would spend its life evicting itself and the runs would be slower
+# rather than faster, while making a green run depend on cache state nobody can
+# see. Builds start from the pinned bases every time.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: images-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Taken from the repository this is running in rather than written down, so
+  # this file names no account. The published repository is
+  # `ghcr.io/<owner>/<repository>/groundstation`.
+  IMAGE: ghcr.io/${{ github.repository }}/groundstation
+
+jobs:
+  #:= docs/specs/groundstation/index.md#req-023-model-files-are-present-in-the-image
+  #:% The service MUST load every model from a file already present in its deployed
+  #:% artifact, and MUST NOT fetch model weights over the network at run time.
+  #
+  #:= docs/specs/groundstation/index.md#req-024-model-provenance-is-recorded-and-verified
+  #:% Every model file MUST be pinned by content hash, and the build MUST fail when a
+  #:% fetched file's hash does not match the pinned value.
+  verify:
+    name: Verify ${{ matrix.variant }} on ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One entry failing must not hide the others: they fail for different
+      # reasons and a cancelled sibling reports nothing.
+      fail-fast: false
+      matrix:
+        # Every combination that is published is built AND run here, on the
+        # architecture it is published for. A build that succeeds proves the
+        # dependencies resolve; it proves nothing about an architecture-specific
+        # shared library, and REQ-031's scenario is that the ARM variant runs.
+        #
+        # The ARM entry runs under emulation, which is slow enough that the
+        # verification widens two of the service's own timeouts — see the
+        # `image-verify` recipe, which explains why that is a measurement
+        # artefact rather than a weakened check.
+        #
+        # There is no ARM entry for the accelerated variant because there is no
+        # ARM accelerated variant: CUDA on ARM is Jetson, which needs NVIDIA's
+        # L4T base rather than the one this build uses, and nothing deploys it.
+        # See the change document.
+        include:
+          - variant: cpu
+            arch: amd64
+          - variant: cpu
+            arch: arm64
+          - variant: cuda
+            arch: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # `just` and the locked workspace. The verification itself runs entirely
+      # in containers — the Python it needs is the image's own — but the recipes
+      # are Justfile recipes and `just image-size` is read by change 0014.
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      # ARM is built and run by emulation rather than on an ARM runner. It is
+      # slower — noticeably so for a build that installs a model runtime — and
+      # it is one action against a second runner pool, a second cache and a
+      # manifest to assemble by hand. See the change document's open questions.
+      - name: Set up emulation for the other architecture
+        if: matrix.arch != 'amd64'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: ${{ matrix.arch }}
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # The accelerated variant is over three gigabytes and the runner's disk is
+      # not generous. Removing the preinstalled toolchains nothing here uses
+      # buys enough room for the base, the builder stage and the result.
+      - name: Make room for the accelerated variant
+        if: matrix.variant == 'cuda'
+        run: |
+          set -euo pipefail
+          df --human-readable /
+          sudo rm --recursive --force \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /opt/ghc \
+            /usr/local/.ghcup
+          df --human-readable /
+
+      # The model fetch happens inside this build, verified against the digests
+      # the registry pins. A build with no network access to the model source
+      # fails here, which is the correct place for it to fail.
+      - name: Build the image
+        env:
+          TAG: ${{ env.IMAGE }}:verify-${{ matrix.variant }}-${{ matrix.arch }}
+        run: |
+          just image "${{ matrix.variant }}" "$TAG" \
+            --platform "linux/${{ matrix.arch }}" --load
+
+      # Groundstation REQ-023's actual scenario: an `--internal` Docker network
+      # has no route off the host, so the model source is unreachable and the
+      # service has to come up on what is already in the image. The recipe
+      # proves the isolation is real before it trusts the result.
+      - name: Start it with the model source unreachable and drive a session
+        env:
+          TAG: ${{ env.IMAGE }}:verify-${{ matrix.variant }}-${{ matrix.arch }}
+        run: just image-verify "$TAG" isolated "${{ matrix.variant }}"
+
+      - name: Drive the same session with ordinary container networking
+        env:
+          TAG: ${{ env.IMAGE }}:verify-${{ matrix.variant }}-${{ matrix.arch }}
+        run: just image-verify "$TAG" bridge "${{ matrix.variant }}"
+
+      # Recorded as a build output so change 0014 can gate on its growth. It
+      # goes three places on purpose: the log, the job summary a human reads,
+      # and an artifact a later job or a later change can fetch.
+      - name: Record the image size
+        id: size
+        env:
+          TAG: ${{ env.IMAGE }}:verify-${{ matrix.variant }}-${{ matrix.arch }}
+          SLUG: ${{ matrix.variant }}-${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir --parents image-size
+          just image-size "$TAG" "${{ matrix.variant }}" \
+            | tee "image-size/${SLUG}.json"
+          {
+            echo "### Image size — ${{ matrix.variant }} on ${{ matrix.arch }}"
+            echo
+            echo '```json'
+            cat "image-size/${SLUG}.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish the size as an artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: groundstation-image-size-${{ matrix.variant }}-${{ matrix.arch }}
+          path: image-size/
+          if-no-files-found: error
+
+  #:= docs/specs/groundstation/index.md#req-031-images-are-published-for-both-robot-adjacent-architectures
+  #:% Every release MUST publish the service image for both 64-bit ARM and 64-bit x86
+  #:% architectures under the same tag.
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    # Nothing is pushed until both variants have been started and driven. These
+    # jobs would otherwise run side by side on a version tag, and a verification
+    # that went red afterwards would leave an unverified release in the
+    # registry, where deleting it does not un-pull it.
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+      # Writing to the registry, narrowed to this job so the workflow-level
+      # default stays read-only.
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      # One version for the whole repository, read from the place release
+      # automation writes it rather than from the tag. The tag has to agree: a
+      # tag pushed by hand at a commit whose version says something else would
+      # otherwise publish an image labelled with neither.
+      - name: Resolve the version the tags carry
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(just version)"
+          if [ "$TAG" != "v${version}" ]; then
+            echo "::error::the tag is ${TAG} but the repository version is ${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up emulation for the other architecture
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Sign in to the registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Both architectures under one tag, which is what makes a pull on an ARM
+      # host select the ARM variant automatically.
+      #
+      # `image.source` is applied here rather than in the Dockerfile: it is what
+      # links the published package back to its repository, and taking it from
+      # the repository this is running in keeps an account name out of every
+      # tracked file.
+      - name: Publish the default variant
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          just image cpu "$IMAGE:$VERSION" \
+            --platform linux/amd64,linux/arm64 \
+            --label "org.opencontainers.image.source=$SOURCE" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --tag "$IMAGE:latest" \
+            --push
+
+      # The accelerated variant is built on every release rather than on demand,
+      # so that it cannot rot unnoticed between the releases nothing deploys it
+      # on. See the change document's open questions.
+      #
+      # x86 only, and that is the honest scope rather than a shortcut: CUDA on
+      # 64-bit ARM is Jetson, which runs NVIDIA's L4T stack rather than the
+      # `nvidia/cuda` base this build uses, and nothing deploys it. REQ-031 is
+      # about the service image, which is the default tag above and is published
+      # for both architectures.
+      - name: Publish the accelerated variant
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          just image cuda "$IMAGE:$VERSION-cuda" \
+            --platform linux/amd64 \
+            --label "org.opencontainers.image.source=$SOURCE" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --tag "$IMAGE:cuda" \
+            --push
+
+      - name: Record what was published
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published"
+            echo
+            for tag in "$VERSION" latest "$VERSION-cuda" cuda; do
+              echo "- \`$IMAGE:$tag\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -36,41 +36,45 @@ SPECIFICATION: [Architecture](docs/specs/architecture/index.md)
 
 SPECIFICATION: [Groundstation](docs/specs/groundstation/index.md)
   SECTION: [REQ-022: Capabilities register without transport changes](#req-022-capabilities-register-without-transport-changes)
-    TEXT[implementation]: Adding a capability MUST NOT require modification to the session layer, the
-    TEXT[implementation]: transport, or any other capability.
+    TEXT[!MUST,implementation]: Adding a capability MUST NOT require modification to the session layer, the
+    TEXT[!MUST,implementation]: transport, or any other capability.
 
   SECTION: [REQ-023: Model files are present in the image](#req-023-model-files-are-present-in-the-image)
-    TEXT[implementation]: The service MUST load every model from a file already present in its deployed
-    TEXT[implementation]: artifact, and MUST NOT fetch model weights over the network at run time.
+    TEXT[!MUST,implementation,implication]: The service MUST load every model from a file already present in its deployed
+    TEXT[!MUST,implementation,implication]: artifact, and MUST NOT fetch model weights over the network at run time.
 
   SECTION: [REQ-024: Model provenance is recorded and verified](#req-024-model-provenance-is-recorded-and-verified)
-    TEXT[implementation]: Every model file MUST be pinned by content hash, and the build MUST fail when a
-    TEXT[implementation]: fetched file's hash does not match the pinned value.
+    TEXT[!MUST,implementation,implication]: Every model file MUST be pinned by content hash, and the build MUST fail when a
+    TEXT[!MUST,implementation,implication]: fetched file's hash does not match the pinned value.
 
   SECTION: [REQ-025: A failed capability does not take down the service](#req-025-a-failed-capability-does-not-take-down-the-service)
-    TEXT[implementation]: When a capability fails to initialise, the service MUST continue serving the
-    TEXT[implementation]: capabilities that initialised successfully.
+    TEXT[!MUST,implementation]: When a capability fails to initialise, the service MUST continue serving the
+    TEXT[!MUST,implementation]: capabilities that initialised successfully.
 
   SECTION: [REQ-026: Readiness is distinct from liveness](#req-026-readiness-is-distinct-from-liveness)
-    TEXT[implementation]: The service MUST report itself ready only once every capability it will offer
-    TEXT[implementation]: has completed its warm-up.
+    TEXT[!MUST,implementation]: The service MUST report itself ready only once every capability it will offer
+    TEXT[!MUST,implementation]: has completed its warm-up.
 
   SECTION: [REQ-027: Inference parallelism is bounded by configuration](#req-027-inference-parallelism-is-bounded-by-configuration)
-    TEXT[implementation]: The service MUST constrain each model runtime to a configured number of threads
-    TEXT[implementation]: rather than letting it size itself against the host.
+    TEXT[!MUST,implementation]: The service MUST constrain each model runtime to a configured number of threads
+    TEXT[!MUST,implementation]: rather than letting it size itself against the host.
 
   SECTION: [REQ-028: Work is attributable end to end](#req-028-work-is-attributable-end-to-end)
-    TEXT[implementation]: Every log line and metric emitted while handling a frame MUST carry the session
-    TEXT[implementation]: identifier and the frame's sequence number.
+    TEXT[!MUST,implementation]: Every log line and metric emitted while handling a frame MUST carry the session
+    TEXT[!MUST,implementation]: identifier and the frame's sequence number.
 
   SECTION: [REQ-029: Per-stage timings are measured and exposed](#req-029-per-stage-timings-are-measured-and-exposed)
-    TEXT[implementation]: The service MUST record the duration of each pipeline stage separately and
-    TEXT[implementation]: expose those durations as metrics.
+    TEXT[!MUST,implementation]: The service MUST record the duration of each pipeline stage separately and
+    TEXT[!MUST,implementation]: expose those durations as metrics.
 
   SECTION: [REQ-030: The effective configuration is retrievable at run time](#req-030-the-effective-configuration-is-retrievable-at-run-time)
-    TEXT[implementation]: The service MUST expose its fully resolved configuration over its own interface
-    TEXT[implementation]: while running, with every value marked secret replaced by a redacted
-    TEXT[implementation]: placeholder.
+    TEXT[!MUST,implementation]: The service MUST expose its fully resolved configuration over its own interface
+    TEXT[!MUST,implementation]: while running, with every value marked secret replaced by a redacted
+    TEXT[!MUST,implementation]: placeholder.
+
+  SECTION: [REQ-031: Images are published for both robot-adjacent architectures](#req-031-images-are-published-for-both-robot-adjacent-architectures)
+    TEXT[!MUST,implication]: Every release MUST publish the service image for both 64-bit ARM and 64-bit x86
+    TEXT[!MUST,implication]: architectures under the same tag.
 
 SPECIFICATION: [Perception](docs/specs/perception/index.md)
   SECTION: [REQ-032: Detection models are permissively licensed](#req-032-detection-models-are-permissively-licensed)

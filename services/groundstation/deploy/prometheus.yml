@@ -1,0 +1,24 @@
+# What collects the groundstation's metrics.
+#
+# It ships beside the compose file because the predecessor exposed metrics that
+# nothing ever scraped, and a histogram nobody collects cannot answer the
+# question it was added for. Groundstation REQ-029 requires each pipeline stage's
+# duration to be exposed separately; this is the other half of that being useful.
+#
+# The target is the compose service name and the container port, which is the
+# port inside the network and not whatever the host publishes. A test asserts it
+# matches the port `.env.example` documents, so the two cannot drift.
+
+global:
+  # Frequent enough that a regression is visible within a minute, infrequent
+  # enough that scraping is not itself load on a service whose latency budget is
+  # set by the link.
+  scrape_interval: 15s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: reachy-groundstation
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - groundstation:8080

@@ -225,6 +225,313 @@ lint-boundary:
 models directory=".models":
     {{ uv }} python -m reachy_groundstation.models.fetch {{ directory }}
 
+# Print the repository-wide version every artifact carries.
+#
+# Read out of the contracts package, which is where release automation writes it
+# and where the distribution metadata is derived from — see the root AGENTS.md
+# on one version for the whole repository. Anything that needs to label an
+# artifact reads it from here rather than growing a second copy.
+version:
+    @{{ uv }} python -c 'from reachy_contracts import __version__; print(__version__)'
+
+# Build the groundstation container image, from the repository root.
+#
+#     just image                       # the default CPU variant
+#     just image cuda                  # the accelerated variant
+#     just image cpu ghcr.io/…:1.2.3 --platform linux/amd64,linux/arm64 --push
+#
+# The variant is the whole difference between the two published tags: which base
+# image ships, which model runtime is installed, and which execution providers
+# the service prefers. There is one Dockerfile, and everything variant-specific
+# is here, so a third variant is three lines rather than a second build file.
+#
+# Anything after the tag is passed to `docker buildx build` unchanged, which is
+# how continuous integration adds `--platform`, `--push` and its cache flags
+# without this recipe growing a parameter per flag. Nothing here names an
+# architecture: `--platform` is the whole of building for both.
+image variant="cpu" tag="reachy-groundstation:dev" *buildx_args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case '{{ variant }}' in
+        cpu)
+            # The default. `RUNTIME_BASE` and the provider list are the
+            # Dockerfile's own defaults, so nothing is overridden here.
+            args=()
+            ;;
+        cuda)
+            # NVIDIA's CUDA runtime with cuDNN, pinned by the digest of the
+            # multi-architecture index. The CUDA MAJOR VERSION is not free: the
+            # `onnxruntime-gpu` wheel in the lockfile links `libcublasLt.so.13`
+            # and says so — "Require cuDNN 9.* and CUDA 13.*" — so a 12.x base
+            # produces an image whose CUDA provider library fails to load and a
+            # service that silently falls back to the CPU provider. That is
+            # exactly the "builds fine, is not what it claims" failure this
+            # change's verification exists to catch, and
+            # `just image-verify <tag> <network> cuda` is what catches it.
+            #
+            # `onnxruntime-gpu` is what actually carries the CUDA execution
+            # provider — the stock wheel does not have it, so a variant that
+            # changed only the provider list would fall back to the CPU
+            # provider and quietly not be a CUDA variant.
+            args=(
+                --build-arg 'RUNTIME_BASE=nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04@sha256:14d94b039cb94bbd5da559f303b46bc4b0d5d6c24ab1a9d7b186e566ed3400dc'
+                --build-arg 'RUNTIME_EXTRA=cuda'
+                --build-arg 'INFERENCE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider'
+            )
+            ;;
+        *)
+            echo "just image: unknown variant '{{ variant }}'; expected cpu or cuda" >&2
+            exit 1
+            ;;
+    esac
+
+    # Where the result goes. A `docker` driver builds straight into the local
+    # daemon; a `docker-container` one — which `docker buildx create` makes, and
+    # which continuous integration uses because it is what builds for another
+    # architecture — writes nowhere unless told to, so `just image` followed by
+    # `just image-verify` would verify whatever image was there before. Asking
+    # for `--load` covers both.
+    #
+    # It is dropped in exactly two cases, and naming an architecture is not one
+    # of them: a single-platform build for the OTHER architecture is precisely
+    # the one that has to be loaded, because it is the one `just image-verify`
+    # then runs under emulation. The two are a caller who already said where the
+    # result goes, since buildx refuses two destinations, and a genuinely
+    # multi-platform build, which buildx cannot load into a daemon at all.
+    # Every spelling buildx accepts for a destination, because two exporters is
+    # an error rather than a preference: the long flags, their boolean
+    # assignment forms, and the `-o` shorthand with or without its value
+    # attached.
+    output=(--load)
+    platforms=''
+    previous=''
+    for argument in {{ buildx_args }}; do
+        case "$argument" in
+            --load|--load=*|--push|--push=*|--output|--output=*|-o|-o=*|-o?*)
+                output=()
+                ;;
+            --platform=*) platforms="${argument#--platform=}" ;;
+        esac
+        if [ "$previous" = '--platform' ]; then
+            platforms="$argument"
+        fi
+        previous="$argument"
+    done
+    case "$platforms" in
+        *,*) output=() ;;
+    esac
+
+    docker buildx build \
+        --file services/groundstation/Dockerfile \
+        --tag '{{ tag }}' \
+        "${args[@]}" \
+        "${output[@]}" \
+        {{ buildx_args }} \
+        .
+
+# Report how large a built image is, as one line of JSON.
+#
+# This is the build output groundstation change 0014 gates on: the predecessor
+# shipped 483 MB against roughly 2 GB for the alternative packaging, and keeping
+# that property is a packaging decision rather than an application one. The
+# number is the uncompressed on-disk size of the image in the local daemon,
+# which is what `docker images` reports and what a host needs room for; the
+# compressed transfer size depends on the registry and is not comparable across
+# one.
+#
+# JSON on standard output rather than a table, because the consumer is a gate.
+#
+# ⚠️ `{{{{` below is not a typo and the braces are not unbalanced. `docker
+# --format` takes a Go template, whose delimiters are the same `{{ }}` this file
+# interpolates its own parameters with — so a literal `{{` has to be escaped as
+# `{{{{`, while `}}` outside an interpolation is already literal and is written
+# once. `'{{{{ .Size }}'` therefore reaches the shell as `'{{ .Size }}'`, quoted
+# and balanced. Check with `just --dry-run image-size`, which prints what will
+# actually run. The same escape appears in `image-verify` below, twice.
+#
+# This comment sits ABOVE the recipe rather than inside it, and that is forced: a
+# comment inside a recipe body is a template line like any other, so writing an
+# unescaped doubled brace in one opens an interpolation that never closes and the
+# whole file stops parsing.
+image-size tag="reachy-groundstation:dev" variant="cpu":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bytes="$(docker image inspect '{{ tag }}' --format '{{{{ .Size }}')"
+    platform="$(docker image inspect '{{ tag }}' --format '{{{{ .Os }}/{{{{ .Architecture }}')"
+    printf '{"image":"%s","variant":"%s","platform":"%s","size_bytes":%s,"size_mib":%s}\n' \
+        '{{ tag }}' '{{ variant }}' "$platform" "$bytes" \
+        "$(awk -v b="$bytes" 'BEGIN { printf "%.1f", b / 1048576 }')"
+
+# Start the built image and prove it is a working deployment, not just a
+# successful build.
+#
+# Every interesting packaging failure — a missing model, a wrong user, an absent
+# shared library, an interpreter that segfaults on a base image with no
+# `/etc/machine-id` — is invisible to a build that only checks the build
+# succeeded. All four of those have happened to this Dockerfile.
+#
+# `network` decides what the container can reach, and the default is the
+# interesting one:
+#
+#   isolated  an `--internal` Docker network, which has no route off the host.
+#             This is groundstation REQ-023's actual scenario — a container on a
+#             host with no outbound internet access — and the recipe proves the
+#             isolation is real by resolving every model source out of the
+#             registry inside the container and failing if any of them can be
+#             reached.
+#   bridge    ordinary container networking, so the same session is driven
+#             against a service that could have reached the network and did not
+#             need to.
+#
+# `variant` selects the two checks that are not the same for both images. Only
+# the default variant is toolchain-free — NVIDIA publishes no CUDA runtime image
+# smaller than an Ubuntu, so the accelerated one inherits a package manager and
+# a shell — and only the accelerated one has a CUDA provider library to load.
+#
+# The session is driven from a SIBLING container on the same network rather than
+# from the host, because an `--internal` network publishes no ports. The sibling
+# runs the image under test, which already carries the interpreter, `websockets`
+# and the contracts; the script and the fixture frame are mounted read-only.
+image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # A placeholder, and never anybody's: this credential exists for the length
+    # of one container. See the root AGENTS.md on what may enter a tracked file.
+    credential='example-credential'
+    name="reachy-image-verify-$$"
+    net="${name}-net"
+
+    case '{{ network }}' in
+        isolated) create=(docker network create --internal "$net") ;;
+        bridge)   create=(docker network create "$net") ;;
+        *)
+            echo "just image-verify: unknown network '{{ network }}'; expected isolated or bridge" >&2
+            exit 1
+            ;;
+    esac
+
+    # Read-only, at a path nothing in the image looks at: the probe scripts and
+    # the fixture frame are harness, not artifact. Nothing is mounted over
+    # anything the image ships.
+    mounts=(
+        --volume "$PWD/scripts:/verify/scripts:ro"
+        --volume "$PWD/services/groundstation/tests/fixtures:/verify/fixtures:ro"
+    )
+
+    # The one client implementation of the session protocol, mounted for the
+    # container that drives the session and for no other. Reachyctl REQ-057
+    # makes `reachy_session_client` the only client, so the alternative is a
+    # second one written to test an image, which would pass its own
+    # expectations and prove nothing about what a robot meets.
+    #
+    # It is mounted rather than installed because it is not a groundstation
+    # dependency and putting it in the published image to test the published
+    # image would be the wrong trade. It runs on the image's own interpreter:
+    # the client is pure Python and needs `reachy_contracts` and `websockets`,
+    # both of which the service already installs. If it ever needs a third, the
+    # driver fails with an import error naming it.
+    driver=(
+        --volume "$PWD/packages/reachy-session-client/src:/verify/lib:ro"
+        --env PYTHONPATH=/verify/lib
+    )
+
+    # The log is the only account of why a container that failed failed, and by
+    # the time anybody looks the container is gone. So it is dumped on the way
+    # out of ANY failure — a container that never started, a probe that refused
+    # it, a session that was never answered — rather than at the one call site
+    # where somebody remembered to.
+    cleanup() {
+        status=$?
+        if [ "$status" -ne 0 ]; then
+            echo '--- the service log follows ---' >&2
+            # Both streams together: the resolved configuration goes to standard
+            # output and a refusal to start goes to standard error, and the one
+            # that explains a failure is usually the second.
+            logs="$(docker logs "$name" 2>&1 || true)"
+            printf '%s\n' "$logs" >&2
+        fi
+        docker rm --force "$name" >/dev/null 2>&1 || true
+        docker network rm "$net" >/dev/null 2>&1 || true
+        return "$status"
+    }
+    trap cleanup EXIT
+
+    "${create[@]}" >/dev/null
+    # Two timeouts are widened for the harness, and only for the harness. An
+    # image built for the other architecture is run here under emulation, where
+    # one detection pass costs seconds rather than tens of milliseconds — so the
+    # service's own warm-up bound and its per-frame bound would both expire and
+    # the run would report a packaging failure that is really a QEMU
+    # measurement. What is being checked is that the artifact starts and
+    # answers, not how quickly; how quickly is change 0014's question, measured
+    # on hardware rather than through an emulator.
+    docker run --detach --name "$name" --network "$net" "${mounts[@]}" \
+        --env "REACHY_GROUNDSTATION_CREDENTIAL=${credential}" \
+        --env 'REACHY_GROUNDSTATION_WARM_UP_TIMEOUT_SECONDS=600' \
+        --env 'REACHY_GROUNDSTATION_CAPABILITY_TIMEOUT_SECONDS=120' \
+        '{{ tag }}' >/dev/null
+
+    # A container that refused its configuration or could not load its model has
+    # already exited by now, and every check below would then fail with
+    # something that reads like a network fault. Say what actually happened
+    # instead, and say it in a second rather than after the readiness deadline.
+    sleep 5
+    # The quadrupled brace below is just's escape for the doubled brace a Go
+    # template needs — see the note above `image-size`.
+    if [ "$(docker inspect "$name" --format '{{{{ .State.Running }}')" != 'true' ]; then
+        echo "just image-verify: the container exited instead of starting; its log follows" >&2
+        exit 1
+    fi
+
+    # These run in the service's OWN container, which is the only place any of
+    # them can be answered: whether this network really has no route off the
+    # host, whether the runtime stage really carries no toolchain, and whether
+    # the accelerated variant's CUDA provider would actually load.
+    probe=()
+    if [ '{{ network }}' = 'isolated' ]; then
+        probe+=(--unreachable-sources)
+    fi
+    case '{{ variant }}' in
+        cpu)  probe+=(--no-toolchain) ;;
+        cuda) probe+=(--cuda-provider) ;;
+        *)
+            echo "just image-verify: unknown variant '{{ variant }}'; expected cpu or cuda" >&2
+            exit 1
+            ;;
+    esac
+    docker exec "$name" /opt/reachy/venv/bin/python \
+        /verify/scripts/probe_groundstation_container.py "${probe[@]}"
+
+    # It must not run as root, whatever the base image's own default is. The
+    # brace escape below is the one explained above `image-size`.
+    user="$(docker inspect "$name" --format '{{{{ .Config.User }}')"
+    case "$user" in
+        ''|0|0:0|root|root:*)
+            echo "just image-verify: the image runs as '${user:-root}'" >&2
+            exit 1
+            ;;
+    esac
+    echo "image-verify: runs as ${user}"
+
+    # The session is driven from a sibling on the same network. An `--internal`
+    # network publishes no ports, so there is no way to reach the service from
+    # the host — and driving it from another container is closer to a robot
+    # opening a session than a loopback connection would be anyway. The sibling
+    # runs the image under test because it already carries the interpreter,
+    # `websockets` and the contracts, which is what the shared session client
+    # mounted above needs to run on it.
+    docker run --rm --network "$net" "${mounts[@]}" "${driver[@]}" \
+        --entrypoint /opt/reachy/venv/bin/python \
+        '{{ tag }}' /verify/scripts/verify_groundstation_image.py \
+            --base-url "http://${name}:8080" \
+            --credential "$credential" \
+            --frame /verify/fixtures/perception/face_single.jpg \
+            --ready-timeout 900
+
+    docker logs "$name"
+
 # Redraw the committed perception fixture images.
 #
 # They are drawn rather than photographed, so their provenance is the script and

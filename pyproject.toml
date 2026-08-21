@@ -30,11 +30,21 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
     "pytest-socket>=0.7",
+    # The compose file and the metrics scrape configuration are checked against
+    # the service's own settings model by an ordinary test, so that a setting
+    # added without updating the deployment is a red run rather than a
+    # deployment that disagrees with its own documentation. Reading them means
+    # parsing YAML. Declared here rather than leaned on transitively: a test
+    # that depends on somebody else's dependency breaks when they drop it.
+    "pyyaml>=6.0",
     "ruff>=0.6",
     # Stubs for the generated protobuf modules the vendored ESPHome protocol
     # imports. Upstream declares them too; without them mypy cannot follow
     # `google.protobuf` and reports every import as untyped.
     "types-protobuf>=5",
+    # Stubs for the YAML parser the deployment tests read the compose file and
+    # the scrape configuration with. Without them strict mode rejects the import.
+    "types-pyyaml>=6.0",
 ]
 
 # The reference implementation the YuNet parity test measures against, and

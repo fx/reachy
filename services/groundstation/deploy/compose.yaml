@@ -1,0 +1,85 @@
+# The groundstation, runnable without an orchestrator.
+#
+#     cp .env.example .env      # and fill the credential in
+#     docker compose up
+#
+# Two services, and the second one is the point. The predecessor exposed metrics
+# that nothing ever collected, which is the same as not having them: a histogram
+# nobody scrapes cannot answer "which stage got slower". So a Prometheus ships
+# beside the service with a scrape configuration already pointed at it, and the
+# metrics are being collected from the first `up`.
+#
+# Everything configurable is read from `.env`, which is untracked;
+# `.env.example` beside this file documents every variable, and a test asserts
+# that the example and the service's own settings model cannot disagree. Real
+# values — a credential, a published address — live in the copy on the host and
+# never in this repository.
+#
+# For the accelerated image, add the overlay beside this file:
+# `docker compose -f compose.yaml -f compose.cuda.yaml up`. Pointing
+# GROUNDSTATION_IMAGE at the `-cuda` tag without it produces a working
+# deployment that runs on the CPU, because nothing has asked the host for a
+# device and the driver is therefore not in the container.
+
+name: reachy-groundstation
+
+services:
+  groundstation:
+    # `latest` so that a fresh copy of this file runs, and a moving tag for
+    # exactly that reason: a pull after a release gives a different service with
+    # no local change to explain it. A deployment that has to answer "which
+    # groundstation is this" sets GROUNDSTATION_IMAGE to a version tag in `.env`.
+    # The same variable is what selects the accelerated variant, which also
+    # needs the overlay named in the header above.
+    image: ${GROUNDSTATION_IMAGE:-ghcr.io/OWNER/REPOSITORY/groundstation:latest}
+
+    # `env_file` rather than `environment`, so that adding a setting is an edit
+    # to one file rather than to two. Every REACHY_GROUNDSTATION_* variable in
+    # it must name a known setting: the service refuses to start on one it does
+    # not recognise, which is what turns a typo into a message at boot instead
+    # of a value the operator believes they set.
+    env_file:
+      - .env
+
+    # Published on the loopback interface by default. A groundstation reachable
+    # from the network it is on is a deployment decision — it authenticates
+    # every session, but the health, metrics and configuration endpoints beside
+    # it are not authenticated at all. Override GROUNDSTATION_PUBLISH to expose
+    # it deliberately.
+    ports:
+      - "${GROUNDSTATION_PUBLISH:-127.0.0.1:8080}:8080"
+
+    # The image declares its own readiness check, so nothing is restated here.
+    restart: unless-stopped
+
+    # The service holds a bounded queue and one model runtime; it does not need
+    # to write anywhere. A read-only root filesystem means a compromise of the
+    # session endpoint cannot leave anything behind, and `tmpfs` covers the one
+    # directory a Python process may still want.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  prometheus:
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038}
+    # Read-only: this file is configuration for the deployment, not state the
+    # container may rewrite.
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PUBLISH:-127.0.0.1:9090}:9090"
+    # Not `service_started`: Prometheus logging a connection refused for the
+    # first two minutes while the models warm up is noise that looks like a
+    # fault. Readiness is the image's own health check.
+    depends_on:
+      groundstation:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:

@@ -1,0 +1,36 @@
+# The accelerated deployment: the compose file beside this one, plus a GPU.
+#
+#     # in .env, point GROUNDSTATION_IMAGE at a tag ending in -cuda
+#     docker compose -f compose.yaml -f compose.cuda.yaml up
+#
+# It is an overlay rather than a second copy, so the service, its settings, its
+# published address and the collector that scrapes it are defined once.
+#
+# **Running the `-cuda` tag without this file gives a slower CPU deployment, not
+# a broken one.** The NVIDIA container runtime is what mounts the driver library
+# into the container, and it does that only for a container that asked for a
+# device; without the request, ONNX Runtime cannot load its CUDA provider,
+# reports so in a log line, and carries on with the CPU provider. That is a safe
+# fallback and a confusing one, which is why the accelerated tag has a
+# deployment of its own rather than being a tag substitution.
+#
+# It needs a host with an NVIDIA driver and the NVIDIA container toolkit
+# installed. Neither is this repository's to install, and there is no way to
+# check for them from inside a compose file; a host without them fails at
+# `docker compose up` with a message naming the driver, which is the right place
+# to find out.
+
+services:
+  groundstation:
+    # `deploy.resources` is one of the few `deploy` keys compose honours outside
+    # a swarm, and it is the documented way to ask for a GPU. `count: all` takes
+    # whatever the host has — the service runs one small detection graph, so
+    # there is nothing to gain from pinning a particular device, and pinning one
+    # by index would make this file host-specific.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

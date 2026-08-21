@@ -7,7 +7,7 @@ the GitHub Container Registry, with a CUDA variant and a compose file that makes
 it runnable without an orchestrator.
 
 **Spec:** [Groundstation](../specs/groundstation/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0002, 0005
 
 ## Motivation
@@ -60,7 +60,9 @@ implementing them requires of this change:
   variant. Both carry the repository-wide version from 0002.
 - The compose file runs the service standalone and includes a metrics scrape
   configuration, because the predecessor exposed metrics that nothing collected.
-- Image size is recorded as a build output so 0014 can gate on its growth.
+- Image size is recorded as a build output, so that the later performance
+  work can gate on its growth without this change having to guess a
+  threshold.
 - The published image is verified by starting it in CI and running a real
   session against it.
 
@@ -112,32 +114,148 @@ selection, so it is a build argument rather than a second Dockerfile.
 
 ## Tasks
 
-- [ ] Write the image build
-  - [ ] Multi-stage Dockerfile with a toolchain-free runtime stage
-  - [ ] Build-time model fetch with hash verification
-  - [ ] Non-root runtime user
-  - [ ] CUDA variant as a build argument over the same definition
-- [ ] Publish from CI
-  - [ ] Multi-architecture build for 64-bit ARM and x86
-  - [ ] Push both variants to the registry on a version tag
-  - [ ] Record image size as a build output
-- [ ] Verify the artifact
-  - [ ] Start the built image in CI, wait for readiness
-  - [ ] Drive a real session through the running container
-  - [ ] Assert the service starts with the model source unreachable
-- [ ] Ship the standalone deployment
-  - [ ] Compose file running the service with sane defaults
-  - [ ] Metrics scrape configuration alongside it
-  - [ ] `.env.example` documenting every setting the compose file reads
+- [x] Write the image build
+  - [x] Multi-stage Dockerfile with a toolchain-free runtime stage
+  - [x] Build-time model fetch with hash verification
+  - [x] Non-root runtime user
+  - [x] CUDA variant as a build argument over the same definition
+- [x] Publish from CI
+  - [x] Multi-architecture build for 64-bit ARM and x86
+  - [x] Push both variants to the registry on a version tag
+  - [x] Record image size as a build output
+- [x] Verify the artifact
+  - [x] Start the built image in CI, wait for readiness
+  - [x] Drive a real session through the running container
+  - [x] Assert the service starts with the model source unreachable
+- [x] Ship the standalone deployment
+  - [x] Compose file running the service with sane defaults
+  - [x] Metrics scrape configuration alongside it
+  - [x] `.env.example` documenting every setting the compose file reads
 
 ## Open Questions
 
-- [ ] Whether the CUDA variant is built on every release or only on demand. It
+- [x] Whether the CUDA variant is built on every release or only on demand. It
       roughly doubles build time and nothing currently deploys it. Current lean:
       every release, so it cannot rot unnoticed.
-- [ ] Whether ARM images are built natively or by emulation. Emulation is
+      **Resolved: every release, and every pull request as well.** The lean was
+      right and understated. Building it only on release would have shipped a
+      CUDA image that is not accelerated: the model runtime wheel in the
+      lockfile links `libcublasLt.so.13` and needs a CUDA 13 base, and the
+      obvious 12.6 base produced an image that builds, starts, serves and
+      silently falls back to the CPU provider. That was caught by running the
+      artifact, so the variant is verified on every pull request too, and the
+      check is specifically that the provider library loads rather than that the
+      container starts.
+- [x] Whether ARM images are built natively or by emulation. Emulation is
       simpler and slow enough to be irritating for a model-heavy build. Current
       lean: emulation until it becomes painful.
+      **Resolved: emulation, and the ARM image is RUN under it rather than only
+      built.** Emulation is one action against a second runner pool, a second
+      cache and a manifest assembled by hand, and the emulated work is
+      dependency installation rather than compilation — every dependency
+      resolves to an `aarch64` wheel, so nothing is built from source under
+      QEMU. Running it matters as much as building it: REQ-031's scenario is
+      that the ARM variant *runs*, and a successful build says nothing about an
+      architecture-specific shared library. The verification therefore widens
+      the service's warm-up and per-frame bounds for the emulated run, because
+      those expiring under QEMU would report a packaging failure that is really
+      a measurement of the emulator. Revisit when the ARM leg becomes the
+      slowest merge gate; the change is confined to the matrix entries that name
+      an architecture.
+
+## Completion notes
+
+**The image.** `services/groundstation/Dockerfile`, built from the repository
+root by `just image [variant] [tag] [buildx arguments…]`. Dependencies and the
+models are resolved in a builder stage, and neither variant's runtime stage
+installs anything: the interpreter, the environment and the weights arrive as
+`COPY --from` instructions and both run as uid 65532.
+
+The **default** variant's runtime base is `gcr.io/distroless/cc-debian12`, which
+has no shell, no package manager and no compiler — and `just image-verify`
+asserts that from inside the running container rather than taking the base
+image's word for it. The **accelerated** variant's base is NVIDIA's CUDA runtime
+image, which is an Ubuntu and therefore does carry a shell and a package
+manager; NVIDIA publishes no smaller one, and assembling a CUDA runtime from
+parts is not this change's job. That is the one property the two variants do not
+share, and it is why the toolchain assertion is made for the default variant
+only.
+
+Python is a self-contained interpreter uv installs into the builder and both
+stages copy, which is what makes the runtime base a free variable at all —
+NVIDIA's image ships no Python, and installing one into it would have put a
+package manager into the default variant too.
+
+**Measured sizes**, `linux/amd64`, uncompressed, as `just image-size` reports
+them:
+
+| Variant | Architecture | Bytes | |
+|---|---|---:|---|
+| default (CPU) | x86-64 | 458,501,121 | 437.3 MiB |
+| default (CPU) | 64-bit ARM | 371,147,638 | 354.0 MiB |
+| accelerated (CUDA) | x86-64 | 3,659,895,758 | 3,490.3 MiB |
+
+The ARM image is the smaller of the two default builds, which is the one that
+matters: the robot is an aarch64 Raspberry Pi CM4 and the groundstation is
+expected to run on whatever host is available beside it.
+
+The default variant is under the predecessor's 483 MB, which was the packaging
+property worth keeping. The accelerated variant is what a CUDA 13 runtime plus
+cuDNN plus a 202 MB `onnxruntime-gpu` wheel costs; nothing about it is
+compressible by choosing differently, which is the reason CPU is the default
+tag.
+
+**How the size is recorded**, since change 0014 gates on its growth:
+`just image-size <tag> <variant>` prints one line of JSON —
+`{"image": …, "variant": …, "platform": …, "size_bytes": …, "size_mib": …}` —
+read from `docker image inspect .Size`, the uncompressed on-disk size a host
+needs room for. The `platform` comes from the image rather than the runner, so a
+record made for an emulated build says which architecture it measured. The
+`Images` workflow writes it to the job summary and uploads it as the artifact
+`groundstation-image-size-<variant>-<arch>`, holding one JSON file named
+`<variant>-<arch>.json`.
+
+**What the CUDA variant actually is:** the same Dockerfile with three build
+arguments — `RUNTIME_BASE`, `RUNTIME_EXTRA=cuda` and `INFERENCE_PROVIDERS`. The
+extra is `onnxruntime-gpu`, declared as an optional dependency of
+`reachy-groundstation`; the build asks for it and leaves the CPU wheel out with
+`--no-install-package onnxruntime`, because both distributions install the same
+module.
+
+**What is published, and for which architectures.** The default tag carries
+both 64-bit x86 and 64-bit ARM under one manifest, which is REQ-031. The
+accelerated tag is x86 only, and that is the honest scope rather than a
+shortcut: CUDA on 64-bit ARM is Jetson, which runs NVIDIA's L4T stack rather
+than the `nvidia/cuda` base this build uses, and nothing deploys it. Every
+combination that is published is built *and run* on the architecture it is
+published for before anything is pushed — the publish job waits on the
+verification job rather than running beside it.
+
+**Deploying the accelerated variant takes the overlay, not just the tag.**
+`deploy/compose.cuda.yaml` reserves an NVIDIA device; without it the container
+never asks the host for one, the container runtime never mounts the driver, and
+ONNX Runtime falls back to the CPU provider and says so in a log line nobody
+reads. So the accelerated deployment is
+`docker compose -f compose.yaml -f compose.cuda.yaml up`, and `.env.example`
+says so where the image tag is chosen.
+
+**Verification** is `just image-verify <tag> [isolated|bridge] [variant]`. It
+starts the image on an `--internal` Docker network with no route off the host,
+proves the isolation by resolving every model source out of the registry inside
+the container and failing if any answers, asserts the runtime stage carries no
+toolchain, asserts it does not run as root, and then drives a real session from
+a sibling container: negotiate, send a committed one-face fixture as a frame,
+and require a face back. The service answered with one face at 0.909 confidence
+on both variants.
+
+**What has not been exercised on hardware.** No GPU was available, so the
+accelerated variant is verified as far as "every library its CUDA provider
+declares is in the image, bar the driver the container runtime injects". Whether
+inference on it is faster than the CPU path is change 0014's question, and the
+measurements that made CPU the default say it may well not be. No aarch64 host
+was available either: the ARM image is built and run under QEMU, which proves it
+starts, loads its model and answers a session, and measures nothing about how
+long any of that takes on the real thing.
 
 ## References
 

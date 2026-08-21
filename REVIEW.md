@@ -11,17 +11,18 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** One spec is
-registered in `.duvet/config.toml` — perception — so `duvet report --ci` and
-`duvet query -c implementation` check that spec's 8 requirements and nothing
-else. The snapshot is nonetheless much larger than that: duvet loads a
-specification an annotation points at whether or not it is registered, so the
-file lists the requirement text every annotation cites, including annotations
-against the 7 unregistered specs. Regeneration is byte-identical, so CI is
-deterministic — and a green run is evidence about perception only. A spec is
-registered by the change that implements it. See `.duvet/config.toml` for why
-the rest are unregistered, and for why annotations are written `#:=`/`#:%`
-rather than duvet's documented `#=`/`#%`.
+**`.duvet/snapshot.txt` records annotations, not coverage.** Two specs are
+registered in `.duvet/config.toml` — perception and groundstation — so
+`duvet report --ci` and `duvet query -c implementation` check those 18
+requirements and nothing else. The snapshot is nonetheless larger than that:
+duvet loads a specification an annotation points at whether or not it is
+registered, so the file lists the requirement text every annotation cites —
+including the annotations that already point at architecture and robot-link,
+neither of which is registered. Regeneration is
+byte-identical, so CI is deterministic — and a green run is evidence about those
+two specs only. A spec is registered by the change that implements it. See
+`.duvet/config.toml` for why the rest are unregistered, and for why annotations
+are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
 
 **A vendored file stays as upstream wrote it.** A file carrying a provenance
 header is a derived work, and its directory's `NOTICE` enumerates the complete
@@ -48,6 +49,14 @@ using the `fs` fixture is an ordinary unit test and marking it would say
 something untrue. A test using pytest's `tmp_path` writes real files and does
 carry it. The dividing line is whether anything reaches a disk, not whether the
 word "filesystem" appears in the test.
+
+The criterion is **the bytes on disk being the thing under test**; the golden
+corpus is the first example, not the list. The second is the deployment files —
+`test_groundstation_deployment.py` reads the Dockerfile, the compose files, the
+scrape configuration and `.env.example` and compares them with the settings
+model, `mise.toml` and the member list, where a fake would compare the
+documentation with itself. Do not report those. A marker on a test that merely
+*used* a real path for convenience still is a finding.
 
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a
@@ -132,6 +141,18 @@ Behaviour and scenarios belong to the spec it links; a restated rule is a second
 copy that will drift. Every change document MUST open `## Requirements` with
 `### Testing Requirements`. Renaming a `### REQ-NNN:` heading is breaking — it
 is the anchor annotations cite.
+
+**`### Testing Requirements` is not a restatement, and neither is a Functional
+requirements list that delegates.** The first is mandatory above and every one of
+the 15 change documents carries it in the same shape: it cites
+[Testing conventions](docs/specs/architecture/index.md#testing-conventions) and
+then says which of those standing rules this change's pull request is judged
+against, which is sequencing rather than a second normative copy. The second is
+the documented shape too — the section names the spec that owns the behaviour,
+says its scenarios are the acceptance criteria, and lists what implementing them
+requires *of this change*. Do not report either as a violation of this rule. What
+IS a violation is a change document stating a behavioural rule the spec does not,
+or contradicting one the spec does.
 
 ### Change dependencies must cover what the tasks consume
 
