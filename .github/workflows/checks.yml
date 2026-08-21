@@ -63,7 +63,19 @@ jobs:
       - name: Set up the workspace
         uses: ./.github/actions/setup-workspace
 
+      # The perception integration tests run real inference, and weights are
+      # never committed — the registry pins them by digest and this fetches and
+      # verifies them, exactly as the image build does. It has to happen before
+      # the suite: `REACHY_REQUIRE_MODELS` below turns "no weights, so skip"
+      # into "no weights, so fail", because the parity comparison perception
+      # REQ-036 requires is a merge gate and a gate that skips itself when its
+      # inputs are missing is not one.
+      - name: Fetch and verify the pinned models
+        run: just models
+
       - name: Run the suite with coverage
+        env:
+          REACHY_REQUIRE_MODELS: "1"
         run: just test
 
       # Coverage is gated on the diff rather than on the whole tree, so a large

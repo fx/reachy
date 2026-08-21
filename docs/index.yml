@@ -69,7 +69,7 @@ changes:
     path: changes/0005-perception-capability.md
     description: Model runtime, pinned model store, YuNet face detection with parity test, and gesture recognition
     spec: perception
-    status: draft
+    status: complete
     depends_on: ["0004"]
   - id: "0006"
     name: groundstation-images

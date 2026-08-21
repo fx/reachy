@@ -11,15 +11,17 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** No spec is
-registered in `.duvet/config.toml`, so duvet extracts 0 requirements and both
-`duvet report --ci` and `duvet query -c implementation` exit 0 having checked
-nothing. The snapshot is nonetheless non-empty: duvet loads a specification an
-annotation points at whether or not it is registered, so the file lists the
-requirement text each annotation cites. Regeneration is byte-identical, so CI is
-deterministic — and a green run is still not evidence that any requirement is
-traced. See `.duvet/config.toml` for why the specs are unregistered, and for why
-annotations are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
+**`.duvet/snapshot.txt` records annotations, not coverage.** One spec is
+registered in `.duvet/config.toml` — perception — so `duvet report --ci` and
+`duvet query -c implementation` check that spec's 8 requirements and nothing
+else. The snapshot is nonetheless much larger than that: duvet loads a
+specification an annotation points at whether or not it is registered, so the
+file lists the requirement text every annotation cites, including annotations
+against the 7 unregistered specs. Regeneration is byte-identical, so CI is
+deterministic — and a green run is evidence about perception only. A spec is
+registered by the change that implements it. See `.duvet/config.toml` for why
+the rest are unregistered, and for why annotations are written `#:=`/`#:%`
+rather than duvet's documented `#=`/`#%`.
 
 **A vendored file stays as upstream wrote it.** A file carrying a provenance
 header is a derived work, and its directory's `NOTICE` enumerates the complete

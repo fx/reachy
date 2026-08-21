@@ -13,16 +13,19 @@ dependency runs the other way. They hold a `CapabilityRegistryPort` handed to
 them by the composition root in `reachy_groundstation.service`, which is the only
 module outside this package that names it.
 
-**No capability ships here yet, and that is the design.** Perception is change
-0005. What ships in this change is the seam, exercised end to end by a test
-capability that returns a fixed answer — which is what makes the registry,
-routing and pipeline verifiable with no model anywhere.
+**Perception is what ships here.** `perception/` holds face detection and gesture
+recognition, and importing it is what registers them — which is why it is
+imported below rather than merely available. A capability that is switched off by
+configuration declines to be built, and the registry records that as its own
+state rather than as a failure.
 """
 
 from __future__ import annotations
 
+from reachy_groundstation.capabilities import perception
 from reachy_groundstation.capabilities.base import CapabilityBase
 from reachy_groundstation.capabilities.registry import (
+    CapabilityDisabledError,
     CapabilityFactory,
     CapabilityRegistry,
     register,
@@ -31,8 +34,10 @@ from reachy_groundstation.capabilities.registry import (
 
 __all__ = [
     "CapabilityBase",
+    "CapabilityDisabledError",
     "CapabilityFactory",
     "CapabilityRegistry",
+    "perception",
     "register",
     "registered_factories",
 ]

@@ -6,10 +6,10 @@ Distribution `reachy-groundstation`, import name `reachy_groundstation`.
 **Spec:** [groundstation](../../docs/specs/groundstation/), with
 [perception](../../docs/specs/perception/) for the first capability.
 **Filled in by:** [0004](../../docs/changes/0004-groundstation-session.md) —
-transport, session layer, capability registry, pipeline and observability. The
-first capability arrives in
-[0005](../../docs/changes/0005-perception-capability.md) and the container image
-in [0006](../../docs/changes/0006-groundstation-images.md).
+transport, session layer, capability registry, pipeline and observability — and
+[0005](../../docs/changes/0005-perception-capability.md), which added the model
+runtime, the pinned model store and the perception capabilities. The container
+image is [0006](../../docs/changes/0006-groundstation-images.md).
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -22,6 +22,9 @@ src/reachy_groundstation/
 ├─ session/        # authentication, framing, negotiation, routing
 ├─ pipeline/       # the bounded queue, the single decode, result assembly
 ├─ capabilities/   # the interface, the registry, and the capabilities
+│  └─ perception/  # face detection, gesture recognition, coordinates
+├─ models/         # the pinned registry, the build-time fetch, the run-time store
+├─ runtime/        # model-runtime sessions: providers, thread bounds, warm-up
 ├─ obs/            # structured logging, metrics, tracing
 ├─ ports.py        # the seam: the decoded frame and the two interfaces
 ├─ config.py       # settings, read once by a function the entry point calls
@@ -59,6 +62,19 @@ src/reachy_groundstation/
 - **Drops are counted, never logged.** Frames are dropped when the service is
   already saturated, and per-occurrence logging would add load at the worst
   moment.
-- **No test may need a camera or a GPU.** Model runtimes are reached through an
-  interface and exercised with a fake. The integration tests do open a socket,
-  in-process, and each one declares `@pytest.mark.enable_socket`.
+- **No test may need a camera or a GPU.** The perception integration tests run
+  real inference on the CPU against committed fixture images — mocking the
+  runtime there would test the mock — and they read the weights `just models`
+  put in place, so each declares `@pytest.mark.filesystem`. The transport
+  integration tests do open a socket, in-process, and each one declares
+  `@pytest.mark.enable_socket`.
+- **Weights are never committed.** `models/registry.py` pins each model by
+  digest and records its licence, attribution, upstream project and retrieval
+  URL. `models/fetch.py` retrieves and verifies at build time and is the only
+  module here that can reach a network; `models/store.py` is what the running
+  service uses and cannot. Adding a model means adding a registry entry, and the
+  licence allowlist is a unit test rather than a review step.
+- **Disabled is not unhealthy.** A capability switched off by configuration
+  raises `CapabilityDisabledError` from its factory and the registry records
+  `CapabilityState.DISABLED`. An operator has to be able to tell a setting from
+  a fault.

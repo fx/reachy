@@ -124,14 +124,22 @@ class AgreedCapability:
 class CapabilityState(StrEnum):
     """Where a capability is in its lifecycle.
 
+    `DISABLED` and `UNHEALTHY` are both "offered to nobody" and are deliberately
+    not the same answer. A disabled capability is one this deployment switched
+    off; an unhealthy one is one that tried and failed. Reporting the first as
+    the second would send an operator looking for a fault that is a setting, and
+    reporting the second as the first would hide a real one.
+
     Attributes:
         WARMING: Built, but its warm-up has not finished yet.
         READY: Warmed up and offered during negotiation.
+        DISABLED: Switched off by configuration; never built, never offered.
         UNHEALTHY: It failed to build or to warm up, and is offered to nobody.
     """
 
     WARMING = "warming"
     READY = "ready"
+    DISABLED = "disabled"
     UNHEALTHY = "unhealthy"
 
 

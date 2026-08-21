@@ -22,6 +22,12 @@ venv/
 # somebody else's repository, re-fetched on every run.
 .upstream-drift/
 
+# Model weights. Fetched and hash-verified by `just models` from the pinned
+# sources in services/groundstation/src/reachy_groundstation/models/registry.py,
+# and never committed: the registry records where each one came from and what it
+# must hash to, which is what a licence audit reads instead of the bytes.
+.models/
+
 # Tool caches.
 .mypy_cache/
 .pytest_cache/

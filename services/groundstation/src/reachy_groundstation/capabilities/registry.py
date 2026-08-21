@@ -19,6 +19,14 @@ ones after it from being attempted at all.
 returned for every capability, however each of them turned out, which is what
 lets the readiness endpoint hold an orchestrator off until the first inference
 would not be slow.
+
+A third thing lives here because of where it has to be caught. A factory says
+"this deployment switched me off" by raising `CapabilityDisabledError`, and the
+registry records that as its own state rather than as a failure — see
+`CapabilityState` for why the two are not the same answer. Switching a capability
+off is therefore a setting a factory reads, not a list the composition root
+edits, which is what keeps perception REQ-038 true of every capability that
+arrives later rather than of the two that exist today.
 """
 
 from __future__ import annotations
@@ -41,6 +49,7 @@ if TYPE_CHECKING:
     from reachy_groundstation.config import Settings
 
 __all__ = [
+    "CapabilityDisabledError",
     "CapabilityFactory",
     "CapabilityRegistry",
     "register",
@@ -48,6 +57,32 @@ __all__ = [
 ]
 
 _logger = get_logger(__name__)
+
+
+#:= docs/specs/perception/index.md#req-038-a-capability-can-be-disabled-without-disabling-the-session
+#:% Each detector MUST be independently switchable at run time, and disabling one
+#:% MUST leave the others operating.
+class CapabilityDisabledError(Exception):
+    """A factory declining to build, because configuration switched it off.
+
+    It carries the name the capability would have negotiated under, because the
+    factory returned no capability to read a descriptor from and an operator
+    still has to be able to see which one is off. Every other exception out of a
+    factory means the capability tried to exist and failed.
+
+    Attributes:
+        name: What the capability would have been called.
+    """
+
+    def __init__(self, name: str) -> None:
+        """Decline to build a capability this deployment does not want.
+
+        Args:
+            name: What the capability would have negotiated under.
+        """
+        super().__init__(f"{name} is disabled by configuration")
+        self.name = name
+
 
 # What a capability module registers: something that builds the capability from
 # the settings in effect. A factory rather than an instance, because a capability
@@ -171,7 +206,7 @@ class CapabilityRegistry:
             factory: What to build.
 
         Returns:
-            The entry for it, warming or unhealthy.
+            The entry for it: warming, disabled or unhealthy.
         """
         label = getattr(factory, "__name__", repr(factory))
         try:
@@ -179,6 +214,12 @@ class CapabilityRegistry:
             # Inside the guard, not after it: `descriptor` is a property on
             # third-party code, so it is as able to raise as the factory is.
             descriptor = capability.descriptor
+        except CapabilityDisabledError as disabled:
+            # Before the general guard below, and reported as its own state: a
+            # capability an operator switched off is not a capability that
+            # failed, and the health surface has to be able to tell them apart.
+            _logger.info("capability.disabled", capability=disabled.name)
+            return _Entry(disabled.name, None, CapabilityState.DISABLED)
         except Exception as error:
             _logger.error("capability.build_failed", factory=label, error=repr(error))
             return _Entry(label, None, CapabilityState.UNHEALTHY, describe_fault(error))

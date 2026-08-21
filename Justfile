@@ -211,6 +211,28 @@ lint-boundary:
     fi
     echo 'lint-boundary: TID251 fires inside the vendored directory and nowhere else, and no absolute Reachy import survives there.'
 
+# Fetch every model the groundstation ships and verify it against its pinned
+# hash. Writes to `.models/` by default, which is gitignored — weights are never
+# committed.
+#
+# This is the build-time half of groundstation REQ-023 and REQ-024: models are
+# fetched and hash-verified while the artifact is being built, and the running
+# service loads them from a file already in place. It is also what continuous
+# integration runs before the test suite, because the perception integration
+# tests run real inference and there is nothing to run it against otherwise. A
+# fetched file whose digest disagrees with the registry fails the run and is
+# deleted rather than left where a later stage could find it.
+models directory=".models":
+    {{ uv }} python -m reachy_groundstation.models.fetch {{ directory }}
+
+# Redraw the committed perception fixture images.
+#
+# They are drawn rather than photographed, so their provenance is the script and
+# there is no licence to check. Every random draw is seeded, so a rerun that
+# changes a file means the drawing changed rather than the noise.
+perception-fixtures directory="services/groundstation/tests/fixtures/perception":
+    {{ uv }} python scripts/generate_perception_fixtures.py {{ directory }}
+
 # Verify that the assets shipped in the satellite wheel are exactly the ones the
 # registry records, unmodified. The half of the licence gate that has to read the
 # directory; the half that judges the terms is an ordinary unit test.

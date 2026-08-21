@@ -98,6 +98,43 @@ class Settings(BaseSettings):
         log_level: The lowest severity emitted.
         log_format: `json` for machines, `console` for a terminal.
         service_name: What this process calls itself in traces and metrics.
+        models_dir: The directory model files are read from. They are put there
+            when the artifact is built and never fetched at run time, which is
+            what groundstation REQ-023 requires; the default is where the
+            container image bakes them.
+        inference_intra_op_threads: How many threads one model runtime may use
+            within a single operator. This is the number groundstation REQ-027
+            is about — left to the runtime, it sizes itself against the host and
+            takes every core it finds. The default of four is where the
+            predecessor's measured curve flattened: 93 ms at one thread, 51 ms
+            at four and 55 ms at six, so the sixth thread cost time rather than
+            saving it. The curve is re-measured by change 0014 on this
+            repository's own hardware; until then four is a starting point that
+            was measured somewhere, not a constant that was guessed.
+        inference_inter_op_threads: How many operators one model runtime may run
+            at once. One, because these are single-branch detection graphs with
+            almost nothing to overlap, and a second scheduler thread spends more
+            on coordination than the overlap returns.
+        inference_providers: The execution providers to try, best first, as a
+            comma-separated list. Anything this build has not got is skipped and
+            the CPU provider is always the last resort, so the accelerated image
+            variant sets this and nothing else changes.
+        face_enabled: Whether the face detector is built and offered.
+        face_score_threshold: The confidence a face detection must reach to be
+            reported. Perception REQ-039's whole point: settable here rather
+            than rebuilt into the artifact.
+        face_nms_threshold: How much two face boxes may overlap before the
+            lower-scoring one is suppressed, as intersection over union.
+        gesture_enabled: Whether the gesture detector is built and offered. Off
+            by default — the perception spec defers the model choice, and this
+            build wires no gesture model at all, so switching it on offers a
+            capability that answers every frame with no gestures.
+        gesture_score_threshold: The confidence a gesture must reach to be
+            reported.
+        gesture_sample_interval: How many frames apart the gesture classifier
+            runs. The predecessor sampled every fourth frame to bound the cost;
+            here that rate is configuration, because the right value depends on
+            the classifier eventually chosen. One means every frame.
     """
 
     model_config = SettingsConfigDict(
@@ -120,6 +157,28 @@ class Settings(BaseSettings):
     log_level: Literal["debug", "info", "warning", "error"] = "info"
     log_format: Literal["json", "console"] = "json"
     service_name: str = Field(default="reachy-groundstation", min_length=1)
+
+    #:= docs/specs/groundstation/index.md#req-023-model-files-are-present-in-the-image
+    #:% The service MUST load every model from a file already present in its deployed
+    #:% artifact, and MUST NOT fetch model weights over the network at run time.
+    models_dir: str = Field(default="/opt/reachy/models", min_length=1)
+
+    #:= docs/specs/groundstation/index.md#req-027-inference-parallelism-is-bounded-by-configuration
+    #:% The service MUST constrain each model runtime to a configured number of threads
+    #:% rather than letting it size itself against the host.
+    inference_intra_op_threads: int = Field(default=4, ge=1, le=256)
+    inference_inter_op_threads: int = Field(default=1, ge=1, le=256)
+    inference_providers: str = Field(default="CPUExecutionProvider", min_length=1)
+
+    #:= docs/specs/perception/index.md#req-039-detection-thresholds-are-configuration
+    #:% The confidence threshold for each detector MUST be settable without rebuilding
+    #:% the artifact.
+    face_enabled: bool = True
+    face_score_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    face_nms_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    gesture_enabled: bool = False
+    gesture_score_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    gesture_sample_interval: int = Field(default=4, ge=1, le=1024)
 
 
 def _secret_settings() -> frozenset[str]:

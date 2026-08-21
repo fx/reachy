@@ -7,7 +7,7 @@ YuNet face detection with its parity test, and gesture recognition with the
 negatives evaluation that makes its accuracy a measured quantity.
 
 **Spec:** [Perception](../specs/perception/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0004
 
 ## Motivation
@@ -122,39 +122,90 @@ memory.
 
 ## Tasks
 
-- [ ] Implement the model runtime
-  - [ ] Runtime session management with provider selection and thread limits
-  - [ ] Warm-up, wired to the readiness signal from 0004
-  - [ ] Thread-count configuration with its documented default
-- [ ] Implement the model store
-  - [ ] Registry file recording source, licence, location and hash per model
-  - [ ] Build-time fetch with hash verification and failure on mismatch
-  - [ ] Licence-allowlist test over the registry
-- [ ] Implement face detection
-  - [ ] YuNet inference using dynamic input shape, no letterbox
-  - [ ] Output decoding and overlap suppression
-  - [ ] Parity test against the SDK decoder with stated tolerances
-  - [ ] Resolution-independence test across two scales of one fixture
-- [ ] Implement gesture recognition
-  - [ ] Hand detection and crop classification
-  - [ ] Configurable sampling rate
-  - [ ] Negatives fixture set and false-positive rate reporting
-- [ ] Wire run-time switching
-  - [ ] Per-detector enable and disable
-  - [ ] Configurable thresholds, visible through the configuration endpoint
-  - [ ] Test that disabling every detector yields empty results, not errors
+- [x] Implement the model runtime
+  - [x] Runtime session management with provider selection and thread limits
+  - [x] Warm-up, wired to the readiness signal from 0004
+  - [x] Thread-count configuration with its documented default
+- [x] Implement the model store
+  - [x] Registry file recording source, licence, location and hash per model
+  - [x] Build-time fetch with hash verification and failure on mismatch
+  - [x] Licence-allowlist test over the registry
+- [x] Implement face detection
+  - [x] YuNet inference using dynamic input shape, no letterbox
+  - [x] Output decoding and overlap suppression
+  - [x] Parity test against the SDK decoder with stated tolerances
+  - [x] Resolution-independence test across two scales of one fixture
+- [x] Implement gesture recognition — the capability, not a model. The model
+      choice is a non-goal above and the perception spec's decision record
+      defers it, so no gesture model is registered and neither stage has one
+      behind it.
+  - [x] Hand detection and crop classification — the two-stage arrangement, its
+        two interfaces, the cropping and the thresholding, exercised end to end
+        through scripted stages. No hand model and no classifier are wired.
+  - [x] Configurable sampling rate
+  - [x] Negatives fixture set and false-positive rate reporting
+- [x] Wire run-time switching
+  - [x] Per-detector enable and disable
+  - [x] Configurable thresholds, visible through the configuration endpoint
+  - [x] Test that disabling every detector yields empty results, not errors
 
 ## Open Questions
 
-- [ ] Which gesture model replaces the current classifier. Blocked on the
-      negatives evaluation this change produces.
-- [ ] Whether the gesture capability ships enabled by default before a
-      replacement model is chosen. Current lean: disabled by default, with the
-      false-positive number in its documentation.
-- [ ] What the parity tolerances should be. The predecessor's hand comparison
-      found centres within 2.2 px and confidence within 0.011 against a
-      different model pair. Current lean: start there and tighten once the real
-      distribution is known.
+- [x] Which gesture model replaces the current classifier. **Decided: none, and
+      the choice is now a measurement rather than a blocker.** Choosing one is
+      follow-up work for the change that proposes a candidate; it is no longer
+      an open question for this change, because what this change owed it was the
+      evidence. No hand-signal classifier was found that clears
+      [REQ-032](../specs/perception/index.md#req-032-detection-models-are-permissively-licensed)'s
+      licence bar with a provenance chain this repository can record, so no
+      gesture model is registered and the capability ships with neither stage
+      wired. The evaluation harness is in place and reports a number for
+      whatever is wired, so a candidate is compared rather than argued about.
+      The question moves to the change that proposes one.
+- [x] Whether the gesture capability ships enabled by default before a
+      replacement model is chosen. **Disabled by default**, as the lean
+      suggested. With no model wired it would answer every frame with an empty
+      payload, so offering it would advertise a capability that does nothing.
+      Switching it on is one environment variable, and it then negotiates,
+      samples and answers normally.
+- [x] What the parity tolerances should be. **Tightened, well below the lean.**
+      The two implementations agree exactly: across 6 fixtures and 9 faces the
+      maximum centre deviation is 0.000000 px and the maximum confidence
+      deviation is 0.000000, because they are two spellings of the same
+      arithmetic over the same session's float32 outputs. The stated tolerances
+      are 0.5 px and 0.005 — not zero, so that a future refactor moving a result
+      by an ulp does not fail a gate people would then route around, and tight
+      enough that a real decoding error moves a detection by tens of pixels.
+      Resolution independence is stated separately at 0.02 normalised units,
+      against an observed worst case of 0.013.
+
+## Completion notes
+
+**What shipped.** `runtime/` bounds every model session by configured thread
+counts and runs inference on a single worker thread off the event loop.
+`models/` holds a tracked registry pinning the face model by digest, a
+build-time fetch that refuses anything else, a run-time store that only ever
+reads, and a licence gate that is an ordinary unit test.
+`capabilities/perception/` holds the two detectors behind 0004's interface.
+
+**The face model.** YuNet, MIT, retrieved from an immutable revision of the same
+Hugging Face repository the Reachy Mini SDK downloads from — an unmodified
+redistribution of the OpenCV Zoo model. Its digest, licence, attribution,
+upstream project and retrieval URL are in
+`services/groundstation/src/reachy_groundstation/models/registry.py`, and weights
+are never committed. `just models` fetches and verifies them; continuous
+integration runs it before the suite.
+
+**Disabled is not unhealthy.** A capability switched off by configuration
+declines to be built by raising `CapabilityDisabledError`, and the registry
+records `CapabilityState.DISABLED`. It is offered to nobody and routed to by
+nothing, and the health surface distinguishes it from a capability that failed —
+so an operator can tell "I turned that off" from "that broke".
+
+**What was deliberately not done.** No gesture model was chosen or wired, per the
+first open question above. No CUDA-specific work: the provider list is
+configuration, and the accelerated image variant is 0006. No facial landmarks,
+which the spec leaves for the change that introduces a consumer.
 
 ## References
 
