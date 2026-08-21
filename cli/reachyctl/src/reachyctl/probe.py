@@ -30,7 +30,7 @@ import asyncio
 import contextlib
 import statistics
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from reachy_contracts import FACE_CAPABILITY, GESTURE_CAPABILITY, Capability
 from reachy_session_client import (
@@ -302,6 +302,12 @@ async def _exchange(
     expected = plan.count * len(agreed)
     producer = asyncio.create_task(_produce(client, source, plan), name="frames")
     results = client.results()
+    # The pending `anext`, held across iterations rather than started and
+    # abandoned inside each one. Cancelling an `anext` closes the asynchronous
+    # generator it was taken from, so a wait this loop gives up on has to be
+    # the *loop's* last, and a wait it merely stops waiting on has to survive
+    # to be awaited again.
+    pending: asyncio.Task[FrameResult] | None = None
     try:
         while True:
             if producer.done():
@@ -312,31 +318,68 @@ async def _exchange(
                 expected = producer.result() * len(agreed)
             if len(collected) >= expected:
                 break
+            if pending is None:
+                pending = asyncio.ensure_future(anext(results))
             # What is left of the run's overall bound, narrowed to one
             # staleness window once the frames have stopped: results that have
             # not arrived by then are not coming. Clamped at zero rather than
-            # guarded with a branch — `wait_for` treats a zero timeout as "is
-            # it ready now?", which is exactly the question at that point.
+            # guarded with a branch — a zero timeout asks "is it ready now?",
+            # which is exactly the question at that point.
             budget = deadline - loop.time()
             if producer.done():
                 budget = min(budget, plan.staleness)
-            try:
-                result = await asyncio.wait_for(
-                    anext(results),
-                    timeout=max(0.0, budget),
-                )
-            except (TimeoutError, StopAsyncIteration):
-                # Breaking rather than waiting again is not a choice: a timeout
-                # cancels the `anext`, and cancelling `anext` on an
-                # asynchronous generator closes the generator. There is no
-                # second wait to be had on this iteration.
+            # The producer is waited on beside the result, so that it finishing
+            # *during* a wait shortens that wait instead of being noticed only
+            # after it. Without this, a run whose last result never arrives
+            # sits out the whole `--timeout` — thirty seconds by default —
+            # having entered the wait with the frames still flowing and a full
+            # budget. One staleness window is the answer this loop is supposed
+            # to give, and a diagnostic that takes thirty seconds to give it is
+            # the thing the run's bounds exist to prevent.
+            waiters: list[asyncio.Task[Any]] = [pending]
+            if not producer.done():
+                waiters.append(producer)
+            settled, _still_waiting = await asyncio.wait(
+                waiters,
+                timeout=max(0.0, budget),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not settled:
+                # Nothing completed, so the wait ran out its budget: one
+                # staleness window if the frames have stopped, what was left of
+                # the run's overall bound if they have not.
                 break
+            if pending not in settled:
+                # The producer finished and the result has not arrived yet. Go
+                # round rather than keep waiting on the budget chosen before it
+                # did: `expected` narrows to what actually went out, and the
+                # budget narrows to one staleness window. The pending `anext`
+                # is carried over untouched, because cancelling it would close
+                # the generator it came from.
+                continue
+            try:
+                result = pending.result()
+            except StopAsyncIteration:  # pragma: no cover
+                # `results()` returns only once the client has been closed, and
+                # `run_probe` closes it after this loop rather than during it,
+                # so nothing here can reach this today. It is handled anyway
+                # because the alternative is this loop raising
+                # `StopAsyncIteration` out of a command, and because the second
+                # consumer of this client — the robot adapter in change 0012 —
+                # closes on a different schedule than `probe` does.
+                break
+            finally:
+                pending = None
             collected.append(_outcome(result))
             reporter.detail(
                 f"frame {result.sequence} answered by {result.capability}: "
                 f"{result.detections} detection(s)",
             )
     finally:
+        if pending is not None:
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                await pending
         producer.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await producer

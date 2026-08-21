@@ -121,12 +121,22 @@ class Backoff:
         # of the first retry. Working from the difference of two logarithms
         # rather than the logarithm of a quotient has no such range to fall out
         # of, so the whole class goes rather than one more value being refused.
-        growth = (attempt - 1) * math.log(self.multiplier)
-        if math.log(self.initial_seconds) + growth >= math.log(self.maximum_seconds):
+        #
+        # The comparison is `int >= float` and deliberately not
+        # `int * float >= float`. Python compares the two exactly, without
+        # converting the integer, so an attempt count too large to *be* a float
+        # — `10 ** 1000`, which is a perfectly ordinary `int` — answers the
+        # question instead of raising `OverflowError` while being converted.
+        # Multiplying first would put that conversion back.
+        steps_to_bound = (
+            math.log(self.maximum_seconds) - math.log(self.initial_seconds)
+        ) / math.log(self.multiplier)
+        if attempt - 1 >= steps_to_bound:
             return self.maximum_seconds
-        # Below the bound, so the power is in range. `min` keeps the guarantee
-        # exact anyway: the comparison above is float arithmetic, and a value
-        # landing within an ulp of the bound must not step over it.
+        # Below the bound, so both the exponent and the power are in range.
+        # `min` keeps the guarantee exact anyway: the comparison above is float
+        # arithmetic, and a value landing within an ulp of the bound must not
+        # step over it.
         return min(
             self.initial_seconds * self.multiplier ** (attempt - 1),
             self.maximum_seconds,

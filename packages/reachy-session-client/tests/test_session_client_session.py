@@ -775,3 +775,55 @@ def test_a_staleness_window_that_never_elapses_is_refused(window: float) -> None
     """
     with pytest.raises(ValueError, match="must be positive"):
         SessionClient(url=URL, credential=credential(), staleness_seconds=window)
+
+
+#:= docs/specs/robot-link/index.md#req-014-results-are-keyed-to-the-frame-that-produced-them
+#:% Every frame MUST carry a monotonically increasing sequence number, and every
+#:% result MUST identify the sequence number of the frame it derives from.
+@pytest.mark.asyncio
+async def test_a_frame_that_lands_on_a_replaced_session_does_not_number_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The two tasks share a client, so a send can outlive the session it began on.
+
+    `submit_frame` and `results()` run in different tasks and the send is not
+    taken under the lock — deliberately, because taking it would hold a frame
+    behind a reconnection that sleeps out its whole backoff delay. So a frame
+    can still be on the wire when the session underneath it is replaced, and
+    counting that one would advance the counter `_establish` has just set back
+    to zero: the new session's first frame would be numbered one, and nothing
+    would be numbered zero.
+
+    The replacement is done from inside `send_bytes`, which is where the real
+    one happens — the results task reconnects while this send is suspended.
+
+    Args:
+        monkeypatch: Used to make this transport's send replace the session,
+            which is the interleaving under test.
+    """
+    first, second = StubTransport(), StubTransport()
+    first.push(agreement(FACE))
+    client, _sleep = build(first)
+    await client.connect()
+
+    async def reconnect_mid_send(_data: bytes) -> None:
+        """Stand where the results task would, while the frame is on the wire.
+
+        Args:
+            _data: The frame, which this send discards; what is under test is
+                what the client does when it returns.
+        """
+        # Exactly what `_establish` does for a new session, and reaching into
+        # the client is how a single-threaded test occupies the other task.
+        client._transport = second
+        client._sequence = 0
+
+    monkeypatch.setattr(first, "send_bytes", reconnect_mid_send)
+
+    header = await client.submit_frame(JPEG)
+
+    assert header is None
+    assert client.stats.frames_dropped == 1
+    assert client.stats.frames_submitted == 0
+    # The new session still starts where `_establish` left it.
+    assert client._sequence == 0

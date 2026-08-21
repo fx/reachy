@@ -421,6 +421,23 @@ class SessionClient:
             # reconnects; this frame is simply gone.
             self._stats.frames_dropped += 1
             return None
+        if transport is not self._transport:
+            # The send succeeded, but on a session that is no longer the one
+            # this client holds: `results()` reconnected while this frame was
+            # on the wire. The counter below belongs to the *new* session,
+            # which `_establish` has just set back to zero, so incrementing it
+            # here would make the new session's first frame number one and
+            # leave nothing numbered zero. Counted as dropped, which is what it
+            # is from the new session's point of view.
+            #
+            # Checked rather than locked, deliberately. Taking `self._lock`
+            # here would hold a frame behind a reconnection that sleeps out its
+            # whole backoff delay — up to the bound — and this method's promise
+            # is the opposite: a frame produced while no session is up is
+            # dropped rather than held against a connection that may never come
+            # back.
+            self._stats.frames_dropped += 1
+            return None
         self._sequence += 1
         self._stats.frames_submitted += 1
         return header

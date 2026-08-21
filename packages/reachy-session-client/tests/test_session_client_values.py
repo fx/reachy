@@ -217,3 +217,18 @@ def test_a_policy_spanning_the_whole_float_range_still_answers() -> None:
 
     assert span.delay(1) == 5e-324
     assert span.delay(10**9) == 1e308
+
+
+#:= docs/specs/robot-link/index.md#req-018-reconnection-is-automatic-and-rate-limited
+#:% A client MUST re-establish a dropped session automatically, and MUST increase
+#:% the delay between successive failed attempts up to a bound.
+def test_an_attempt_count_too_large_to_be_a_float_still_answers() -> None:
+    """`attempt` is an `int`, and an `int` has no range for a policy to exceed.
+
+    The bound is decided by comparing the attempt against a float threshold
+    rather than by multiplying it into one, because Python compares those two
+    exactly while converting an integer this size to a float raises
+    `OverflowError` — inside the reconnection loop, which is the one place an
+    exception ends the session for good.
+    """
+    assert Backoff().delay(10**1000) == Backoff().maximum_seconds

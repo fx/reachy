@@ -22,6 +22,7 @@ Test module names are globally unique across the workspace — see the root
 from __future__ import annotations
 
 import json
+import time
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -382,3 +383,47 @@ def test_a_recording_shorter_than_the_count_is_not_a_run_that_fell_short(
     assert result.exit_code == ExitCode.OK
     assert document["data"]["frames_submitted"] == FRAMES
     assert len(document["rows"]) == FRAMES
+
+
+#:= docs/specs/robot-link/index.md#req-017-stale-results-stop-being-acted-on
+#:% A consumer MUST stop acting on results once none has arrived within a configured
+#:% staleness window.
+@pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
+def test_the_frames_running_out_mid_wait_still_bounds_the_run_by_one_window(
+    tmp_path: Path,
+) -> None:
+    """The window has to start when the frames stop, not when the loop next looks.
+
+    The producer finishes while the loop is already waiting for a result, and
+    it is that wait — entered with the frames still flowing, and therefore with
+    the whole of `--timeout` as its budget — that has to be cut short. A loop
+    which only narrows its budget on the next time round never gets a next time
+    round when the missing result is the thing it is waiting for, so it sits
+    out the full timeout instead of one staleness window.
+
+    The capability here answers far later than the window allows, so the run is
+    bounded by the window or by nothing. Wall time is the assertion because it
+    is the symptom: the outcome was already correct before this was fixed, it
+    just took twenty seconds to say so.
+
+    Args:
+        tmp_path: Where the recorded frames are written.
+    """
+    write_frames(tmp_path, FRAMES)
+
+    with serving(StaticRegistry(SlowFace(delay=1.5))) as url:
+        started = time.monotonic()
+        result = runner.invoke(
+            app,
+            ["--output", "json", *probe_arguments(url, tmp_path, "--staleness", "0.1")],
+            env=CONFIGURED,
+        )
+        elapsed = time.monotonic() - started
+
+    document = json.loads(result.stdout)
+    assert result.exit_code == ExitCode.FAILURE
+    assert document["ok"] is False
+    # Comfortably below the capability's own delay, which is what the run would
+    # otherwise have waited for, and an order of magnitude below `--timeout`.
+    assert elapsed < 1.0
