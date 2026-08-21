@@ -200,7 +200,12 @@ A suppression without a reason is a change request, not a lint failure.
 
 `docs/contracts/` is written by `just contracts` and compared by the
 contract-drift gate. Do not edit a file in it: the edit is reverted by the next
-run at best and blocks a merge at worst. Two registries feed it — the wire
+run at best and blocks a merge at worst. **The directory is owned in full** —
+regeneration deletes anything it did not write, and any directory that leaves
+empty. A generator that only wrote would let a withdrawn contract keep its
+committed artifact forever, and the gate would go on passing over a published
+interface nothing produces any more, which is REQ-008 failing by the one route a
+write-only generator cannot see. Two registries feed it — the wire
 schemas in `reachy_contracts.contracts_export` and the `doctor` check reference
 in `reachy_checks.checks_export` — because `reachy-checks` depends on
 `reachy-contracts` and a registry in the contracts package that imported the

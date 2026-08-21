@@ -66,6 +66,30 @@ def test_writing_twice_produces_the_same_tree(tmp_path: Path) -> None:
     assert Path(INDEX_PATH) in first
 
 
+def test_an_artifact_no_registry_produces_any_more_is_deleted(tmp_path: Path) -> None:
+    """Otherwise the drift gate passes over a contract nothing generates.
+
+    A write-only generator cannot see a removed or renamed contract: the old
+    file stays committed, regeneration leaves it alone, and the gate compares a
+    tree that still publishes it against a run that never wrote it and finds no
+    difference. That is REQ-008 failing by the one route it cannot detect, so
+    the directory is owned rather than merely written into.
+    """
+    main([str(tmp_path)])
+    stale = tmp_path / "robot-link" / "withdrawn.schema.json"
+    stale.write_text("{}\n", encoding="utf-8")
+    orphan = tmp_path / "gone"
+    orphan.mkdir()
+    (orphan / "leftover.md").write_text("nothing generates this\n", encoding="utf-8")
+
+    main([str(tmp_path)])
+
+    assert not stale.exists()
+    assert not orphan.exists()
+    assert (tmp_path / INDEX_PATH).exists()
+    assert (tmp_path / "robot-link").is_dir()
+
+
 def test_the_default_output_directory_is_the_published_one() -> None:
     """`just contracts` passes it explicitly; a caller that does not gets the same."""
     assert DEFAULT_OUT_DIR == "docs/contracts"

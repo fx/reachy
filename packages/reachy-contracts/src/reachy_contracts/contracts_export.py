@@ -253,7 +253,20 @@ def export(
     out_dir: Path,
     contracts: Sequence[Contract] = CONTRACTS,
 ) -> list[Path]:  # pragma: no cover - writes to the filesystem
-    """Write every rendered artifact under an output directory.
+    """Write every rendered artifact under an output directory, and only those.
+
+    **Anything already under `out_dir` that this run did not write is deleted**,
+    along with any directory left empty by that. Writing without pruning would
+    let a contract that was removed or renamed keep its committed artifact
+    forever: the drift gate compares the tree against what regeneration
+    produced, so it would go on passing over a published interface nothing
+    generates any more — which is precisely the drift REQ-008 exists to catch,
+    arriving by the one route a write-only generator cannot see.
+
+    That makes the directory this writes into fully owned. It is
+    `docs/contracts/`, whose generated index says in so many words that every
+    file in it is generated; pointing this at a directory holding anything else
+    would delete it.
 
     Args:
         out_dir: The directory to write into, created if it does not exist.
@@ -262,13 +275,40 @@ def export(
     Returns:
         The paths written, in sorted order.
     """
+    rendered = render_all(contracts)
     written: list[Path] = []
-    for relative, content in sorted(render_all(contracts).items()):
+    for relative, content in sorted(rendered.items()):
         destination = out_dir / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
         written.append(destination)
+    _prune(out_dir, set(written))
     return written
+
+
+def _prune(
+    out_dir: Path,
+    written: set[Path],
+) -> None:  # pragma: no cover - reads and writes the filesystem
+    """Delete everything under a directory that this run did not write.
+
+    Directories are removed after their contents, and only when empty, so a
+    directory holding a generated artifact survives and one whose last artifact
+    was withdrawn does not.
+
+    Args:
+        out_dir: The directory to prune.
+        written: The paths this run wrote.
+    """
+    if not out_dir.exists():
+        return
+    for path in sorted(
+        out_dir.rglob("*"), key=lambda path: len(path.parts), reverse=True
+    ):
+        if path.is_file() and path not in written:
+            path.unlink()
+        elif path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
 
 
 if __name__ == "__main__":  # pragma: no cover - module entry point
