@@ -1,13 +1,25 @@
 """Check that the built satellite wheel is the artifact it is supposed to be.
 
-A wheel that builds is not a wheel that works, and the two ways this one can be
-wrong are invisible to a successful build.
+A wheel that builds is not a wheel that works, and the three ways this one can
+be wrong are invisible to a successful build.
 
 **The entry point.** ha-satellite REQ-041 says installing the wheel is
 sufficient for the daemon to find the application, and what makes that true is
 one line of `entry_points.txt` inside the distribution's metadata. A packaging
 change that dropped it would produce a wheel that installs perfectly and never
 appears in the daemon's list.
+
+**The launch.** The line existing is not the whole of REQ-041, and believing it
+was cost a robot an evening. The daemon does not import the entry point and
+instantiate the class it names: it takes the **module** half — everything left
+of the colon — and starts the application as a subprocess,
+`python -u -m <module>`. A module with no `if __name__ == "__main__":` block
+imports under that command, does nothing and exits 0; the daemon reports the
+application as finished, successfully, seconds after starting it and with no
+output at all. So the module is executed here the way the daemon executes it,
+and a wheel whose entry module exits 0 having done nothing is refused. See
+`_execution_problems` for why that outcome is cleanly distinguishable from a
+working one without a robot anywhere near it.
 
 **The assets.** The wake-word models and sounds ship as package data, and the
 licence texts that have to travel with them ship beside them. `just check-assets`
@@ -17,12 +29,16 @@ the registry and the build is visible.
 
 **What is read from where, because the distinction is the whole point.** The
 *artifact* is read out of the wheel and only out of the wheel: every path, every
-digest and the entry-point metadata come from the zip file. The *declaration* is
-imported from the source tree — `assets.registry` — because that is what the
-wheel is being checked against, and a registry read out of the wheel would make
-this a check that the wheel agrees with itself. Importing the registry is
-therefore not importing the package under test: the package under test is the
-built distribution, and nothing here imports, installs or executes it.
+digest and the entry-point metadata come from the zip file, and the launch check
+runs the module it extracted from that zip file rather than the one in this
+checkout — `_resolution_problems` is what makes that a fact instead of a hope.
+The *declaration* is imported from the source tree — `assets.registry`, and
+`config` for the environment-variable prefix — because that is what the wheel is
+being checked against, and a registry read out of the wheel would make this a
+check that the wheel agrees with itself. Importing the registry is therefore not
+importing the package under test: the package under test is the built
+distribution, which is extracted and executed in a subprocess and never imported
+into this process.
 
 Nothing reaches the network.
 """
@@ -30,13 +46,19 @@ Nothing reaches the network.
 from __future__ import annotations
 
 import hashlib
+import json
+import ntpath
+import os
 import re
+import subprocess
 import sys
+import tempfile
 import zipfile
 from importlib.metadata import Distribution
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from reachy_mini_ha_satellite.assets.registry import ASSETS, UNREGISTERED
+from reachy_mini_ha_satellite.config import ENV_PREFIX, variable_for
 
 # Where the package lands inside a wheel.
 _PACKAGE = "reachy_mini_ha_satellite"
@@ -45,6 +67,91 @@ _PACKAGE = "reachy_mini_ha_satellite"
 # application has to be registered in it as.
 ENTRY_POINT_GROUP = "reachy_mini_apps"
 ENTRY_POINT_TARGET = "reachy_mini_ha_satellite.daemon_app:ReachyMiniHaSatellite"
+
+# The half of that the daemon actually launches. Its application manager asks
+# for the module — everything left of the colon — and runs `python -u -m` on it;
+# the object half is never imported and never instantiated by the daemon. So
+# this, and not the class, is the thing that has to be runnable, and it is
+# derived from the target rather than written out a second time so the two
+# cannot disagree about which module that is.
+ENTRY_POINT_MODULE = ENTRY_POINT_TARGET.split(":", 1)[0]
+
+# What the entry module's `main` returns when the configuration is unusable:
+# EX_CONFIG. It is the status the launch check expects, because a satellite
+# started with nothing configured refuses to start and says why — see
+# `_execution_problems`.
+EX_CONFIG = 78
+
+# How long the entry module gets before the check gives up on it. It refuses
+# within about a second, because the refusal happens before anything is built;
+# this only stops a wheel whose module blocks from hanging a release.
+LAUNCH_TIMEOUT_SECONDS = 120.0
+
+# How many bad members a refusal names before it starts counting. A wheel built
+# to escape carries one or two; a wheel whose every member is wrong would
+# otherwise produce a finding nobody can read.
+_MEMBERS_NAMED = 5
+
+# The Reachy Mini SDK, in the shape the entry module uses it and nothing more.
+#
+# The entry module imports `reachy_mini.apps.app`, and importing the real one
+# executes `import gi` three modules away — PyGObject and the whole GStreamer
+# stack, which architecture REQ-005 keeps off this side of the line. Standing in
+# for that one import is what lets the daemon's launch be reproduced on a
+# machine that is not a robot, and it is the *only* substitution: the `__main__`
+# guard, `main`, the configuration layer and the refusal that comes out of it are
+# all the wheel's own code, run from the wheel's own files.
+#
+# `wrapped_run` is the SDK's contract with an application — the daemon calls it,
+# and it calls `run` with a robot handle — so the stub calls `run` too. The
+# handle is a bare object because the configuration is read before anything
+# reaches for it, which is the whole reason an unconfigured start is a clean
+# signal rather than a crash somewhere in the robot layer.
+_SDK_STUB = '''"""A stand-in for the Reachy Mini SDK's application base class."""
+
+import threading
+
+
+class ReachyMiniApp:
+    """What the daemon's applications subclass."""
+
+    custom_app_url = None
+    dont_start_webserver = False
+    request_media_backend = None
+
+    def __init__(self, running_on_wireless=False):
+        """Prepare, without looking for a daemon to talk to."""
+        self.running_on_wireless = running_on_wireless
+        self.stop_event = threading.Event()
+        self.error = ""
+
+    def wrapped_run(self, *args, **kwargs):
+        """Run the application with a robot handle, as the daemon does."""
+        self.run(object(), self.stop_event)
+
+    def stop(self):
+        """Ask the application to stop."""
+        self.stop_event.set()
+'''
+
+# Asks the interpreter which file `python -m <module>` would run, and whether
+# that name is a package — a package would run its `__main__` submodule instead,
+# which is a different file from the one the entry point names.
+_RESOLUTION_PROBE = """\
+import importlib.util
+import json
+import sys
+
+spec = importlib.util.find_spec(sys.argv[1])
+print(
+    json.dumps(
+        {
+            "origin": None if spec is None else spec.origin,
+            "package": spec is not None and bool(spec.submodule_search_locations),
+        },
+    ),
+)
+"""
 
 # Where an installer reads entry points from, per the wheel specification: one
 # `.dist-info` directory at the root of the archive, and nothing nested. Anchored
@@ -211,6 +318,414 @@ def _entry_point_problems(wheel: zipfile.ZipFile, names: set[str]) -> list[str]:
     return []
 
 
+def _launch_environment(
+    *,
+    stub_root: Path,
+    wheel_root: Path,
+    state_dir: Path,
+) -> dict[str, str]:
+    """Build the environment the entry module is launched in.
+
+    Three things are arranged, and each of them is what makes the answer mean
+    something.
+
+    **`PYTHONPATH` is replaced, not extended.** Any inherited value would be
+    this checkout's own source tree, and a check that ran the source instead of
+    the wheel would pass on a wheel that does not contain the fix. The stub SDK
+    comes first and the extracted wheel second; the interpreter's own
+    `site-packages` still supplies the third-party dependencies, exactly as the
+    daemon's shared application environment does on the robot.
+
+    **Every `REACHY_SATELLITE_*` variable is dropped.** The check reads a
+    refusal to start as the proof that the module runs, so a machine that
+    happens to have the satellite configured must not turn that refusal into a
+    real startup.
+
+    **The state directory is pointed at somewhere empty.** `state_dir` is a
+    bootstrap setting read straight from the environment, and it is where the
+    settings interface's overrides file lives. Left alone, a robot's real
+    overrides would be read and could supply the one setting whose absence this
+    relies on.
+
+    Args:
+        stub_root: The directory holding the stand-in SDK.
+        wheel_root: The directory the wheel was extracted into.
+        state_dir: An empty directory to use as the satellite's state
+            directory.
+
+    Returns:
+        The environment for the subprocesses.
+    """
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(ENV_PREFIX)
+    }
+    environment["PYTHONPATH"] = os.pathsep.join((str(stub_root), str(wheel_root)))
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment[variable_for("state_dir")] = str(state_dir)
+    return environment
+
+
+def _python(
+    arguments: list[str],
+    environment: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    """Run this interpreter with the given arguments and capture what it says.
+
+    Args:
+        arguments: What to pass the interpreter.
+        environment: The environment to run in.
+
+    Returns:
+        The finished process.
+
+    Raises:
+        subprocess.TimeoutExpired: If it does not finish in time.
+    """
+    return subprocess.run(  # noqa: S603  # a fixed argument vector built from this module's own literals and `sys.executable`; no shell, and nothing a caller supplies reaches it
+        [sys.executable, "-u", *arguments],
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+        timeout=LAUNCH_TIMEOUT_SECONDS,
+    )
+
+
+def _resolution_problems(
+    module: str,
+    wheel_root: Path,
+    completed: subprocess.CompletedProcess[str],
+) -> list[str]:
+    """Say whether `python -m <module>` would run the file the wheel shipped.
+
+    Without this the launch check could be satisfied by something that is not
+    the wheel at all. Two ways, and both have happened to somebody:
+
+    * **A different copy of the module.** This repository installs its members
+      editable, so an interpreter here can reach the source tree as well as the
+      extraction directory. Comparing the resolved file against the extraction
+      directory is what makes the run a run of the artifact.
+    * **A `__main__.py` standing in for it.** If the entry point named a
+      *package*, `python -m` would run that package's `__main__` submodule
+      instead — a different file, which may well have an execution path while
+      the module the daemon's `get_app_module` returns has none. That is
+      precisely this application's arrangement, so the check that would have
+      been fooled by it is the check worth writing.
+
+    Args:
+        module: The module the entry point names.
+        wheel_root: The directory the wheel was extracted into.
+        completed: The finished resolution probe.
+
+    Returns:
+        One line per problem.
+    """
+    if completed.returncode != 0:
+        return [
+            f"{module} could not be resolved from the wheel: {_tail(completed.stderr)}",
+        ]
+    try:
+        resolved = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        return [f"the resolution probe for {module} said nothing usable: {error}"]
+
+    malformed = _probe_problems(module, resolved, completed.stdout)
+    if malformed:
+        return malformed
+
+    origin = resolved["origin"]
+    if origin is None:
+        return [
+            f"the wheel declares {ENTRY_POINT_GROUP} entry point "
+            f"{ENTRY_POINT_TARGET}, but {module} is not in the wheel, so the "
+            f"daemon would launch a module that does not exist",
+        ]
+    if resolved["package"]:
+        return [
+            f"{module} is a package, so `python -m {module}` would run its "
+            f"__main__ submodule rather than the module the entry point names",
+        ]
+
+    expected = wheel_root.joinpath(*module.split(".")).with_suffix(".py")
+    if Path(origin).resolve() != expected.resolve():
+        return [
+            f"`python -m {module}` would run {origin} rather than the wheel's "
+            f"own {expected}, so the launch below would not be a check of this "
+            f"wheel",
+        ]
+    return []
+
+
+def _probe_problems(module: str, document: object, printed: str) -> list[str]:
+    """Say whether the resolution probe printed the document this expects.
+
+    **Reported, never raised.** Reading `document["origin"]` out of whatever
+    came back would turn a probe that printed something unexpected — a partial
+    line, a different shape after somebody edited `_RESOLUTION_PROBE`, an
+    interpreter that wrote a warning where the JSON was meant to go — into a
+    `KeyError` traceback out of the middle of a release. That is the defect
+    this whole check exists to prevent, one level up: a failure arriving as
+    silence or a stack trace rather than as a diagnosis, leaving whoever is
+    holding the release to read the verifier's source to find out what
+    happened. Every shape that is not the expected one is a finding here, and
+    every finding carries what was actually printed.
+
+    Args:
+        module: The module the probe was asked about.
+        document: Whatever the probe's output parsed to.
+        printed: That output, verbatim, for the report.
+
+    Returns:
+        One line per problem, or an empty list when `document` is an object
+        carrying an `origin` that is a path or null and a `package` that is a
+        boolean — which is what makes reading those two fields afterwards
+        safe.
+    """
+    if not isinstance(document, dict):
+        return [
+            f"the resolution probe for {module} printed a JSON "
+            f"{type(document).__name__} rather than an object: {_tail(printed)}",
+        ]
+
+    missing = [field for field in ("origin", "package") if field not in document]
+    if missing:
+        return [
+            f"the resolution probe for {module} printed an object with no "
+            f"{' and no '.join(missing)}: {_tail(printed)}",
+        ]
+
+    origin = document["origin"]
+    if origin is not None and not isinstance(origin, str):
+        return [
+            f"the resolution probe for {module} reported an origin of JSON "
+            f"{type(origin).__name__} rather than a path or null: "
+            f"{_tail(printed)}",
+        ]
+    if not isinstance(document["package"], bool):
+        return [
+            f"the resolution probe for {module} reported a package flag of JSON "
+            f"{type(document['package']).__name__} rather than a boolean: "
+            f"{_tail(printed)}",
+        ]
+    return []
+
+
+def _member_problems(names: list[str]) -> list[str]:
+    """Say whether every member of the wheel is a path inside the wheel.
+
+    **Checked before anything is written, and the whole wheel refused if one
+    member is wrong** — not the member skipped. An archive carrying one is not
+    an archive to go on inspecting.
+
+    The reason is not that `extractall` would write outside the extraction
+    directory. On CPython it does not: it strips leading separators, drive
+    letters and `..` components from each member, so `../../daemon_app.py` is
+    **relocated** to the root of the extraction directory rather than escaping
+    it. That silent relocation is itself the problem, twice over.
+
+    A verification tool that quietly repairs a malformed archive and then
+    reports on the repaired version has reported on an artifact that does not
+    exist — and this one's whole job is to refuse a wheel nobody should ship.
+
+    And the relocation lands somewhere real. A member named
+    `../../reachy_mini_ha_satellite/daemon_app.py` flattens onto exactly the
+    path `_resolution_problems` is about to resolve and `_execution_problems`
+    is about to run, so an archive could choose what this check executes and
+    the check would report on the file the archive chose. Refusing is what
+    keeps it a check. This script also takes a wheel path on the command line
+    and the runbooks tell people to fetch one from a release, so "we only ever
+    hand it something we just built" is not a property of the tool.
+
+    Args:
+        names: Every member of the archive.
+
+    Returns:
+        One line per problem.
+    """
+    unsafe = sorted(name for name in names if _escapes(name))
+    if not unsafe:
+        return []
+    shown = ", ".join(unsafe[:_MEMBERS_NAMED])
+    rest = len(unsafe) - _MEMBERS_NAMED
+    return [
+        f"the wheel carries {len(unsafe)} member(s) whose path is not a "
+        f"relative location inside the archive ({shown}"
+        f"{f', and {rest} more' if rest > 0 else ''}), so extracting it would "
+        f"put a file somewhere the wheel does not say it goes",
+    ]
+
+
+def _escapes(name: str) -> bool:
+    """Say whether one member's name is anything but a relative path inside.
+
+    A wheel member is a relative POSIX path — the specification says the
+    separator is `/` — so an absolute path, a drive or UNC prefix, a backslash,
+    or a `..` component is all outside what a legal wheel can contain.
+
+    Args:
+        name: The member's name, as the archive records it.
+
+    Returns:
+        Whether it names somewhere other than inside the archive.
+    """
+    if "\\" in name or ntpath.splitdrive(name)[0]:
+        return True
+    path = PurePosixPath(name)
+    return path.is_absolute() or ".." in path.parts
+
+
+def _execution_problems(
+    module: str,
+    completed: subprocess.CompletedProcess[str],
+) -> list[str]:
+    """Say whether the daemon's launch actually starts anything.
+
+    **The distinction this rests on, and why it needs no robot.** The module is
+    run with nothing configured, which the satellite refuses: `device_name` has
+    no default and cannot have one, so `main` catches the `ConfigurationError`,
+    writes it to standard error and returns EX_CONFIG. That refusal is not a
+    disappointment here — it is the evidence, because reaching it means the
+    module's `__main__` guard ran, called `main`, and got as far as the code
+    that reads a configuration.
+
+    A module with no `__main__` guard cannot produce any of that. Under
+    `python -m` it imports, finds nothing to do and exits **0, silently**. The
+    two outcomes differ in both the status and the presence of output, neither
+    of which needs a robot, a network or a configured environment — which is
+    why this check can stand behind REQ-041 in an ordinary build.
+
+    Anything else — an import error, a crash, a module that blocks — is neither
+    outcome and is reported with what it said, because a launch check that
+    passed on "well, it exited non-zero" would pass on a wheel that cannot
+    import.
+
+    Args:
+        module: The module the entry point names.
+        completed: The finished launch.
+
+    Returns:
+        One line per problem.
+    """
+    if completed.returncode == 0:
+        return [
+            f"`python -m {module}` exited 0 having done nothing, which is how "
+            f"the daemon launches this application: it takes the module half of "
+            f"the {ENTRY_POINT_GROUP} entry point and runs it as a subprocess. "
+            f'The module needs an `if __name__ == "__main__":` block; without '
+            f"one the daemon reports the application as finished, successfully, "
+            f"seconds after starting it",
+        ]
+    if completed.returncode != EX_CONFIG:
+        return [
+            f"`python -m {module}` exited {completed.returncode} rather than "
+            f"refusing an empty configuration with {EX_CONFIG}: "
+            f"{_tail(completed.stderr)}",
+        ]
+    if not completed.stderr.strip():
+        return [
+            f"`python -m {module}` exited {EX_CONFIG} without saying why, so "
+            f"whatever an operator saw would not tell them what to configure",
+        ]
+    return []
+
+
+def _tail(output: str, limit: int = 2000) -> str:
+    """Keep the end of a captured stream, which is where the reason is.
+
+    Args:
+        output: What the process wrote.
+        limit: How many characters to keep.
+
+    Returns:
+        The tail of it, or a note that there was nothing.
+    """
+    stripped = output.strip()
+    if not stripped:
+        return "(it said nothing)"
+    return stripped[-limit:]
+
+
+def check_launch(path: Path, module: str = ENTRY_POINT_MODULE) -> list[str]:
+    """Run the wheel's entry module the way the daemon runs it.
+
+    The wheel is extracted rather than installed, and executed in a subprocess
+    rather than imported, so this process never loads the artifact it is
+    judging. Nothing is written outside a temporary directory that is removed
+    afterwards — every member is checked against that before a byte is written,
+    which `_member_problems` explains — and nothing reaches the network.
+
+    Args:
+        path: The built wheel.
+        module: The module the daemon would launch. Defaults to the one the
+            entry point names; a parameter so the tests can point it elsewhere.
+
+    Returns:
+        One line per problem, or an empty list when the launch works.
+    """
+    with tempfile.TemporaryDirectory(prefix="satellite-wheel-") as scratch:
+        root = Path(scratch)
+        wheel_root = root / "wheel"
+        with zipfile.ZipFile(path) as archive:
+            # Nothing is written until every member has been judged — see
+            # `_member_problems` for why a relocated member is a hazard to this
+            # check specifically, and why the answer is to refuse the wheel
+            # rather than to skip the member.
+            problems = _member_problems(archive.namelist())
+            if problems:
+                return problems
+            # Then the whole of it, into a temporary directory removed on the
+            # way out. Extracting a subset would be extracting what the check
+            # expects rather than what the wheel contains, and the module's
+            # imports need its siblings anyway.
+            archive.extractall(wheel_root)
+        stub_root = _write_sdk_stub(root / "sdk")
+        state_dir = root / "state"
+        state_dir.mkdir()
+        environment = _launch_environment(
+            stub_root=stub_root,
+            wheel_root=wheel_root,
+            state_dir=state_dir,
+        )
+
+        try:
+            probe = _python(["-c", _RESOLUTION_PROBE, module], environment)
+        except subprocess.TimeoutExpired:
+            return [f"resolving {module} from the wheel did not finish"]
+        problems = _resolution_problems(module, wheel_root, probe)
+        if problems:
+            return problems
+
+        try:
+            launched = _python(["-m", module], environment)
+        except subprocess.TimeoutExpired:
+            return [
+                f"`python -m {module}` did not finish within "
+                f"{LAUNCH_TIMEOUT_SECONDS:.0f} seconds, so the daemon would "
+                f"start an application that neither runs nor refuses",
+            ]
+        return _execution_problems(module, launched)
+
+
+def _write_sdk_stub(root: Path) -> Path:
+    """Lay out the stand-in SDK the entry module imports.
+
+    Args:
+        root: Where to put it.
+
+    Returns:
+        The directory to put on the path, which is `root` itself.
+    """
+    apps = root / "reachy_mini" / "apps"
+    apps.mkdir(parents=True)
+    (root / "reachy_mini" / "__init__.py").write_text("", encoding="utf-8")
+    (apps / "__init__.py").write_text("", encoding="utf-8")
+    (apps / "app.py").write_text(_SDK_STUB, encoding="utf-8")
+    return root
+
+
 def check(wheel: zipfile.ZipFile) -> list[str]:
     """Report every way this wheel is not the artifact it claims to be.
 
@@ -278,8 +793,27 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"{path} is not a file\n")
         return 2
 
-    with zipfile.ZipFile(path) as wheel:
-        problems = check(wheel)
+    # An unreadable archive is a finding about the wheel, not an accident of
+    # the gate. This is the same defect `_probe_problems` exists for — a
+    # verifier that answers a bad artifact with a traceback makes whoever is
+    # holding a release read its source — and it is reachable the moment
+    # somebody points this at a release artifact that arrived truncated, which
+    # is a thing the runbooks tell people to do.
+    try:
+        with zipfile.ZipFile(path) as wheel:
+            problems = check(wheel)
+    except zipfile.BadZipFile as error:
+        sys.stderr.write(
+            f"satellite wheel: {path.name} is not a readable zip archive, so "
+            f"nothing about it can be verified: {error}\n",
+        )
+        return 1
+
+    # Only when the declaration is right. Launching the module the entry point
+    # names is meaningless while the entry point itself is wrong, and the
+    # findings above are the ones that say what to fix.
+    if not problems:
+        problems = check_launch(path)
 
     for problem in problems:
         sys.stderr.write(f"satellite wheel: {problem}\n")
@@ -287,7 +821,9 @@ def main(argv: list[str]) -> int:
         return 1
     print(
         f"satellite wheel: {path.name} carries {len(ASSETS)} registered assets, "
-        f"their licence texts, and the {ENTRY_POINT_GROUP} entry point",
+        f"their licence texts, and the {ENTRY_POINT_GROUP} entry point, whose "
+        f"module {ENTRY_POINT_MODULE} starts and refuses an empty configuration "
+        f"when run the way the daemon runs it",
     )
     return 0
 

@@ -1,12 +1,13 @@
 """The wheel guard, exercised against every way it is meant to fail.
 
-A wheel that builds is not a wheel that works, and both ways this one can be
-wrong are invisible to a successful build: a missing `reachy_mini_apps` entry
+A wheel that builds is not a wheel that works, and every way this one can be
+wrong is invisible to a successful build: a missing `reachy_mini_apps` entry
 point produces a wheel that installs perfectly and never appears in the daemon's
-application list, and an asset shipping without its registry entry ships
-somebody else's file under terms nobody agreed to. A guard nobody has watched
-fail is a guard that does not exist, so each of those is provoked deliberately
-below.
+application list, an entry point whose *module* has no execution path produces
+one the daemon finds, launches and reports as finished within seconds, and an
+asset shipping without its registry entry ships somebody else's file under terms
+nobody agreed to. A guard nobody has watched fail is a guard that does not
+exist, so each of those is provoked deliberately below.
 
 Every wheel here is assembled in memory, so none has to have been built first.
 Whether a test reads disk turns on **which fixture it uses**, and the two are
@@ -17,6 +18,7 @@ kept apart on purpose:
 | `TestACorrectWheelPasses` | `_wheel` | yes — `@pytest.mark.filesystem` |
 | `TestTheAssets` | `_wheel` | yes — `@pytest.mark.filesystem` |
 | `TestTheEntryPoint` | `_metadata_only_wheel` | no |
+| `TestTheLaunch` | `fs`, where a path is resolved | no — see its own docstring |
 | `TestTheCommandLine` | neither | no — see its own docstring |
 
 `_wheel` reads the committed assets through `_preimage`, and it has to: the
@@ -37,13 +39,18 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import subprocess
 import zipfile
+from pathlib import Path
 
 import pytest
 import verify_satellite_wheel
 from verify_satellite_wheel import (
     ENTRY_POINT_GROUP,
+    ENTRY_POINT_MODULE,
     ENTRY_POINT_TARGET,
+    EX_CONFIG,
     REQUIRED_TEXTS,
     check,
 )
@@ -234,6 +241,22 @@ class TestTheCommandLine:
     def test_a_path_that_is_not_a_file_is_reported(self) -> None:
         """Rather than a traceback out of the zip reader."""
         assert verify_satellite_wheel.main(["/nowhere/reachy.whl"]) == 2
+
+    @pytest.mark.usefixtures("fs")
+    def test_a_file_that_is_not_an_archive_is_reported(self) -> None:
+        """A truncated download is a finding, not a `BadZipFile` traceback.
+
+        The runbooks tell people to fetch a wheel from a release and verify it,
+        so this is reachable by following the documentation. It is the same
+        defect `TestTheLaunch` covers for the probe: a gate that answers a bad
+        artifact with a stack trace tells whoever is holding a release to read
+        its source.
+        """
+        path = Path("/reachy-wheel-tests/truncated.whl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"PK\x03\x04 and then nothing")
+
+        assert verify_satellite_wheel.main([str(path)]) == 1
 
 
 class TestTheEntryPoint:
@@ -488,6 +511,411 @@ class TestTheEntryPoint:
         reported = next(p for p in check(wheel) if "one answer" in p)
 
         assert reported.index(_METADATA) < reported.index(f"{_PACKAGE}-0.2.0")
+
+
+class TestTheLaunch:
+    """REQ-041's other half: the daemon has to be able to *run* what it found.
+
+    The entry point resolving is not the daemon starting the application. The
+    daemon takes the module half of the entry point and launches
+    `python -u -m <module>`, so a module with no `if __name__ == "__main__":`
+    block imports, does nothing and exits 0 — and the daemon reports the
+    application as finished, successfully, with no output at all. That is a
+    wheel this gate has to refuse, and every case below is one way of telling
+    that outcome apart from a working one.
+
+    `check_launch` itself extracts a wheel and starts two subprocesses, which a
+    unit test must not do. What it decides on the strength of, though, is two
+    pure functions over a finished process, and those are what is exercised
+    here — with results handed to them directly, so the whole class performs no
+    input or output. `just wheel-verify` runs the subprocess half against the
+    real built wheel, which is where it belongs.
+
+    The tests that compare a resolved path take `fs`, and only those. Deciding
+    whether two paths name one file goes through `Path.resolve`, which reads
+    the real filesystem to follow symbolic links; on `pyfakefs` it asks an
+    in-memory one instead, so those tests perform no input either. The rest
+    hand the verdict function a finished process and touch no path at all.
+    """
+
+    def test_exiting_zero_having_done_nothing_is_the_finding(self) -> None:
+        """The defect itself: a module the daemon can find and cannot run."""
+        problems = verify_satellite_wheel._execution_problems(
+            ENTRY_POINT_MODULE,
+            _finished(returncode=0),
+        )
+
+        assert len(problems) == 1
+        assert '`if __name__ == "__main__":` block' in problems[0]
+
+    def test_refusing_an_empty_configuration_is_a_pass(self) -> None:
+        """It is the evidence, not a disappointment.
+
+        Reaching that refusal means the guard ran, called `main`, and got as
+        far as reading a configuration — none of which needs a robot.
+        """
+        problems = verify_satellite_wheel._execution_problems(
+            ENTRY_POINT_MODULE,
+            _finished(returncode=EX_CONFIG, stderr="DEVICE_NAME is not set\n"),
+        )
+
+        assert problems == []
+
+    def test_refusing_without_saying_why_is_reported(self) -> None:
+        """An operator reading the daemon's log has to be told what to set."""
+        problems = verify_satellite_wheel._execution_problems(
+            ENTRY_POINT_MODULE,
+            _finished(returncode=EX_CONFIG),
+        )
+
+        assert any("without saying why" in problem for problem in problems)
+
+    def test_any_other_status_is_reported_with_what_it_said(self) -> None:
+        """A wheel that cannot import exits non-zero too.
+
+        Accepting "well, it exited non-zero" would pass one, which is why the
+        expected status is the specific one and not merely a truthy value.
+        """
+        problems = verify_satellite_wheel._execution_problems(
+            ENTRY_POINT_MODULE,
+            _finished(returncode=1, stderr="ModuleNotFoundError: no numpy\n"),
+        )
+
+        assert any("ModuleNotFoundError" in problem for problem in problems)
+
+    def test_a_launch_that_said_nothing_at_all_is_still_legible(self) -> None:
+        """`(it said nothing)` rather than a finding trailing off into space."""
+        problems = verify_satellite_wheel._execution_problems(
+            ENTRY_POINT_MODULE,
+            _finished(returncode=1),
+        )
+
+        assert any("(it said nothing)" in problem for problem in problems)
+
+    @pytest.mark.usefixtures("fs")
+    def test_the_module_that_runs_has_to_be_the_wheel_s_own(self) -> None:
+        """Otherwise the launch below is a check of this checkout.
+
+        Every member here is installed editable, so an interpreter can reach
+        the source tree as well as the extraction directory — and a launch that
+        resolved to the source would pass on a wheel built before the fix.
+        """
+        problems = verify_satellite_wheel._resolution_problems(
+            ENTRY_POINT_MODULE,
+            Path("/extracted"),
+            _finished(
+                returncode=0,
+                stdout=_probe(origin="/checkout/src/daemon_app.py"),
+            ),
+        )
+
+        assert any("rather than the wheel's own" in problem for problem in problems)
+
+    @pytest.mark.usefixtures("fs")
+    def test_the_wheel_s_own_copy_resolves_cleanly(self) -> None:
+        """The arrangement `just wheels` actually produces."""
+        origin = "/extracted/reachy_mini_ha_satellite/daemon_app.py"
+
+        problems = verify_satellite_wheel._resolution_problems(
+            ENTRY_POINT_MODULE,
+            Path("/extracted"),
+            _finished(returncode=0, stdout=_probe(origin=origin)),
+        )
+
+        assert problems == []
+
+    @pytest.mark.usefixtures("fs")
+    def test_a_package_would_run_its_main_submodule_instead(self) -> None:
+        """Which is a different file from the one the entry point names.
+
+        This package has a `__main__.py`, so an entry point naming the package
+        rather than the module would run that file — and pass a launch check
+        that only asked whether *something* ran, while the module the daemon's
+        own lookup returns still had no execution path.
+        """
+        problems = verify_satellite_wheel._resolution_problems(
+            "reachy_mini_ha_satellite",
+            Path("/extracted"),
+            _finished(
+                returncode=0,
+                stdout=_probe(
+                    origin="/extracted/reachy_mini_ha_satellite/__init__.py",
+                    package=True,
+                ),
+            ),
+        )
+
+        assert any("__main__ submodule" in problem for problem in problems)
+
+    def test_a_module_the_wheel_does_not_carry_is_reported(self) -> None:
+        """The entry point names something that is not in the distribution."""
+        problems = verify_satellite_wheel._resolution_problems(
+            ENTRY_POINT_MODULE,
+            Path("/extracted"),
+            _finished(returncode=0, stdout=_probe(origin=None)),
+        )
+
+        assert any("is not in the wheel" in problem for problem in problems)
+
+    def test_a_probe_that_failed_is_reported_rather_than_read(self) -> None:
+        """Reading its empty output would report a missing module instead."""
+        problems = verify_satellite_wheel._resolution_problems(
+            ENTRY_POINT_MODULE,
+            Path("/extracted"),
+            _finished(returncode=1, stderr="the interpreter refused\n"),
+        )
+
+        assert any("the interpreter refused" in problem for problem in problems)
+
+    def test_a_probe_that_said_something_unreadable_is_reported(self) -> None:
+        """Rather than a `JSONDecodeError` out of the middle of the gate."""
+        problems = verify_satellite_wheel._resolution_problems(
+            ENTRY_POINT_MODULE,
+            Path("/extracted"),
+            _finished(returncode=0, stdout="not json\n"),
+        )
+
+        assert any("nothing usable" in problem for problem in problems)
+
+    @pytest.mark.parametrize(
+        ("printed", "expected"),
+        [
+            pytest.param("[]", "JSON list rather than an object", id="not-an-object"),
+            pytest.param(
+                '{"package": false}',
+                "an object with no origin",
+                id="origin-missing",
+            ),
+            pytest.param(
+                '{"origin": "/x/y.py"}',
+                "an object with no package",
+                id="package-missing",
+            ),
+            pytest.param(
+                "{}",
+                "an object with no origin and no package",
+                id="both-missing",
+            ),
+            pytest.param(
+                '{"origin": 7, "package": false}',
+                "origin of JSON int rather than a path or null",
+                id="origin-wrong-type",
+            ),
+            pytest.param(
+                '{"origin": "/x/y.py", "package": "yes"}',
+                "package flag of JSON str rather than a boolean",
+                id="package-wrong-type",
+            ),
+        ],
+    )
+    def test_a_probe_of_the_wrong_shape_is_reported_not_raised(
+        self,
+        printed: str,
+        expected: str,
+    ) -> None:
+        """A `KeyError` here would be this PR's own defect one level up.
+
+        The whole change exists because a failure surfaced as silence instead
+        of a diagnosis. A verifier that answers a malformed probe with a
+        traceback makes whoever is holding a release read its source to find
+        out what went wrong, which is the same failure wearing different
+        clothes. Every shape is a finding, and every finding says what was
+        received.
+
+        Args:
+            printed: What the probe printed.
+            expected: The phrase the finding has to carry.
+        """
+        problems = verify_satellite_wheel._resolution_problems(
+            ENTRY_POINT_MODULE,
+            Path("/extracted"),
+            _finished(returncode=0, stdout=printed),
+        )
+
+        assert len(problems) == 1
+        assert expected in problems[0]
+        assert printed.strip() in problems[0]
+
+
+class TestTheMembersOfTheArchive:
+    """A wheel may only put files where the wheel says they go.
+
+    `extractall` on CPython does not write outside the directory it is given —
+    it strips leading separators, drive letters and `..` components — so a
+    member naming `../../x` is silently **relocated** rather than escaping.
+    That is the hazard, not an escape: this check resolves and then *runs* a
+    file out of the extraction directory, so a member that flattens onto
+    `reachy_mini_ha_satellite/daemon_app.py` would let the archive choose what
+    the launch check executes. The whole wheel is refused instead, before a
+    byte is written.
+
+    Nothing here touches a real path. Most of these hand `_member_problems` a
+    list of names and need no archive at all; the one that has to prove the
+    *ordering* builds a real archive and calls `check_launch`, and it does that
+    on `pyfakefs`, so the bytes it writes go to an in-memory filesystem.
+    """
+
+    @pytest.mark.parametrize(
+        "member",
+        [
+            pytest.param("../escaped.py", id="parent"),
+            pytest.param("a/../../escaped.py", id="parent-in-the-middle"),
+            pytest.param(
+                f"../../{_PACKAGE}/daemon_app.py",
+                id="flattens-onto-the-entry-module",
+            ),
+            pytest.param("/absolute.py", id="absolute"),
+            pytest.param("C:/drive.py", id="drive"),
+            pytest.param("//host/share/unc.py", id="unc"),
+            pytest.param("back\\slash.py", id="backslash"),
+        ],
+    )
+    def test_a_member_that_is_not_a_relative_path_inside_is_refused(
+        self,
+        member: str,
+    ) -> None:
+        """And the refusal names it, so the wheel can be looked at.
+
+        Args:
+            member: The member name to smuggle in.
+        """
+        problems = verify_satellite_wheel._member_problems(
+            [f"{_PACKAGE}/__init__.py", member],
+        )
+
+        assert len(problems) == 1
+        assert member in problems[0]
+
+    def test_an_ordinary_wheel_s_members_are_accepted(self) -> None:
+        """Including a dotted name, which is not a parent reference."""
+        problems = verify_satellite_wheel._member_problems(
+            [
+                f"{_PACKAGE}/__init__.py",
+                f"{_PACKAGE}/assets/sounds/wake.flac",
+                f"{_PACKAGE}/..hidden.py",
+                f"{_METADATA}/entry_points.txt",
+            ],
+        )
+
+        assert problems == []
+
+    def test_a_refusal_counts_the_ones_it_does_not_name(self) -> None:
+        """A wheel whose every member is wrong still produces a readable line."""
+        problems = verify_satellite_wheel._member_problems(
+            [f"../escape-{index}.py" for index in range(9)],
+        )
+
+        assert "9 member(s)" in problems[0]
+        assert "and 4 more" in problems[0]
+
+    @pytest.mark.usefixtures("fs")
+    def test_nothing_is_extracted_and_nothing_is_run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The order is the point: judged first, written second.
+
+        A check that extracted and then complained would already have put the
+        file wherever the member said, which is the thing being prevented.
+
+        **Both halves are observed at the call site rather than inferred
+        afterwards**, and the second half is why: `check_launch` extracts into
+        a `TemporaryDirectory` whose name is random, and this archive's
+        smuggled member would be relocated within it — so no path this test
+        could name is one extraction would create, and looking for the absence
+        of a file would pass whether or not `extractall` ran. Replacing both
+        `extractall` and the interpreter with something that raises on the
+        spot makes reaching either a failure rather than a slow test, and
+        makes the two failure modes read alike.
+
+        Args:
+            monkeypatch: Used to make extracting, and starting a subprocess,
+                errors.
+        """
+
+        def _refuse_to_extract(
+            self: zipfile.ZipFile,
+            *args: object,
+            **kwargs: object,
+        ) -> None:
+            """Fail rather than write anything.
+
+            Args:
+                self: The archive; unused.
+                args: Unused.
+                kwargs: Unused.
+
+            Raises:
+                AssertionError: Always.
+            """
+            del self, args, kwargs
+            message = "check_launch got as far as extracting the archive"
+            raise AssertionError(message)
+
+        def _refuse_to_run(arguments: list[str], environment: dict[str, str]) -> None:
+            """Fail rather than run anything.
+
+            Args:
+                arguments: Unused.
+                environment: Unused.
+
+            Raises:
+                AssertionError: Always.
+            """
+            del arguments, environment
+            message = "check_launch got as far as starting a subprocess"
+            raise AssertionError(message)
+
+        monkeypatch.setattr(zipfile.ZipFile, "extractall", _refuse_to_extract)
+        monkeypatch.setattr(verify_satellite_wheel, "_python", _refuse_to_run)
+        wheel = Path("/reachy-wheel-tests/smuggler.whl")
+        wheel.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(wheel, "w") as writing:
+            writing.writestr(f"{_PACKAGE}/__init__.py", b"")
+            writing.writestr(f"../../{_PACKAGE}/daemon_app.py", b"# not ours")
+
+        problems = verify_satellite_wheel.check_launch(wheel)
+
+        assert len(problems) == 1
+        assert "relative location inside the archive" in problems[0]
+
+
+def _finished(
+    *,
+    returncode: int,
+    stdout: str = "",
+    stderr: str = "",
+) -> subprocess.CompletedProcess[str]:
+    """Stand in for a process that has already run.
+
+    Args:
+        returncode: The status it exited with.
+        stdout: What it printed.
+        stderr: What it complained about.
+
+    Returns:
+        The finished process, in the shape `subprocess.run` returns one.
+    """
+    return subprocess.CompletedProcess(
+        args=["python"],
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def _probe(*, origin: str | None, package: bool = False) -> str:
+    """Write what the resolution probe prints.
+
+    Args:
+        origin: The file `python -m` would run, or `None` for a name that
+            resolves to nothing.
+        package: Whether that name is a package.
+
+    Returns:
+        The probe's output.
+    """
+    return json.dumps({"origin": origin, "package": package})
 
 
 def _metadata_only_wheel(members: dict[str, bytes]) -> zipfile.ZipFile:

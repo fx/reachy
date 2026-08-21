@@ -353,14 +353,20 @@ tool, which is what proves that is enough. **Executed:**
 ```
 wheel-verify: reachyctl 0.1.0
 wheel-verify: doctor reported 9 checks, all skipped
-satellite wheel: reachy_mini_ha_satellite-0.1.0-py3-none-any.whl carries 13 registered assets, their licence texts, and the reachy_mini_apps entry point
+satellite wheel: reachy_mini_ha_satellite-0.1.0-py3-none-any.whl carries 13 registered assets, their licence texts, and the reachy_mini_apps entry point, whose module reachy_mini_ha_satellite.daemon_app starts and refuses an empty configuration when run the way the daemon runs it
 ```
 
-The third line is the question specific to the satellite wheel: a missing
-`reachy_mini_apps` entry point installs perfectly and never appears in the
-daemon's application list, and an asset shipping without its registry entry ships
-somebody else's file under terms nobody agreed to. Neither is visible to a build
-that merely succeeded.
+The third line is the question specific to the satellite wheel, and it has three
+parts. A missing `reachy_mini_apps` entry point installs perfectly and never
+appears in the daemon's application list. An asset shipping without its registry
+entry ships somebody else's file under terms nobody agreed to. And an entry point
+whose **module** has no execution path produces an application the daemon finds,
+launches and reports as finished within seconds of starting, with no output at
+all — because the daemon runs the module rather than instantiating the class, as
+[deploying the satellite](../ops/satellite-deployment.md#how-the-daemon-starts-it)
+describes. None of the three is visible to a build that merely succeeded, so the
+last clause of that line is the wheel's entry module having been executed the way
+the daemon executes it.
 
 ### Preview, then deploy
 

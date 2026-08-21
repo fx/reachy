@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import runpy
 import sys
 import threading
 from types import ModuleType
@@ -27,6 +28,7 @@ from typing import TYPE_CHECKING
 import pytest
 from satellite_support import FakeRobot
 
+from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.config import (
     ConfigurationError,
     OverrideStore,
@@ -459,3 +461,124 @@ class TestTheModuleEntryPoint:
         module = importlib.import_module("reachy_mini_ha_satellite.__main__")
 
         assert module.main is daemon_app.main
+
+    def test_running_the_package_reaches_that_function(
+        self,
+        daemon_app: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`python -m reachy_mini_ha_satellite`, which the runbooks document.
+
+        The test above asserts the two names refer to one function, which is
+        not the same as the command working: it never executes the guard that
+        calls it. This does, by the machinery `python -m` uses, so a documented
+        way in cannot quietly stop being one.
+
+        Args:
+            daemon_app: The module under test, imported against the stubbed
+                SDK so that running the package finds the stub.
+            monkeypatch: Used to put an argument on the command line.
+        """
+        del daemon_app
+        monkeypatch.setattr(sys, "argv", ["reachy_mini_ha_satellite", "--verbose"])
+        monkeypatch.delitem(
+            sys.modules,
+            "reachy_mini_ha_satellite.__main__",
+            raising=False,
+        )
+
+        with pytest.raises(SystemExit) as raised:
+            runpy.run_module("reachy_mini_ha_satellite", run_name="__main__")
+
+        assert raised.value.code == 2
+
+
+class TestBeingExecutedTheWayTheDaemonExecutesIt:
+    """The launch that actually happens on the robot, and it is not an import.
+
+    The Reachy Mini daemon does not resolve the `reachy_mini_apps` entry point
+    to its object and instantiate it. It takes the **module** half — everything
+    left of the colon — and starts the application as a subprocess,
+    `python -u -m reachy_mini_ha_satellite.daemon_app`. So the module the entry
+    point names has to be a program as well as an import target, and
+    `__main__.py` does not make it one: that file makes the *package* runnable,
+    which is a different name.
+
+    Without the guard at the foot of `daemon_app`, that command imports the
+    module, finds nothing to do and exits 0 — which the daemon reports as an
+    application that finished successfully, seconds after starting, with no
+    output at all. That is what happened on the robot, and these are the tests
+    that go red if it happens again.
+
+    `runpy.run_module` with `run_name="__main__"` is that command's own
+    machinery — it is what `python -m` runs — so this exercises the execution
+    path rather than asserting that some text appears in the file. It runs
+    in-process against the stubbed SDK, so no subprocess is started and the
+    tests stay ordinary unit tests.
+    """
+
+    def test_the_module_runs_rather_than_importing_and_exiting(
+        self,
+        daemon_app: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The regression, stated as the daemon experiences it.
+
+        Exiting 2 is `main` refusing an argument, so this asserts two things at
+        once: the module has an execution path, and that path hands it
+        `sys.argv[1:]` rather than inventing its own arguments. A module with
+        no execution path exits nothing at all — `run_module` returns a
+        namespace and `pytest.raises` fails — which is precisely the silent
+        exit 0 the daemon saw.
+
+        Args:
+            daemon_app: The module under test, imported against the stubbed
+                SDK so that running it again finds the stub in `sys.modules`.
+            monkeypatch: Used to put an argument on the command line.
+        """
+        del daemon_app
+        monkeypatch.setattr(sys, "argv", [_UNDER_TEST, "--verbose"])
+        monkeypatch.delitem(sys.modules, _UNDER_TEST, raising=False)
+
+        with pytest.raises(SystemExit) as raised:
+            runpy.run_module(_UNDER_TEST, run_name="__main__")
+
+        assert raised.value.code == 2
+
+    def test_the_status_it_exits_with_is_the_one_startup_returned(
+        self,
+        daemon_app: ModuleType,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Which is what makes the daemon's report of the run mean something.
+
+        The composition root is replaced on the module `daemon_app` imports
+        `run` from, not on `daemon_app` itself: `run_module` executes a fresh
+        copy of the module, and that copy binds whatever
+        `reachy_mini_ha_satellite.main.run` is at the moment it imports it.
+
+        Args:
+            daemon_app: The module under test, imported against the stubbed
+                SDK.
+            monkeypatch: Used to replace the composition root, empty the
+                command line and drop the imported copy of the module.
+        """
+        del daemon_app
+
+        async def _run(handle: object, stop: asyncio.Event) -> None:
+            """Return immediately, as a stop request from the page makes it.
+
+            Args:
+                handle: Unused.
+                stop: Unused.
+            """
+            del handle, stop
+
+        monkeypatch.setattr(satellite_main, "run", _run)
+        monkeypatch.setattr(sys, "argv", [_UNDER_TEST])
+        monkeypatch.delitem(sys.modules, _UNDER_TEST, raising=False)
+
+        with pytest.raises(SystemExit) as raised:
+            runpy.run_module(_UNDER_TEST, run_name="__main__")
+
+        assert raised.value.code == 0

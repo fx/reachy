@@ -266,6 +266,13 @@ page offers a **Stop** and says where to start it again, which is the robot
 dashboard's application list — also a web interface, so no shell is involved
 either way.
 
+**`done` with a null error is not evidence of a clean exit.** The daemon reports
+an application that refused to start, or raised, exactly as it reports one that
+ran and finished — the exception does not reach its API. So `done` seconds after
+a deployment, with no output, is a reading to investigate rather than a result.
+See [How the daemon starts it](satellite-deployment.md#how-the-daemon-starts-it)
+for what produces it and what to check.
+
 ---
 
 ## After: prove the chain again
