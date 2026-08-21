@@ -335,14 +335,28 @@ async def _exchange(
     # the *loop's* last, and a wait it merely stops waiting on has to survive
     # to be awaited again.
     pending: asyncio.Task[FrameResult] | None = None
+    # What stopped the frames, if something did. Held rather than raised where
+    # it is found: the results already collected are worth reporting, and a
+    # bare `producer.result()` would re-raise into the middle of this loop and
+    # throw them away along with the reason.
+    broke: BaseException | None = None
     try:
         while True:
-            if producer.done():
+            if producer.done() and broke is None:
                 # Now that the frames have run out, what the groundstation owes
                 # is one answer per capability per frame that actually went out
                 # — which is fewer than was asked for when the source was
                 # shorter than the count, and when the link dropped frames.
-                expected = producer.result() * len(agreed)
+                broke = producer.exception()
+                sent = (
+                    # The producer's own count is gone with the exception that
+                    # replaced it, and this is the same number: the client
+                    # counts a frame submitted exactly when the producer does.
+                    client.stats.frames_submitted
+                    if broke is not None
+                    else producer.result()
+                )
+                expected = sent * len(agreed)
             if len(collected) >= expected:
                 break
             if pending is None:
@@ -408,9 +422,20 @@ async def _exchange(
             with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
                 await pending
         producer.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        # Every exception, not only the cancellation. A producer that failed is
+        # not cancelled by `cancel`, so awaiting it here re-raises what it
+        # failed with — out of a `finally`, where it would replace whatever
+        # this function was in the middle of returning. What it failed with is
+        # already in `broke` and is reported below.
+        with contextlib.suppress(Exception, asyncio.CancelledError):
             await producer
         await results.aclose()
+
+    if broke is not None:
+        # Raised after the loop rather than inside it, so that the frames which
+        # did go out have been counted and the reason is the one the operator
+        # can act on: an unreadable recording, not the shortfall it caused.
+        raise broke
 
     complete = len(collected) >= expected and expected > 0
     return ProbeOutcome(

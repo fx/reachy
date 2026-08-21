@@ -462,3 +462,35 @@ def test_a_groundstation_that_accepts_and_then_says_nothing_is_still_bounded(
     assert "did not finish opening a session" in result.stdout
     # The bound was honoured rather than merely eventually reached.
     assert elapsed < 5.0
+
+
+@pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
+def test_an_empty_recording_is_named_rather_than_raised_through_the_command(
+    tmp_path: Path,
+) -> None:
+    """A truncated file in the directory is an accident, not a protocol failure.
+
+    The framing is right that an empty payload is not a frame, but it raises
+    three layers from anything an operator can act on — and out of the frame
+    producer, which is a task, so it arrived as a traceback with no exit status
+    of this tool's own. Both halves are the point: the message names the file,
+    and the status is the one that means the command could not start with what
+    it was given rather than the one that means the robot is unwell.
+
+    Args:
+        tmp_path: Where the recorded frames are written.
+    """
+    write_frames(tmp_path, FRAMES)
+    # Truncated part way through the directory rather than at the end, so the
+    # run has already sent frames when it meets it.
+    (tmp_path / "frame-002.jpg").write_bytes(b"")
+
+    with serving(StaticRegistry(CountingFace())) as url:
+        result = runner.invoke(app, probe_arguments(url, tmp_path), env=CONFIGURED)
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    # It exited rather than crashed: `SystemExit` is what a command that chose
+    # its own status raises, and anything else here is a traceback.
+    assert isinstance(result.exception, SystemExit)
+    assert "frame-002.jpg is empty" in result.stdout

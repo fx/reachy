@@ -465,3 +465,41 @@ def test_a_credential_containing_a_bracket_is_removed_from_the_rich_rendering() 
     assert code is ExitCode.FAILURE
     assert bracketed not in streams.result
     assert streams.result.count("<redacted>") == 3
+
+
+#:= docs/specs/reachyctl/index.md#req-058-output-is-machine-readable-on-request
+#:% Every command that reports results MUST offer a structured output format
+#:% suitable for consumption by another program.
+def test_a_field_carrying_a_tab_or_a_newline_does_not_move_the_columns() -> None:
+    r"""The plain rendering is separated by those two characters, so it owns them.
+
+    A summary carries exception text and a field carries a path or a URL, so
+    both are reachable rather than theoretical. Unescaped, a tab shifts every
+    column after it and a newline turns one row into two — and a script cutting
+    on the tab reads a different field than it asked for, with nothing to tell
+    it that it did. Every line has to hold exactly as many fields as there are
+    columns, whatever the values contain.
+    """
+    reporter, streams = reporter_for()
+
+    reporter.emit(
+        Report(
+            command="probe",
+            ok=True,
+            summary="failed:\tsee\nbelow",
+            data={"url": "ws://198.51.100.10/a\tb"},
+            columns=("first", "second"),
+            rows=(
+                {"first": "a\tb", "second": "plain"},
+                {"first": "one\ntwo", "second": "plain"},
+            ),
+        ),
+    )
+
+    lines = streams.result.splitlines()
+    # Header, two rows, one data line, one status line — and not one more.
+    assert len(lines) == 5
+    for line in lines[:3]:
+        assert len(line.split("\t")) == 2
+    assert "\\t" in lines[1]
+    assert "\\n" in lines[2]

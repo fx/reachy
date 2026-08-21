@@ -123,7 +123,7 @@ class RecordedFrames:
 
         Raises:
             ConfigurationError: If a frame that was there when the directory was
-                listed cannot be read now.
+                listed cannot be read now, or if one of them holds nothing.
         """
         for path in self._paths:
             try:
@@ -132,11 +132,21 @@ class RecordedFrames:
                 # stops the client observing a result that has already arrived
                 # — and the delay lands in the round-trip figure the probe
                 # exists to measure.
-                yield await asyncio.to_thread(path.read_bytes)
+                payload = await asyncio.to_thread(path.read_bytes)
             except OSError as error:
                 reason = error.strerror or type(error).__name__
                 message = f"the recorded frame {path} could not be read: {reason}"
                 raise ConfigurationError(message) from error
+            if not payload:
+                # Refused here rather than left to the framing, which is right
+                # that an empty payload is not a frame but is three layers away
+                # from the thing an operator can fix. An empty file in a
+                # directory of recordings is an ordinary accident — an
+                # interrupted copy, a truncated download — and it deserves the
+                # name of the file rather than a sentence about the protocol.
+                message = f"the recorded frame {path} is empty"
+                raise ConfigurationError(message)
+            yield payload
 
     def close(self) -> None:
         """Release whatever the source holds, which is nothing."""

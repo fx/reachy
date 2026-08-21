@@ -274,14 +274,16 @@ class Reporter:
             report: What the command produced.
         """
         if report.columns:
-            self._write(self._out, _SEPARATOR.join(report.columns))
+            self._write(
+                self._out, _SEPARATOR.join(_plain(name) for name in report.columns)
+            )
             for row in report.rows:
                 self._write(self._out, self._plain_row(report.columns, row))
         for name, value in report.data.items():
-            self._write(self._out, f"{name}{_SEPARATOR}{_render(value)}")
+            self._write(self._out, f"{_plain(name)}{_SEPARATOR}{_plain(value)}")
         status = "ok" if report.ok else "failed"
-        summary = f"{_SEPARATOR}{report.summary}" if report.summary else ""
-        self._write(self._out, f"{report.command}{_SEPARATOR}{status}{summary}")
+        summary = f"{_SEPARATOR}{_plain(report.summary)}" if report.summary else ""
+        self._write(self._out, f"{_plain(report.command)}{_SEPARATOR}{status}{summary}")
 
     def _plain_row(self, columns: Sequence[str], row: Mapping[str, object]) -> str:
         """Render one row of the plain table.
@@ -293,7 +295,7 @@ class Reporter:
         Returns:
             The line to write.
         """
-        return _SEPARATOR.join(_render(row.get(name)) for name in columns)
+        return _SEPARATOR.join(_plain(row.get(name)) for name in columns)
 
     def _emit_rich(self, report: Report) -> None:
         """Write the result for a person at a terminal.
@@ -405,6 +407,36 @@ def _markup(text: str) -> str:
         The same text, with its brackets shown rather than read.
     """
     return escape(text)
+
+
+def _plain(value: object) -> str:
+    """Render one field so that it cannot add a column or a row.
+
+    The plain rendering is the one REQ-058 promises a script can read without
+    screen-scraping, and it separates fields with a tab and rows with a
+    newline. A value carrying either takes that promise away: a summary carries
+    exception text and a field carries a path or a URL, so a tab shifts every
+    column after it and a newline turns one row into two. A script that cuts on
+    the tab then reads a different field than it asked for and cannot tell.
+
+    Escaping rather than stripping, so nothing is silently lost — and the
+    backslash first, so an escape this function produces is distinguishable
+    from one the value already contained.
+
+    Args:
+        value: The field's value.
+
+    Returns:
+        Its text form, with the separator and any line break shown rather than
+        acted on.
+    """
+    return (
+        _render(value)
+        .replace("\\", "\\\\")
+        .replace(_SEPARATOR, "\\t")
+        .replace("\r", "\\r")
+        .replace("\n", "\\n")
+    )
 
 
 def _render(value: object) -> str:
