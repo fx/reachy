@@ -7,7 +7,7 @@ documentation entry points, so every later change has a place to land and one
 way to be built and tested.
 
 **Spec:** [Architecture](../specs/architecture/)
-**Status:** draft
+**Status:** complete
 **Depends On:** —
 
 ## Motivation
@@ -57,8 +57,9 @@ restated here. What implementing them requires of this change:
 
 - The workspace root declares every member; members depend on one another by
   path, never by version range.
-- `uv.lock` is committed, and CI installs with `--frozen` so a stale lockfile
-  fails rather than being silently re-resolved.
+- `uv.lock` is committed, and CI installs with `--locked` so a stale lockfile
+  fails rather than being silently re-resolved. See the decision below on why
+  that flag and not `--frozen`.
 - `mise.toml` already pins `rust` and `cargo:duvet` from duvet adoption. This
   change adds `python` and `uv` to the same `[tools]` table rather than creating
   a second one.
@@ -102,6 +103,16 @@ lint dialects.
     discoverable only by reading CI.
   - **Alternatives considered**: Documenting raw `uv run` invocations in
     `AGENTS.md`, which drifts from CI the first time either changes.
+- **Decision**: Installs use `uv --locked`, not `uv --frozen`.
+  - **Why**: Only `--locked` produces the failure this change is after.
+    Measured against this workspace: with a dependency added to a member and
+    the lockfile left alone, `uv run --frozen` installs the old resolution and
+    exits 0, while `uv run --locked` exits non-zero with "The lockfile at
+    `uv.lock` needs to be updated". Neither flag re-resolves, so `--frozen`
+    reads as safe and is in fact the one that lets a stale lockfile through.
+  - **Alternatives considered**: `--frozen` plus a separate `uv lock --check`
+    step, which is the same check spelled twice and only in the places someone
+    remembered to add it.
 - **Decision**: `python` and `uv` join the existing `[tools]` table.
   - **Why**: A second `[tools]` header is a TOML duplicate-key error and would
     stop mise loading any tool for the repository.
@@ -116,31 +127,37 @@ lint dialects.
 
 ## Tasks
 
-- [ ] Create the uv workspace root
-  - [ ] Root `pyproject.toml` declaring all six members and shared tool
+- [x] Create the uv workspace root
+  - [x] Root `pyproject.toml` declaring all six members and shared tool
         configuration
-  - [ ] Add `python` and `uv` to the existing `mise.toml` `[tools]` table
-  - [ ] Extend `.gitignore` for Python artifacts and virtual environments
-  - [ ] Generate and commit `uv.lock`
-- [ ] Scaffold the member directories
-  - [ ] `packages/reachy-contracts` with a real module, a real test, and its
+  - [x] Add `python` and `uv` to the existing `mise.toml` `[tools]` table
+  - [x] Extend `.gitignore` for Python artifacts and virtual environments
+  - [x] Generate and commit `uv.lock`
+- [x] Scaffold the member directories
+  - [x] `packages/reachy-contracts` with a real module, a real test, and its
         `pyproject.toml`
-  - [ ] `services/groundstation`, `apps/ha-satellite`, `cli/reachyctl`,
+  - [x] `services/groundstation`, `apps/ha-satellite`, `cli/reachyctl`,
         `bench` — package directory and `pyproject.toml` only
-  - [ ] `provisioning/ansible` directory skeleton
-- [ ] Create the task surface
-  - [ ] `Justfile` with `test`, `lint`, `typecheck`, `check`
-  - [ ] Verify each recipe runs green against the scaffold
-- [ ] Write the agent documentation
-  - [ ] Expand root `AGENTS.md` into the real entry point
-  - [ ] Per-member `AGENTS.md` for each of the six members
-  - [ ] Confirm `CLAUDE.md` still imports `AGENTS.md` and nothing else
+  - [x] `provisioning/ansible` directory skeleton
+- [x] Create the task surface
+  - [x] `Justfile` with `test`, `lint`, `typecheck`, `check`
+  - [x] Verify each recipe runs green against the scaffold
+- [x] Write the agent documentation
+  - [x] Expand root `AGENTS.md` into the real entry point
+  - [x] Per-member `AGENTS.md` for each of the six members
+  - [x] Confirm `CLAUDE.md` still imports `AGENTS.md` and nothing else
 
 ## Open Questions
 
-- [ ] Whether `bench` is a workspace member or a plain directory of scripts — it
-      needs dependencies, which argues for a member, but it publishes nothing.
-      Current lean: a member that is never published.
+- [x] **Resolved: `bench` is a workspace member that is never published.** It
+      needs the shared resolution and it imports the other members, which is
+      what a member is for; the thing it does not do is produce an artifact.
+      Those are separable, so both hold: it is listed in
+      `[tool.uv.workspace] members`, and its `pyproject.toml` carries the
+      `Private :: Do Not Upload` classifier, which makes an accidental publish
+      fail at the upload rather than succeed quietly. A plain directory of
+      scripts was rejected because its dependencies would then resolve outside
+      the single lockfile, which is the skew REQ-001 exists to prevent.
 
 ## References
 

@@ -4,3 +4,37 @@
 # `duvet report --ci` verifies against.
 .duvet/reports/
 .duvet/requirements/
+
+# Python bytecode and build output.
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# Virtual environments. The workspace uses a single .venv at the root, created
+# by `uv sync`; per-member environments are never correct here because the
+# members share one resolution.
+.venv/
+venv/
+
+# Tool caches.
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Coverage output. Diff-scoped gating regenerates these on every run.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Untracked local files that carry environment-specific values. Each one has a
+# tracked `.example` sibling documenting its shape — the examples arrive with
+# the changes that introduce the files (0002 for the environment files, 0010 for
+# the Ansible inventory). Real hostnames, addresses and credentials live only in
+# these ignored copies.
+.env
+.env.*
+!.env.example
+provisioning/ansible/inventory.ini

@@ -41,7 +41,7 @@ changes:
     path: changes/0001-workspace-skeleton.md
     description: uv workspace, pinned toolchain, task surface and agent documentation entry points
     spec: architecture
-    status: draft
+    status: complete
     depends_on: []
   - id: "0002"
     name: ci-and-hygiene-gates
