@@ -254,7 +254,26 @@ async def run_probe(
         open_transport=open_transport,
         staleness_seconds=plan.staleness,
     )
-    async with client:
+    # The bound starts here rather than once a session is up, because opening
+    # one is a thing that hangs. A groundstation which accepts the connection
+    # and then never answers the offer leaves `connect` waiting on a read with
+    # nothing behind it — and that is not an exotic failure, it is what a
+    # wedged service looks like from outside, which is the case an operator
+    # runs `probe` to tell apart from a slow one. Bounding only the exchange
+    # would leave `--timeout` describing a part of the run rather than the run.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + plan.timeout
+    try:
+        await asyncio.wait_for(client.connect(), timeout=plan.timeout)
+    except TimeoutError as error:
+        # The cancellation `wait_for` delivers unwinds through `_establish`,
+        # which closes the connection it had opened on its way out.
+        message = (
+            f"the groundstation at {plan.url} accepted the connection but did "
+            f"not finish opening a session within {plan.timeout}s"
+        )
+        raise UnreachableError(message) from error
+    try:
         agreement = client.agreement
         agreed = (
             ()
@@ -274,7 +293,11 @@ async def run_probe(
                     "offered, so nothing would answer a frame"
                 ),
             )
-        return await _exchange(client, source, plan, reporter, agreed)
+        return await _exchange(client, source, plan, reporter, agreed, deadline)
+    finally:
+        # What `async with client` did before the connect was pulled out of it,
+        # so the session is still said goodbye to on every path out of here.
+        await client.aclose()
 
 
 async def _exchange(
@@ -283,6 +306,7 @@ async def _exchange(
     plan: ProbePlan,
     reporter: Reporter,
     agreed: tuple[str, ...],
+    deadline: float,
 ) -> ProbeOutcome:
     """Send the frames and collect the answers, within the run's bounds.
 
@@ -292,12 +316,15 @@ async def _exchange(
         plan: What the run was asked to do.
         reporter: Where the per-frame detail goes.
         agreed: The capability names both sides settled on.
+        deadline: When the whole run is out of time, on the running loop's
+            clock. Passed in rather than started here, because opening the
+            session has already spent part of `--timeout` and a bound that
+            restarted would describe two runs rather than one.
 
     Returns:
         What the run found.
     """
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + plan.timeout
     collected: list[FrameOutcome] = []
     expected = plan.count * len(agreed)
     producer = asyncio.create_task(_produce(client, source, plan), name="frames")

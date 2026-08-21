@@ -32,6 +32,7 @@ from reachyctl_server import (
     SlowFace,
     StaticRegistry,
     serving,
+    wedged,
     write_frames,
 )
 from typer.testing import CliRunner
@@ -427,3 +428,37 @@ def test_the_frames_running_out_mid_wait_still_bounds_the_run_by_one_window(
     # Comfortably below the capability's own delay, which is what the run would
     # otherwise have waited for, and an order of magnitude below `--timeout`.
     assert elapsed < 1.0
+
+
+@pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
+def test_a_groundstation_that_accepts_and_then_says_nothing_is_still_bounded(
+    tmp_path: Path,
+) -> None:
+    """`--timeout` has to bound opening the session, not just using it.
+
+    A service whose socket still accepts and which then answers nothing is
+    exactly what an operator runs `probe` to tell apart from a slow one, and it
+    is the shape a wedged process presents from outside. With the bound
+    starting only once a session was up, this run never ended: it waited on a
+    read behind a handshake that was never going to complete, and the
+    diagnostic hung rather than diagnosing.
+
+    Args:
+        tmp_path: Where the recorded frames are written.
+    """
+    write_frames(tmp_path, FRAMES)
+
+    with wedged() as url:
+        started = time.monotonic()
+        result = runner.invoke(
+            app,
+            probe_arguments(url, tmp_path, "--timeout", "1"),
+            env=CONFIGURED,
+        )
+        elapsed = time.monotonic() - started
+
+    assert result.exit_code == ExitCode.UNREACHABLE
+    assert "did not finish opening a session" in result.stdout
+    # The bound was honoured rather than merely eventually reached.
+    assert elapsed < 5.0

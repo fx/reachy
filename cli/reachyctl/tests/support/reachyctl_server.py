@@ -26,6 +26,7 @@ import cv2
 import numpy as np
 import structlog
 import uvicorn
+import websockets.asyncio.server
 
 from reachy_contracts import (
     FACE_CAPABILITY,
@@ -297,3 +298,78 @@ def write_frames(directory: Path, count: int) -> None:
     payload = bytes(encoded.tobytes())
     for index in range(count):
         (directory / f"frame-{index:03d}.jpg").write_bytes(payload)
+
+
+@contextlib.contextmanager
+def wedged() -> Iterator[str]:
+    """Run a server that accepts a session and then never answers the offer.
+
+    Not the groundstation. What is being modelled is the thing an operator
+    cannot tell apart from a slow service without a diagnostic: a process whose
+    listening socket still accepts, whose WebSocket handshake still completes,
+    and which then does nothing at all. The real application cannot be made to
+    behave this way without breaking it, and it is the client's bound rather
+    than the server's behaviour that is under test.
+
+    Yields:
+        The session URL to point `probe` at.
+
+    Raises:
+        AssertionError: If the server does not start, so that a test fails
+            rather than the suite hanging.
+    """
+
+    async def hold(connection: object) -> None:
+        """Accept the connection and answer nothing on it.
+
+        Held until the test is over rather than forever, so that closing the
+        server does not have to wait out its own grace period for a handler
+        that was never going to return.
+
+        Args:
+            connection: The accepted WebSocket, deliberately unused.
+        """
+        del connection
+        await stopping.wait()
+
+    loop = asyncio.new_event_loop()
+    started = threading.Event()
+    stopping = asyncio.Event()
+    port = 0
+
+    async def run() -> None:
+        """Serve until asked to stop, then close the server properly."""
+        nonlocal port
+        async with websockets.asyncio.server.serve(hold, "127.0.0.1", 0) as server:
+            port = next(iter(server.sockets)).getsockname()[1]
+            started.set()
+            await stopping.wait()
+
+    def spin() -> None:
+        """Run the loop in a thread of its own, as `serving` does."""
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(run())
+        finally:
+            # Cancel what holding the connection open left behind, and let each
+            # cancellation be delivered, so the loop closes without complaining
+            # about a task that was destroyed while pending.
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True),
+                )
+            loop.close()
+
+    thread = threading.Thread(target=spin, name="wedged", daemon=True)
+    thread.start()
+    try:
+        if not started.wait(timeout=TIMEOUT):
+            message = "the wedged server did not start"
+            raise AssertionError(message)
+        yield f"ws://127.0.0.1:{port}{SESSION_PATH}"
+    finally:
+        loop.call_soon_threadsafe(stopping.set)
+        thread.join(timeout=TIMEOUT)
