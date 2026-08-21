@@ -305,29 +305,60 @@ class TestFailuresDoNotTakeTheApplicationDown:
     """This source is often only ever the fallback; it must fail quietly."""
 
     @pytest.mark.asyncio
-    async def test_a_detector_that_will_not_load_leaves_the_source_silent(
-        self,
-    ) -> None:
-        """Which reads as "not fresh", and returns the head to neutral.
+    async def test_a_detector_that_will_not_load_makes_start_fail(self) -> None:
+        """Loudly, because this is the source that exists to survive a failure.
 
-        The alternative is the application refusing to start over a detector it
-        may never have needed.
+        Reporting success on a detector that does not exist is the one way a
+        fallback must not fail: the composite marks the robot as having taken
+        over, the robot then has detections from neither source, and nothing
+        retries because nothing knows anything went wrong.
         """
-
-        def _explode() -> FakeFaceDetector:
-            message = "no model here"
-            raise RuntimeError(message)
-
         source = LocalPerception(
             FakeMedia(image=frame()),
-            detector=_explode,
+            detector=_explodes,
             clock=ManualClock(),
             sleep=_immediately,
             offload=inline,
         )
+        with pytest.raises(RuntimeError, match="no model here"):
+            await source.start()
+        assert not source.latest().fresh
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_start_leaves_the_source_able_to_try_again(
+        self,
+    ) -> None:
+        """Nothing is assigned until the build succeeds, so nothing blocks a retry.
+
+        A source that recorded a half-started state would short-circuit the
+        next `start` and never load the model, which is the same silent failure
+        arriving one call later.
+        """
+        attempts: list[int] = []
+        detector = FakeFaceDetector([_AT_640])
+
+        def _fails_once() -> FakeFaceDetector:
+            attempts.append(1)
+            if len(attempts) == 1:
+                message = "no model here"
+                raise RuntimeError(message)
+            return detector
+
+        source = LocalPerception(
+            FakeMedia(image=frame(480, 640)),
+            detector=_fails_once,
+            clock=ManualClock(),
+            sleep=_immediately,
+            offload=inline,
+        )
+        with pytest.raises(RuntimeError):
+            await source.start()
+        # The second call genuinely rebuilds rather than returning early.
         await source.start()
         await _settle()
-        assert not source.latest().fresh
+        assert len(attempts) == 2
+        assert source.latest().fresh
         await source.aclose()
 
     @pytest.mark.asyncio
@@ -510,6 +541,19 @@ def _sdk_detector_source() -> Path:
     if not locations:
         pytest.skip("reachy-mini is not installed; the local detector is unavailable")
     return Path(next(iter(locations))) / "vision" / "face_detector.py"
+
+
+def _explodes() -> FakeFaceDetector:
+    """Stand in for a model file that is missing or corrupt.
+
+    Returns:
+        Never.
+
+    Raises:
+        RuntimeError: Always.
+    """
+    message = "no model here"
+    raise RuntimeError(message)
 
 
 async def _settle() -> None:
@@ -943,38 +987,6 @@ class TestShutdownRacingTheModelLoad:
     """A worker thread cannot be cancelled, so its result has to be caught."""
 
     @pytest.mark.asyncio
-    async def test_a_detector_that_arrives_after_the_close_is_still_closed(
-        self,
-    ) -> None:
-        """Otherwise its inference session runs for the life of the process.
-
-        The race is not only a shutdown: a fallback source closes the local
-        detector when the groundstation comes back, precisely in order to give
-        the robot its cores back — and a session leaked there holds exactly the
-        core that close was for.
-        """
-        detector = FakeFaceDetector([_AT_640])
-        loading = asyncio.Event()
-        source = LocalPerception(
-            FakeMedia(image=frame()),
-            detector=lambda: detector,
-            clock=ManualClock(),
-            sleep=_immediately,
-            offload=_waits_for(loading),
-        )
-        await source.start()
-        await _settle()
-        # The close and the load, racing. `aclose` waits for the build it
-        # cannot cancel and then releases it; the release below is what lets
-        # the "thread" finish.
-        closing = asyncio.ensure_future(source.aclose())
-        await _settle()
-        assert detector.closed == 0
-        loading.set()
-        await closing
-        assert detector.closed == 1
-
-    @pytest.mark.asyncio
     async def test_a_restart_never_overlaps_a_build_it_does_not_own(
         self,
     ) -> None:
@@ -1014,13 +1026,15 @@ class TestShutdownRacingTheModelLoad:
         assert second.closed == 1
 
     @pytest.mark.asyncio
-    async def test_a_build_slower_than_the_bound_is_still_closed(self) -> None:
-        """A shutdown must be prompt, and it must not leak an inference session.
+    async def test_a_build_abandoned_by_a_cancelled_start_is_still_closed(
+        self,
+    ) -> None:
+        """A worker thread cannot be stopped, so its result has to be caught.
 
-        `aclose` waits for the build only so long — REQ-050 asks for a prompt
-        exit — and then disowns it. The worker cannot be stopped, so the
-        session arrives regardless, and it is closed on arrival rather than
-        left holding an arena and a thread.
+        Cancelling the caller that is awaiting `start` leaves the build
+        running. The session arrives with nobody waiting for it, and this is
+        the only thing left that can release it — otherwise it holds an arena
+        and a thread for the life of the process.
         """
         detector = FakeFaceDetector([_AT_640])
         loading = asyncio.Event()
@@ -1030,14 +1044,14 @@ class TestShutdownRacingTheModelLoad:
             clock=ManualClock(),
             sleep=_immediately,
             offload=_waits_for(loading),
-            # Already elapsed by the time the event loop looks at it, so
-            # nothing here waits for a clock.
-            close_build_seconds=0.0,
         )
-        await source.start()
+        starting = asyncio.ensure_future(source.start())
         await _settle()
-        await source.aclose()
+        starting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await starting
         assert detector.closed == 0
+        # The build finishes anyway, because nothing could stop it.
         loading.set()
         await _settle()
         assert detector.closed == 1

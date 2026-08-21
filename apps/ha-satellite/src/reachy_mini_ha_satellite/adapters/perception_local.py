@@ -107,13 +107,6 @@ DEFAULT_DETECTION_INTERVAL: Final = 0.2
 # uses, so that "stale" means one thing whichever source produced the answer.
 DEFAULT_STALENESS_SECONDS: Final = 2.0
 
-# How long a shutdown waits for a model that is still loading, so that it can
-# close the session the load produces. Opening an inference session over a
-# quarter-megabyte model takes tens of milliseconds, so this is generous; it is
-# bounded at all because ha-satellite REQ-050 asks for a prompt exit, and a
-# robot asked to stop cannot spend an unbounded time deciding to.
-_CLOSE_BUILD_SECONDS: Final = 2.0
-
 # What every answer from this module is labelled with.
 # Bound once rather than spelled at each site, because the repository's leak
 # scanner reads this member's dotted form as an mDNS hostname suffix — a shape
@@ -489,7 +482,6 @@ class LocalPerception:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         offload: Offload = in_thread,
-        close_build_seconds: float = _CLOSE_BUILD_SECONDS,
     ) -> None:
         """Describe the source without loading a model.
 
@@ -506,9 +498,6 @@ class LocalPerception:
             offload: How to run the model and read the camera without stalling
                 the event loop. Inference is a hundred milliseconds of
                 arithmetic, so this one is not optional on the robot.
-            close_build_seconds: How long a shutdown waits for a model that is
-                still loading before disowning it. A parameter so that a test
-                reaches the disowning path without waiting for the default.
 
         Raises:
             ValueError: If the interval or the staleness window is not a
@@ -527,19 +516,52 @@ class LocalPerception:
         self._clock = clock
         self._sleep = sleep
         self._offload = offload
-        self._close_build_seconds = close_build_seconds
 
         self._faces: tuple[FaceDetection, ...] = ()
         self._received_at: float | None = None
         self._detector: FaceDetectorPort | None = None
         self._loop: asyncio.Task[None] | None = None
-        self._build: asyncio.Future[FaceDetectorPort] | None = None
 
     async def start(self) -> None:
-        """Load the model and begin looking. Idempotent."""
+        """Load the model, then begin looking. Idempotent.
+
+        **The model is loaded here rather than inside the loop**, and that is
+        what makes a failure to load visible. Spawning the loop and returning
+        would report success on a detector that does not exist — and the one
+        caller that matters is `FallbackPerception`, which marks the robot as
+        having taken over the moment this returns. The robot would then have no
+        detections from either source while reporting that fallback is engaged,
+        and nothing would retry, because as far as the composite knew nothing
+        had failed. A local source is the thing that exists to survive another
+        failure, so failing silently is the one way it must not fail.
+
+        Raising also leaves this object retryable: nothing is assigned until
+        the build succeeds, so a later `start` builds again rather than
+        short-circuiting on a loop that was never created.
+
+        Raises:
+            Exception: Whatever building the detector raised — a model file
+                that is missing or corrupt, a runtime that will not open a
+                session. It is re-raised rather than logged and swallowed so
+                the caller can retry it or report it.
+        """
         if self._loop is not None:
             return
-        self._loop = asyncio.create_task(self._run(), name="local-detection")
+        # Shielded, because cancelling this coroutine cannot stop the worker
+        # thread: the inference session would come into existence with nothing
+        # holding a reference to it, and hold an arena and a thread for the
+        # life of the process on a robot with four cores.
+        build = asyncio.ensure_future(self._offload(self._build_detector))
+        try:
+            detector = await asyncio.shield(build)
+        except asyncio.CancelledError:
+            build.add_done_callback(_close_when_built)
+            raise
+        self._detector = detector
+        self._loop = asyncio.create_task(
+            self._run(detector),
+            name="local-detection",
+        )
 
     def latest(self) -> Detections:
         """Say what the robot last saw, if it is still current.
@@ -570,18 +592,10 @@ class LocalPerception:
     async def aclose(self) -> None:
         """Stop looking and release the inference session.
 
-        Waiting on the construction is the part that is easy to leave out.
-        Building the detector runs on a worker thread, and cancelling the
-        coroutine that awaits it does **not** stop the thread — so the session
-        comes into existence anyway, with nothing left holding a reference to
-        it. Waiting for it here is the only way to close it, and the wait is
-        bounded so that a shutdown cannot be held up by a model that is taking
-        an unreasonable time: a robot asked to stop cannot spend that long
-        deciding to.
-
-        This also closes the restart case. By the time this returns, the build
-        is finished and disposed of, so a later `start` never overlaps one it
-        does not own.
+        There is no build to wait for here. `start` does not return until the
+        model has loaded or has failed to, so by the time anything can call
+        this there is either a detector to close or nothing at all — and a
+        `start` cancelled mid-build disowns its own build on the way out.
         """
         loop, self._loop = self._loop, None
         if loop is not None:
@@ -591,56 +605,20 @@ class LocalPerception:
             # would re-raise its failure out of a shutdown path.
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 await loop
-        build, self._build = self._build, None
-        if build is not None and self._detector is None:
-            try:
-                self._detector = await asyncio.wait_for(
-                    asyncio.shield(build),
-                    self._close_build_seconds,
-                )
-            except TimeoutError:
-                # Disowned rather than abandoned. The worker cannot be stopped,
-                # so the session will exist; the callback below is what closes
-                # it whenever it arrives, and it closes unconditionally because
-                # nothing is waiting for this build any more — a later `start`
-                # begins one of its own.
-                _LOGGER.warning(
-                    "the local detector is still loading after %.1fs; its "
-                    "inference session will be closed when it arrives",
-                    self._close_build_seconds,
-                )
-                build.add_done_callback(_close_when_built)
-            except (Exception, asyncio.CancelledError):
-                # A build that failed or was cancelled produced no session, so
-                # there is nothing to release and nothing to report here: the
-                # loop that awaited it has already logged whatever went wrong.
-                _LOGGER.debug("the local detector never finished loading")
         detector, self._detector = self._detector, None
         if detector is not None:
             detector.close()
         self._received_at = None
         self._faces = ()
 
-    async def _run(self) -> None:
-        """Look at a frame, then wait, for as long as the source is open."""
-        # Shielded, and kept where `aclose` can find it. Cancelling this task
-        # cannot stop the worker thread, so abandoning the future would leave
-        # an inference session nothing holds a reference to — an arena and a
-        # thread, for the life of the process, on a robot with four cores.
-        build = asyncio.ensure_future(self._offload(self._build_detector))
-        self._build = build
-        try:
-            self._detector = await asyncio.shield(build)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # A model that will not load leaves this source producing nothing,
-            # which reads as "not fresh" and returns the head to neutral. That
-            # is the right outcome: the alternative is the application failing
-            # to start over a detector it may only ever have been a fallback.
-            _LOGGER.exception("the local face detector could not be loaded")
-            return
-        detector = self._detector
+    async def _run(self, detector: FaceDetectorPort) -> None:
+        """Look at a frame, then wait, for as long as the source is open.
+
+        Args:
+            detector: The loaded detector. Passed in rather than read off the
+                instance, because `start` has already proved it exists — this
+                loop never has to ask whether the model loaded.
+        """
         while True:
             await self._sleep(self._interval)
             try:

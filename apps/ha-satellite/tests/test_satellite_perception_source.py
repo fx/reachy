@@ -16,6 +16,7 @@ that has actually gone starts a second detector on a robot with four cores.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Final
 
 import pytest
@@ -491,6 +492,152 @@ async def _settle() -> None:
     """Let the supervisor run a few turns without waiting for a clock."""
     for _ in range(20):
         await asyncio.sleep(0)
+
+
+class TestFallbackDoesNotClaimALocalDetectorItCouldNotStart:
+    """The failure mode this whole selection exists to prevent.
+
+    `remote_with_local_fallback` is worth having only because it works when the
+    groundstation stops. A composite that marked the robot as having taken over
+    on a detector that never loaded would leave it with detections from neither
+    source, reporting that fallback was engaged, and would never retry — the
+    silent failure of the mechanism whose entire job is to survive a failure.
+
+    The tests that **count** build attempts drive `check` without calling
+    `start`, deliberately. `start` spawns the supervisor, which retries on its
+    own schedule, so a count taken with it running measures both and is
+    deterministic only by the accident of a fake that never yields. The last
+    test here is the other half: the supervisor left to do it by itself,
+    asserted on its outcome rather than on a count.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_local_detector_that_will_not_load_is_not_marked_running(
+        self,
+    ) -> None:
+        """`_local_running` is set after a successful start, never before."""
+        remote = _remote_seeing_somebody()
+        remote.connected = False
+        local = _LocalThatWillNotLoad()
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        await _turn(source)
+        assert local.attempts == 1
+        assert not source.falling_back
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_it_reports_honestly_that_neither_source_is_available(
+        self,
+    ) -> None:
+        """Rather than a stale view, or a fresh one attributed to nothing."""
+        remote = _remote_seeing_somebody()
+        remote.connected = False
+        source = FallbackPerception(
+            remote,
+            _LocalThatWillNotLoad(),
+            sleep=_immediately,
+        )
+        await _turn(source)
+        view = source.latest()
+        assert view.faces == ()
+        assert not view.fresh
+        assert view.source is None
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_every_turn_tries_the_local_detector_again(self) -> None:
+        """A model that failed once may load on the next turn.
+
+        The disk was busy, the file was still being written, the runtime was
+        out of memory for a moment. Trying once and giving up silently is what
+        turned this into a permanent outage.
+        """
+        remote = _remote_seeing_somebody()
+        remote.connected = False
+        local = _LocalThatWillNotLoad()
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        for _ in range(4):
+            await _turn(source)
+        assert local.attempts == 4
+        assert not source.falling_back
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_fallback_engages_once_the_detector_can_be_built(
+        self,
+    ) -> None:
+        """And the retry is what gets there: it fails twice, then loads."""
+        remote = _remote_seeing_somebody()
+        remote.connected = False
+        local = _LocalThatWillNotLoad(fails=2)
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        for _ in range(3):
+            await _turn(source)
+        assert local.attempts == 3
+        assert source.falling_back
+        assert source.latest().source is _ROBOT
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_the_supervisor_recovers_from_it_without_being_driven(
+        self,
+    ) -> None:
+        """The production path: nothing calls `check`, and it still gets there.
+
+        Asserted on the outcome rather than on a count, because the number of
+        turns the supervisor takes to reach a working model is its own business
+        and pinning it would make this test about the scheduler.
+        """
+        remote = _remote_seeing_somebody()
+        remote.connected = False
+        local = _LocalThatWillNotLoad(fails=2)
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        await source.start()
+        await _settle()
+        assert source.falling_back
+        assert source.latest().source is _ROBOT
+        await source.aclose()
+
+
+class _LocalThatWillNotLoad(FakePerception):
+    """A local source whose model fails to load for its first few starts."""
+
+    def __init__(self, fails: int = 99) -> None:
+        """Say how many starts fail before one succeeds.
+
+        Args:
+            fails: How many attempts raise. The default never succeeds.
+        """
+        super().__init__()
+        self.attempts = 0
+        self._fails = fails
+
+    async def start(self) -> None:
+        """Fail the way a missing or corrupt model does, then load.
+
+        Raises:
+            RuntimeError: Until `fails` attempts have been made.
+        """
+        self.attempts += 1
+        if self.attempts <= self._fails:
+            message = "the local model could not be loaded"
+            raise RuntimeError(message)
+        self.see(face(-0.3, 0.0), source=_ROBOT)
+
+
+async def _turn(source: FallbackPerception) -> None:
+    """Run one supervision turn the way `_supervise` runs it.
+
+    `check` propagates a failing `start`, and that is the contract: the
+    supervisor is what decides a failed turn is survivable, so a test that
+    drives `check` directly has to supply the same tolerance rather than
+    pretend the exception does not happen.
+
+    Args:
+        source: The composite to advance by one turn.
+    """
+    with contextlib.suppress(Exception):
+        await source.check()
 
 
 class TestTheSupervisorSurvivesItsOwnFailures:
