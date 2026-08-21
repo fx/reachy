@@ -29,7 +29,7 @@ import json
 from typing import TYPE_CHECKING, Final
 
 import pytest
-from reachyctl_robot import DROP_IN, FakeRobot, daemon_for
+from reachyctl_robot import DROP_IN, FakeRobot, applied_settings, daemon_for
 from reachyctl_support import reporter_for
 
 from reachy_session_client import REDACTED
@@ -44,7 +44,7 @@ from reachyctl.configure import (
     run_apply,
 )
 from reachyctl.exits import ExitCode
-from reachyctl.managed import parse_region, render_region
+from reachyctl.managed import render_region
 from reachyctl.output import OutputFormat
 
 if TYPE_CHECKING:
@@ -148,7 +148,7 @@ async def test_applying_writes_the_region_restarts_and_verifies_it_is_in_force()
 
     steps, difference = await run_apply(daemon, DECLARED, reporter, preview=False)
 
-    assert parse_region(robot.managed_region) == DECLARED
+    assert applied_settings(robot) == DECLARED
     assert robot.environment == DECLARED
     assert [result.name for result in steps.results] == [
         "read",
@@ -176,7 +176,7 @@ async def test_a_setting_withdrawn_from_the_declaration_is_removed_from_the_robo
     steps, difference = await run_apply(daemon, DECLARED, reporter, preview=False)
 
     assert difference.removed == (INTERVAL,)
-    assert INTERVAL not in parse_region(robot.managed_region)
+    assert INTERVAL not in applied_settings(robot)
     assert INTERVAL not in robot.environment
     assert steps.ok is True
 
@@ -323,7 +323,7 @@ async def test_an_empty_declaration_removes_everything_and_verifies_the_removal(
 
     steps, difference = await run_apply(daemon, {}, reporter, preview=False)
 
-    assert parse_region(robot.managed_region) == {}
+    assert applied_settings(robot) == {}
     assert robot.environment == {}
     assert difference.removed == tuple(sorted(DECLARED))
     verify = _named(steps.results)["verify"]
@@ -402,7 +402,7 @@ async def test_setting_one_value_leaves_the_others_where_they_were() -> None:
         merge=True,
     )
 
-    assert parse_region(robot.managed_region) == {URL: ENDPOINT, LEVEL: "debug"}
+    assert applied_settings(robot) == {URL: ENDPOINT, LEVEL: "debug"}
     assert difference.removed == ()
     assert difference.changed == (LEVEL,)
 

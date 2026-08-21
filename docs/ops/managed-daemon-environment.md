@@ -86,12 +86,26 @@ five header lines, `[Service]`, the two markers, and the form of an
   let the two implementations overwrite each other's files instead of agreeing.
   The specific refusals below still exist, because they say *which* line is
   wrong; the round trip is what makes the check complete.
+- **Absent, empty and unreadable are three states, and an implementation must
+  answer with the one it found.** This is the rule the whole ownership model
+  rests on, because a region read as ours is a region the next apply rewrites.
+
+  | State | What it means | What to do |
+  |---|---|---|
+  | The file does not exist | Nothing has been applied to this robot | Proceed; write it |
+  | The file exists and carries a readable region | This tooling wrote it | Proceed; converge it |
+  | The file exists and is empty, or its markers are missing, unpaired or out of order | Something else wrote it, or emptied it | **Refuse**, naming the path |
+
+  **An existing empty file belongs in the third row, not the first.** This format
+  never writes an empty file: withdrawing every setting still writes the header,
+  `[Service]` and both markers, so a region with nothing in it is nine lines
+  long. A blank file is therefore one something else blanked, and collapsing it
+  into "never written" means the next apply silently replaces it — in exactly
+  the case where an operator most needs to be told.
 - **The markers delimit the region a reader parses.** They are not how ownership
   is decided — ownership is the file — but a file whose markers are missing,
   unpaired, or out of order is reported as unreadable rather than silently
-  treated as empty. `reachyctl` stops and says so rather than overwriting it,
-  because "empty" and "somebody else is writing this" call for different
-  actions.
+  treated as empty, per the table above.
 - **A line between the markers that is not an `Environment=` assignment this
   format writes** makes the region unreadable, for the same reason. That includes
   a blank one: this format does not write them.

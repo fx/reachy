@@ -45,8 +45,18 @@ on:
 permissions:
   contents: read
 
+# Keyed on what the run OPERATES ON, not on the ref it was dispatched from.
+# `github.ref` is `refs/heads/main` for every `workflow_dispatch` run whatever
+# tag it was given, so grouping on it would put two manual publishes of
+# different tags — and release-please's own run on `main` — in one group, where
+# they would serialise behind each other for no reason. `inputs.tag` is unset
+# for a push, so a push falls back to its ref: `refs/heads/main` for the
+# derivation run, `refs/tags/vX.Y.Z` for the publish it creates.
+#
+# `cancel-in-progress` stays false. A publish that is halfway through attaching
+# wheels to a release is not something to cancel.
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:

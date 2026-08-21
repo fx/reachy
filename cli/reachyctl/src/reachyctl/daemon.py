@@ -46,7 +46,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from reachy_checks import ApplicationState, DaemonInfo, InstalledApplication
-from reachyctl.managed import parse_region
+from reachyctl.managed import MalformedRegionError, parse_region
 from reachyctl.robot import CommandOutcome, RobotAccessError
 
 if TYPE_CHECKING:
@@ -397,12 +397,21 @@ class DaemonClient:
             raise RobotAccessError(message)
         return {name: str(decoded.get(name, "") or "") for name in distributions}
 
-    async def read_managed_region(self) -> str:
+    async def read_managed_region(self) -> str | None:
         """Read the drop-in this tool owns in full.
 
+        **Three states, three answers**, and collapsing any two of them is how a
+        file this tool did not write gets silently replaced. The file is not
+        there: nothing has been applied, and the next apply proceeds. The file
+        is there: its content comes back, whatever is in it — including
+        nothing, which `reachy_checks`-style callers must treat as a file
+        rather than as an absence, because this format never writes an empty
+        one. The file is there and cannot be read: that is a fault and is
+        raised.
+
         Returns:
-            Its content, or an empty string when it has never been written. A
-            missing file is a robot nothing has been applied to, not a fault.
+            The file's content, or `None` when there is no file. `None` and
+            `""` are different robots and the type says so.
 
         Raises:
             RobotAccessError: If the file is there and could not be read — a
@@ -415,7 +424,7 @@ class DaemonClient:
         if outcome.ok:
             return outcome.stdout
         if _NOT_FOUND.search(outcome.stderr):
-            return ""
+            return None
         message = f"could not read {self._layout.drop_in}: {outcome.complaint()}"
         raise RobotAccessError(message)
 
@@ -423,14 +432,24 @@ class DaemonClient:
         """Read back the settings the managed region carries.
 
         Returns:
-            The settings by name.
+            The settings by name. A robot with no drop-in carries none, which is
+            a robot nothing has been applied to rather than an error.
 
         Raises:
-            MalformedRegionError: If something other than this tooling has
-                written the file. Deciding what to do about that belongs to the
-                command, which can tell an operator what it found.
+            MalformedRegionError: If the file is there and is not one this
+                tooling wrote — including one that is there and empty, which
+                this format never produces. The path is named, because the
+                operator's next question is which file to look at. Deciding what
+                to *do* about it belongs to the command.
         """
-        return parse_region(await self.read_managed_region())
+        content = await self.read_managed_region()
+        if content is None:
+            return {}
+        try:
+            return parse_region(content)
+        except MalformedRegionError as error:
+            message = f"{error}. The file is {self._layout.drop_in}"
+            raise MalformedRegionError(message) from error
 
     async def write_managed_region(self, content: str) -> None:
         """Replace the managed drop-in with new content, and reload systemd.

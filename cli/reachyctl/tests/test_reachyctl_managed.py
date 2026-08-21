@@ -91,12 +91,6 @@ def test_a_value_containing_an_equals_sign_survives() -> None:
     assert parse_region(render_region({"A_SETTING": "abc=="})) == {"A_SETTING": "abc=="}
 
 
-def test_an_absent_file_carries_no_settings_and_is_not_an_error() -> None:
-    """A robot nothing has been applied to is not a robot in a bad state."""
-    assert parse_region("") == {}
-    assert parse_region("\n  \n") == {}
-
-
 def test_a_file_with_no_markers_is_refused_rather_than_treated_as_empty() -> None:
     """Overwriting it regardless is how two tools start reverting each other."""
     with pytest.raises(MalformedRegionError, match="not readable"):
@@ -287,3 +281,27 @@ def test_everything_this_format_writes_is_read_back_unchanged() -> None:
     }
 
     assert parse_region(render_region(awkward)) == awkward
+
+
+def test_an_existing_empty_file_is_not_a_robot_nothing_was_applied_to() -> None:
+    """The state the whole ownership model rests on telling apart.
+
+    This format never writes an empty file — withdrawing every setting still
+    writes the header, `[Service]` and both markers — so a blank file is one
+    something else blanked. Reading it as "never written" means the next apply
+    replaces it silently, in exactly the case where an operator most needs to
+    be told.
+    """
+    for blank in ("", "   ", "\n\n", "\t\n "):
+        with pytest.raises(MalformedRegionError, match="there and is"):
+            parse_region(blank)
+
+
+def test_withdrawing_every_setting_still_writes_a_region() -> None:
+    """Which is why an empty *file* cannot be one of ours, and this is that proof."""
+    emptied = render_region({})
+
+    assert emptied.strip()
+    assert BEGIN_MARKER in emptied
+    assert END_MARKER in emptied
+    assert parse_region(emptied) == {}

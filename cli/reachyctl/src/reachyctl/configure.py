@@ -620,12 +620,15 @@ def execute_get(
         CommandError: If the robot could not be reached.
     """
 
-    async def _read() -> tuple[Mapping[str, str], Mapping[str, str]]:
+    async def _read() -> tuple[Mapping[str, str], Mapping[str, str] | None, str]:
         """Read the effective environment and what the region owns.
 
         Returns:
-            What is in force, and what this tool put there — so the report can
-            say which settings are managed and which arrived some other way.
+            What is in force; what this tool put there, or `None` when the
+            region could not be read; and why it could not, when it could not.
+            `None` rather than an empty mapping, because "this tool manages
+            nothing on this robot" and "nobody can tell what this tool manages"
+            are different facts and the `managed` column reports one of them.
         """
         await daemon.connect()
         effective = await daemon.effective_configuration()
@@ -634,38 +637,48 @@ def execute_get(
         guard_secrets(reporter, effective)
         try:
             managed = await daemon.read_managed_settings()
-        except MalformedRegionError:
-            # `get` reads; it never writes. A region something else wrote is
-            # worth knowing about when converging on a declaration, and is not
-            # a reason to refuse to show what is in force.
-            managed = {}
+        except MalformedRegionError as error:
+            # `get` reads; it never writes. A region something else wrote is a
+            # reason to refuse to *converge*, which `diff` and `apply` do, and
+            # is not a reason to refuse to show what is in force. What it is a
+            # reason for is saying so rather than answering "nothing here is
+            # managed", which is a claim this run cannot make.
+            return effective, None, str(error)
         guard_secrets(reporter, managed)
-        return effective, managed
+        return effective, managed, ""
 
-    effective, managed = asyncio.run(closing(_read(), close))
+    effective, managed, unreadable = asyncio.run(closing(_read(), close))
     shown = sorted(effective) if not names else sorted(set(names))
     absent = tuple(name for name in shown if name not in effective)
+    found = (
+        f"the daemon is running with {len(effective)} setting(s) in its environment"
+        if not absent
+        else f"not set on this robot: {', '.join(absent)}"
+    )
     return reporter.emit(
         Report(
             command="config get",
             ok=not absent,
-            summary=(
-                f"the daemon is running with {len(effective)} setting(s) in its "
-                f"environment"
-                if not absent
-                else f"not set on this robot: {', '.join(absent)}"
-            ),
+            summary=f"{found}. {unreadable}" if unreadable else found,
             data={
                 "robot": robot,
                 "settings": len(effective),
                 "absent": absent,
+                # Empty in the ordinary case. A run that could not read the
+                # managed region says so here rather than leaving a reader to
+                # infer it from a column of `null`s.
+                "region_unreadable": unreadable,
             },
             columns=("setting", "in_force", "managed"),
             rows=tuple(
                 {
                     "setting": name,
                     "in_force": _shown(name, effective.get(name)),
-                    "managed": name in managed,
+                    # `None`, not `False`, when the region could not be read:
+                    # this run does not know whether it manages this setting,
+                    # and saying it does not would be a claim rather than an
+                    # answer.
+                    "managed": None if managed is None else name in managed,
                 }
                 for name in shown
             ),

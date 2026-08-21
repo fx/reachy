@@ -22,13 +22,13 @@ from typing import TYPE_CHECKING, Final
 
 import pytest
 from reachyctl_fixture_wheel import FIXTURE_DISTRIBUTION, FIXTURE_VERSION, fixture_wheel
-from reachyctl_robot import DROP_IN, FakeRemoteAccess, FakeRobot
+from reachyctl_robot import DROP_IN, FakeRemoteAccess, FakeRobot, applied_settings
 from typer.testing import CliRunner
 
 from reachyctl import cli
 from reachyctl.credentials import ENV_PREFIX
 from reachyctl.exits import ExitCode
-from reachyctl.managed import parse_region, render_region
+from reachyctl.managed import render_region
 from reachyctl.robot import RobotAccessError
 
 if TYPE_CHECKING:
@@ -440,7 +440,7 @@ def test_applying_a_declaration_writes_the_region_and_verifies_it(
     )
 
     assert result.exit_code == ExitCode.OK, result.stdout
-    assert parse_region(watcher.robot.managed_region) == {URL: ENDPOINT, LEVEL: "info"}
+    assert applied_settings(watcher.robot) == {URL: ENDPOINT, LEVEL: "info"}
 
 
 @pytest.mark.filesystem  # writes a declaration for the command to read; not a unit test
@@ -553,7 +553,7 @@ def test_setting_one_value_leaves_the_others_where_they_were(
     )
 
     assert result.exit_code == ExitCode.OK, result.stdout
-    assert parse_region(watcher.robot.managed_region) == {URL: ENDPOINT, LEVEL: "debug"}
+    assert applied_settings(watcher.robot) == {URL: ENDPOINT, LEVEL: "debug"}
 
 
 def test_reading_a_robots_configuration_reports_what_is_in_force(

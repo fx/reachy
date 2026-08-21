@@ -184,11 +184,16 @@ def parse_region(content: str) -> dict[str, str]:
     """Read back the settings a rendered file carries.
 
     Args:
-        content: The file's content, or an empty string when there is no file.
+        content: The file's content. **The file exists.** Whether it does is the
+            caller's distinction to make and not one this function can see: an
+            absent file and an existing empty one both arrive here as an empty
+            string, and they are opposite facts. `DaemonClient.read_managed_region`
+            answers `None` for the first, and only the second reaches this.
 
     Returns:
-        The settings by name. An absent file carries none, which is a robot
-        nothing has been applied to rather than an error.
+        The settings by name. A region that is genuinely empty — every setting
+        withdrawn — still carries the header and the markers, so it parses to
+        nothing and is not the same file as one with nothing in it.
 
     Raises:
         MalformedRegionError: If the file is not, byte for byte, one this format
@@ -197,7 +202,21 @@ def parse_region(content: str) -> dict[str, str]:
             wrong; the round trip at the end is what makes the check complete.
     """
     if not content.strip():
-        return {}
+        # An existing file with nothing in it. Not "nothing has been applied":
+        # this format never writes an empty file — emptying the region still
+        # writes the header and both markers — so a file that is blank is one
+        # something else made blank, and the next apply would otherwise
+        # overwrite it without anybody being told. Provisioning REQ-063 makes
+        # this region fully owned, and the safety of owning it wholesale rests
+        # entirely on being able to tell "we wrote this" from "somebody else's
+        # file is sitting here".
+        message = (
+            "the managed region is not readable: the file is there and is "
+            "empty. This format never writes an empty file — withdrawing every "
+            "setting still writes the header and both markers — so something "
+            "other than the Reachy tooling has emptied it"
+        )
+        raise MalformedRegionError(message)
     # `split`, not `splitlines`: the latter also breaks on a carriage return, a
     # form feed and three Unicode separators, none of which this format emits —
     # so a file written with any of them would be read as one of ours. The round

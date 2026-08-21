@@ -33,8 +33,11 @@ from reachyctl_robot import (
     FakeRobot,
     daemon_for,
 )
+from reachyctl_support import reporter_for
 
+from reachyctl.configure import run_apply
 from reachyctl.daemon import DaemonClient, DaemonControlError
+from reachyctl.errors import CommandError
 from reachyctl.managed import MalformedRegionError, render_region
 from reachyctl.robot import (
     DEFAULT_APPLICATION,
@@ -266,11 +269,15 @@ async def test_a_control_that_could_not_be_run_is_a_fault_not_a_stopped_applicat
 
 
 @pytest.mark.asyncio
-async def test_reading_a_region_that_was_never_written_is_empty() -> None:
-    """A robot nothing has been applied to is not a robot in a bad state."""
+async def test_reading_a_region_that_was_never_written_is_absent_not_empty() -> None:
+    """A robot nothing has been applied to is not a robot in a bad state.
+
+    `None` rather than `""`: the two are different robots, and the fuller
+    three-state case is below.
+    """
     daemon, _access = daemon_for()
 
-    assert await daemon.read_managed_region() == ""
+    assert await daemon.read_managed_region() is None
     assert await daemon.read_managed_settings() == {}
 
 
@@ -520,3 +527,46 @@ async def test_a_cleanup_over_a_broken_link_complains_rather_than_raising() -> N
 
     assert said
     assert "could not remove" in said[0]
+
+
+@pytest.mark.asyncio
+async def test_the_three_states_of_the_managed_drop_in_are_three_answers() -> None:
+    """Absent, present, and present-but-not-ours. Collapsing any two loses a file.
+
+    A region read as ours is a region the next apply rewrites, so the safety of
+    owning it wholesale rests entirely on telling "nothing has been applied"
+    from "somebody else's file is sitting here". This is the seam that can see
+    the difference: `parse_region` is handed a string and cannot.
+    """
+    absent, _one = daemon_for(FakeRobot())
+    written = render_region({"A_SETTING": "1"})
+    present, _two = daemon_for(FakeRobot(files={DROP_IN: written}))
+    blanked, _three = daemon_for(FakeRobot(files={DROP_IN: ""}))
+
+    assert await absent.read_managed_region() is None
+    assert await absent.read_managed_settings() == {}
+
+    assert await present.read_managed_region() == written
+    assert await present.read_managed_settings() == {"A_SETTING": "1"}
+
+    # There, and empty. Not "never written": this format never writes an empty
+    # file, so something else emptied it.
+    assert await blanked.read_managed_region() == ""
+    with pytest.raises(MalformedRegionError) as raised:
+        await blanked.read_managed_settings()
+
+    # And the operator is told which file to go and look at.
+    assert DROP_IN in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_blanked_drop_in_is_never_silently_overwritten() -> None:
+    """The consequence the distinction exists to prevent, asserted end to end."""
+    robot = FakeRobot(files={DROP_IN: ""})
+    daemon, _access = daemon_for(robot)
+    reporter, _streams = reporter_for()
+
+    with pytest.raises(CommandError):
+        await run_apply(daemon, {"A_SETTING": "1"}, reporter, preview=False)
+
+    assert robot.files[DROP_IN] == ""

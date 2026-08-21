@@ -55,6 +55,7 @@ __all__ = [
     "ROBOT",
     "FakeRemoteAccess",
     "FakeRobot",
+    "applied_settings",
     "daemon_for",
 ]
 
@@ -151,16 +152,21 @@ class FakeRobot:
     failing: set[str] = field(default_factory=set)
 
     @property
-    def managed_region(self) -> str:
+    def managed_region(self) -> str | None:
         """What the managed drop-in holds right now.
 
         Returns:
-            Its content, or an empty string when it has never been written.
-            This is the value a preview test snapshots before and compares
+            Its content, or `None` when there is no such file. `None` and `""`
+            are different robots — a drop-in that was never written and one
+            something emptied — and this models that distinction rather than
+            flattening it, because flattening it is the defect the tool was
+            fixed for.
+
+            This is also the value a preview test snapshots before and compares
             after: the guarantee is that nothing happened, and only an
             after-state assertion tests that.
         """
-        return self.files.get(DROP_IN, "")
+        return self.files.get(DROP_IN)
 
 
 class FakeRemoteAccess:
@@ -380,7 +386,14 @@ class FakeRemoteAccess:
                 )
             self.robot.active = True
             if self.robot.honours_restart:
-                self.robot.environment = dict(parse_region(self.robot.managed_region))
+                # A robot with no drop-in restarts into an empty environment;
+                # one whose drop-in something emptied is a robot systemd would
+                # refuse to read, and the tool refuses it too rather than
+                # guessing — so the fake does not guess either.
+                region = self.robot.managed_region
+                self.robot.environment = (
+                    {} if region is None else dict(parse_region(region))
+                )
             # The daemon restarting takes the application down with it, which
             # is exactly why the command warns before doing it.
             self.robot.app_running = False
@@ -741,3 +754,23 @@ def _is_remove(argv: list[str]) -> bool:
         True when it is.
     """
     return len(argv) > 1 and argv[0] == "rm"
+
+
+def applied_settings(robot: FakeRobot) -> dict[str, str]:
+    """Read back what an apply left in the robot's managed drop-in.
+
+    Asserts the file is *there* before parsing it, which is the distinction the
+    tool itself makes: an absent drop-in and an empty one are different robots,
+    and a test asserting on "the settings" has to say which of the two it
+    expects to be looking at. A test that means "nothing was applied" asserts
+    `robot.managed_region is None` instead.
+
+    Args:
+        robot: The robot to read.
+
+    Returns:
+        The settings the drop-in carries.
+    """
+    region = robot.managed_region
+    assert region is not None, "the managed drop-in was never written"
+    return parse_region(region)
