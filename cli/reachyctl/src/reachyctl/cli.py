@@ -414,17 +414,13 @@ def doctor(
         typer.Option(
             "--timeout",
             min=0.1,
-            help="Bound on opening the session, and then on waiting for a result.",
+            help=(
+                "One budget, in seconds, for the whole groundstation exchange: "
+                "opening the session, sending a frame and waiting for the "
+                "result. Not per step."
+            ),
         ),
     ] = 10.0,
-    staleness: Annotated[
-        float,
-        typer.Option(
-            "--staleness",
-            min=0.1,
-            help="How long a result stays worth acting on.",
-        ),
-    ] = 2.0,
     credential_file: Annotated[
         Path | None,
         typer.Option(
@@ -451,8 +447,7 @@ def doctor(
         capability: What to offer during negotiation.
         models_dir: Where the pinned model files are.
         intent: A declaration of what the robot is supposed to be.
-        timeout: Bound on the session and on waiting for a result.
-        staleness: How long a result stays worth acting on.
+        timeout: One budget for the whole groundstation exchange.
         credential_file: Where the credential is kept.
 
     Raises:
@@ -472,7 +467,6 @@ def doctor(
             models_directory=models_dir,
             intent=None if intent is None else load_intent(intent),
             timeout=timeout,
-            staleness=staleness,
         )
         credential = None
         if plan.url is not None:

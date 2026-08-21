@@ -359,6 +359,29 @@ def test_the_counts_are_present_whatever_the_run_found() -> None:
     assert report.data["checks"] == 1
 
 
+def test_the_report_always_carries_the_observer_failures_field() -> None:
+    """Empty in the ordinary case rather than missing from it, so a script can read it."""
+    report = report_for(_run(_result(DAEMON_REACHABLE, Outcome.PASSED)), PLAN)
+
+    assert report.data["observer_failures"] == ()
+
+
+def test_a_progress_callback_that_threw_is_reported_rather_than_hidden() -> None:
+    """It is a defect in this tool, and an operator should not have to guess at it."""
+    run = CheckRun(
+        (_result(DAEMON_REACHABLE, Outcome.PASSED),),
+        ("daemon.reachable: RuntimeError: the display fell over",),
+    )
+
+    report = report_for(run, PLAN)
+
+    assert report.data["observer_failures"] == (
+        "daemon.reachable: RuntimeError: the display fell over",
+    )
+    # The verdict about the robot is still the verdict.
+    assert report.ok
+
+
 def test_a_run_with_no_groundstation_reports_none_rather_than_a_blank() -> None:
     """The field is always there, so a consumer never has to guess why it is missing."""
     plan = DoctorPlan(url=None, capabilities=DEFAULT_CAPABILITIES)

@@ -28,10 +28,13 @@ from reachy_checks.ports import ModelFileReport
 
 __all__ = ["REGISTRY_MISSING", "GroundstationModelFiles"]
 
-# What the check reports when the groundstation is not installed. Phrased as a
-# problem rather than a skip: a caller who pointed `doctor` at a model
-# directory asked for the files to be verified, and answering "there was
-# nothing to verify them against" is a finding, not silence.
+# Why the check could not run, when the groundstation package is not installed.
+# It goes in `unavailable` rather than in `problems`, and the check is skipped
+# rather than failed: an absent optional dependency is a prerequisite that is
+# not there, not a fault in the files. A machine carrying the checks but not
+# the service — a control machine running the provisioning verification, say —
+# is not in an error state, and a diagnosis that told it otherwise would be
+# noise on every run.
 REGISTRY_MISSING = (
     "the pinned model registry is not importable here, so nothing says which "
     "files should be present or what they should hash to; the models extra "
@@ -66,7 +69,9 @@ class GroundstationModelFiles:
             What is present and unaltered, and one line per problem. A model
             that is absent, unreadable or hashes to something else is a
             problem; every model is examined, so one bad file does not hide
-            the state of the others.
+            the state of the others. A machine with no registry to judge
+            against reports that in `unavailable` and finds no problems,
+            because it looked at nothing.
         """
         try:
             # Imported here rather than at module level. See the module
@@ -81,7 +86,7 @@ class GroundstationModelFiles:
         except ImportError:
             return ModelFileReport(
                 directory=str(self._directory),
-                problems=(REGISTRY_MISSING,),
+                unavailable=REGISTRY_MISSING,
             )
         store = ModelStore(self._directory)
         verified: list[str] = []

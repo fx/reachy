@@ -219,9 +219,15 @@ class CheckRun:
 
     Attributes:
         results: One per registered check, in the order they ran.
+        observer_failures: One line per time the caller's progress callback
+            raised. It is carried rather than discarded because a callback that
+            throws is a defect in the consumer, and one that failed silently
+            would leave an operator with progress output that simply stopped
+            partway and no reason for it.
     """
 
     results: tuple[CheckResult, ...]
+    observer_failures: tuple[str, ...] = ()
 
     @property
     def passed(self) -> tuple[CheckResult, ...]:
@@ -292,15 +298,26 @@ class CheckRun:
             f"{len(self.passed)} passed, {len(self.failures)} failed, "
             f"{len(self.skipped)} skipped"
         )
+        # Appended rather than allowed to replace the verdict: a callback that
+        # threw says nothing about the robot, and the answer the operator asked
+        # for still comes first.
+        aside = (
+            ""
+            if not self.observer_failures
+            else (
+                f"; progress reporting itself failed "
+                f"{len(self.observer_failures)} time(s)"
+            )
+        )
         broken = self.first_failure
         if broken is not None:
             return (
                 f"the first broken link is {broken.identifier}: "
-                f"{broken.summary} ({counts})"
+                f"{broken.summary} ({counts}){aside}"
             )
         if self.skipped:
-            return f"nothing failed, but not everything was checked ({counts})"
-        return f"every link is healthy ({counts})"
+            return f"nothing failed, but not everything was checked ({counts}){aside}"
+        return f"every link is healthy ({counts}){aside}"
 
 
 def counts_of(results: Sequence[CheckResult]) -> dict[str, int]:

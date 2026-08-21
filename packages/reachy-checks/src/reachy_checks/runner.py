@@ -10,6 +10,11 @@ first. That includes a check that raises: an adapter reaching a robot over a
 network can throw anything, and a diagnosis tool that ends in a traceback has
 diagnosed nothing.
 
+That independence extends to the caller's progress callback, which is the one
+thing every check is downstream of. An observer that raises would otherwise end
+a run partway with the remaining links unreported — the same failure the checks
+themselves are guarded against, arriving by a route nobody would think to test.
+
 **Skipping rather than failing.** A check whose prerequisites are absent never
 ran, and saying it failed would mean telling an operator with no groundstation
 configured that their installation is broken. They would be right to stop
@@ -99,15 +104,31 @@ async def run_checks(
         checks: The registry to run. Defaults to the real one.
         observer: Called with each result as it arrives, so a caller can show
             progress on a run that is waiting on a network. It is not given a
-            chance to change anything.
+            chance to change anything, and it is not given a chance to stop the
+            run either — see below.
 
     Returns:
-        Every result, in the order they ran.
+        Every result, in the order they ran, and one line per time the observer
+        raised.
     """
     results: list[CheckResult] = []
+    observer_failures: list[str] = []
     for check in checks:
         result = await run_check(check, context)
         results.append(result)
-        if observer is not None:
+        if observer is None:
+            continue
+        try:
             observer(result)
-    return CheckRun(tuple(results))
+        except Exception as error:
+            # Every check is independent of every other, and all of them are
+            # downstream of this one callback: an observer that throws on the
+            # second of nine checks would leave seven links unreported, which
+            # is exactly what reachyctl REQ-054 forbids and by a route nobody
+            # would think to test. So the run continues — and the failure is
+            # recorded rather than swallowed, because a progress display that
+            # silently stopped partway is its own puzzle for an operator.
+            observer_failures.append(
+                f"{check.identifier}: {type(error).__name__}: {error}",
+            )
+    return CheckRun(tuple(results), tuple(observer_failures))

@@ -383,6 +383,43 @@ async def test_model_files_fails_and_carries_every_problem() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_files_is_skipped_when_there_is_no_registry_to_judge_against() -> (
+    None
+):
+    """An absent optional dependency is a missing prerequisite, not a broken robot."""
+    context = CheckContext(
+        models=FakeModelFiles(
+            ModelFileReport(
+                directory="/opt/reachy/models",
+                unavailable="the pinned model registry is not importable here",
+            ),
+        ),
+    )
+
+    finding = await probes.model_files(context)
+
+    assert finding.outcome is Outcome.SKIPPED
+    assert "not importable here" in finding.summary
+
+
+@pytest.mark.asyncio
+async def test_model_files_still_fails_when_the_registry_was_consulted() -> None:
+    """The line is the registry's absence, not the check being inconvenient."""
+    context = CheckContext(
+        models=FakeModelFiles(
+            ModelFileReport(
+                directory="/opt/reachy/models",
+                problems=("face_detection_yunet: hashes to something else",),
+            ),
+        ),
+    )
+
+    finding = await probes.model_files(context)
+
+    assert finding.outcome is Outcome.FAILED
+
+
+@pytest.mark.asyncio
 async def test_model_files_fails_when_nothing_was_verified_against() -> None:
     """A directory checked against an empty registry has not been checked."""
     context = CheckContext(

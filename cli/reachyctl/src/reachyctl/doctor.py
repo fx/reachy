@@ -96,8 +96,11 @@ class DoctorPlan:
         capabilities: What to offer during negotiation.
         models_directory: Where the model files are, or `None`.
         intent: What the robot is supposed to be, or `None`.
-        timeout: How long to wait for the session and then for a result.
-        staleness: How long a result stays worth acting on.
+        timeout: One budget for the whole groundstation exchange — opening the
+            session, sending the frame, and waiting for the result that answers
+            it. Not a per-step timeout: a bound that restarted at each step
+            would describe a part of the run rather than the run, and every
+            step is one a wedged service can stop dead.
     """
 
     url: str | None
@@ -105,7 +108,6 @@ class DoctorPlan:
     models_directory: Path | None = None
     intent: Intent | None = None
     timeout: float = 10.0
-    staleness: float = 2.0
 
 
 def _read(path: Path) -> str:
@@ -257,9 +259,14 @@ def _context(plan: DoctorPlan, link: SessionLink | None) -> CheckContext:
     """
     unavailable: dict[Requirement, str] = {Requirement.DAEMON: NO_ROBOT_YET}
     if link is None:
+        # Two ways to have no link, and they are different mistakes. Saying
+        # "configure an address" to somebody who configured one and no
+        # credential would send them to look at the thing that is already right.
         unavailable[Requirement.GROUNDSTATION] = (
             "no groundstation is configured: pass --url or set "
             "REACHYCTL_GROUNDSTATION_URL"
+            if plan.url is None
+            else "a groundstation is configured but no credential was resolved for it"
         )
     if plan.models_directory is None:
         unavailable[Requirement.MODELS] = (
@@ -293,8 +300,8 @@ async def run_doctor(
 
     Args:
         plan: What the run was asked to look at.
-        credential: What to present to the groundstation. `None` exactly when
-            no groundstation is configured.
+        credential: What to present to the groundstation, or `None` when there
+            is no groundstation to present it to.
         reporter: Where per-check progress goes while the run is happening.
         open_transport: How to open the connection. Injected only so the
             integration test can watch which connections were opened; the
@@ -305,12 +312,16 @@ async def run_doctor(
     """
     link: SessionLink | None = None
     if plan.url is not None and credential is not None:
+        # The staleness window is left at the client's own default and is not
+        # an option here. It governs `latest()` and `stale`, and this command
+        # reads neither — it takes the first result off `results()` within the
+        # run's budget. A `--staleness` that changed nothing observable would
+        # be exactly the silently-inert setting this command exists to catch.
         link = SessionLink(
             url=plan.url,
             credential=credential,
             capabilities=plan.capabilities,
             timeout=plan.timeout,
-            staleness=plan.staleness,
             open_transport=open_transport,
         )
 
@@ -368,6 +379,11 @@ def report_for(run: CheckRun, plan: DoctorPlan) -> Report:
         "skipped": tally["skipped"],
         "first_failure": None if broken is None else broken.identifier,
         "round_trip_ms": _round_trip(run),
+        # Always present, empty in the ordinary case. A progress callback that
+        # threw is a defect in this tool rather than a diagnosis of the robot,
+        # and it is reported rather than swallowed so that output which stopped
+        # partway is not left as a puzzle.
+        "observer_failures": run.observer_failures,
     }
     return Report(
         command="doctor",

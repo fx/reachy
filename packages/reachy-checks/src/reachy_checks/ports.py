@@ -126,8 +126,18 @@ class LinkReport:
 class ModelFileReport:
     """What is in a model directory, judged against what is pinned.
 
+    `unavailable` is the difference between "these files are wrong" and "there
+    was nothing here to judge them against", and the two are different facts
+    about different machines. A control machine carrying the checks but not the
+    groundstation package has nothing to verify against and is not in an error
+    state; a machine that has the registry and a file that does not match it
+    is. Collapsing the first into the second makes a provisioning run fail on a
+    machine that was never meant to carry the service.
+
     Attributes:
         directory: Where it looked.
+        unavailable: Why nothing could be judged, when nothing could. Empty
+            when the registry was consulted, whatever it then found.
         verified: The names of the models whose file is present and hashes to
             the pinned digest.
         problems: One line per model that is absent, unreadable, or hashes to
@@ -135,6 +145,7 @@ class ModelFileReport:
     """
 
     directory: str
+    unavailable: str = ""
     verified: tuple[str, ...] = ()
     problems: tuple[str, ...] = ()
 

@@ -287,3 +287,83 @@ def test_the_counts_carry_every_outcome_even_when_nothing_produced_one() -> None
 def test_the_registry_is_what_the_runner_runs_by_default() -> None:
     """The default is the real registry, not a copy a test could keep in step."""
     assert identifiers() == tuple(check.identifier for check in CHECKS)
+
+
+@pytest.mark.asyncio
+async def test_an_observer_that_raises_does_not_stop_the_run() -> None:
+    """Every check is downstream of one callback, which is the route past independence.
+
+    reachyctl REQ-054 requires every link to be reported individually. An
+    observer that threw on the second of nine checks would leave seven of them
+    unreported, and no test of the checks themselves would catch it.
+    """
+    checks = (
+        _check("first", _passes),
+        _check("second", _passes),
+        _check("third", _fails),
+    )
+    seen: list[str] = []
+
+    def observer(result: CheckResult) -> None:
+        """Raise on the first result and record the rest.
+
+        Args:
+            result: What the check found.
+
+        Raises:
+            RuntimeError: On the first call, modelling a progress display that
+                fell over partway.
+        """
+        if not seen:
+            seen.append(result.identifier)
+            message = "the progress display fell over"
+            raise RuntimeError(message)
+        seen.append(result.identifier)
+
+    run = await run_checks(CheckContext(), checks, observer)
+
+    assert [result.identifier for result in run.results] == [
+        "first",
+        "second",
+        "third",
+    ]
+    assert seen == ["first", "second", "third"]
+
+
+@pytest.mark.asyncio
+async def test_an_observer_failure_is_recorded_rather_than_swallowed() -> None:
+    """Progress output that simply stopped partway is its own puzzle for an operator."""
+    checks = (_check("first", _passes),)
+
+    def observer(result: CheckResult) -> None:
+        """Always fail.
+
+        Args:
+            result: Ignored.
+
+        Raises:
+            RuntimeError: Always.
+        """
+        del result
+        message = "the progress display fell over"
+        raise RuntimeError(message)
+
+    run = await run_checks(CheckContext(), checks, observer)
+
+    assert len(run.observer_failures) == 1
+    assert (
+        "first: RuntimeError: the progress display fell over"
+        in (run.observer_failures[0])
+    )
+    # The verdict about the robot still comes first, and is still the truth.
+    assert run.ok
+    assert "progress reporting itself failed 1 time(s)" in run.summary()
+
+
+@pytest.mark.asyncio
+async def test_a_run_with_a_working_observer_records_no_failure() -> None:
+    """The field is empty in the ordinary case rather than absent from it."""
+    run = await run_checks(CheckContext(), (_check("first", _passes),), lambda _r: None)
+
+    assert run.observer_failures == ()
+    assert "progress reporting" not in run.summary()

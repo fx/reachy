@@ -275,6 +275,19 @@ def test_doctor_pointed_at_a_declaration_that_is_not_there() -> None:
     assert "could not be read" in result.stdout
 
 
+def test_doctor_has_no_staleness_option() -> None:
+    """It was removed rather than documented, because it changed nothing observable.
+
+    The staleness window governs `latest()` and `stale`, which this command
+    never reads — it takes the first result within the run's budget. A knob
+    that quietly did nothing is the defect class `doctor` exists to catch, so
+    it fails as an unknown option rather than being accepted and ignored.
+    """
+    result = runner.invoke(app, ["doctor", "--staleness", "2.0"], env=CONFIGURED)
+
+    assert result.exit_code == ExitCode.USAGE
+
+
 def test_doctor_with_a_capability_the_contract_would_refuse() -> None:
     """A typo costs a message rather than a session that negotiates to nothing."""
     result = runner.invoke(

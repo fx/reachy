@@ -243,6 +243,15 @@ async def model_files(context: CheckContext) -> Finding:
     are the right ones, and the two would be free to drift until a capability
     warmed up against something nobody reviewed.
 
+    A machine with no registry to judge against is skipped rather than failed.
+    The registry is an optional dependency, and a machine that does not carry
+    it — the control machine a provisioning verification runs from, most
+    obviously — has an absent prerequisite rather than a broken installation.
+    Failing there would make every such run red, which is how an operator
+    learns to stop reading the output. A machine that *does* have the registry
+    and a file that is missing or does not match it has a real fault, and that
+    still fails.
+
     Args:
         context: What the run was given.
 
@@ -255,6 +264,8 @@ async def model_files(context: CheckContext) -> Finding:
         "models_verified": report.verified,
         "models_problems": report.problems,
     }
+    if report.unavailable:
+        return Finding.skipped(report.unavailable, detail)
     if report.problems:
         return Finding.failed(
             f"{len(report.problems)} model file problem(s) in {report.directory}: "

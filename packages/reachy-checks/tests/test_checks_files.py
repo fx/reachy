@@ -143,18 +143,38 @@ def test_the_real_registry_is_what_is_verified_against(fs: FakeFilesystem) -> No
         assert any(model.name in problem for problem in report.problems)
 
 
-def test_a_machine_without_the_groundstation_says_so_rather_than_raising(
+def test_a_machine_without_the_groundstation_reports_an_absent_prerequisite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The registry is an optional extra; its absence is a finding, not an ImportError."""
+    """The registry is an optional extra, and its absence is neither a crash nor a fault.
+
+    It goes in `unavailable` and NOT in `problems`, which is what makes the
+    check skip rather than fail. A control machine carrying the checks but not
+    the service has nothing to verify against; calling that broken would fail
+    every provisioning verification run on a machine that was never meant to
+    carry the groundstation package.
+    """
     # Binding the name to None is what makes an import of it raise ImportError,
     # which is the same thing a machine that never installed the extra does.
     monkeypatch.setitem(sys.modules, "reachy_groundstation.models", None)
 
     report = GroundstationModelFiles(DIRECTORY).inspect()
 
-    assert report.problems == (REGISTRY_MISSING,)
+    assert report.unavailable == REGISTRY_MISSING
+    assert report.problems == ()
     assert report.verified == ()
+
+
+def test_a_machine_with_the_registry_reports_nothing_unavailable(
+    fs: FakeFilesystem,
+) -> None:
+    """The other side of the line: the registry was consulted, so the fault is real."""
+    fs.create_dir(DIRECTORY)
+
+    report = GroundstationModelFiles(DIRECTORY).inspect()
+
+    assert report.unavailable == ""
+    assert report.problems
 
 
 def test_the_directory_is_kept_as_it_was_given() -> None:
