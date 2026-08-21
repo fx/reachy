@@ -1,11 +1,16 @@
 """The image verifier's own logic, exercised without a container.
 
-What is worth testing here is not the WebSocket — that is `websockets`, and the
-protocol it carries is `reachy_contracts`, both of which have tests of their own.
-It is the small amount of judgement this script adds: deriving the session
-endpoint from a base URL, refusing a base URL it cannot derive one from, building
-an offer the service will accept, and giving up on readiness rather than waiting
-for ever.
+What is worth testing here is deliberately small. The session protocol belongs to
+`reachy_session_client`, which has its own suite covering negotiation, framing,
+results and reconnection — re-testing it through this script would test the
+client twice and this script not at all. What is left is the judgement this
+module adds: deriving the session endpoint from a base URL, refusing one it
+cannot derive an endpoint from, reading the frame without re-encoding it, and
+giving up on readiness rather than waiting for ever.
+
+`drive_session` itself is exercised for real rather than here: `just
+image-verify` runs it against the built image on a network with no route off the
+host, which is the only place it can prove anything.
 
 The readiness tests drive `wait_until_ready` through an injected clock and an
 injected fetch, so no socket is opened and no wall time is spent.
@@ -13,28 +18,20 @@ injected fetch, so no socket is opened and no wall time is spent.
 
 from __future__ import annotations
 
-import asyncio
 import urllib.error
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 import verify_groundstation_image
 from verify_groundstation_image import (
     VerificationError,
-    capture_stamp,
-    frame_for,
-    offer_for,
+    frame_bytes,
     session_url,
     wait_until_ready,
 )
 
-from reachy_contracts import FACE_CAPABILITY, SessionOffer
-from reachy_groundstation.session.framing import (
-    MessageKind,
-    decode_control,
-    decode_frame,
-)
+from reachy_session_client import validate_session_url
 
 if TYPE_CHECKING:
     from pyfakefs.fake_filesystem import FakeFilesystem
@@ -66,38 +63,37 @@ def test_a_base_url_with_no_usable_scheme_is_refused(base: str) -> None:
         session_url(base)
 
 
-def test_the_offer_presents_the_credential_and_asks_for_the_face_capability() -> None:
-    """What is sent is what the service parses, built from the same types."""
-    kind, payload = decode_control(offer_for("example-credential"))
-    assert kind is MessageKind.OFFER
-    offer = SessionOffer.from_wire(payload)
-    assert offer.credential.get_secret_value() == "example-credential"
-    assert [capability.name for capability in offer.capabilities] == [FACE_CAPABILITY]
+def test_the_derived_endpoint_is_one_the_shared_client_accepts() -> None:
+    """The client validates the URL it is given, so this has to satisfy it.
+
+    Deriving an endpoint the client refuses would fail at `SessionClient`'s
+    constructor with a message about the URL rather than about the service, and
+    the two are the sort of thing a reader conflates at three in the morning.
+    """
+    assert validate_session_url(session_url(_BASE)) == session_url(_BASE)
 
 
 @pytest.mark.filesystem  # the committed fixture's bytes are what gets sent
-def test_the_frame_carries_the_image_bytes_unaltered() -> None:
-    """A frame is a header and the compressed bytes; nothing re-encodes them."""
+def test_the_frame_is_read_without_being_re_encoded() -> None:
+    """Compressed bytes go to the client as they are; nothing re-encodes them."""
     fixture = verify_groundstation_image._DEFAULT_FRAME
-    header, payload = decode_frame(frame_for(fixture, sequence=7))
-    assert header.sequence == 7
-    assert header.captured_at == capture_stamp(7)
-    assert payload == fixture.read_bytes()
+    assert frame_bytes(fixture) == fixture.read_bytes()
+    assert frame_bytes(fixture).startswith(b"\xff\xd8")
 
 
 def test_a_missing_frame_is_reported_as_a_missing_file(fs: FakeFilesystem) -> None:
     """Better than a stack trace out of `read_bytes` two frames deeper.
 
     An in-memory filesystem rather than a real temporary one: no bytes on disk
-    are the thing under test here, so this is an ordinary unit test and
-    performs no input or output.
+    are the thing under test here, so this is an ordinary unit test and performs
+    no input or output.
 
     Args:
         fs: The in-memory filesystem, which is empty.
     """
     del fs
     with pytest.raises(VerificationError, match="is not a file"):
-        frame_for(Path("/frames/no-such-frame.jpg"))
+        frame_bytes(Path("/frames/no-such-frame.jpg"))
 
 
 def test_readiness_is_polled_until_the_service_says_yes(
@@ -152,12 +148,9 @@ def test_readiness_reports_a_refused_connection_rather_than_raising(
     assert "Connection refused" in detail
 
 
-def test_a_binary_message_where_text_was_due_is_refused() -> None:
-    """Results are text; a binary answer means the framing has changed."""
-
-    class _Binary:
-        async def recv(self) -> Any:  # noqa: ANN401  # mirrors `websockets`, whose `recv` returns text or bytes
-            return b"\x00\x01"
-
-    with pytest.raises(VerificationError, match="binary bytes"):
-        asyncio.run(verify_groundstation_image._receive(_Binary()))  # type: ignore[arg-type]  # a stand-in for `ClientConnection`, which is a concrete class rather than a protocol
+def test_a_body_that_is_not_json_is_reported_as_the_text_that_arrived() -> None:
+    """A proxy error page must name what answered, not raise a decode error."""
+    assert (
+        verify_groundstation_image._decoded(b"<html>502</html>") == "<html>502</html>"
+    )
+    assert verify_groundstation_image._decoded(b'{"ready": true}') == {"ready": True}

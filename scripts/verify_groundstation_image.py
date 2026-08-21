@@ -1,4 +1,4 @@
-"""Drive a real session against a running groundstation and report what happened.
+r"""Drive a real session against a running groundstation and report what happened.
 
 This is the half of `just image-verify` that exercises the artifact rather than
 inspecting it. A Dockerfile that builds successfully and produces a service that
@@ -6,20 +6,23 @@ cannot start is a passing build and a broken release, so what CI checks is that
 the built image, started, warms its models up, reports itself ready and answers a
 frame with a detection — the same sequence a robot performs.
 
-**It does not reimplement the session protocol.** The offer, the framing and the
-result envelope come from `reachy_contracts` and
-`reachy_groundstation.session.framing`, which are the same modules the service
-parses with. A hand-rolled client here would drift from the protocol and the
-drift would look like a passing verification.
+**The session is driven by `reachy_session_client`, not by anything written
+here.** Reachyctl REQ-057 makes that package the one client implementation of the
+protocol, and a second one written to test an image is exactly what it forbids:
+it would pass its own expectations and prove nothing about what a robot meets.
+So this module contributes a readiness poll, a file read and an exit status, and
+the negotiation, the framing and the result envelope are the shared client's.
 
 It is designed to run *inside a container on the same Docker network as the
 service*, which is what lets the service be verified while attached to a network
-with no route off the host — see the `image-verify` recipe. Nothing here assumes
+with no route off the host — see the `image-verify` recipe, which mounts this
+script and the client's source into a sibling container. Nothing here assumes
 otherwise: it is given a base URL and it uses it.
 
 Run it as a script:
 
-    python scripts/verify_groundstation_image.py --base-url http://127.0.0.1:8080
+    python scripts/verify_groundstation_image.py \\
+        --base-url http://127.0.0.1:8080 --credential …
 
 The default frame is a committed perception fixture with one face in it, so a
 successful run is evidence that the model baked into the image loaded and ran,
@@ -38,38 +41,18 @@ import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from websockets.asyncio.client import connect
-
-from reachy_contracts import (
-    FACE_CAPABILITY,
-    Capability,
-    CaptureTimestamp,
-    FaceDetections,
-    FrameHeader,
-    ResultEnvelope,
-    SessionAgreement,
-    SessionOffer,
-)
+from reachy_contracts import FACE_CAPABILITY, Capability
 from reachy_groundstation.api.app import SESSION_PATH
-from reachy_groundstation.session.framing import (
-    MessageKind,
-    decode_control,
-    encode_control,
-    encode_frame,
-)
+from reachy_session_client import Credential, FrameResult, SessionClient
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from websockets.asyncio.client import ClientConnection
-
 __all__ = [
     "VerificationError",
-    "capture_stamp",
     "drive_session",
-    "frame_for",
+    "frame_bytes",
     "main",
-    "offer_for",
     "readiness",
     "session_url",
     "wait_until_ready",
@@ -79,19 +62,14 @@ __all__ = [
 # own `FACE_VERSION`, restated as a literal rather than imported, because
 # negotiation is where a client and a service discover they disagree: importing
 # the service's constant would make the two agree by construction and verify
-# nothing. A bump to the capability that this does not follow shows up here as
-# an empty agreed set, which is exactly the failure worth seeing.
+# nothing. A bump to the capability that this does not follow shows up as an
+# empty agreed set, which is exactly the failure worth seeing.
 _FACE_VERSION: Final = 1
 
-# What a client with no clock of its own puts in a frame header. The
-# groundstation copies it onto the result byte for byte and never reads it, so
-# any token does; this one is recognisable in a log.
-_CAPTURE_LABEL: Final = "image-verify"
-
-# How long to wait for something that should already be on its way. Warm-up runs
-# one real inference before the service reports ready, so the readiness deadline
-# is separately generous.
-_MESSAGE_TIMEOUT_SECONDS: Final = 30.0
+# How long to wait for a result that should already be on its way. Generous
+# because the ARM image is verified under emulation, where one detection pass
+# costs seconds rather than tens of milliseconds.
+_RESULT_TIMEOUT_SECONDS: Final = 120.0
 _POLL_INTERVAL_SECONDS: Final = 1.0
 
 # The frame driven through the service when none is named. One face, drawn
@@ -133,50 +111,17 @@ def session_url(base_url: str) -> str:
     raise VerificationError(message)
 
 
-def capture_stamp(sequence: int) -> CaptureTimestamp:
-    """Mint the opaque capture token for one frame.
+def frame_bytes(path: Path) -> bytes:
+    """Read the frame to send, exactly as capture hardware would have produced it.
+
+    The bytes are handed to the client compressed and are never re-encoded on
+    the way, which is the one thing the protocol is careful not to do.
 
     Args:
-        sequence: The frame's number within the session.
+        path: The JPEG to send.
 
     Returns:
-        A token this client can recognise in a result and in a log line.
-    """
-    return CaptureTimestamp(f"{_CAPTURE_LABEL}-{sequence}")
-
-
-def offer_for(credential: str) -> str:
-    """Build the control message that opens a session.
-
-    Args:
-        credential: What the service authenticates the session against.
-
-    Returns:
-        The encoded offer.
-    """
-    return encode_control(
-        MessageKind.OFFER,
-        SessionOffer.model_validate(
-            {
-                "credential": credential,
-                "capabilities": (
-                    Capability(name=FACE_CAPABILITY, version=_FACE_VERSION),
-                ),
-            },
-        ),
-    )
-
-
-def frame_for(path: Path, sequence: int = 0) -> bytes:
-    """Build the binary frame message carrying an image.
-
-    Args:
-        path: The JPEG to send, exactly as the capture hardware would have
-            produced it. It is never re-encoded.
-        sequence: The frame's number within the session.
-
-    Returns:
-        The encoded frame message.
+        Its contents.
 
     Raises:
         VerificationError: If the file is not there.
@@ -184,10 +129,7 @@ def frame_for(path: Path, sequence: int = 0) -> bytes:
     if not path.is_file():
         message = f"no frame to send: {path} is not a file"
         raise VerificationError(message)
-    return encode_frame(
-        FrameHeader(sequence=sequence, captured_at=capture_stamp(sequence)),
-        path.read_bytes(),
-    )
+    return path.read_bytes()
 
 
 def readiness(base_url: str, timeout: float) -> tuple[bool, object]:
@@ -208,12 +150,32 @@ def readiness(base_url: str, timeout: float) -> tuple[bool, object]:
     )
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310  # same request object, already scheme-checked
-            body = json.loads(response.read())
+            raw = response.read()
     except urllib.error.HTTPError as error:
-        return False, json.loads(error.read())
+        return False, _decoded(error.read())
     except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
         return False, repr(error)
+    body = _decoded(raw)
     return bool(isinstance(body, dict) and body.get("ready")), body
+
+
+def _decoded(raw: bytes) -> object:
+    """Decode a readiness body, falling back to the text that was sent.
+
+    A wrong port, a proxy error page or an empty body would otherwise end the
+    run in a `JSONDecodeError` traceback rather than in a message naming what
+    answered.
+
+    Args:
+        raw: The bytes of the answer.
+
+    Returns:
+        The parsed document, or the text when it is not JSON.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw.decode("utf-8", "replace")
 
 
 def wait_until_ready(base_url: str, deadline_seconds: float) -> object:
@@ -250,36 +212,39 @@ def wait_until_ready(base_url: str, deadline_seconds: float) -> object:
     raise VerificationError(message)
 
 
-async def drive_session(
-    url: str,
-    credential: str,
-    frame: bytes,
-) -> ResultEnvelope[FaceDetections]:
+async def drive_session(url: str, credential: str, payload: bytes) -> FrameResult:
     """Negotiate a session, send one frame, and read the answer back.
+
+    Every protocol step here belongs to `SessionClient`: the offer it builds,
+    the agreement it parses, the framing it applies, and the envelope it
+    validates. What is left is the assertions — that the capability was actually
+    agreed, and that something came back.
 
     Args:
         url: The session endpoint.
         credential: What the service authenticates the session against.
-        frame: The encoded frame message to send.
+        payload: The compressed frame to send.
 
     Returns:
         The result the face capability produced for that frame.
 
     Raises:
-        VerificationError: If the service closed the session, refused the
-            credential, agreed to no capabilities, or answered with something
-            other than a face result.
+        VerificationError: If the service agreed to no face capability, dropped
+            the frame because no session was up, or sent no result before the
+            deadline.
     """
-    async with connect(url, max_size=None) as connection:
-        await connection.send(offer_for(credential))
-        kind, payload = await _receive(connection)
-        if kind is not MessageKind.AGREEMENT:
-            message = f"expected an agreement, got a {kind.value}: {payload!r}"
-            raise VerificationError(message)
-        agreement = SessionAgreement.from_wire(payload)
-        if FACE_CAPABILITY not in [
-            capability.name for capability in agreement.capabilities
-        ]:
+    client = SessionClient(
+        url=url,
+        credential=Credential(credential),
+        capabilities=(Capability(name=FACE_CAPABILITY, version=_FACE_VERSION),),
+        # Long enough that the emulated ARM run's result is still worth acting
+        # on when it arrives. `latest` is not read here, but a result the client
+        # considers stale is a result this would have to reason about.
+        staleness_seconds=_RESULT_TIMEOUT_SECONDS,
+    )
+    async with client:
+        agreement = await client.connect()
+        if client.agreed(FACE_CAPABILITY) is None:
             message = (
                 f"the service agreed to {[c.name for c in agreement.capabilities]}, "
                 f"which does not include {FACE_CAPABILITY!r}; the model in the "
@@ -287,32 +252,46 @@ async def drive_session(
             )
             raise VerificationError(message)
 
-        await connection.send(frame)
-        kind, payload = await _receive(connection)
-        if kind is not MessageKind.RESULT:
-            message = f"expected a result, got a {kind.value}: {payload!r}"
+        if await client.submit_frame(payload) is None:
+            message = "the frame was dropped: no session was up to send it on"
             raise VerificationError(message)
-        return ResultEnvelope[FaceDetections].from_wire(payload)
+
+        return await _first_result(client)
 
 
-async def _receive(connection: ClientConnection) -> tuple[MessageKind, bytes]:
-    """Read the next control message off an open session.
+async def _first_result(client: SessionClient) -> FrameResult:
+    """Take the first result off a session and stop the client reconnecting.
+
+    Iteration is what keeps the link up, so leaving the generator open would
+    leave the client reconnecting on this function's behalf after it has what it
+    came for. Closing it is part of using it.
 
     Args:
-        connection: The open WebSocket.
+        client: The connected session.
 
     Returns:
-        The kind and canonical bytes of the message.
+        The first result the service sent.
 
     Raises:
-        VerificationError: If the service sent a binary message, which nothing
-            in this direction ever is.
+        VerificationError: If none arrived before the deadline.
     """
-    raw = await asyncio.wait_for(connection.recv(), timeout=_MESSAGE_TIMEOUT_SECONDS)
-    if isinstance(raw, bytes):
-        message = f"the service sent {len(raw)} binary bytes where text was due"
-        raise VerificationError(message)
-    return decode_control(raw)
+    results = client.results()
+    try:
+        return await asyncio.wait_for(
+            anext(results),
+            timeout=_RESULT_TIMEOUT_SECONDS,
+        )
+    except StopAsyncIteration as end:
+        message = "the session ended before the frame was answered"
+        raise VerificationError(message) from end
+    except TimeoutError as expired:
+        message = (
+            f"no result arrived within {_RESULT_TIMEOUT_SECONDS:.0f}s of the "
+            f"frame being sent"
+        )
+        raise VerificationError(message) from expired
+    finally:
+        await results.aclose()
 
 
 def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -354,10 +333,10 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         help="how long to wait for readiness, in seconds (default: %(default)s)",
     )
     parser.add_argument(
-        "--expect-faces",
+        "--expect-detections",
         type=int,
         default=1,
-        help="how many faces the answer must carry (default: %(default)s)",
+        help="how many detections the answer must carry (default: %(default)s)",
     )
     return parser.parse_args(argv)
 
@@ -378,26 +357,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         health = wait_until_ready(arguments.base_url, arguments.ready_timeout)
         sys.stdout.write(f"image-verify: ready: {json.dumps(health)}\n")
 
-        frame = frame_for(arguments.frame)
-        result = asyncio.run(drive_session(url, arguments.credential, frame))
-        faces = result.payload.faces
-        sys.stdout.write(
-            f"image-verify: {arguments.frame.name} "
-            f"({len(frame)} bytes on the wire) answered by "
-            f"{result.capability!r} at sequence {result.sequence} "
-            f"with {len(faces)} face(s): "
-            f"{[(f.centre.x, f.centre.y, f.confidence) for f in faces]}\n",
+        payload = frame_bytes(arguments.frame)
+        result = asyncio.run(drive_session(url, arguments.credential, payload))
+        round_trip = (
+            "unmeasured"
+            if result.round_trip_seconds is None
+            else f"{result.round_trip_seconds * 1000:.0f} ms"
         )
-        if result.captured_at != capture_stamp(result.sequence):
+        sys.stdout.write(
+            f"image-verify: {arguments.frame.name} ({len(payload)} bytes) "
+            f"answered by {result.capability!r} at sequence {result.sequence} "
+            f"with {result.detections} detection(s) in {round_trip}: "
+            f"{result.payload.to_wire().decode('utf-8')}\n",
+        )
+        if result.detections < arguments.expect_detections:
             message = (
-                f"the capture token came back as {result.captured_at.root!r}, "
-                f"not the {capture_stamp(result.sequence).root!r} that was sent"
-            )
-            raise VerificationError(message)
-        if len(faces) < arguments.expect_faces:
-            message = (
-                f"expected at least {arguments.expect_faces} face(s) in "
-                f"{arguments.frame.name}, got {len(faces)}"
+                f"expected at least {arguments.expect_detections} detection(s) "
+                f"in {arguments.frame.name}, got {result.detections}"
             )
             raise VerificationError(message)
     except VerificationError as error:

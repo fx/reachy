@@ -399,12 +399,29 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
             ;;
     esac
 
-    # Read-only, at a path nothing in the image looks at: the two probe scripts
-    # and the fixture frame are harness, not artifact. Nothing is mounted over
+    # Read-only, at a path nothing in the image looks at: the probe scripts and
+    # the fixture frame are harness, not artifact. Nothing is mounted over
     # anything the image ships.
     mounts=(
         --volume "$PWD/scripts:/verify/scripts:ro"
         --volume "$PWD/services/groundstation/tests/fixtures:/verify/fixtures:ro"
+    )
+
+    # The one client implementation of the session protocol, mounted for the
+    # container that drives the session and for no other. Reachyctl REQ-057
+    # makes `reachy_session_client` the only client, so the alternative is a
+    # second one written to test an image, which would pass its own
+    # expectations and prove nothing about what a robot meets.
+    #
+    # It is mounted rather than installed because it is not a groundstation
+    # dependency and putting it in the published image to test the published
+    # image would be the wrong trade. It runs on the image's own interpreter:
+    # the client is pure Python and needs `reachy_contracts` and `websockets`,
+    # both of which the service already installs. If it ever needs a third, the
+    # driver fails with an import error naming it.
+    driver=(
+        --volume "$PWD/packages/reachy-session-client/src:/verify/lib:ro"
+        --env PYTHONPATH=/verify/lib
     )
 
     # The log is the only account of why a container that failed failed, and by
@@ -487,8 +504,9 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
     # the host — and driving it from another container is closer to a robot
     # opening a session than a loopback connection would be anyway. The sibling
     # runs the image under test because it already carries the interpreter,
-    # `websockets` and the contracts.
-    docker run --rm --network "$net" "${mounts[@]}" \
+    # `websockets` and the contracts, which is what the shared session client
+    # mounted above needs to run on it.
+    docker run --rm --network "$net" "${mounts[@]}" "${driver[@]}" \
         --entrypoint /opt/reachy/venv/bin/python \
         '{{ tag }}' /verify/scripts/verify_groundstation_image.py \
             --base-url "http://${name}:8080" \
