@@ -55,7 +55,7 @@ changes:
     path: changes/0003-contracts-package.md
     description: Shared wire types, golden fixtures and schema generation
     spec: robot-link
-    status: draft
+    status: complete
     depends_on: ["0001", "0002"]
   - id: "0004"
     name: groundstation-session

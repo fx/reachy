@@ -116,6 +116,10 @@ exclude = [
 # Tests assert, and pytest rewrites those asserts; S101 is the rule that objects
 # to `assert` in shipped code, which is not what a test file is.
 "**/tests/**/*.py" = ["S101"]
+# The wire-type ban further down is lifted here, and only here. This package is
+# the declaration site every other member is pointed at, so it is the one place
+# a pydantic model is not a second copy of somebody else's contract.
+"packages/reachy-contracts/**/*.py" = ["TID253"]
 
 # The `banned-api` list further down bans Reachy-specific imports so that the
 # vendored ESPHome directory cannot grow a robot dependency. Those imports are
@@ -185,8 +189,40 @@ exclude = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+# The formatter still wraps code at `line-length` above; this only relaxes the
+# rule that flags a line the formatter cannot split. A duvet annotation's meta
+# line is a spec path plus a section anchor derived from the requirement's
+# heading, which is one unbreakable token — and the specs are frozen, so the
+# heading cannot be shortened to fit. The alternative is a `# noqa` on the
+# annotation itself, which duvet would then read as part of the anchor.
+[tool.ruff.lint.pycodestyle]
+max-line-length = 120
+
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
+
+# The import direction, enforced rather than documented. A wire type is declared
+# once, in `reachy-contracts`, and every other member imports it from
+# `reachy_contracts`; a member that reaches for pydantic is about to declare a
+# second copy of a shape that already exists, and the two are then free to drift
+# until a robot behaves oddly. The exemption for the declaration site itself is
+# the TID253 entry in `per-file-ignores` above.
+#
+# TID253 rather than `banned-api`, for two reasons. TID251 is already spoken for
+# by the vendored ESPHome boundary below, whose negated `per-file-ignores` entry
+# switches the whole rule off outside that directory — so a `banned-api` entry
+# added here would be silently dead everywhere it needed to fire. And naming the
+# module covers every way to declare a model at once, including
+# `pydantic.dataclasses`, the `pydantic.v1` shim and whatever pydantic adds next,
+# where `banned-api` had to enumerate eleven qualified paths and would miss the
+# twelfth.
+#
+# It is deliberately coarser than "no model bases": any module-level pydantic
+# import outside the contracts package trips it. `pydantic_settings` is not
+# banned, so validated configuration is unaffected — but a settings model that
+# also wants pydantic's own `Field` suppresses this on that import, with a
+# comment saying the model is configuration and not a wire type.
+banned-module-level-imports = ["pydantic"]
 
 # The import-direction boundary, enforced rather than left to convention.
 #
@@ -220,6 +256,10 @@ ban-relative-imports = "parents"
 
 [tool.mypy]
 python_version = "3.12"
+# Without the plugin a pydantic model's `__init__` is `(**data: Any)`, so strict
+# mode checks every call in the repository except the ones that build a message
+# — which is the class of mistake the wire types exist to catch.
+plugins = ["pydantic.mypy"]
 # Strict for every module. Relaxations are per-module `[[tool.mypy.overrides]]`
 # blocks carrying a comment that names the reason, never a global loosening.
 strict = true
@@ -317,6 +357,11 @@ warn_unused_ignores = false
 disable_error_code = ["redundant-expr", "truthy-bool"]
 ignore_missing_imports = true
 
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 # Strict async mode: an async test without an explicit marker errors rather than
@@ -346,6 +391,15 @@ addopts = [
 ]
 testpaths = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 filterwarnings = ["error"]
+# The filesystem half of the no-input-or-output rule has no `--disable-socket`
+# equivalent. This marker grants a unit test nothing: it declares that the test
+# is not one, the way `enable_socket` does for an integration test. The golden
+# fixture corpus is the case it exists for — the bytes on disk are the contract,
+# so reading them is the behaviour under test and a fake would pin whatever the
+# fake was told to return.
+markers = [
+    "filesystem: declares a contract test that reads committed data files; never a unit test.",
+]
 
 [tool.coverage.run]
 branch = true

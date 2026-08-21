@@ -1,0 +1,30 @@
+{
+  "$defs": {
+    "CaptureTimestamp": {
+      "description": "A frame's capture instant, as the capturing side wrote it.\n\nThe value is an opaque token everywhere except on the machine that minted\nit. This type therefore stores characters and nothing else: it will not\nparse, compare, order or re-render them, so copying a token from a frame\nonto a result is the only thing that is easy to do with one. The producing\nside reads `root` and interprets it against the monotonic clock it came\nfrom; nobody else has a clock the value means anything against.\n\nAttributes:\n    root: The token exactly as the capturing side supplied it.",
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "CaptureTimestamp",
+      "type": "string"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What travels with a frame's opaque payload bytes.\n\nThe frame itself is already JPEG-compressed by the capture hardware and the\nprotocol never re-encodes it, so the header is the whole of what the link\nreads about a frame.\n\nAttributes:\n    sequence: This frame's number within the session, increasing.\n    captured_at: The capturing side's opaque token for when it was taken.",
+  "properties": {
+    "captured_at": {
+      "$ref": "#/$defs/CaptureTimestamp"
+    },
+    "sequence": {
+      "minimum": 0,
+      "title": "Sequence",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "sequence",
+    "captured_at"
+  ],
+  "title": "FrameHeader",
+  "type": "object"
+}

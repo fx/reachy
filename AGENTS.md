@@ -105,6 +105,42 @@ exercises a real transport in-process declares it with
 `@pytest.mark.enable_socket`. The filesystem and sleeping halves have no
 equivalent guard and are enforced in review.
 
+`@pytest.mark.filesystem` is the filesystem's counterpart to
+`@pytest.mark.enable_socket`, and it grants a unit test nothing. It **declares
+that the test is not a unit test**: reading a committed data file is input, so a
+test that does it is a contract test and the rule above no longer describes it.
+The marker exists so that fact is visible in the test rather than discovered
+later, and a unit test carrying it is a mislabelled test, not a licensed one. It
+is warranted only where the bytes on disk are themselves the thing under test —
+the golden fixture corpus — because there a fake would pin whatever the fake was
+told to return.
+
+### Wire types are declared once
+
+Every type that crosses the robot link is declared in
+`packages/reachy-contracts` and imported from `reachy_contracts` by everything
+else. A second copy in a consumer is free to drift from the first, and the
+failure shows up as a robot behaving oddly rather than as a test going red.
+
+That import direction is a lint rule, not a convention: ruff's `TID253` bans
+importing `pydantic` at module level outside the contracts package, so a member
+that starts declaring its own wire type fails `just lint`. The ban names the
+module rather than the model bases, which covers every construct at once —
+`BaseModel`, `RootModel`, `create_model`, `pydantic.dataclasses` and the
+`pydantic.v1` shim — and keeps covering whatever pydantic adds next.
+
+It is `TID253` and not `banned-api` because `TID251` is already spoken for by
+the vendored ESPHome boundary, whose negated `per-file-ignores` entry switches
+that rule off everywhere outside the vendored directory. A `banned-api` entry
+for pydantic would therefore be silently dead in every member it needed to
+guard. The two rules carry the two bans precisely so their scopes stay
+independent.
+
+`pydantic_settings` is not banned, so validated configuration is unaffected. A
+settings model that also wants pydantic's own `Field` suppresses `TID253` on
+that one import, with a comment saying the model is configuration rather than a
+wire type.
+
 ### Tool configuration is shared, never per-member
 
 ruff, mypy, pytest and coverage are configured once, in the root
@@ -186,6 +222,10 @@ Annotations already in the tree still resolve, and they are written `#:=` for th
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and
 `#%`. The colon is what stops `ruff format` inserting a space after the `#` and
 silently breaking the citation; the same file's header explains it.
+
+A `#:%` line reproduces the requirement's sentence byte for byte, including its
+original line wrapping. Reflow it to fit and `duvet report` exits 1 with `could
+not find text in section`.
 
 ## Task Tracking
 

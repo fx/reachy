@@ -3,23 +3,45 @@
 The drift gate this feeds is simple: regenerate, then fail if the working tree
 changed. That only works if regeneration is a real operation with a real output,
 so this module is the registry the generators plug into rather than a
-placeholder the gate skips over. `CONTRACTS` is empty today — the wire types
-whose schemas belong here do not exist yet — and the index it renders records
-exactly that, which is a fact worth committing: an empty registry that says so
-is checkable, and a check that is only wired up later is not.
+placeholder the gate skips over.
 
-Registering a generator is the whole of the work left. Append a `Contract` with
-the path it writes under `docs/contracts/` and a callable that renders its
-content, and the gate covers it with no further change here or in the workflow.
+`CONTRACTS` now holds one JSON Schema per robot link message type, derived from
+the same declarations that validate those messages at run time. One declaration
+producing both is the point: a schema written by hand beside a type is a second
+statement of the contract, free to disagree with the first, and the drift gate
+would have nothing to compare that disagreement against.
+
+Registering a further generator is still the whole of the work. Append a
+`Contract` with the path it writes under `docs/contracts/` and a callable that
+renders its content, and the gate covers it with no further change here or in
+the workflow.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
+
+from reachy_contracts.session import (
+    FrameHeader,
+    ResultEnvelope,
+    SessionAgreement,
+    SessionClose,
+    SessionError,
+    SessionOffer,
+)
+from reachy_contracts.values import (
+    FACE_CAPABILITY,
+    GESTURE_CAPABILITY,
+    CapabilityName,
+    FaceDetections,
+    GestureDetections,
+    WireModel,
+)
 
 __all__ = ["CONTRACTS", "INDEX_PATH", "Contract", "export", "render_all"]
 
@@ -41,8 +63,125 @@ class Contract:
     render: Callable[[], str]
 
 
-# Empty until the wire types exist. Generators are appended here.
-CONTRACTS: Final[tuple[Contract, ...]] = ()
+# Where the robot link schemas are written, relative to `docs/contracts/`.
+_SCHEMA_DIRECTORY: Final = "robot-link"
+
+# Declared so a consumer reading a published schema knows which dialect's rules
+# apply to it. pydantic emits 2020-12 shapes but does not stamp the document.
+_DIALECT: Final = "https://json-schema.org/draft/2020-12/schema"
+
+
+def _schema_of(
+    model: type[WireModel],
+    capability: CapabilityName | None = None,
+) -> Callable[[], str]:
+    """Build a renderer for one message type's JSON Schema.
+
+    The validation schema rather than the serialisation one. The two agree for
+    every message type here except the session offer, where the serialisation
+    schema drops the credential's minimum length and the fact that it is a
+    secret — so publishing it would describe a contract laxer than the one this
+    package enforces, and a second implementation written against it could emit
+    a message this package refuses.
+
+    A result envelope is published once per capability, and each published copy
+    pins its `capability` field to that name. Without it the two result schemas
+    are identical documents that both admit either name, so a producer written
+    against `face-result.schema.json` could emit a gesture payload under the
+    face name — a message `ResultEnvelope` rejects at run time, which is exactly
+    the disagreement between the code and its published contract that generating
+    one from the other is supposed to remove.
+
+    Args:
+        model: The message type to describe.
+        capability: The capability this parameterisation answers for, when the
+            message type is a result envelope.
+
+    Returns:
+        A callable rendering that type's schema, keys sorted so the output
+        depends on the declaration and not on dictionary ordering.
+    """
+
+    def render() -> str:
+        schema = model.model_json_schema(mode="validation")
+        if capability is not None:
+            schema["properties"]["capability"]["const"] = capability
+        document = {"$schema": _DIALECT, **schema}
+        text = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False)
+        return f"{text}\n"
+
+    return render
+
+
+@dataclass(frozen=True, slots=True)
+class _Published:
+    """One message type and how it is published.
+
+    Attributes:
+        slug: The schema's file name, without its extension.
+        model: The message type to describe.
+        summary: One line for the generated index.
+        capability: The capability a result envelope answers for, or `None` for
+            a message type that is not a result envelope.
+    """
+
+    slug: str
+    model: type[WireModel]
+    summary: str
+    capability: CapabilityName | None = None
+
+
+# One schema per message type. `face-result` and `gesture-result` are the same
+# envelope carrying different payloads, which is what makes a new capability a
+# new row here rather than a change to `ResultEnvelope`.
+_MESSAGE_TYPES: Final[tuple[_Published, ...]] = (
+    _Published(
+        "session-offer",
+        SessionOffer,
+        "the client's credential and the capabilities it can speak",
+    ),
+    _Published(
+        "session-agreement",
+        SessionAgreement,
+        "the capabilities both sides settled on",
+    ),
+    _Published(
+        "frame-header",
+        FrameHeader,
+        "a frame's sequence number and its opaque capture token",
+    ),
+    _Published(
+        "face-result",
+        ResultEnvelope[FaceDetections],
+        "face detections answering one frame",
+        FACE_CAPABILITY,
+    ),
+    _Published(
+        "gesture-result",
+        ResultEnvelope[GestureDetections],
+        "gesture detections answering one frame",
+        GESTURE_CAPABILITY,
+    ),
+    _Published(
+        "session-error",
+        SessionError,
+        "a failure report, optionally naming the frame it concerns",
+    ),
+    _Published(
+        "session-close",
+        SessionClose,
+        "the last message on a session and why it ended",
+    ),
+)
+
+CONTRACTS: Final[tuple[Contract, ...]] = tuple(
+    Contract(
+        path=f"{_SCHEMA_DIRECTORY}/{published.slug}.schema.json",
+        summary=published.summary,
+        render=_schema_of(published.model, published.capability),
+    )
+    for published in _MESSAGE_TYPES
+)
 
 _PREAMBLE: Final = """\
 # Generated contracts
@@ -55,9 +194,9 @@ edit is reverted by the next run at best and blocks a merge at worst.
 
 
 _EMPTY_REGISTRY: Final = """\
-No contract artifacts are generated yet. The registry in
-`reachy_contracts.contracts_export` is empty, and this file is what the drift
-gate compares against until the first generator is registered.
+No contract artifacts are registered. The registry in
+`reachy_contracts.contracts_export` is empty, so this index is the only file the
+drift gate has to compare against.
 """
 
 

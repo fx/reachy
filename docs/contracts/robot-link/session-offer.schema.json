@@ -1,0 +1,54 @@
+{
+  "$defs": {
+    "Capability": {
+      "additionalProperties": false,
+      "description": "A capability one side can speak, at one version.\n\nAttributes:\n    name: The capability's identifier, a value rather than an enumerator.\n    version: Which revision of that capability is being spoken.",
+      "properties": {
+        "name": {
+          "maxLength": 32,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "Capability",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "The client's opening message: its credential and what it can speak.\n\nThe credential is held as a secret so that a repr, a traceback, or a\nPython-mode `model_dump` shows a mask rather than the value. JSON\nserialisation puts the real value back, because presenting it is the entire\npoint of the message.\n\nThat asymmetry is deliberate and is the safer of the two failure modes.\nGating the clear-text value on a serialisation context would mask it in\n`model_dump_json` as well, which means a component that serialised an offer\nwith pydantic's own API rather than `to_wire` would send `**********` as its\ncredential and fail authentication for a reason nothing in the log explains.\nA masked value that reaches the wire is a silent production failure; a real\nvalue that reaches a log only does so if somebody deliberately JSON-dumps a\nmessage into one, which is what the Python-mode mask is there to make the\nunnatural path.\n\nAttributes:\n    credential: The shared secret the groundstation authenticates against.\n    capabilities: What this client can speak, possibly nothing.",
+  "properties": {
+    "capabilities": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Capability"
+      },
+      "title": "Capabilities",
+      "type": "array"
+    },
+    "credential": {
+      "format": "password",
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Credential",
+      "type": "string",
+      "writeOnly": true
+    }
+  },
+  "required": [
+    "credential"
+  ],
+  "title": "SessionOffer",
+  "type": "object"
+}
