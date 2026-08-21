@@ -39,6 +39,7 @@ _DEPLOY: Final = _SERVICE_ROOT / "deploy"
 
 _DOCKERFILE: Final = _SERVICE_ROOT / "Dockerfile"
 _COMPOSE: Final = _DEPLOY / "compose.yaml"
+_COMPOSE_CUDA: Final = _DEPLOY / "compose.cuda.yaml"
 _ENV_EXAMPLE: Final = _DEPLOY / ".env.example"
 _PROMETHEUS: Final = _DEPLOY / "prometheus.yml"
 
@@ -265,6 +266,27 @@ def test_the_collector_scrapes_the_service_compose_actually_runs() -> None:
     mounted = compose["services"]["prometheus"]["volumes"][0]
     assert mounted.startswith(f"./{_PROMETHEUS.name}:")
     assert scrape["scrape_configs"][0]["static_configs"][0]["targets"]
+
+
+@pytest.mark.filesystem  # the overlay on disk is the thing under test
+def test_the_accelerated_overlay_asks_the_host_for_a_gpu() -> None:
+    """The `-cuda` tag alone is a CPU deployment, so the overlay is the switch.
+
+    The NVIDIA container runtime mounts the driver library into a container that
+    reserved a device and into no other, and ONNX Runtime answers a provider it
+    cannot load by falling back to the CPU one. So an accelerated tag deployed
+    without this overlay works, is slower, and says so only in a log line.
+    """
+    overlay = _load_yaml(_COMPOSE_CUDA)
+    # It overlays the service the base file defines; a typo here would be a
+    # second service that quietly runs nothing.
+    assert set(overlay["services"]) == {_SERVICE_NAME}
+    assert _SERVICE_NAME in _load_yaml(_COMPOSE)["services"]
+    reserved = overlay["services"][_SERVICE_NAME]["deploy"]["resources"][
+        "reservations"
+    ]["devices"]
+    assert [device["driver"] for device in reserved] == ["nvidia"]
+    assert reserved[0]["capabilities"] == ["gpu"]
 
 
 @pytest.mark.filesystem  # the compose file on disk is the thing under test

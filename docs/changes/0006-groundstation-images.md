@@ -147,12 +147,19 @@ selection, so it is a build argument rather than a second Dockerfile.
 - [x] Whether ARM images are built natively or by emulation. Emulation is
       simpler and slow enough to be irritating for a model-heavy build. Current
       lean: emulation until it becomes painful.
-      **Resolved: emulation.** It is one action against a second runner pool, a
-      second cache and a manifest assembled by hand, and the emulated work is
+      **Resolved: emulation, and the ARM image is RUN under it rather than only
+      built.** Emulation is one action against a second runner pool, a second
+      cache and a manifest assembled by hand, and the emulated work is
       dependency installation rather than compilation — every dependency
       resolves to an `aarch64` wheel, so nothing is built from source under
-      QEMU. Revisit when the ARM leg becomes the slowest merge gate; the change
-      is confined to the two workflow jobs that name `--platform`.
+      QEMU. Running it matters as much as building it: REQ-031's scenario is
+      that the ARM variant *runs*, and a successful build says nothing about an
+      architecture-specific shared library. The verification therefore widens
+      the service's warm-up and per-frame bounds for the emulated run, because
+      those expiring under QEMU would report a packaging failure that is really
+      a measurement of the emulator. Revisit when the ARM leg becomes the
+      slowest merge gate; the change is confined to the matrix entries that name
+      an architecture.
 
 ## Completion notes
 
@@ -180,10 +187,15 @@ package manager into the default variant too.
 **Measured sizes**, `linux/amd64`, uncompressed, as `just image-size` reports
 them:
 
-| Variant | Bytes | |
-|---|---:|---|
-| default (CPU) | 458,501,043 | 437.3 MiB |
-| accelerated (CUDA) | 3,659,895,758 | 3,490.3 MiB |
+| Variant | Architecture | Bytes | |
+|---|---|---:|---|
+| default (CPU) | x86-64 | 458,501,121 | 437.3 MiB |
+| default (CPU) | 64-bit ARM | 371,147,638 | 354.0 MiB |
+| accelerated (CUDA) | x86-64 | 3,659,895,758 | 3,490.3 MiB |
+
+The ARM image is the smaller of the two default builds, which is the one that
+matters: the robot is an aarch64 Raspberry Pi CM4 and the groundstation is
+expected to run on whatever host is available beside it.
 
 The default variant is under the predecessor's 483 MB, which was the packaging
 property worth keeping. The accelerated variant is what a CUDA 13 runtime plus
@@ -195,9 +207,11 @@ tag.
 `just image-size <tag> <variant>` prints one line of JSON —
 `{"image": …, "variant": …, "platform": …, "size_bytes": …, "size_mib": …}` —
 read from `docker image inspect .Size`, the uncompressed on-disk size a host
-needs room for. The `Images` workflow writes it to the job summary and uploads
-it as the artifact `groundstation-image-size-<variant>`, one JSON file named
-`<variant>.json`.
+needs room for. The `platform` comes from the image rather than the runner, so a
+record made for an emulated build says which architecture it measured. The
+`Images` workflow writes it to the job summary and uploads it as the artifact
+`groundstation-image-size-<variant>-<arch>`, holding one JSON file named
+`<variant>-<arch>.json`.
 
 **What the CUDA variant actually is:** the same Dockerfile with three build
 arguments — `RUNTIME_BASE`, `RUNTIME_EXTRA=cuda` and `INFERENCE_PROVIDERS`. The
@@ -205,6 +219,23 @@ extra is `onnxruntime-gpu`, declared as an optional dependency of
 `reachy-groundstation`; the build asks for it and leaves the CPU wheel out with
 `--no-install-package onnxruntime`, because both distributions install the same
 module.
+
+**What is published, and for which architectures.** The default tag carries
+both 64-bit x86 and 64-bit ARM under one manifest, which is REQ-031. The
+accelerated tag is x86 only, and that is the honest scope rather than a
+shortcut: CUDA on 64-bit ARM is Jetson, which runs NVIDIA's L4T stack rather
+than the `nvidia/cuda` base this build uses, and nothing deploys it. Every
+combination that is published is built *and run* on the architecture it is
+published for before anything is pushed — the publish job waits on the
+verification job rather than running beside it.
+
+**Deploying the accelerated variant takes the overlay, not just the tag.**
+`deploy/compose.cuda.yaml` reserves an NVIDIA device; without it the container
+never asks the host for one, the container runtime never mounts the driver, and
+ONNX Runtime falls back to the CPU provider and says so in a log line nobody
+reads. So the accelerated deployment is
+`docker compose -f compose.yaml -f compose.cuda.yaml up`, and `.env.example`
+says so where the image tag is chosen.
 
 **Verification** is `just image-verify <tag> [isolated|bridge] [variant]`. It
 starts the image on an `--internal` Docker network with no route off the host,
@@ -216,10 +247,13 @@ and require a face back. The service answered with one face at 0.909 confidence
 on both variants.
 
 **What has not been exercised on hardware.** No GPU was available, so the
-accelerated variant is verified as far as "its CUDA provider library's
-dependencies all resolve, apart from the driver the container runtime injects".
-Whether inference on it is faster than the CPU path is change 0014's question,
-and the measurements that made CPU the default say it may well not be.
+accelerated variant is verified as far as "every library its CUDA provider
+declares is in the image, bar the driver the container runtime injects". Whether
+inference on it is faster than the CPU path is change 0014's question, and the
+measurements that made CPU the default say it may well not be. No aarch64 host
+was available either: the ARM image is built and run under QEMU, which proves it
+starts, loads its model and answers a session, and measures nothing about how
+long any of that takes on the real thing.
 
 ## References
 

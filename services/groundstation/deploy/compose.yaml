@@ -14,6 +14,12 @@
 # that the example and the service's own settings model cannot disagree. Real
 # values — a credential, a published address — live in the copy on the host and
 # never in this repository.
+#
+# For the accelerated image, add the overlay beside this file:
+# `docker compose -f compose.yaml -f compose.cuda.yaml up`. Pointing
+# GROUNDSTATION_IMAGE at the `-cuda` tag without it produces a working
+# deployment that runs on the CPU, because nothing has asked the host for a
+# device and the driver is therefore not in the container.
 
 name: reachy-groundstation
 

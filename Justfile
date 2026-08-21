@@ -286,10 +286,29 @@ image variant="cpu" tag="reachy-groundstation:dev" *buildx_args:
             ;;
     esac
 
+    # Where the result goes. A `docker` driver builds straight into the local
+    # daemon; a `docker-container` one — which `docker buildx create` makes, and
+    # which continuous integration uses because it is what builds for another
+    # architecture — writes nowhere unless told to, so `just image` followed by
+    # `just image-verify` would verify whatever image was there before. Asking
+    # for `--load` covers both, and it is skipped when the caller already said
+    # where the result goes, because buildx refuses two destinations and cannot
+    # load a multi-platform result at all.
+    output=(--load)
+    for argument in {{ buildx_args }}; do
+        case "$argument" in
+            --load|--push|--output|--output=*|--platform|--platform=*)
+                output=()
+                break
+                ;;
+        esac
+    done
+
     docker buildx build \
         --file services/groundstation/Dockerfile \
         --tag '{{ tag }}' \
         "${args[@]}" \
+        "${output[@]}" \
         {{ buildx_args }} \
         .
 
@@ -392,15 +411,25 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
     trap cleanup EXIT
 
     "${create[@]}" >/dev/null
+    # Two timeouts are widened for the harness, and only for the harness. An
+    # image built for the other architecture is run here under emulation, where
+    # one detection pass costs seconds rather than tens of milliseconds — so the
+    # service's own warm-up bound and its per-frame bound would both expire and
+    # the run would report a packaging failure that is really a QEMU
+    # measurement. What is being checked is that the artifact starts and
+    # answers, not how quickly; how quickly is change 0014's question, measured
+    # on hardware rather than through an emulator.
     docker run --detach --name "$name" --network "$net" "${mounts[@]}" \
         --env "REACHY_GROUNDSTATION_CREDENTIAL=${credential}" \
+        --env 'REACHY_GROUNDSTATION_WARM_UP_TIMEOUT_SECONDS=600' \
+        --env 'REACHY_GROUNDSTATION_CAPABILITY_TIMEOUT_SECONDS=120' \
         '{{ tag }}' >/dev/null
 
     # A container that refused its configuration or could not load its model has
     # already exited by now, and every check below would then fail with
     # something that reads like a network fault. Say what actually happened
     # instead, and say it in a second rather than after the readiness deadline.
-    sleep 2
+    sleep 5
     if [ "$(docker inspect "$name" --format '{{{{ .State.Running }}')" != 'true' ]; then
         echo "just image-verify: the container exited instead of starting; its log follows" >&2
         exit 1
@@ -446,7 +475,8 @@ image-verify tag="reachy-groundstation:dev" network="isolated" variant="cpu":
         '{{ tag }}' /verify/scripts/verify_groundstation_image.py \
             --base-url "http://${name}:8080" \
             --credential "$credential" \
-            --frame /verify/fixtures/perception/face_single.jpg
+            --frame /verify/fixtures/perception/face_single.jpg \
+            --ready-timeout 900
 
     docker logs "$name"
 
