@@ -101,11 +101,21 @@ def encode_control(kind: MessageKind, message: WireModel) -> str:
 def decode_control(text: str) -> tuple[MessageKind, bytes]:
     """Unpack a control message into its kind and the bytes it carries.
 
-    The inner object is re-serialised compactly rather than handed over as a
-    dictionary, so the caller parses it with the same `from_wire` the sender
-    serialised it with and gets the same strictness — a value that JSON-mode
-    validation would refuse does not become acceptable by having passed through
-    a dict on the way.
+    The inner object is re-serialised rather than handed over as a dictionary,
+    so the caller parses it with the same `from_wire` the sender serialised it
+    with and gets the same strictness — a value that JSON-mode validation would
+    refuse does not become acceptable by having passed through a dict on the
+    way.
+
+    The re-serialisation reproduces the sender's bytes rather than merely an
+    equivalent document. `separators` removes the whitespace `json` would
+    otherwise insert and `ensure_ascii=False` leaves non-ASCII characters as the
+    UTF-8 the sender wrote, instead of turning them into ASCII escape
+    sequences; JSON
+    object order is insertion order both ways. So for a message serialised with
+    `to_wire`, which is every message on this link, what comes out of here is
+    byte-for-byte what went in — which is what makes the golden corpus pin this
+    framing and not just an equivalent of it.
 
     Args:
         text: The control message as it arrived.
@@ -132,7 +142,11 @@ def decode_control(text: str) -> tuple[MessageKind, bytes]:
         detail = f"unknown control message kind: {envelope[_KIND]!r}"
         raise FramingError(detail) from error
 
-    return kind, json.dumps(envelope[_MESSAGE], separators=(",", ":")).encode("utf-8")
+    return kind, json.dumps(
+        envelope[_MESSAGE],
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
 
 
 def encode_frame(header: FrameHeader, payload: bytes) -> bytes:

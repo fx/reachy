@@ -20,10 +20,12 @@ from reachy_contracts import (
     FIXTURES,
     Capability,
     CaptureTimestamp,
+    ErrorCode,
     FaceDetections,
     FrameHeader,
     ResultEnvelope,
     SessionAgreement,
+    SessionError,
     SessionOffer,
     fixture_bytes,
     load_fixture,
@@ -122,11 +124,15 @@ def test_every_golden_fixture_survives_this_sides_framing(fixture: Fixture) -> N
 
     kind = _CONTROL_KINDS[fixture.name]
     framed = encode_control(kind, message)
-    # The contract type's own canonical bytes travel inside the envelope,
-    # unaltered: this framing packs, it never re-serialises.
+    # The contract type's own canonical bytes travel inside the envelope, and
+    # come back out of it, byte for byte. Value equality would not be enough:
+    # two documents can be equal while one writes a field the other omits or
+    # escapes a character the other spells out, and a second implementation
+    # reading the corpus would then disagree with this one about what arrived.
     assert message.to_wire().decode("utf-8") in framed
     kind_out, payload = decode_control(framed)
     assert kind_out is kind
+    assert payload == message.to_wire()
     assert fixture.model.from_wire(payload) == message
 
 
@@ -232,3 +238,19 @@ def test_a_header_too_large_to_frame_is_refused() -> None:
     )
     with pytest.raises(FramingError, match="over"):
         encode_frame(header, b"jpeg")
+
+
+def test_a_message_carrying_non_ascii_survives_byte_for_byte() -> None:
+    """Re-serialising must not turn a character into an escape sequence.
+
+    `json.dumps` escapes non-ASCII by default, which produces a document equal
+    in value and different in bytes — and the corpus pins bytes.
+    """
+    error = SessionError(
+        code=ErrorCode.MALFORMED_MESSAGE,
+        detail="frame refusée — 帧被拒绝",
+        sequence=3,
+    )
+    _, payload = decode_control(encode_control(MessageKind.ERROR, error))
+    assert payload == error.to_wire()
+    assert "frame refusée — 帧被拒绝".encode() in payload
