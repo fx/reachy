@@ -723,9 +723,34 @@ class TestTheWakeWordFeed:
 
         service.pump()
         service.detect()
+        await asyncio.sleep(0)
 
         assert len(model.inputs) == 2
         assert satellite.chunks == []
+        # The models ran and fired; there was simply nobody to tell, and the
+        # connection that had gone is not woken behind Home Assistant's back.
+        assert satellite.woken == []
+
+    @pytest.mark.asyncio
+    async def test_it_wakes_whichever_connection_is_current(self) -> None:
+        """Home Assistant reconnecting in that moment is an ordinary event.
+
+        A restart or a network blip between the model firing and the loop
+        getting round to the activation would otherwise wake the connection
+        that had already gone — on a closed transport, while the new one heard
+        nothing and the refractory window swallowed the next attempt.
+        """
+        model = FakeMicroWakeWord("okay_nabu", fires=[True])
+        service, state, gone = await self._feed(model)
+
+        service.pump()
+        service.detect()
+        fresh = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", fresh)
+        await asyncio.sleep(0)
+
+        assert gone.woken == []
+        assert fresh.woken == [model]
 
     @pytest.mark.asyncio
     async def test_it_ends_detection_even_when_the_queue_is_full(self) -> None:

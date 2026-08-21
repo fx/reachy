@@ -119,6 +119,7 @@ if TYPE_CHECKING:
         MotionPort,
         PerceptionPort,
     )
+    from reachy_mini_ha_satellite.wake_word import Activations
 
 __all__ = [
     "STOP_WORD_ID",
@@ -690,8 +691,9 @@ class EsphomeService:
         music and start a sound, and every other transition of that state
         happens on the event loop while a packet is being handled. Calling them
         from here would race one — two pipelines started, or a response stopped
-        halfway into starting — so they are handed to the loop instead. Only the
-        model runs on this thread, which is the whole reason it exists.
+        halfway into starting — so `_apply` is handed to the loop instead, and
+        it is what decides. Only the model runs on this thread, which is the
+        whole reason the thread exists.
         """
         detector = self._detector
         loop = self._loop
@@ -713,23 +715,39 @@ class EsphomeService:
                 # to fix, arrived at from the other direction.
                 _LOGGER.exception("wake-word detection failed on a chunk")
                 continue
-            satellite = self._state.satellite
-            if satellite is None:
-                # The models still ran; there is simply nothing to tell.
+            if not activations.woken and not activations.stopped:
+                # Which is nearly every chunk. Nothing is handed to the loop for
+                # one, so the ordinary cost of detection to the loop is nil.
                 continue
-            for model in activations.woken:
-                # The vendored signature names the two concrete runtime classes
-                # where the detector speaks in the structural protocol both of
-                # them satisfy. That is what lets a test drive this loop with a
-                # model that is neither, and the cast is where the two spellings
-                # of the same object meet.
-                self._on_loop(
-                    loop,
-                    satellite.wakeup,
-                    cast("MicroWakeWord | OpenWakeWord", model),
-                )
-            if activations.stopped:
-                self._on_loop(loop, satellite.stop)
+            self._on_loop(loop, self._apply, activations)
+
+    def _apply(self, activations: Activations) -> None:
+        """Act on what a chunk contained, on the event loop rather than off it.
+
+        Which connection is current is read *here* rather than on the detection
+        thread, and that is the point of the method existing. Home Assistant
+        reconnecting between the two is an ordinary event — a restart, a network
+        blip — and a bound method captured before it would wake a protocol whose
+        transport has closed, leaving the new connection with nothing while the
+        refractory window swallowed the next attempt.
+
+        Args:
+            activations: What fired, already filtered by the mute switch and the
+                refractory window.
+        """
+        satellite = self._state.satellite
+        if satellite is None:
+            # The models ran; there is simply nobody to tell.
+            return
+        for model in activations.woken:
+            # The vendored signature names the two concrete runtime classes
+            # where the detector speaks in the structural protocol both of them
+            # satisfy. That is what lets a test drive this loop with a model
+            # that is neither, and the cast is where the two spellings of the
+            # same object meet.
+            satellite.wakeup(cast("MicroWakeWord | OpenWakeWord", model))
+        if activations.stopped:
+            satellite.stop()
 
     @staticmethod
     def _on_loop(
