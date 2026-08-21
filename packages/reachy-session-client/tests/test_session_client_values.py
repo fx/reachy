@@ -100,12 +100,10 @@ def test_the_delay_survives_an_outage_of_any_length() -> None:
         (5.0, 2.0, 5.0),
         # And the non-finite values, which are the same defect wearing a
         # disguise: every comparison against `nan` is false, so `nan` satisfies
-        # each of the rules above rather than failing one. An infinite
-        # multiplier is the worst of them because it raises nothing — it makes
-        # the exponent clamp zero and yields the first delay forever, which is
-        # exactly the constant delay the two cases above refuse. The others
-        # raise out of `delay`, inside the reconnection loop, which is the one
-        # place an exception ends the session for good.
+        # each of the rules above rather than failing one, and then makes
+        # `delay` answer `nan` — a wait nobody can predict, inside the loop
+        # where REQ-018's bounded growth is supposed to hold. An infinite bound
+        # or first delay is the same story from the other end.
         (float("inf"), 2.0, 30.0),
         (float("nan"), 2.0, 30.0),
         (0.5, float("inf"), 30.0),
@@ -200,3 +198,22 @@ def test_a_capability_this_build_does_not_know_has_no_result_type() -> None:
 def test_a_failure_with_no_field_information_is_named_by_its_kind() -> None:
     """`describe_validation` is fed whatever a parse raised, not only pydantic's."""
     assert describe_validation(ValueError("something went wrong")) == "ValueError"
+
+
+#:= docs/specs/robot-link/index.md#req-018-reconnection-is-automatic-and-rate-limited
+#:% A client MUST re-establish a dropped session automatically, and MUST increase
+#:% the delay between successive failed attempts up to a bound.
+def test_a_policy_spanning_the_whole_float_range_still_answers() -> None:
+    """Every value finite and every rule satisfied, and the ratio still is not.
+
+    `maximum / initial` overflows to infinity here while both ends are ordinary
+    finite numbers, which is why the bound is decided from the difference of
+    two logarithms rather than from the logarithm of a quotient. The delay for
+    an early attempt is the first delay, and a late one is the bound; neither
+    may raise, because the only caller is the reconnection loop and an
+    exception there ends the session for good.
+    """
+    span = Backoff(initial_seconds=5e-324, multiplier=2.0, maximum_seconds=1e308)
+
+    assert span.delay(1) == 5e-324
+    assert span.delay(10**9) == 1e308

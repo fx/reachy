@@ -101,35 +101,35 @@ class Backoff:
         if attempt < 1:
             message = f"attempts are counted from one, not {attempt}"
             raise ValueError(message)
+        # Whether the bound has been reached is decided in log space, and the
+        # power is computed only on the branch where the answer is no. That is
+        # a correctness fix rather than an elegance one, twice over.
+        #
+        # Float exponentiation *raises* `OverflowError` rather than saturating
+        # at infinity, and the reconnection loop never bounds its attempt count
+        # — REQ-018 asks for a bounded delay, not for attempts that stop — so
+        # with the default policy attempt 1025 would compute `2.0 ** 1024` and
+        # end the session for good, eight hours into precisely the outage the
+        # requirement's second scenario describes. Comparing first means the
+        # power is never evaluated once the delay is already at its bound.
+        #
+        # The obvious alternative, clamping the exponent at the number of steps
+        # it takes to reach the bound, is what this replaced: it computes that
+        # count from `maximum / initial`, and that ratio is itself infinite for
+        # a policy as ordinary-looking as `Backoff(5e-324, 2.0, 1e308)` — every
+        # value finite, every rule above satisfied, and `ceil(inf)` raising out
+        # of the first retry. Working from the difference of two logarithms
+        # rather than the logarithm of a quotient has no such range to fall out
+        # of, so the whole class goes rather than one more value being refused.
+        growth = (attempt - 1) * math.log(self.multiplier)
+        if math.log(self.initial_seconds) + growth >= math.log(self.maximum_seconds):
+            return self.maximum_seconds
+        # Below the bound, so the power is in range. `min` keeps the guarantee
+        # exact anyway: the comparison above is float arithmetic, and a value
+        # landing within an ulp of the bound must not step over it.
         return min(
-            self.initial_seconds * self.multiplier ** min(attempt - 1, self._steps()),
+            self.initial_seconds * self.multiplier ** (attempt - 1),
             self.maximum_seconds,
-        )
-
-    def _steps(self) -> int:
-        """How many doublings it takes to reach the bound.
-
-        The exponent is clamped at this rather than left to grow, and that is a
-        correctness fix rather than an optimisation: float exponentiation
-        *raises* `OverflowError` instead of saturating at infinity, so with the
-        default policy `2.0 ** 1024` overflows before `min` can clamp it. The
-        reconnection loop never bounds its attempt count — REQ-018 asks for a
-        bounded delay, not for attempts that stop — so attempt 1025 arrives
-        after about eight hours of outage, which is precisely the case the
-        requirement's second scenario describes. The exception would leave the
-        reconnection loop, leave `results()`, and end the session for good.
-
-        `__post_init__` has already refused a multiplier of one and a bound
-        equal to the first delay, so the logarithm below has a base above one
-        and an argument above one and needs no special case for either.
-
-        Returns:
-            The number of growth steps after which the delay is already at its
-            bound, so that clamping the exponent there changes no value the
-            policy would otherwise have produced.
-        """
-        return math.ceil(
-            math.log(self.maximum_seconds / self.initial_seconds, self.multiplier),
         )
 
 

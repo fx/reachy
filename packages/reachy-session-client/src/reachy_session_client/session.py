@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import time
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlsplit
@@ -195,11 +196,20 @@ class SessionClient:
 
         Raises:
             ValueError: If the URL does not name a WebSocket scheme, or if the
-                staleness window is not positive.
+                staleness window is not a positive, finite number of seconds.
         """
         validate_session_url(url)
-        if staleness_seconds <= 0:
-            message = f"the staleness window must be positive, not {staleness_seconds}"
+        # Finite as well as positive, and the finiteness is the half that
+        # matters. A window of `inf` is never elapsed and a window of `nan`
+        # compares false against every age, so either one makes `latest` hand
+        # back a result for as long as the process runs — which is REQ-017
+        # inverted rather than merely unenforced, and it fails silently,
+        # looking exactly like a link that is keeping up.
+        if not math.isfinite(staleness_seconds) or staleness_seconds <= 0:
+            message = (
+                "the staleness window must be positive and finite, "
+                f"not {staleness_seconds}"
+            )
             raise ValueError(message)
 
         self._url = url

@@ -755,3 +755,23 @@ async def test_a_connection_cancelled_mid_handshake_is_still_closed() -> None:
 
     assert silent.closed
     assert not client.connected
+
+
+#:= docs/specs/robot-link/index.md#req-017-stale-results-stop-being-acted-on
+#:% A consumer MUST stop acting on results once none has arrived within a configured
+#:% staleness window.
+@pytest.mark.parametrize("window", [float("inf"), float("nan")])
+def test_a_staleness_window_that_never_elapses_is_refused(window: float) -> None:
+    """A window of `inf` or `nan` inverts the requirement rather than relaxing it.
+
+    Both pass a positivity check: `inf > 0`, and every comparison against `nan`
+    is false. Neither is ever elapsed once a result exists, so `latest` would
+    keep handing back the same result for as long as the process runs — a robot
+    tracking a face that left the room, which is exactly the scenario REQ-017
+    describes, and it would look like a link that is keeping up.
+
+    Args:
+        window: The staleness window to refuse.
+    """
+    with pytest.raises(ValueError, match="must be positive"):
+        SessionClient(url=URL, credential=credential(), staleness_seconds=window)
