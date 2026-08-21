@@ -75,12 +75,17 @@ five header lines, `[Service]`, the two markers, and the form of an
   directive it is on, and the rest of the value would become a directive of its
   own. `reachy_contracts.validate_settings` refuses one before anything is
   written; the writer does not re-check, so the validator is not optional.
-- **A reader accepts only what the writer writes.** A value whose backslashes
-  are not the two escapes above, an unbalanced quote, a name carrying a quote,
-  and a duplicated setting are all refused. Accepting one would report a file
-  this format did not produce as a region the tooling owns, after which the next
-  apply rewrites it. Line *order* is not checked: unlike those, it carries
-  nothing.
+- **A reader accepts only what it could have written, and checks that in closed
+  form.** `reachyctl` parses the region and then re-renders it: unless the result
+  is the file it was given, byte for byte, the file is refused. So every rule on
+  this page is load-bearing for a reader as well as a writer — the name order,
+  the escaping, the `\n` line endings, one line per setting, no blank lines
+  inside the region, the exact header. **A `daemon_env` role whose output differs
+  from this page in any respect produces a region `reachyctl` will refuse**, and
+  that is the intended direction: a reader that tolerated a disagreement would
+  let the two implementations overwrite each other's files instead of agreeing.
+  The specific refusals below still exist, because they say *which* line is
+  wrong; the round trip is what makes the check complete.
 - **The markers delimit the region a reader parses.** They are not how ownership
   is decided — ownership is the file — but a file whose markers are missing,
   unpaired, or out of order is reported as unreadable rather than silently
@@ -88,8 +93,8 @@ five header lines, `[Service]`, the two markers, and the form of an
   because "empty" and "somebody else is writing this" call for different
   actions.
 - **A line between the markers that is not an `Environment=` assignment this
-  format writes** makes the region unreadable, for the same reason. Blank lines
-  between the markers are ignored.
+  format writes** makes the region unreadable, for the same reason. That includes
+  a blank one: this format does not write them.
 
 ## The vocabulary
 

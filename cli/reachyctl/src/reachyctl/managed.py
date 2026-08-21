@@ -31,13 +31,27 @@ therefore produce byte-identical files, which is what makes provisioning REQ-060
 — a second run changes nothing — a property of the format rather than something
 each implementation has to remember.
 
-**Only what the writer writes is read back.** A line whose escaping this format
-does not produce, and a setting assigned twice, are both refused rather than
-interpreted: accepting either would report a file this renderer could not have
-produced as a region this tool owns, after which the next apply rewrites
-somebody else's file — and in the duplicate case discards one of the two values
-on the way. Line *order* is not checked, because unlike those two it carries
-nothing: a region whose lines were reordered says exactly what it said before.
+**Only what the writer writes is read back, and that is checked in closed
+form.** `parse_region` reads the settings and then re-renders them: unless the
+result is the file it was given, byte for byte, the file is refused. Three
+separate attempts at enumerating what to reject — an escape this format does not
+produce, a setting assigned twice, a line ending it does not emit — each closed
+one hole and left the next, because the property being checked is not a list of
+mistakes. It is "this renderer could have produced this file", and the renderer
+is the only thing that knows.
+
+That matters because of what happens next: a region read as ours is a region the
+next apply **rewrites**. Reading somebody else's file as ours loses their
+content, and reading a region with two lines for one setting as ours loses one of
+the values. The specific checks below survive because they say *why* a file is
+not ours, which is what an operator needs; the round trip is what makes the
+answer complete.
+
+It also puts a real obligation on change 0010: the Ansible role writes this same
+file, and a role whose output differs by so much as a line ending produces a
+region `reachyctl` refuses. That is the intended direction — the two agreeing
+byte for byte is the whole point, and a check that quietly tolerated a
+disagreement would let them fight over the file instead.
 """
 
 from __future__ import annotations
@@ -177,15 +191,19 @@ def parse_region(content: str) -> dict[str, str]:
         nothing has been applied to rather than an error.
 
     Raises:
-        MalformedRegionError: If the markers are missing, unpaired or out of
-            order, or if a line between them is not one this format writes.
-            Every one of those means something other than this format wrote the
-            file, and rewriting it regardless is how two tools start reverting
-            each other.
+        MalformedRegionError: If the file is not, byte for byte, one this format
+            writes — see the module documentation. The specific cases are named
+            where they can be, because an operator needs to know *which* line is
+            wrong; the round trip at the end is what makes the check complete.
     """
     if not content.strip():
         return {}
-    lines = content.splitlines()
+    # `split`, not `splitlines`: the latter also breaks on a carriage return, a
+    # form feed and three Unicode separators, none of which this format emits —
+    # so a file written with any of them would be read as one of ours. The round
+    # trip at the end would catch that anyway; splitting strictly is what makes
+    # the error say which line is wrong rather than only that the file is.
+    lines = content.split("\n")
     begins = [index for index, line in enumerate(lines) if line == BEGIN_MARKER]
     ends = [index for index, line in enumerate(lines) if line == END_MARKER]
     if len(begins) != 1 or len(ends) != 1 or begins[0] > ends[0]:
@@ -226,6 +244,18 @@ def parse_region(content: str) -> dict[str, str]:
             )
             raise MalformedRegionError(message)
         settings[name] = _unescape(match.group(2))
+    if render_region(settings) != content:
+        # Everything above says why a particular line is not ours. This says
+        # that the file as a whole is not, which is the property that actually
+        # matters and the only one that cannot be got wrong by omission. It
+        # quotes nothing: the difference could be in a value.
+        message = (
+            "the managed region is not readable: it is not byte for byte what "
+            "this format writes, so re-rendering what was read does not "
+            "reproduce it. Something other than the Reachy tooling has written "
+            "this file"
+        )
+        raise MalformedRegionError(message)
     return settings
 
 

@@ -137,11 +137,16 @@ def test_a_line_inside_the_region_that_is_not_ours_is_refused_by_position() -> N
     assert "hunter2" not in str(raised.value)
 
 
-def test_a_blank_line_inside_the_region_is_ignored() -> None:
-    """An editor that added one has not made the file unreadable."""
+def test_a_blank_line_inside_the_region_makes_the_file_not_ours() -> None:
+    """This format does not write one, so a file with one was written by something else.
+
+    Reading it as ours would mean the next apply rewrites it — and whatever else
+    that editor changed goes with it.
+    """
     content = f'[Service]\n{BEGIN_MARKER}\n\nEnvironment="A=1"\n\n{END_MARKER}\n'
 
-    assert parse_region(content) == {"A": "1"}
+    with pytest.raises(MalformedRegionError, match="byte for byte"):
+        parse_region(content)
 
 
 def test_the_paths_are_derived_from_the_unit() -> None:
@@ -227,11 +232,12 @@ def test_a_setting_assigned_twice_is_refused() -> None:
     assert "second" not in message
 
 
-def test_a_region_whose_lines_were_reordered_still_reads() -> None:
-    """Order carries nothing, unlike an escape this format does not write.
+def test_a_region_whose_lines_were_reordered_is_not_ours_either() -> None:
+    """The writer sorts, so a region that is not sorted is one it did not write.
 
-    Refusing it would be strictness for its own sake: a reordered region says
-    exactly what it said before.
+    An earlier version allowed this on the grounds that order carries no data.
+    It carries something else: evidence about who wrote the file, which is the
+    only question this parser is asking.
     """
     content = (
         f"[Service]\n{BEGIN_MARKER}\n"
@@ -240,4 +246,44 @@ def test_a_region_whose_lines_were_reordered_still_reads() -> None:
         f"{END_MARKER}\n"
     )
 
-    assert parse_region(content) == {"A_SETTING": "1", "B_SETTING": "2"}
+    with pytest.raises(MalformedRegionError, match="byte for byte"):
+        parse_region(content)
+
+
+@pytest.mark.parametrize(
+    "terminator",
+    ["\r\n", "\r", "\u2028", "\u0085"],
+    ids=["crlf", "cr", "line-separator", "next-line"],
+)
+def test_a_region_written_with_line_endings_this_format_does_not_emit_is_refused(
+    terminator: str,
+) -> None:
+    """`str.splitlines` breaks on all of these; this writer emits none of them.
+
+    A file using one would otherwise be read as ours and rewritten, taking
+    whatever else it held with it.
+
+    Args:
+        terminator: The line ending to write the region with.
+    """
+    content = render_region(EXAMPLE).replace("\n", terminator)
+
+    with pytest.raises(MalformedRegionError):
+        parse_region(content)
+
+
+def test_everything_this_format_writes_is_read_back_unchanged() -> None:
+    """The other half of the round trip: strictness that refused our own file.
+
+    A check written as "reject what looks wrong" can be made arbitrarily strict
+    without anybody noticing until a robot the tool provisioned stops being
+    readable by it. This is the case that would catch that.
+    """
+    awkward = {
+        "A_SETTING": 'a\\b"c\\"d',
+        "B_SETTING": "",
+        "C_SETTING": "spaces and = signs and $dollars",
+        "D_SETTING": "a value with a \u2028 separator in it",
+    }
+
+    assert parse_region(render_region(awkward)) == awkward
