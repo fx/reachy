@@ -201,3 +201,43 @@ def test_a_directive_this_format_could_not_have_written_is_refused(line: str) ->
 
     with pytest.raises(MalformedRegionError, match="not readable"):
         parse_region(content)
+
+
+def test_a_setting_assigned_twice_is_refused() -> None:
+    """Taking the last one would silently discard a value.
+
+    The next apply would then write the survivor back as though it were what the
+    file always said, and the region this format writes has one line per
+    setting — so a file with two is one it did not write.
+    """
+    content = (
+        f"[Service]\n{BEGIN_MARKER}\n"
+        f'Environment="A_SETTING=first"\n'
+        f'Environment="A_SETTING=second"\n'
+        f"{END_MARKER}\n"
+    )
+
+    with pytest.raises(MalformedRegionError) as raised:
+        parse_region(content)
+
+    message = str(raised.value)
+    assert "A_SETTING is assigned twice" in message
+    # Named, and neither value quoted: a value is where a credential lives.
+    assert "first" not in message
+    assert "second" not in message
+
+
+def test_a_region_whose_lines_were_reordered_still_reads() -> None:
+    """Order carries nothing, unlike an escape this format does not write.
+
+    Refusing it would be strictness for its own sake: a reordered region says
+    exactly what it said before.
+    """
+    content = (
+        f"[Service]\n{BEGIN_MARKER}\n"
+        f'Environment="B_SETTING=2"\n'
+        f'Environment="A_SETTING=1"\n'
+        f"{END_MARKER}\n"
+    )
+
+    assert parse_region(content) == {"A_SETTING": "1", "B_SETTING": "2"}

@@ -62,7 +62,8 @@ five header lines, `[Service]`, the two markers, and the form of an
 ## Rules the format imposes
 
 - **One `Environment=` line per setting**, with the whole `NAME=value`
-  assignment inside one pair of double quotes.
+  assignment inside one pair of double quotes. A name assigned twice makes the
+  region unreadable — taking either one silently discards a value.
 - **Settings appear in name order.** Two applies of the same declaration
   therefore produce byte-identical files, which is what makes
   [REQ-060](../specs/provisioning/index.md#req-060-applying-twice-changes-nothing-the-second-time)
@@ -74,6 +75,12 @@ five header lines, `[Service]`, the two markers, and the form of an
   directive it is on, and the rest of the value would become a directive of its
   own. `reachy_contracts.validate_settings` refuses one before anything is
   written; the writer does not re-check, so the validator is not optional.
+- **A reader accepts only what the writer writes.** A value whose backslashes
+  are not the two escapes above, an unbalanced quote, a name carrying a quote,
+  and a duplicated setting are all refused. Accepting one would report a file
+  this format did not produce as a region the tooling owns, after which the next
+  apply rewrites it. Line *order* is not checked: unlike those, it carries
+  nothing.
 - **The markers delimit the region a reader parses.** They are not how ownership
   is decided — ownership is the file — but a file whose markers are missing,
   unpaired, or out of order is reported as unreadable rather than silently

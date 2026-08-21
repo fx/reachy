@@ -30,6 +30,14 @@ edited this by hand" call for different actions.
 therefore produce byte-identical files, which is what makes provisioning REQ-060
 — a second run changes nothing — a property of the format rather than something
 each implementation has to remember.
+
+**Only what the writer writes is read back.** A line whose escaping this format
+does not produce, and a setting assigned twice, are both refused rather than
+interpreted: accepting either would report a file this renderer could not have
+produced as a region this tool owns, after which the next apply rewrites
+somebody else's file — and in the duplicate case discards one of the two values
+on the way. Line *order* is not checked, because unlike those two it carries
+nothing: a region whose lines were reordered says exactly what it said before.
 """
 
 from __future__ import annotations
@@ -204,7 +212,20 @@ def parse_region(content: str) -> dict[str, str]:
                 f"than the Reachy tooling has written this file"
             )
             raise MalformedRegionError(message)
-        settings[match.group(1)] = _unescape(match.group(2))
+        name = match.group(1)
+        if name in settings:
+            # One line per setting, and a duplicate is not a tidiness question:
+            # taking the last one silently discards a value, and then the next
+            # apply writes the survivor back as though it were what the file
+            # always said. A file with two is one this format did not write.
+            message = (
+                f"the managed region is not readable: {name} is assigned twice, "
+                f"at line {offset} and earlier. This format writes one line per "
+                f"setting, so something other than the Reachy tooling has "
+                f"written this file"
+            )
+            raise MalformedRegionError(message)
+        settings[name] = _unescape(match.group(2))
     return settings
 
 
