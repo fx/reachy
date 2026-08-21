@@ -856,7 +856,17 @@ def deploy(
     identity_file: IdentityOption = None,
     known_hosts: KnownHostsOption = None,
     sudo: SudoOption = True,
-    application: ApplicationOption = DEFAULT_APPLICATION,
+    application: Annotated[
+        str | None,
+        typer.Option(
+            "--application",
+            help=(
+                "The distribution the daemon knows this by. Defaults to the "
+                "one the wheel carries, which is the only name that cannot be "
+                "wrong about what was installed."
+            ),
+        ),
+    ] = None,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
     python: PythonOption = DEFAULT_PYTHON,
@@ -890,8 +900,8 @@ def deploy(
         identity_file: A private key to offer.
         known_hosts: A host-key file to verify against.
         sudo: Whether privileged commands are elevated.
-        application: The distribution being operated. Taken from the wheel for
-            the verification; this names what the daemon controls.
+        application: The distribution the daemon knows this by. Defaults to
+            the one the wheel carries.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
         python: The fallback interpreter.
@@ -910,11 +920,25 @@ def deploy(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            # A placeholder until the wheel is read: `run_deploy` rebinds the
+            # client to the distribution the wheel carries as its first act,
+            # which is what stops a deploy verifying a name that came from
+            # somewhere other than the thing being installed.
+            _layout(
+                application or DEFAULT_APPLICATION,
+                daemon_unit,
+                daemon_control,
+                python,
+            ),
             reporter,
         )
         code = execute_deploy(
-            DeployPlan(obtain=obtain, origin=origin, preview=preview),
+            DeployPlan(
+                obtain=obtain,
+                origin=origin,
+                application=application,
+                preview=preview,
+            ),
             daemon,
             reporter,
             target.describe(),

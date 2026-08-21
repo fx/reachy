@@ -301,8 +301,16 @@ async def test_a_region_written_and_not_in_force_fails_the_verification() -> Non
 
 
 @pytest.mark.asyncio
-async def test_an_empty_declaration_removes_everything_and_verifies_nothing() -> None:
-    """Emptying the region is a legitimate apply; there is then nothing to assert."""
+async def test_an_empty_declaration_removes_everything_and_verifies_the_removal() -> (
+    None
+):
+    """Emptying the region is a legitimate apply, and it is still verified.
+
+    The shared check compares only the keys an intent declares, and a withdrawn
+    key is precisely one it no longer does — so an apply that verified only the
+    declared half would write, restart and assert nothing at all here, which is
+    the one case provisioning REQ-063 is entirely about.
+    """
     robot = _provisioned(DECLARED)
     daemon, _access = daemon_for(robot)
     reporter, _streams = reporter_for()
@@ -310,7 +318,45 @@ async def test_an_empty_declaration_removes_everything_and_verifies_nothing() ->
     steps, difference = await run_apply(daemon, {}, reporter, preview=False)
 
     assert parse_region(robot.managed_region) == {}
+    assert robot.environment == {}
     assert difference.removed == tuple(sorted(DECLARED))
+    verify = _named(steps.results)["verify"]
+    assert verify.outcome.value == "done"
+    assert "withdrawn" in verify.detail
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawn_setting_that_is_still_in_force_fails_the_verification() -> (
+    None
+):
+    """Removed from the region and still in the environment is not a removal.
+
+    Something outside the managed drop-in is setting it, and the operator asked
+    for it to be gone.
+    """
+    robot = _provisioned(DECLARED)
+    # The restart re-reads the region, and this setting comes back anyway —
+    # which is what another drop-in setting the same name looks like.
+    robot.honours_restart = False
+    daemon, _access = daemon_for(robot)
+    reporter, _streams = reporter_for()
+
+    steps, _difference = await run_apply(daemon, {}, reporter, preview=False)
+
+    verify = _named(steps.results)["verify"]
+    assert verify.failed is True
+    assert "still in force" in verify.detail
+    assert URL in verify.detail
+
+
+@pytest.mark.asyncio
+async def test_an_apply_that_neither_declares_nor_withdraws_verifies_nothing() -> None:
+    """There is genuinely nothing to assert, and saying so is not the same as failing."""
+    daemon, _access = daemon_for(FakeRobot())
+    reporter, _streams = reporter_for()
+
+    steps, _difference = await run_apply(daemon, {}, reporter, preview=False)
+
     assert _named(steps.results)["verify"].outcome.value == "skipped"
 
 

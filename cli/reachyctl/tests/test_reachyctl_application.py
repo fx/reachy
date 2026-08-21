@@ -18,10 +18,12 @@ import pytest
 from reachyctl_robot import FakeRobot, daemon_for
 from reachyctl_support import reporter_for
 
+from reachy_session_client import REDACTED
 from reachyctl.application import execute_logs, execute_start, execute_stop
 from reachyctl.daemon import DaemonControlError
 from reachyctl.exits import ExitCode
 from reachyctl.output import OutputFormat
+from reachyctl.robot import RobotAccessError
 
 # RFC 5737 TEST-NET-1 and a placeholder account — see the root AGENTS.md.
 ROBOT: Final = "operator@192.0.2.10:22"
@@ -306,3 +308,43 @@ def test_both_exit_paths_of_a_log_run_report_the_same_fields() -> None:
     assert normal["lines"] == 1
     assert stopped["lines"] is None
     assert stopped["followed"] is True
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+def test_a_credential_the_robot_logged_is_scrubbed_out_of_the_journal() -> None:
+    """A journal is the likeliest place for a credential to appear in text nobody wrote.
+
+    The redactor cannot remove a value it was never given, so the command reads
+    the robot's configuration first and learns its secret values before it
+    forwards a single line.
+    """
+    awkward = "example\\secret\twith\na-newline"
+    robot = FakeRobot(
+        environment={"REACHY_GROUNDSTATION_CREDENTIAL": awkward},
+        journal=[f"opening a session with {awkward} configured"],
+    )
+    daemon, _access = daemon_for(robot)
+    reporter, streams = reporter_for()
+
+    code = execute_logs(daemon, reporter, ROBOT, lines=10, follow=False)
+
+    written = streams.result + streams.diagnostics
+    assert code is ExitCode.OK
+    assert awkward not in written
+    assert "a-newline" not in written
+    assert REDACTED in written
+
+
+def test_a_robot_whose_configuration_cannot_be_read_will_not_have_its_log_shown() -> (
+    None
+):
+    """Proceeding would mean rendering its output unable to promise it is clean."""
+    daemon, _access = daemon_for(FakeRobot(failing={"systemctl"}, journal=["a line"]))
+    reporter, streams = reporter_for()
+
+    with pytest.raises(RobotAccessError, match="would go out unscrubbed"):
+        execute_logs(daemon, reporter, ROBOT, lines=10, follow=False)
+
+    assert "a line" not in streams.result

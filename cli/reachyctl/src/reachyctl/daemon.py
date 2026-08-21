@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+from dataclasses import replace
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
@@ -133,6 +134,30 @@ class DaemonClient:
         """
         if self._complain_to is not None:
             self._complain_to(message)
+
+    def for_application(self, application: str) -> DaemonClient:
+        """Bind a client to the same robot, about a different application.
+
+        `deploy` uses this the moment it knows what the wheel carries. The
+        alternative — verifying whatever `--application` happened to say while
+        installing whatever the wheel happened to hold — is a deploy that
+        reports success because *some other* application is at the version the
+        wheel declares. That is the shape of the failure this whole tool is
+        written against, arriving by a different door.
+
+        Args:
+            application: The distribution the daemon controls and this client
+                asks about.
+
+        Returns:
+            A client over the same link, with the same everything else.
+        """
+        return DaemonClient(
+            self._access,
+            replace(self._layout, application=application),
+            elevate=self._elevate,
+            complain=self._complain_to,
+        )
 
     @property
     def layout(self) -> RobotLayout:

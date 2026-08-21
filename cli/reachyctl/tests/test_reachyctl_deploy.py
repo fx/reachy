@@ -34,7 +34,7 @@ from reachyctl.deploy import (
 )
 from reachyctl.exits import ExitCode
 from reachyctl.output import OutputFormat
-from reachyctl.robot import DEFAULT_STAGING, RobotLayout
+from reachyctl.robot import DEFAULT_APPLICATION, DEFAULT_STAGING, RobotLayout
 from reachyctl.steps import StepLog
 from reachyctl.wheels import Wheel, describe_wheel
 
@@ -465,3 +465,85 @@ def test_a_previewed_deploy_says_it_changed_nothing() -> None:
     assert code is ExitCode.OK
     assert document["data"]["preview"] is True
     assert "nothing was changed" in document["summary"]
+
+
+def test_a_failure_before_the_verification_still_says_what_is_running() -> None:
+    """An operator whose install failed needs to know the robot is still on the old one.
+
+    And an operator whose *verification* failed has just been told that in the
+    same sentence, so it is not said twice.
+    """
+    reporter, streams = reporter_for(output_format=OutputFormat.JSON)
+    robot = FakeRobot(
+        install_succeeds=False,
+        packages={"reachy-mini": "4.5.6", FIXTURE_DISTRIBUTION: "0.9.0"},
+        app_running=True,
+        app_detail="active",
+    )
+    daemon, _access = daemon_for(robot, layout=LAYOUT)
+
+    code = execute(_plan(), daemon, reporter, ROBOT)
+
+    summary = json.loads(streams.result)["summary"]
+    assert code is ExitCode.FAILURE
+    assert summary.startswith("the deploy failed at install")
+    assert summary.endswith("the robot is running 0.9.0")
+
+    reporter, streams = reporter_for(output_format=OutputFormat.JSON)
+    mismatched = FakeRobot(
+        install_takes_effect=False,
+        packages={"reachy-mini": "4.5.6", FIXTURE_DISTRIBUTION: "0.9.0"},
+    )
+    other, _link = daemon_for(mismatched, layout=LAYOUT)
+    execute(_plan(), other, reporter, ROBOT)
+
+    verified = json.loads(streams.result)["summary"]
+    assert verified.startswith("the deploy failed at verify")
+    assert verified.count("0.9.0") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_deploy_verifies_the_distribution_the_wheel_carries() -> None:
+    """Not a configured name, which could be right about a different application.
+
+    The layout names the satellite, the wheel carries the fixture, and the robot
+    already has the satellite at exactly the version the wheel declares. A
+    deploy that verified the configured name would report success over an
+    application that was never installed.
+    """
+    robot = FakeRobot(
+        packages={"reachy-mini": "4.5.6", DEFAULT_APPLICATION: FIXTURE_VERSION},
+        install_takes_effect=False,
+    )
+    daemon, _access = daemon_for(robot, layout=RobotLayout())
+    reporter, _streams = reporter_for()
+
+    outcome = await run_deploy(_plan(), daemon, reporter)
+
+    steps = _named(outcome.steps.results)
+    assert steps["verify"].failed is True
+    assert FIXTURE_DISTRIBUTION in steps["verify"].detail
+    assert outcome.ok is False
+
+
+@pytest.mark.asyncio
+async def test_an_operator_can_name_the_distribution_the_daemon_knows() -> None:
+    """For a robot whose daemon knows it by another name; overriding says which is verified."""
+    robot = FakeRobot(packages={"reachy-mini": "4.5.6"})
+    daemon, access = daemon_for(robot, layout=RobotLayout())
+    reporter, _streams = reporter_for()
+
+    outcome = await run_deploy(
+        DeployPlan(
+            obtain=_wheel,
+            origin="from this suite's fixture",
+            application="known-by-another-name",
+        ),
+        daemon,
+        reporter,
+    )
+
+    assert outcome.ok is False
+    assert any(
+        "known-by-another-name" in " ".join(command) for command in access.commands
+    )

@@ -27,10 +27,12 @@ dependencies = [
     # which is what lets the transport be exercised against a real SSH session
     # rather than a description of one.
     #
-    # The floor is 2.23.0 rather than the version this was written against. It
-    # is the highest "fixed in" across every advisory published for this
-    # distribution — CVE-2023-46445 and CVE-2023-46446 are fixed in 2.14.1,
-    # CVE-2026-45309 in 2.23.0 — so anything this permits carries none of them.
+    # The floor is 2.23 rather than the version this was written against: it is
+    # the highest "fixed in" across every advisory OSV lists for this
+    # distribution — CVE-2018-7749 in 1.12.1, CVE-2023-46445 and CVE-2023-46446
+    # in 2.14.1, GHSA-hfmc-7525-mj55 (Terrapin, CVE-2023-48795) in 2.14.2, and
+    # CVE-2026-45309 in 2.23.0 — so nothing this permits carries any of them.
+    # `uv.lock` resolves higher still, and `--locked` is what CI installs.
     "asyncssh>=2.23",
 ]
 

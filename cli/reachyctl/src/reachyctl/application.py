@@ -25,6 +25,11 @@ shared `application.running` check afterwards and reports what it found. A
 control command that reported a *failure* is not evidence either, so it is
 recorded as a warning and the verification still decides.
 
+**Nothing the robot wrote is rendered before its secrets are known.** A journal
+line is the single likeliest place for a configured credential to appear in text
+this tool did not write, so every verb here learns the robot's secret values
+before it forwards anything — see `reachyctl.configure.guard_robot_secrets`.
+
 **A state that could not be read is not a state.** The step that decides whether
 there is anything to do asks the daemon directly rather than reading the shared
 check's result, and the difference is not stylistic. `reachy_checks.run_check`
@@ -47,6 +52,7 @@ from reachy_checks import (
     check_by_identifier,
     run_check,
 )
+from reachyctl.configure import guard_robot_secrets
 from reachyctl.output import Report
 from reachyctl.robot import closing
 from reachyctl.steps import StepLog
@@ -88,6 +94,9 @@ async def _lifecycle(
 
     steps.begin(_INSPECT, f"asking whether {daemon.layout.application} is running")
     await daemon.connect()
+    # Before anything the robot wrote is rendered. See
+    # `reachyctl.configure.guard_robot_secrets`.
+    await guard_robot_secrets(daemon, reporter)
     # Asked directly rather than through the registry, and the module
     # documentation says why: a check that could not run reads as a negative
     # answer, and this is the answer the "nothing to do" branch turns on.
@@ -298,6 +307,10 @@ def execute_logs(
             How many lines were shown.
         """
         await daemon.connect()
+        # A journal is the single likeliest place for a configured credential
+        # to appear in text this tool did not write, so the values are learned
+        # before the first line is forwarded.
+        await guard_robot_secrets(daemon, reporter)
         shown = 0
         async for line in daemon.journal(lines=lines, follow=follow, since=since):
             reporter.stream_line(line)

@@ -57,7 +57,7 @@ from reachyctl.errors import CommandError
 from reachyctl.exits import ExitCode
 from reachyctl.managed import MalformedRegionError, render_region
 from reachyctl.output import Report
-from reachyctl.robot import closing
+from reachyctl.robot import RobotAccessError, closing
 from reachyctl.steps import StepLog
 
 if TYPE_CHECKING:
@@ -74,6 +74,7 @@ __all__ = [
     "execute_apply",
     "execute_diff",
     "execute_get",
+    "guard_robot_secrets",
     "guard_secrets",
     "report_for_difference",
     "run_apply",
@@ -138,6 +139,45 @@ def _shown(name: str, value: str | None) -> str:
     if _unclassified(name):
         return _UNSET if not value else _SET
     return "" if value is None else value
+
+
+async def guard_robot_secrets(daemon: DaemonClient, reporter: Reporter) -> None:
+    """Learn the robot's secret values before rendering anything it wrote.
+
+    Every command that operates a robot renders text the robot produced: a
+    journal line, a systemd complaint, a traceback from the daemon's control.
+    Any of it can carry a configured credential, and a redactor cannot remove a
+    string it was never given — so each of those commands reads the robot's
+    effective environment first and hands the values of the settings marked
+    secret to the reporter. That is reachyctl REQ-059 on the paths nobody
+    controls, and it costs one round trip.
+
+    A robot whose environment cannot be read fails the command rather than
+    proceeding, because proceeding would mean rendering its output while unable
+    to promise a credential is not in it.
+
+    The one thing this cannot cover is its own failure message, which carries
+    `systemctl`'s complaint about the read that did not happen. There is no
+    order of operations that fixes that: the values are what would scrub it, and
+    they are exactly what could not be obtained.
+
+    Args:
+        daemon: The robot.
+        reporter: Where everything is written.
+
+    Raises:
+        RobotAccessError: If the robot's environment could not be read.
+    """
+    try:
+        effective = await daemon.effective_configuration()
+    except RobotAccessError as error:
+        message = (
+            f"{error}. Nothing this robot wrote can be rendered until its "
+            f"configuration has been read, because a credential in its output "
+            f"would go out unscrubbed"
+        )
+        raise RobotAccessError(message) from error
+    guard_secrets(reporter, effective)
 
 
 def guard_secrets(reporter: Reporter, *settings: Mapping[str, str]) -> None:
@@ -392,7 +432,7 @@ async def run_apply(
             # now rather than only that a command exited non-zero.
             steps.failed(_RESTART, restarted.complaint())
 
-    await _verify(steps, daemon, desired)
+    await _verify(steps, daemon, desired, difference.removed)
     return steps, difference
 
 
@@ -419,30 +459,58 @@ async def _verify(
     steps: StepLog,
     daemon: DaemonClient,
     desired: Mapping[str, str],
+    removed: tuple[str, ...],
 ) -> None:
     """Ask the robot whether the declaration is actually in force now.
 
-    The same check `doctor` runs, from the same registry, rather than a second
-    comparison written here — reachyctl REQ-056. It reads the effective
-    environment rather than the region that was just written, which is the
-    whole point: a region that is on disk and not in force is exactly the
-    silently-inert configuration this tool exists to catch.
+    Two halves, because full ownership has two halves. What is declared is
+    asserted with the same check `doctor` runs, from the same registry, rather
+    than a second comparison written here — reachyctl REQ-056. What was
+    *withdrawn* is asserted here, because the shared check compares only the
+    keys an intent declares and a withdrawn key is precisely one it no longer
+    does. Without the second half, emptying the region entirely — a legitimate
+    apply, and the one provisioning REQ-063 is about — would write, restart, and
+    verify nothing at all.
+
+    Both read the effective environment rather than the region that was just
+    written, which is the whole point: a region that is on disk and not in force
+    is exactly the silently-inert configuration this tool exists to catch.
 
     Args:
         steps: Where to record it.
         daemon: The robot.
         desired: What should be in force.
+        removed: What was taken out of the managed region and should no longer
+            be in force.
     """
-    if not desired:
+    if not desired and not removed:
         steps.skipped(_VERIFY, "the declaration names no setting to verify")
         return
     steps.begin(_VERIFY, "asking the robot what configuration is now in force")
-    context = CheckContext(daemon=daemon, intent=Intent(configuration=desired))
-    result = await run_check(check_by_identifier(CONFIGURATION_EFFECTIVE), context)
-    if result.failed:
-        steps.failed(_VERIFY, result.summary)
-    else:
-        steps.done(_VERIFY, result.summary)
+    complaints: list[str] = []
+    if desired:
+        context = CheckContext(daemon=daemon, intent=Intent(configuration=desired))
+        result = await run_check(check_by_identifier(CONFIGURATION_EFFECTIVE), context)
+        if result.failed:
+            complaints.append(result.summary)
+    lingering: tuple[str, ...] = ()
+    if removed:
+        effective = await daemon.effective_configuration()
+        lingering = tuple(name for name in removed if name in effective)
+        if lingering:
+            complaints.append(
+                f"{len(lingering)} withdrawn setting(s) are still in force: "
+                f"{', '.join(lingering)}. Something outside the managed drop-in "
+                f"is setting them",
+            )
+    if complaints:
+        steps.failed(_VERIFY, "; ".join(complaints))
+        return
+    steps.done(
+        _VERIFY,
+        f"all {len(desired)} declared setting(s) are in force"
+        + (f", and {len(removed)} withdrawn one(s) are gone" if removed else ""),
+    )
 
 
 def _rows_for(difference: Difference) -> tuple[Mapping[str, object], ...]:

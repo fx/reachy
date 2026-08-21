@@ -15,6 +15,13 @@ sent. A mismatch is a failed deploy that **names the version actually running**,
 because "deploy failed" sends an operator to the logs and "the robot is running
 0.1.0, not 0.2.0" sends them to the right question.
 
+**The application is the one the wheel carries.** Not a configured name: a
+deploy that installed one distribution and verified another would report success
+whenever the other happened to be at the version the wheel declares — the same
+"looks identical to success" failure by a different door. `--application`
+overrides it, for a robot whose daemon knows the distribution by another name,
+and overriding it means saying which name is verified.
+
 **The checks are the shared ones.** Reachability, installation and running state
 are `reachy_checks` declarations, run here exactly as `doctor` runs them, which
 is what stops a deploy having a private opinion about whether a robot is healthy
@@ -54,6 +61,7 @@ from reachy_checks import (
     check_by_identifier,
     run_check,
 )
+from reachyctl.configure import guard_robot_secrets
 from reachyctl.output import Report
 from reachyctl.robot import closing
 from reachyctl.steps import StepLog
@@ -105,11 +113,16 @@ class DeployPlan:
             command surface that had already built it could not report the
             build as a step.
         origin: Where the wheel came from, for the report.
+        application: The distribution the daemon knows this by, when the
+            operator named one. `None` — the ordinary case — takes it from the
+            wheel, which is the only name that cannot be wrong about what was
+            installed.
         preview: Whether to report the changes and make none of them.
     """
 
     obtain: Callable[[], Wheel]
     origin: str
+    application: str | None = None
     preview: bool = False
 
 
@@ -183,11 +196,21 @@ async def run_deploy(
     wheel = plan.obtain()
     steps.done(_BUILD, wheel.describe())
 
+    # From here on, the application is the one the WHEEL carries — unless the
+    # operator named one, which is how a robot whose daemon knows it by another
+    # name is reached. Verifying a name that came from anywhere other than the
+    # thing being installed is how a deploy reports success because something
+    # else happens to be at the version the wheel declares.
+    daemon = daemon.for_application(plan.application or wheel.distribution)
     context = CheckContext(daemon=daemon)
     steps.begin(_REACH, "asking the robot whether its daemon is answering")
     # Above the check on purpose: a link that is not there has told us nothing
     # about the robot, and `run_check` would turn it into a failed diagnosis.
     await daemon.connect()
+    # And before anything the robot wrote is rendered — a systemd complaint, a
+    # traceback from the daemon's control — because a redactor cannot remove a
+    # value it was never given. See `reachyctl.configure.guard_robot_secrets`.
+    await guard_robot_secrets(daemon, reporter)
     reachable = await run_check(check_by_identifier(DAEMON_REACHABLE), context)
     if reachable.failed:
         steps.failed(_REACH, reachable.summary)
@@ -387,9 +410,13 @@ def _summary(outcome: DeployOutcome) -> str:
     failures = [result for result in outcome.steps.results if result.failed]
     if failures:
         first = failures[0]
+        # What the robot is running is appended only when the failing step is
+        # not the one that already said it. An operator whose install failed
+        # needs to know the robot is still on the old version; an operator whose
+        # verification failed has just been told that in the same sentence.
         running = (
             ""
-            if not outcome.running_version
+            if first.name == _VERIFY or not outcome.running_version
             else f"; the robot is running {outcome.running_version}"
         )
         return f"the deploy failed at {first.name}: {first.detail}{running}"
