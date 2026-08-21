@@ -1044,6 +1044,53 @@ class TestTheMicrophoneSettings:
         streamed = np.frombuffer(satellite.chunks[0][0], dtype="<i2")
         assert list(streamed) == [500] * 160
 
+    def test_the_whole_slider_does_something(self) -> None:
+        """Every step of the slider maps to its own factor, the bottom included.
+
+        The bottom is what this is really about. A floor at a tenth would
+        flatten `mic_volume` 1 through 10 onto one value, so an operator
+        dragging Home Assistant's slider from ten to two would hear no change
+        and have no way to find out why. Silence is not what the floor was
+        guarding against either: `persist_mic_volume` clamps to 1, so the
+        quietest the slider can ask for is a hundredth.
+        """
+        assert satellite_main._mic_volume_scalar(100) == pytest.approx(1.0)
+        assert satellite_main._mic_volume_scalar(50) == pytest.approx(0.5)
+        assert satellite_main._mic_volume_scalar(10) == pytest.approx(0.1)
+        assert satellite_main._mic_volume_scalar(2) == pytest.approx(0.02)
+        assert satellite_main._mic_volume_scalar(1) == pytest.approx(0.01)
+
+    def test_it_only_ever_attenuates(self) -> None:
+        """A microphone volume is not a way to amplify past what was captured."""
+        assert satellite_main._mic_volume_scalar(150) == pytest.approx(1.0)
+
+    def test_it_never_inverts_the_waveform(self) -> None:
+        """Which a negative factor would do. Only a hand-edited file gets here."""
+        assert satellite_main._mic_volume_scalar(-20) == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_audio_quiet_enough_to_round_to_zero_is_still_streamed(
+        self,
+    ) -> None:
+        """At the bottom of the slider a quiet room quantises to silence.
+
+        That is arithmetic rather than a failure, and nothing downstream may
+        read an all-zero chunk as one: the emptiness the pump *does* act on is
+        the conditioner having swallowed a block, which is zero bytes, not
+        zero-valued samples.
+        """
+        quiet = np.full(160, 40, dtype="<i2").tobytes()
+        service, state = _esphome_service([], capture=FakeCapture([[quiet]]))
+        state.mic_volume = 1
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        streamed = np.frombuffer(satellite.chunks[0][0], dtype="<i2")
+        assert list(streamed) == [0] * 160
+
     @pytest.mark.asyncio
     async def test_the_default_volume_leaves_the_audio_exactly_alone(self) -> None:
         """Which is every chunk on a robot nobody has touched that slider on."""

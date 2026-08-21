@@ -882,18 +882,29 @@ class EsphomeService:
 def _mic_volume_scalar(mic_volume: int) -> float:
     """Turn Home Assistant's microphone volume into a factor to multiply by.
 
-    Attenuation only, and never to silence: the setting runs from 1 to 100 and
-    100 is the default, so the loudest it can be is the audio exactly as the
-    daemon captured it. A microphone volume that could reach zero would be a
-    second mute switch the mute switch did not know about.
+    Proportional across the whole slider, and attenuation only: 100 is the
+    default, so the loudest the setting can ask for is the audio exactly as the
+    daemon captured it.
+
+    **There is deliberately no floor here, and the reason is that the floor is
+    somebody else's.** `ServerState.persist_mic_volume` clamps what Home
+    Assistant sets to 1 through 100, so the quietest the slider can ask for is a
+    hundredth rather than silence, and the mute switch stays the only thing
+    that silences the microphone. A floor at a tenth would not add that
+    guarantee — it is already there — it would only flatten the bottom tenth of
+    the slider onto one value, so that dragging it from ten to two would change
+    nothing audible and nothing anywhere would say why.
 
     Args:
         mic_volume: The setting, as Home Assistant's own entity persisted it.
 
     Returns:
-        What to multiply every sample by, between 0.1 and 1.0.
+        What to multiply every sample by: at most 1.0, and never negative. The
+        `max` is not about the slider, which cannot go below 1 — it is about a
+        preferences file edited by hand, where a negative factor would invert
+        the waveform rather than quieten it.
     """
-    return max(0.1, min(1.0, mic_volume / 100.0))
+    return min(1.0, max(0.0, mic_volume / 100.0))
 
 
 def _scaled(pcm: bytes, scalar: float) -> bytes:
