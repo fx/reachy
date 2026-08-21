@@ -181,6 +181,19 @@ jobs:
           done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      # The size gate, run where the wheels are built. It fails when a wheel has
+      # grown beyond the size recorded in `bench/baseline.json`, so a dependency
+      # that arrived without anybody weighing it stops the release rather than
+      # shipping in it. The image's own size is gated the same way in
+      # `images.yml`; sizes are collected from the change that produces each
+      # artifact rather than from one build.
+      #
+      #:= docs/specs/benchmarks/index.md#req-073-artifact-size-is-measured-as-a-tracked-quantity
+      #:% The suite MUST record the size of each published artifact and treat growth
+      #:% beyond a stated tolerance as a regression.
+      - name: Fail if a wheel has grown beyond its recorded size
+        run: just bench-sizes --artifact-size wheel-size/
+
       - name: Publish the sizes as an artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

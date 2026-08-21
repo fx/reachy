@@ -3,7 +3,17 @@ name = "reachy-bench"
 version = "0.1.0"
 description = "Performance suite for the Reachy Mini stack"
 requires-python = ">=3.12"
-dependencies = ["reachy-contracts"]
+dependencies = [
+    # The wire vocabulary, for the session the `session` benchmark drives.
+    "reachy-contracts",
+    # The service under measurement. `detect` opens its model runtime, `pipeline`
+    # drives its real frame pipeline and `footprint` starts it as a subprocess,
+    # so what is measured is the code a deployment runs rather than a copy of it.
+    "reachy-groundstation",
+    # The one client implementation of the session protocol — reachyctl REQ-057.
+    # A benchmark with a client of its own would measure its own client.
+    "reachy-session-client",
+]
 # `Private :: Do Not Upload` is rejected by every index that implements the
 # trove classifier list, so an accidental publish of this member fails at the
 # upload rather than silently succeeding. It is a workspace member because it
@@ -18,7 +28,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/reachy_bench"]
 
-# By path, never by version range: there is no published reachy-contracts a
-# resolver could pick instead of the one in this tree.
+# By path, never by version range: none of these is published, so there is no
+# version of one a resolver could pick instead of the one in this tree.
 [tool.uv.sources]
 reachy-contracts = { workspace = true }
+reachy-groundstation = { workspace = true }
+reachy-session-client = { workspace = true }

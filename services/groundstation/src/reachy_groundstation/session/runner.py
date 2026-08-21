@@ -35,8 +35,21 @@ from reachy_contracts import (
 )
 from reachy_groundstation.faults import validation_summary
 from reachy_groundstation.obs import frame_exemplar, get_logger, session_context
+
+# The module rather than the class, and that is what breaks an import cycle
+# this package and `pipeline` have between them: `pipeline.runner` imports
+# `MessageKind` from `session.framing`, which initialises this package, which
+# imports this module, which comes back for `FramePipeline` while
+# `pipeline.runner` is still executing its own imports. Binding the module
+# object succeeds where binding the name does not — the attribute is looked up
+# when the pipeline is built, by which time both modules are complete.
+#
+# Importing anything under `reachy_groundstation.session` first has always
+# worked, which is every path through the service itself, so the cycle was
+# invisible until something imported `reachy_groundstation.pipeline` first —
+# which the benchmark suite does.
+from reachy_groundstation.pipeline import runner as pipeline_runner
 from reachy_groundstation.pipeline.queue import FrameQueue, QueuedFrame
-from reachy_groundstation.pipeline.runner import FramePipeline
 from reachy_groundstation.ports import AgreedCapability
 from reachy_groundstation.session.auth import credential_is_valid
 from reachy_groundstation.session.framing import (
@@ -400,7 +413,7 @@ class SessionRunner:
             TransportClosedError: If the connection ended.
         """
         queue = FrameQueue(self._settings.queue_bound)
-        pipeline = FramePipeline(
+        pipeline = pipeline_runner.FramePipeline(
             capabilities=capabilities,
             deliver=self._send,
             settings=self._settings,

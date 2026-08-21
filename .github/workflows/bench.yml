@@ -1,0 +1,125 @@
+name: Benchmarks
+
+# The per-pull-request performance gate. It takes the measurements that need
+# nothing but a container, writes them as one JSON document, publishes that as a
+# build artifact, and judges it against the baseline committed in
+# `bench/baseline.json`.
+#
+# Every step calls a Justfile recipe rather than restating its command, so what
+# runs here reproduces locally with the command in the step.
+#
+# **The two benchmarks that need a robot do not run here and are not missing
+# from the result either.** `photon-to-head` and `robot-load` measure a robot
+# running the satellite, so the default selection reports them as excluded with
+# the reason — which is benchmarks REQ-072, and is a different thing from a
+# suite that quietly left them out.
+#
+# **Artifact sizes are not gated here.** They are collected from the change that
+# produces each artifact: the container image in `images.yml`, the wheels in
+# `release.yml`, each calling `just bench-sizes` on the JSON its own build
+# emitted. Rebuilding an image here to weigh it would weigh a different build.
+#
+# ⚠️ **The timing half of this gate is only as good as the recorded profile for
+# the runner class below.** A class of machine nobody has measured is reported
+# as unbaselined rather than passed, and the run prints the block to commit into
+# the job summary. Until that block is committed, this job reports the numbers
+# and gates nothing about them; the size gates in the other two workflows are
+# unaffected, because a size does not depend on the machine that weighed it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The runner pool, named rather than derived. `runner.arch` and the kernel
+  # release describe the virtual machine a job happened to land on; the pool is
+  # what actually decides how many cores and how much memory a measurement had,
+  # and it is the honest class for a baseline to be keyed on.
+  PROFILE: github-ubuntu-latest
+
+jobs:
+  #:= docs/specs/benchmarks/index.md#req-071-regression-is-judged-against-a-baseline-recorded-in-the-repository
+  #:% Continuous integration MUST compare benchmark results against a baseline stored
+  #:% in version control and fail when a measurement regresses beyond a stated
+  #:% tolerance.
+  #
+  #:= docs/specs/benchmarks/index.md#req-072-benchmarks-requiring-hardware-are-opt-in
+  #:% Any benchmark that requires a physical robot MUST be excluded from the default
+  #:% suite and selectable explicitly.
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up the workspace
+        uses: ./.github/actions/setup-workspace
+
+      # Every hardware-free benchmark loads the pinned face model, and weights
+      # are never committed. A benchmark with no model is one that fails rather
+      # than one that is fast, so this has to happen first.
+      - name: Fetch and verify the pinned models
+        run: just models
+
+      - name: Take the measurements
+        run: just bench --profile "$PROFILE" --output bench-results.json
+
+      - name: Publish the measurements as an artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bench-results
+          path: bench-results.json
+          if-no-files-found: error
+
+      # The gate. It fails when a measurement has regressed beyond its stated
+      # tolerance — naming the measurement and by how much — and also when a
+      # measurement has no recorded figure at all, because a benchmark added
+      # without recording its cost is one nothing will ever compare.
+      #
+      # Its output goes to the job summary as well as the log, because the
+      # numbers are worth reading on a pull request that did not fail.
+      - name: Judge the run against the committed baseline
+        run: |
+          set -euo pipefail
+          {
+            echo '### Benchmark comparison'
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          just bench-compare --results bench-results.json \
+            | tee --append "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # What to commit in order to start gating this runner class's timings.
+      # Written unconditionally rather than only when the profile is missing:
+      # re-recording a class that already has a profile is exactly the diff
+      # somebody reviews when they mean to accept a change to the numbers, and
+      # REQ-071's scenario is that accepting one is an explicit decision.
+      #
+      # `always()` because the block is most useful on the run that just failed.
+      - name: Report the profile block this run would record
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo '### The baseline profile this run would record'
+            echo
+            echo 'Paste this into the `profiles` object of `bench/baseline.json`'
+            echo 'to record — or to update — the figures for this runner class.'
+            echo 'Nothing here writes it: changing a recorded number is a pull'
+            echo 'request, so that accepting one is a decision made in a review.'
+            echo
+            echo '```json'
+            just bench-record --results bench-results.json \
+              --description "GitHub-hosted $PROFILE runner" 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

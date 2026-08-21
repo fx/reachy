@@ -244,3 +244,4 @@ behind it.
 | Date | Change | Document |
 |------|--------|----------|
 | 2026-08-20 | Initial spec created | — |
+| 2026-08-21 | The YuNet change measured rather than argued. The full face pass over a 640x480 frame is 1.9 ms at four inference threads and 7.8 ms at one, against the predecessor's recorded 38 ms and 93 ms. The measurement is on different hardware, so the ratio is not the model's alone — what it settles is that the licence-driven swap costs nothing observable, the pass being far inside the budget the baseline set. Accuracy is unchanged against the detector the robot itself ships: the REQ-036 parity gate reports zero deviation from the Reachy Mini SDK's decoder over the whole fixture set. | [0014](../../changes/0014-benchmarks-and-gates.md) |

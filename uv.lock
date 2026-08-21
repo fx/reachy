@@ -1800,10 +1800,16 @@ version = "0.1.0"
 source = { editable = "bench" }
 dependencies = [
     { name = "reachy-contracts" },
+    { name = "reachy-groundstation" },
+    { name = "reachy-session-client" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "reachy-contracts", editable = "packages/reachy-contracts" }]
+requires-dist = [
+    { name = "reachy-contracts", editable = "packages/reachy-contracts" },
+    { name = "reachy-groundstation", editable = "services/groundstation" },
+    { name = "reachy-session-client", editable = "packages/reachy-session-client" },
+]
 
 [[package]]
 name = "reachy-checks"

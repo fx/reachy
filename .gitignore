@@ -33,6 +33,13 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
+# Benchmark result documents. A run's measurements describe the machine that
+# took them, so they belong to whoever ran it; the numbers this repository is
+# accountable to live in `bench/baseline.json`, which is committed. Continuous
+# integration publishes a run as a build artifact rather than committing one.
+bench-results.json
+bench-results.*.json
+
 # Coverage output. Diff-scoped gating regenerates these on every run.
 .coverage
 .coverage.*

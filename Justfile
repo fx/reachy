@@ -940,6 +940,59 @@ vendored-drift clone_dir=".upstream-drift":
     echo 'anything. Re-vendoring means updating the files, every per-file header,'
     echo 'and the commit recorded in the NOTICE.'
 
+# Take the benchmark measurements and write a result document.
+#
+# With no names, the default selection runs: everything that needs no hardware.
+# The two that need a robot are reported as excluded rather than left out of the
+# document, which is what benchmarks REQ-072 asks for — a suite that simply
+# omitted them would look like one that had lost them. Naming a benchmark is
+# what selects it, hardware or not:
+#
+#     just bench                                    # the default selection
+#     just bench detect                             # one of them
+#     just bench --artifact-size image-size/        # with sizes to record
+#
+# Needs `just models` to have run: `detect`, `pipeline`, `session` and
+# `footprint` all load the pinned face model, and a benchmark with no model is a
+# benchmark that fails rather than one that is fast.
+bench *args:
+    {{ uv }} python -m reachy_bench run {{ args }}
+
+# Judge a benchmark result against the baseline committed in `bench/baseline.json`.
+#
+# This is the gate. It exits non-zero when a measurement has regressed beyond
+# its stated tolerance, naming the measurement and by how much, and it also
+# fails when a measurement has no recorded figure at all — a benchmark added
+# without recording what it costs is a measurement nothing will ever compare.
+#
+# Timings are judged against the profile for the class of machine the run
+# happened on; a class nobody has recorded is reported as unbaselined rather
+# than passed, and `just bench-record` prints the profile to commit.
+bench-compare *args:
+    {{ uv }} python -m reachy_bench compare {{ args }}
+
+# Judge artifact sizes against the committed baseline. Benchmarks REQ-073.
+#
+# The narrow half of the gate, for the workflows that build an artifact and time
+# nothing: it reads the JSON `just image-size` and `just wheel-size` already
+# emit and compares `size_bytes` against the recorded size. Sizes are collected
+# from the change that produces each artifact rather than from one build, so
+# this runs in the image workflow and in the release workflow rather than beside
+# the benchmarks.
+#
+#     just bench-sizes --artifact-size image-size/cpu-amd64.json
+bench-sizes *args:
+    {{ uv }} python -m reachy_bench sizes {{ args }}
+
+# Print the baseline profile block that would record a result, and write nothing.
+#
+# How a new class of machine is adopted: run the suite on it, read the numbers,
+# and paste the block into `bench/baseline.json` in a pull request. Nothing here
+# edits the baseline, because accepting a change to the recorded numbers is a
+# decision somebody makes in a review rather than one a command makes quietly.
+bench-record *args:
+    {{ uv }} python -m reachy_bench record {{ args }}
+
 # Apply formatting and the lint fixes that are safe to apply automatically.
 fmt:
     {{ uv }} ruff check --fix .

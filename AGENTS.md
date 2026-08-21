@@ -21,7 +21,7 @@ one-line import of this file and holds no content of its own.
 | `apps/ha-satellite/` | Robot-side ESPHome voice satellite (`reachy_mini_ha_satellite`) |
 | `services/groundstation/` | Off-robot capability host (`reachy_groundstation`) |
 | `cli/reachyctl/` | Command-line tool (`reachyctl`) |
-| `bench/` | Performance suite (`reachy_bench`); a member, never published |
+| `bench/` | Performance suite, the committed baseline and the regression gate (`reachy_bench`); a member, never published |
 | `tools/repo-hygiene/` | The repository's own leak scanner (`reachy_hygiene`); a member, never published |
 | `provisioning/ansible/` | Stock image to configured robot: four tagged roles, a removal path, and the filter plugins they reach their Python through. Not a Python member, and its plugins are nonetheless linted, type-checked and covered with everything else |
 | `provisioning/ci/` | The container target the idempotency gate applies the playbook against, and the list of what it does and does not model |
@@ -30,12 +30,10 @@ one-line import of this file and holds no content of its own.
 | `uv.lock` | One lockfile for every member |
 | `mise.toml` | The pinned toolchain |
 | `Justfile` | The task surface |
-| `.github/workflows/` | The merge gates: checks, hygiene, images, release, traceability |
+| `.github/workflows/` | The merge gates: checks, hygiene, images, release, traceability, provisioning, benchmarks |
 | `release-please-config.json` | Where the derived version is written, artifact by artifact |
 
-Every member but `bench` has an implementation today. `bench` is still a
-scaffold: a `pyproject.toml`, an `AGENTS.md` and a package directory, waiting
-for the change that fills it in.
+Every member has an implementation today.
 
 There is exactly one definition of what a healthy installation is, and it is
 `packages/reachy-checks`. `reachyctl doctor` runs those declarations and the
@@ -109,11 +107,12 @@ and the robot application's wheel arrives with the change that builds it.
 `just secret-scan`, `just contracts`, `just contracts-check`,
 `just lint-boundary`, `just lint-behaviour-boundary`,
 `just lint-capability-boundary`, `just check-assets`, `just vendored-drift`, the
-wheel trio `just wheels`, `just wheel-size` and `just wheel-verify`, and the
-provisioning set `just provision-lint`, `just provision-target-up`,
-`just provision-run`, `just provision-target-down` and
-`just provision-idempotency`. Continuous integration calls these recipes rather
-than restating the commands. A command worth running twice belongs in the
+wheel trio `just wheels`, `just wheel-size` and `just wheel-verify`, the
+benchmark set `just bench`, `just bench-compare`, `just bench-sizes` and
+`just bench-record`, and the provisioning set `just provision-lint`,
+`just provision-target-up`, `just provision-run`, `just provision-target-down`
+and `just provision-idempotency`. Continuous integration calls these recipes
+rather than restating the commands. A command worth running twice belongs in the
 `Justfile`, not in workflow YAML and not in prose here.
 
 ### Behaviour is testable without hardware
@@ -220,6 +219,7 @@ mise install     # once, to get the pinned versions
 just sync        # install the workspace exactly as uv.lock describes it
 just models      # fetch and hash-verify the pinned model weights, never committed
 just check       # lint, typecheck, test — three of the merge gates
+just bench       # measure this stack; `just bench-compare` judges the result
 just image       # build the groundstation container image (needs docker)
 just image-verify  # start it with no network and drive a real session through it
 just provision-idempotency  # apply the playbook twice against a container (needs docker)
@@ -234,7 +234,7 @@ missing is not a merge gate.
 
 ## Merge gates
 
-Six workflows, and they do not all run on the same events. Each job calls a
+Seven workflows, and they do not all run on the same events. Each job calls a
 `Justfile` recipe, so every one of them reproduces locally with the command in
 its step.
 
@@ -246,6 +246,7 @@ its step.
 | `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, every released wheel — the `reachyctl` set and the robot application — built, installed into an empty environment, verified, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
 | `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — six specs registered so far, see below | `just duvet` |
 | `provisioning.yml` | pull requests, pushes to `main` | `Provisioning lint`; `Idempotency`, which applies the playbook twice against a container target and fails on any changed step in the second application | `just provision-lint`, `just provision-idempotency` |
+| `bench.yml` | pull requests, pushes to `main` | `Benchmark` — the hardware-free suite, judged against the committed baseline | `just bench`, `just bench-compare` |
 
 `release.yml` never runs on a pull request, which is why it is not in the set of
 checks to require below. Its two jobs never run on each other's event: version
@@ -260,13 +261,13 @@ completion notes of
 
 ## Requirements traceability
 
-⚠️ **The "Requirements traceability" check covers six specs so far.**
+⚠️ **The "Requirements traceability" check covers seven specs so far.**
 `.duvet/config.toml` registers `docs/specs/perception/index.md`,
 `docs/specs/groundstation/index.md`, `docs/specs/robot-link/index.md`,
-`docs/specs/reachyctl/index.md`, `docs/specs/ha-satellite/index.md` and
-`docs/specs/provisioning/index.md` and nothing else, so a green run is evidence
-that those 57 requirements are traced
-and is evidence of nothing about the other 2 specs — duvet does not load them. A
+`docs/specs/reachyctl/index.md`, `docs/specs/ha-satellite/index.md`,
+`docs/specs/provisioning/index.md` and `docs/specs/benchmarks/index.md`, and
+nothing else, so a green run is evidence that those 64 requirements are traced
+and is evidence of nothing about the remaining spec — duvet does not load it. A
 spec is registered by the change that implements it, in that change's pull
 request, alongside the annotations that make it pass. Robot-link was registered
 by change 0012, which is the change that closed its set: the contract has three
@@ -276,8 +277,11 @@ registered by 0013, which added the behaviour layer, the configuration, the
 settings interface and the packaging to the ports and adapters 0011 and 0012 had
 already built. Provisioning was registered by 0010, which implements the whole of
 it at once — the roles, the removal path and the idempotency gate arrive
-together, so there was no partial implementation to register earlier. The header
-comment in that file explains why the rest are deliberately unregistered.
+together, so there was no partial implementation to register earlier. Benchmarks
+was registered by 0014, for the same reason: it is the only change that touches
+that spec, and its suite, its committed baseline and its gate arrive together,
+because a gate without a baseline gates nothing. The header comment in that file
+explains why the one remaining spec is deliberately unregistered.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and

@@ -34,6 +34,36 @@ SPECIFICATION: [Architecture](docs/specs/architecture/index.md)
     TEXT[implementation]: recognise, and MUST emit its fully resolved configuration at startup with every
     TEXT[implementation]: value marked secret replaced by a redacted placeholder.
 
+SPECIFICATION: [Benchmarks](docs/specs/benchmarks/index.md)
+  SECTION: [REQ-067: Results are structured and machine-readable](#req-067-results-are-structured-and-machine-readable)
+    TEXT[!MUST,implementation]: Every benchmark run MUST emit its results in a structured format that another
+    TEXT[!MUST,implementation]: program can consume without parsing human-facing output.
+
+  SECTION: [REQ-068: Every result records the context it was measured in](#req-068-every-result-records-the-context-it-was-measured-in)
+    TEXT[!MUST,implementation]: Each benchmark result MUST record the hardware, the software versions, and the
+    TEXT[!MUST,implementation]: configuration it was produced under.
+
+  SECTION: [REQ-069: Latency is reported as a distribution](#req-069-latency-is-reported-as-a-distribution)
+    TEXT[!MUST,implementation]: Timing measurements MUST report at least a median and a high percentile rather
+    TEXT[!MUST,implementation]: than a mean alone.
+
+  SECTION: [REQ-070: Stages are measured separately](#req-070-stages-are-measured-separately)
+    TEXT[!MUST,implementation]: The suite MUST report the duration of each pipeline stage individually in
+    TEXT[!MUST,implementation]: addition to any end-to-end measurement.
+
+  SECTION: [REQ-071: Regression is judged against a baseline recorded in the repository](#req-071-regression-is-judged-against-a-baseline-recorded-in-the-repository)
+    TEXT[!MUST,implementation,implication]: Continuous integration MUST compare benchmark results against a baseline stored
+    TEXT[!MUST,implementation,implication]: in version control and fail when a measurement regresses beyond a stated
+    TEXT[!MUST,implementation,implication]: tolerance.
+
+  SECTION: [REQ-072: Benchmarks requiring hardware are opt-in](#req-072-benchmarks-requiring-hardware-are-opt-in)
+    TEXT[!MUST,implementation,implication]: Any benchmark that requires a physical robot MUST be excluded from the default
+    TEXT[!MUST,implementation,implication]: suite and selectable explicitly.
+
+  SECTION: [REQ-073: Artifact size is measured as a tracked quantity](#req-073-artifact-size-is-measured-as-a-tracked-quantity)
+    TEXT[!MUST,implementation,implication]: The suite MUST record the size of each published artifact and treat growth
+    TEXT[!MUST,implementation,implication]: beyond a stated tolerance as a regression.
+
 SPECIFICATION: [Groundstation](docs/specs/groundstation/index.md)
   SECTION: [REQ-022: Capabilities register without transport changes](#req-022-capabilities-register-without-transport-changes)
     TEXT[!MUST,implementation]: Adding a capability MUST NOT require modification to the session layer, the
