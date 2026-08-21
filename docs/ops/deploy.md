@@ -118,9 +118,16 @@ investigate before going further.
 docker compose logs groundstation --no-log-prefix | head -1
 ```
 
-The first line is `configuration.resolved`, and it carries every setting in
-force including the defaults. Compare it against what you had: a new release may
-have added a setting, and the default it chose is now yours.
+**Executed:**
+
+```
+{"credential": "<set>", "host": "0.0.0.0", "port": 8080, "queue_bound": 2, "capability_timeout_seconds": 5.0, "handshake_timeout_seconds": 10.0, "warm_up_timeout_seconds": 60.0, "max_message_bytes": 4194304, "log_level": "info", "log_format": "json", "service_name": "reachy-groundstation", "models_dir": "/opt/reachy/models", "inference_intra_op_threads": 4, "inference_inter_op_threads": 1, "inference_providers": "CPUExecutionProvider", "face_enabled": true, "face_score_threshold": 0.6, "face_nms_threshold": 0.3, "gesture_enabled": false, "gesture_score_threshold": 0.6, "gesture_sample_interval": 4, "event": "configuration.resolved", "level": "info", "timestamp": "2026-08-21T19:20:19.399845Z"}
+```
+
+That is every setting in force, including the ones left at their defaults, with
+the credential shown as `<set>` rather than by value. Compare it against what
+you had: a new release may have added a setting, and the default it chose is now
+yours.
 
 **A refusal to start naming a variable is the good outcome**, not a regression.
 It means a setting was renamed or withdrawn and the service will not run on a

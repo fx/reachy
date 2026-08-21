@@ -122,14 +122,14 @@ docker compose ps
 ```
 
 ```
-NAME                                   IMAGE                      SERVICE         STATUS                   PORTS
-reachy-groundstation-groundstation-1   reachy-groundstation:dev   groundstation   Up 12 seconds (healthy)  127.0.0.1:8080->8080/tcp
-reachy-groundstation-prometheus-1      prom/prometheus:v3.7.3     prometheus      Up 6 seconds             127.0.0.1:9090->9090/tcp
+NAME                                   IMAGE                                                                                            COMMAND                  SERVICE         CREATED          STATUS                   PORTS
+reachy-groundstation-groundstation-1   reachy-groundstation:dev                                                                         "/opt/reachy/venv/bi…"   groundstation   11 seconds ago   Up 8 seconds (healthy)   127.0.0.1:8080->8080/tcp
+reachy-groundstation-prometheus-1      prom/prometheus:v3.7.3@sha256:49214755b6153f90a597adcbff0252cc61069f8ab69ce8411285cd4a560e8038   "/bin/prometheus --c…"   prometheus      26 minutes ago   Up 26 minutes            127.0.0.1:9090->9090/tcp
 ```
 
-The real `docker compose ps` prints two more columns — `COMMAND` and `CREATED` —
-and the full digest-pinned Prometheus reference. They are cut here for width;
-nothing else is changed.
+Wide, and pasted whole rather than trimmed. `(healthy)` on the groundstation row
+is the column to read; the Prometheus row has no health state because the image
+declares no check.
 
 ## 4. Read the startup log
 
@@ -252,11 +252,16 @@ groundstation that gets the protocol wrong fails here the way it would fail the
 robot.
 
 Put the credential in a file. There is deliberately no option that takes the
-credential itself, because an argument is visible in the process list:
+credential itself, because an argument is visible in the process list to every
+user on the machine — and for the same reason, do not type the value on a
+command line either, where it lands in the shell history. Read it instead:
 
 ```
-mkdir --parents ~/.config/reachy
-umask 077 && printf '%s' 'the-credential-you-generated' > ~/.config/reachy/groundstation-credential
+install --directory --mode 700 ~/.config/reachy
+read -r -s -p 'Groundstation credential: ' credential
+printf '\n'
+(umask 077; printf '%s' "$credential" > ~/.config/reachy/groundstation-credential)
+unset credential
 ```
 
 Then, from a checkout of this repository:

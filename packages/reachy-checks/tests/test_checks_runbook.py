@@ -87,7 +87,13 @@ def _sections(region: str) -> dict[str, str]:
     bodies: dict[str, str] = {}
     for index, heading in enumerate(headings):
         end = headings[index + 1].start() if index + 1 < len(headings) else len(region)
-        bodies[heading.group(1)] = region[heading.end() : end]
+        identifier = heading.group(1)
+        # A repeated heading would overwrite the first body, and the key list
+        # could still equal the registry — so every assertion below would then
+        # be reading whichever duplicate came last, and a stale first section
+        # would sit in the document unexamined.
+        assert identifier not in bodies, f"the runbook repeats a section: {identifier}"
+        bodies[identifier] = region[heading.end() : end]
     return bodies
 
 

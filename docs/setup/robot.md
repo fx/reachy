@@ -186,6 +186,19 @@ Environment="REACHY_SATELLITE_GROUNDSTATION_URL=ws://192.0.2.10:8080/v1/session"
 Environment="REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL=the-credential-you-generated"
 ```
 
+**That file holds a credential, so give it root-only permissions.** systemd
+reads unit configuration as root and needs nothing more:
+
+```
+sudo install --owner root --group root --mode 600 \
+  20-satellite.conf /etc/systemd/system/reachy-mini-daemon.service.d/
+sudo systemctl daemon-reload
+sudo systemctl restart reachy-mini-daemon.service
+```
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No expected output is recorded for these
+> commands against a robot. Nothing below is a transcript.
+
 And set `REACHY_HOME_ASSISTANT_IDENTITY` in the managed declaration to the
 **same string** as `REACHY_SATELLITE_DEVICE_NAME`, so that `doctor`'s identity
 check compares two values that are supposed to be equal rather than reporting
