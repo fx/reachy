@@ -215,7 +215,9 @@ class FramePipeline:
         The envelope is built by `ResultEnvelope.for_frame`, which moves the
         frame's sequence number and its capture token across without this code
         reading either. The token is the robot's, and nothing here has a clock it
-        could be compared against.
+        could be compared against. Building it is inside the same guard as the
+        capability's own work, because building it is where a payload that does
+        not match the name it will be routed by is caught.
 
         Args:
             decoded: The frame, shared with every other agreed capability.
@@ -232,6 +234,12 @@ class FramePipeline:
                     agreed.capability.process(decoded),
                     timeout=self._settings.capability_timeout_seconds,
                 )
+                # Inside the guard, not after it. Assembling the envelope
+                # validates the payload against the name it will be routed by,
+                # so a capability that answers with the wrong payload type
+                # fails here — and a failure that escaped would stop the
+                # session's whole pipeline while frames kept arriving.
+                result = ResultEnvelope.for_frame(decoded.header, name, payload)
             except Exception as error:
                 # A capability is arbitrary code running inside this process,
                 # and `wait_for` adds a `TimeoutError` to whatever it raises of
@@ -264,10 +272,7 @@ class FramePipeline:
                 )
 
         emitted = self._clock()
-        await self._deliver(
-            MessageKind.RESULT,
-            ResultEnvelope.for_frame(decoded.header, name, payload),
-        )
+        await self._deliver(MessageKind.RESULT, result)
         self._obs.metrics.stage_seconds.labels(stage=STAGE_EMIT).observe(
             self._clock() - emitted,
             exemplar=self._exemplar(decoded.sequence),

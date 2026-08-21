@@ -32,6 +32,7 @@ from groundstation_support import (
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from reachy_contracts import (
+    FACE_CAPABILITY,
     Capability,
     ErrorCode,
     FaceDetections,
@@ -40,6 +41,7 @@ from reachy_contracts import (
     SessionError,
     WireModel,
 )
+from reachy_groundstation.capabilities.base import CapabilityBase
 from reachy_groundstation.obs import (
     STAGE_DECODE,
     STAGE_EMIT,
@@ -462,3 +464,39 @@ async def test_a_pipeline_that_stops_says_which_frame_it_was_handling() -> None:
     assert line["sequence"] == 23
     assert line["session"] == SESSION
     assert line["error"] == "TransportClosedError"
+
+
+#:= docs/specs/groundstation/index.md#req-025-a-failed-capability-does-not-take-down-the-service
+#:% When a capability fails to initialise, the service MUST continue serving the
+#:% capabilities that initialised successfully.
+@pytest.mark.asyncio
+async def test_a_capability_answering_with_the_wrong_payload_costs_only_itself() -> (
+    None
+):
+    """Assembling the envelope is where a mismatched payload is caught.
+
+    A registered capability name carries a declared payload type, and a
+    capability that answers with a different one fails when the envelope is
+    built. That has to be contained the same way a capability raising is: if it
+    escaped, the session's whole pipeline would stop while frames kept
+    arriving, and the client would be told nothing.
+    """
+
+    class _Confused(CapabilityBase):
+        async def process(self, frame: DecodedFrame) -> WireModel:
+            del frame
+            return GestureDetections()
+
+    recorder = _Recorder()
+    pipeline, _obs, _spans = _pipeline(
+        _Confused(Capability(name=FACE_CAPABILITY, version=1)),
+        EchoCapability(),
+        recorder=recorder,
+    )
+    await pipeline.process(_queued(31))
+
+    assert [result.capability for result in recorder.results()] == ["echo"]
+    (error,) = recorder.errors()
+    assert error.code is ErrorCode.CAPABILITY_FAILED
+    assert error.detail.startswith("face: ")
+    assert error.sequence == 31
