@@ -820,6 +820,97 @@ class TestResolvingASoundStaysOffTheCallingThread:
         assert media.played == ["/cache/slow.mp3"]
 
 
+class TestAResolverThatRaisesCannotWedgeTheOutput:
+    """The blast radius of the truncated-file defect, closed at the player."""
+
+    def test_a_resolver_that_raises_is_treated_as_an_unplayable_sound(
+        self,
+    ) -> None:
+        """It runs on a detached thread, where an exception has nowhere to go.
+
+        Left to escape, it kills that thread silently: `_loading` stays set, so
+        the player reports itself playing for ever, the `done_callback` never
+        fires, and the vendored protocol layer waits out the rest of the
+        conversation for an announcement that never started. A skipped sound is
+        a far smaller failure than a wedged one.
+        """
+        media = FakeMedia()
+        player = ReachyPlayback(
+            media,
+            _RefusesToResolve(),
+            scheduler=ManualScheduler(),
+            detach=immediately,
+        )
+        finished: list[str] = []
+        player.play(
+            "https://198.51.100.10/x.mp3", done_callback=lambda: finished.append("done")
+        )
+        assert media.played == []
+        assert not player.is_playing
+        assert finished == ["done"]
+
+    def test_the_rest_of_a_playlist_survives_one_that_raises(self) -> None:
+        """One broken media URL must not cost the items behind it."""
+        media = FakeMedia()
+        sounds = _RaisesOnce()
+        sounds.add("good", "/sounds/good.wav", 0.1)
+        player = ReachyPlayback(
+            media,
+            sounds,
+            scheduler=ManualScheduler(),
+            detach=immediately,
+        )
+        player.play(["broken", "good"])
+        assert media.played == ["/sounds/good.wav"]
+
+
+class _RefusesToResolve:
+    """A sound source that raises where it is contracted to answer `None`."""
+
+    def resolve(self, url: str) -> Sound | None:
+        """Fail the way a truncated download once did.
+
+        Args:
+            url: What was asked for.
+
+        Returns:
+            Never.
+
+        Raises:
+            IndexError: Always. The type is the one the frame scan raised on an
+                empty response, so this stands in for that defect's shape
+                rather than for an invented one.
+        """
+        del url
+        raise IndexError("index out of range")
+
+
+class _RaisesOnce(FakeSoundSource):
+    """A sound source whose first resolution raises and whose rest behave."""
+
+    def __init__(self) -> None:
+        """Start with nothing registered and nothing yet asked for."""
+        super().__init__()
+        self.calls = 0
+
+    def resolve(self, url: str) -> Sound | None:
+        """Raise the first time and behave after that.
+
+        Args:
+            url: What was asked for.
+
+        Returns:
+            Whatever was registered, after the first call.
+
+        Raises:
+            IndexError: On the first call only.
+        """
+        self.calls += 1
+        if self.calls == 1:
+            raise IndexError("index out of range")
+        return super().resolve(url)
+
+
 class _SlowSource:
     """A sound source standing in for one that has to fetch."""
 

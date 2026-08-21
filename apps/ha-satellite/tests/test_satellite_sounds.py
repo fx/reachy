@@ -184,6 +184,126 @@ class TestReadingHowLongASoundIs:
         assert wav_duration(b"RIFF" + b"\x00" * 8) is None
 
 
+class TestATruncatedFileIsMeasuredAsNothing:
+    """A short or empty response is an ordinary outcome, not an exotic one.
+
+    Home Assistant supplies the media URLs, and a fetch can come back empty or
+    cut short. Every reader here promises `None` for bytes it cannot measure,
+    and this is that promise for the case where there is not enough of the file
+    to look at — which is exactly where indexing into a `bytes` at a computed
+    offset goes wrong.
+    """
+
+    @pytest.mark.parametrize(
+        ("description", "data"),
+        [
+            ("nothing at all", b""),
+            ("a lone sync byte", b"\xff"),
+            ("half a sync word", b"\xff\xfb"),
+            ("a header one byte short", b"\xff\xfb\x90"),
+        ],
+    )
+    def test_a_stream_too_short_to_hold_a_header_measures_as_nothing(
+        self,
+        description: str,
+        data: bytes,
+    ) -> None:
+        """Each of these once indexed past the end of the buffer.
+
+        The last is the one a naive length check survives: three bytes are
+        enough to pass the sync test and read the version and the layer, and
+        the fourth byte — the channel mode — is the one that is not there.
+
+        Args:
+            description: What the bytes are, for a readable failure.
+            data: The truncated stream.
+        """
+        del description
+        assert mp3_duration(data) is None
+
+    def test_a_header_exactly_long_enough_is_still_read(self) -> None:
+        """The bound excludes what does not fit and nothing more.
+
+        A fix that stopped one byte early would turn this into `None` and lose
+        every stream whose first frame lands at the very end of what arrived.
+        """
+        assert mp3_duration(bytes([0xFF, 0xFB, 0x90, 0x00])) is not None
+
+    def test_a_tag_claiming_more_than_arrived_measures_as_nothing(self) -> None:
+        """An ID3 tag declares its own length, and a truncated file can lie.
+
+        The scan then starts past the end of the buffer, which has to yield no
+        offsets rather than one that cannot be read.
+        """
+        # A tag declaring a megabyte, in a file that stops after the header.
+        size = 1024 * 1024
+        declared = bytes(
+            (
+                (size >> 21) & 0x7F,
+                (size >> 14) & 0x7F,
+                (size >> 7) & 0x7F,
+                size & 0x7F,
+            ),
+        )
+        assert mp3_duration(b"ID3" + bytes([0x04, 0x00, 0x00]) + declared) is None
+
+    @pytest.mark.parametrize(
+        "whole",
+        [
+            _wav(8000),
+            _flac(22050),
+            _mp3(bitrate_kbps=128, audio_bytes=4000, xing_frames=38),
+            _mp3(bitrate_kbps=32, audio_bytes=4000, id3_bytes=500),
+        ],
+        ids=["wav", "flac", "mp3-vbr", "mp3-tagged"],
+    )
+    def test_no_prefix_of_a_valid_file_raises(self, whole: bytes) -> None:
+        """The sweep, and the reason this is a class rather than one line.
+
+        Every reader in this module parses a binary format by indexing into a
+        `bytes` at a computed offset, so every one of them is exposed to the
+        same mistake. Truncating a valid file at every possible length is what
+        turns "I checked the helpers I thought of" into a statement about all
+        of them — and it is what would have caught the frame scan.
+
+        Args:
+            whole: A valid file of one of the three formats this can measure.
+        """
+        for length in range(len(whole) + 1):
+            prefix = whole[:length]
+            for reader in (wav_duration, flac_duration, mp3_duration):
+                measured = reader(prefix)
+                assert measured is None or measured > 0.0
+
+    @pytest.mark.parametrize(
+        ("description", "data"),
+        [
+            ("a RIFF header and nothing else", b"RIFF"),
+            ("a WAVE with no format chunk", b"RIFF\x04\x00\x00\x00WAVE"),
+            ("a format chunk cut in half", b"RIFF\x08\x00\x00\x00WAVEfmt "),
+            ("a FLAC marker and nothing else", b"fLaC"),
+            ("a FLAC header cut in half", b"fLaC\x80\x00\x00\x22" + bytes(12)),
+        ],
+    )
+    def test_a_recognised_magic_number_over_nothing_measures_as_nothing(
+        self,
+        description: str,
+        data: bytes,
+    ) -> None:
+        """Getting past the magic number is where a parser starts indexing.
+
+        A truncation that fails the magic test never reaches the arithmetic;
+        one that passes it is the case worth pinning.
+
+        Args:
+            description: What the bytes are, for a readable failure.
+            data: The truncated stream.
+        """
+        del description
+        assert wav_duration(data) is None
+        assert flac_duration(data) is None
+
+
 class TestResolvingWhatWasAskedFor:
     """A path, a `file://` URL, or something that has to be fetched."""
 

@@ -215,7 +215,7 @@ def wav_duration(data: bytes) -> float | None:
 
     Returns:
         The length in seconds, or `None` when the bytes are not a WAV this
-        module can measure.
+        module can measure — a truncated download included.
     """
     if not data.startswith(_RIFF):
         return None
@@ -223,7 +223,14 @@ def wav_duration(data: bytes) -> float | None:
         with wave.open(io.BytesIO(data), "rb") as opened:
             rate = opened.getframerate()
             frames = opened.getnframes()
-    except (wave.Error, EOFError, ValueError):
+    except (wave.Error, EOFError, ValueError, struct.error):
+        # This is the one reader that hands untrusted bytes to a parser this
+        # repository does not own, so the list is what `wave` is documented and
+        # observed to raise, plus `struct.error` — which it reaches for through
+        # `chunk`, and which is **not** a `ValueError` subclass. Probing every
+        # truncation and every malformed header produced only the first two;
+        # the fourth is here so the "a bad download answers `None`" guarantee
+        # holds by construction rather than by what anybody happened to try.
         return None
     if rate <= 0 or frames <= 0:
         return None
@@ -288,15 +295,25 @@ def _frame_header(data: bytes, start: int) -> tuple[int, int, int, int, bool] | 
 
     Args:
         data: The file's bytes.
-        start: Where to begin looking, which is just past any ID3 tag.
+        start: Where to begin looking, which is the length of any ID3 tag and
+            is therefore never negative. It may be past the end of `data`, for
+            a tag that declares more length than the response carried.
 
     Returns:
         The offset of the header, its version, its bitrate in kilobits per
         second, its sampling rate in hertz, and whether the stream is mono — or
-        `None` when no usable Layer III header is within the search window.
+        `None` when no usable Layer III header is within the search window,
+        which includes there being no room for one at all.
     """
-    end = min(len(data) - 4, start + _SYNC_SEARCH_BYTES)
-    for offset in range(max(start, 0), max(end, 0) + 1):
+    # The last offset at which a whole header still fits. When `data` is
+    # shorter than a header this is negative, and the loop below must then run
+    # zero times — an empty or truncated response is an ordinary outcome for a
+    # media URL, and this function's contract is to answer `None` for it.
+    # Flooring the bound at zero instead would make `range` yield offset 0 with
+    # nothing there to read, turning "no usable header" into an `IndexError`
+    # three lines later.
+    last = min(len(data) - _FRAME_HEADER_BYTES, start + _SYNC_SEARCH_BYTES)
+    for offset in range(start, last + 1):
         if data[offset] != 0xFF or (data[offset + 1] & 0xE0) != 0xE0:
             continue
         version = (data[offset + 1] >> 3) & 0x03

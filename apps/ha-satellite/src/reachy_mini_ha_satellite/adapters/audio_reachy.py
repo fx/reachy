@@ -700,7 +700,23 @@ class ReachyPlayback:
                     break
                 url = self._pending.pop(0)
                 self._resolving = url
-            sound = self._sounds.resolve(url)
+            try:
+                sound = self._sounds.resolve(url)
+            except Exception:
+                # A resolver is contracted to answer `None` for a sound it
+                # cannot obtain, and this catch is the backstop for one that
+                # raises instead. It is not defensive padding: this runs on a
+                # detached thread, so an exception escaping here would kill
+                # that thread silently, leaving `_loading` set for ever — the
+                # player would report itself playing, the `done_callback`
+                # would never fire, and the vendored protocol layer would wait
+                # out the rest of the conversation for an announcement that
+                # never started. A skipped sound is a far smaller failure.
+                _LOGGER.exception(
+                    "%s: a sound could not be resolved",
+                    self._name,
+                )
+                sound = None
             if sound is None:
                 _LOGGER.warning(
                     "%s: skipping a sound that could not be read",
