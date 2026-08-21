@@ -29,23 +29,32 @@
 # ⚠️ MOST SPECS ARE STILL UNREGISTERED, AND THAT IS DELIBERATE.
 #
 # `docs/specs/` holds 8 specs carrying 73 requirements. Two of them are
-# registered below: perception, whose 8 requirements are implemented and
-# annotated by docs/changes/0005-perception-capability.md, and groundstation,
-# whose 10 are implemented across changes 0004, 0005 and 0006 and registered by
-# the last of them — the one that made REQ-023 and REQ-031 true by building and
-# publishing the image. For those two specs, and only those two,
-# `duvet query -c implementation` and `duvet report --ci` mean what they appear
-# to mean.
+# registered below:
 #
-# The other 6 are unregistered because not all of their requirements have an
-# implementation to annotate yet. Architecture and robot-link already carry some
-# annotations — they show up in the snapshot, because duvet loads a
-# specification an annotation points at whether or not it is registered — but
-# registering either turns the job red immediately on the requirements no change
-# has reached, and it stays red until the implementing change lands. A spec is
-# registered by the change that completes it, in that change's pull request,
-# alongside the annotations that make it pass. Nothing outside those two is
-# evidence of anything today.
+#   - perception, whose 8 requirements are implemented and annotated by
+#     docs/changes/0005-perception-capability.md;
+#   - groundstation, whose 10 are implemented across changes 0004, 0005 and
+#     0006 and registered by the last of them — the one that made REQ-023 and
+#     REQ-031 true by building and publishing the image;
+#   - robot-link, whose 12 requirements — REQ-010 to REQ-021 — are implemented
+#     across changes 0003, 0004, 0007 and 0012. It is registered by 0012,
+#     which is the change that closes the set: the robot is the last of the
+#     contract's three consumers to exist, so until it did, registering the
+#     spec would have claimed traceability for a side of the link nothing
+#     implemented.
+#
+# For those three specs, and only those three, `duvet query -c implementation`
+# and `duvet report --ci` mean what they appear to mean.
+#
+# The other 5 are unregistered because not all of their requirements have an
+# implementation to annotate yet. Architecture already carries some annotations
+# — they show up in the snapshot, because duvet loads a specification an
+# annotation points at whether or not it is registered — but registering it
+# turns the job red immediately on the requirements no change has reached, and
+# it stays red until the implementing change lands. A spec is registered by the
+# change that completes it, in that change's pull request, alongside the
+# annotations that make it pass. Nothing outside those three is evidence of
+# anything today.
 #
 # Each entry takes a `source` path plus a MANDATORY `format = "markdown"`:
 #
@@ -70,6 +79,11 @@ format = "markdown"
 # turns those annotations from documentation into a gate.
 [[specification]]
 source = "docs/specs/groundstation/index.md"
+format = "markdown"
+
+# --- Robot link: implemented across 0003, 0004, 0007 and 0012 ----------------
+[[specification]]
+source = "docs/specs/robot-link/index.md"
 format = "markdown"
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses

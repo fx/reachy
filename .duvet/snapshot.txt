@@ -76,6 +76,28 @@ SPECIFICATION: [Groundstation](docs/specs/groundstation/index.md)
     TEXT[!MUST,implication]: Every release MUST publish the service image for both 64-bit ARM and 64-bit x86
     TEXT[!MUST,implication]: architectures under the same tag.
 
+SPECIFICATION: [HA Satellite](docs/specs/ha-satellite/index.md)
+  SECTION: [REQ-042: Decision logic is free of input and output](#req-042-decision-logic-is-free-of-input-and-output)
+    TEXT[implementation]: The logic that maps voice-pipeline events and detections to motion intents MUST
+    TEXT[implementation]: be implemented without performing input or output.
+
+  SECTION: [REQ-043: Hardware access goes through the daemon's media layer](#req-043-hardware-access-goes-through-the-daemon-s-media-layer)
+    TEXT[implementation]: Microphone capture and audio playback MUST be performed through the robot
+    TEXT[implementation]: daemon's media interface rather than by opening audio devices directly.
+
+  SECTION: [REQ-047: Detection source is selectable](#req-047-detection-source-is-selectable)
+    TEXT[implementation]: The source of face detections MUST be selectable between the groundstation, the
+    TEXT[implementation]: robot's own detector, and the groundstation with local fallback.
+
+  SECTION: [REQ-048: The head returns to neutral when tracking data goes stale](#req-048-the-head-returns-to-neutral-when-tracking-data-goes-stale)
+    TEXT[implementation]: When results stop arriving within the staleness window, the application MUST
+    TEXT[implementation]: return the head to its neutral position rather than holding its last commanded
+    TEXT[implementation]: pose.
+
+  SECTION: [REQ-050: Shutdown is graceful and leaves the robot safe](#req-050-shutdown-is-graceful-and-leaves-the-robot-safe)
+    TEXT[implementation]: On receiving a termination signal the application MUST stop commanding movement,
+    TEXT[implementation]: release the media interface, and exit.
+
 SPECIFICATION: [Perception](docs/specs/perception/index.md)
   SECTION: [REQ-032: Detection models are permissively licensed](#req-032-detection-models-are-permissively-licensed)
     TEXT[!MUST,implementation]: Every model shipped in the published artifact MUST be redistributable under a
@@ -139,52 +161,52 @@ SPECIFICATION: [reachyctl](docs/specs/reachyctl/index.md)
 
 SPECIFICATION: [Robot Link](docs/specs/robot-link/index.md)
   SECTION: [REQ-010: The robot is a client only](#req-010-the-robot-is-a-client-only)
-    TEXT[implementation]: The robot MUST open the session outbound to the groundstation, and the
-    TEXT[implementation]: groundstation MUST NOT require any inbound listener on the robot.
+    TEXT[!MUST,implementation]: The robot MUST open the session outbound to the groundstation, and the
+    TEXT[!MUST,implementation]: groundstation MUST NOT require any inbound listener on the robot.
 
   SECTION: [REQ-011: One session carries every exchange](#req-011-one-session-carries-every-exchange)
-    TEXT[implementation]: All frames, results, and control messages for a running app MUST travel over a
-    TEXT[implementation]: single session, established once and reused for the lifetime of that session.
+    TEXT[!MUST,implementation]: All frames, results, and control messages for a running app MUST travel over a
+    TEXT[!MUST,implementation]: single session, established once and reused for the lifetime of that session.
 
   SECTION: [REQ-012: Capabilities are negotiated at session start](#req-012-capabilities-are-negotiated-at-session-start)
-    TEXT[implementation]: Both sides MUST exchange the set of capabilities they support, each with a
-    TEXT[implementation]: version, before any capability-specific message is sent.
+    TEXT[!MUST,implementation]: Both sides MUST exchange the set of capabilities they support, each with a
+    TEXT[!MUST,implementation]: version, before any capability-specific message is sent.
 
   SECTION: [REQ-013: An empty result is a valid result](#req-013-an-empty-result-is-a-valid-result)
-    TEXT[implementation]: A result message carrying no detections MUST be treated as a successful result
-    TEXT[implementation]: for that frame.
+    TEXT[!MUST,implementation]: A result message carrying no detections MUST be treated as a successful result
+    TEXT[!MUST,implementation]: for that frame.
 
   SECTION: [REQ-014: Results are keyed to the frame that produced them](#req-014-results-are-keyed-to-the-frame-that-produced-them)
-    TEXT[implementation]: Every frame MUST carry a monotonically increasing sequence number, and every
-    TEXT[implementation]: result MUST identify the sequence number of the frame it derives from.
+    TEXT[!MUST,implementation]: Every frame MUST carry a monotonically increasing sequence number, and every
+    TEXT[!MUST,implementation]: result MUST identify the sequence number of the frame it derives from.
 
   SECTION: [REQ-015: Overload drops frames rather than queueing them](#req-015-overload-drops-frames-rather-than-queueing-them)
-    TEXT[implementation]: When frames arrive faster than they can be processed, the oldest unprocessed
-    TEXT[implementation]: frame MUST be discarded in preference to growing the queue or blocking the
-    TEXT[implementation]: producer.
+    TEXT[!MUST,implementation]: When frames arrive faster than they can be processed, the oldest unprocessed
+    TEXT[!MUST,implementation]: frame MUST be discarded in preference to growing the queue or blocking the
+    TEXT[!MUST,implementation]: producer.
 
   SECTION: [REQ-016: Results return the capture timestamp unaltered](#req-016-results-return-the-capture-timestamp-unaltered)
-    TEXT[implementation]: Every result MUST carry the capture timestamp of the frame it derives from,
-    TEXT[implementation]: byte-for-byte as the capturing side supplied it, so that the capturing side can
-    TEXT[implementation]: compute the result's age against the same clock that produced it.
+    TEXT[!MUST,implementation]: Every result MUST carry the capture timestamp of the frame it derives from,
+    TEXT[!MUST,implementation]: byte-for-byte as the capturing side supplied it, so that the capturing side can
+    TEXT[!MUST,implementation]: compute the result's age against the same clock that produced it.
 
   SECTION: [REQ-017: Stale results stop being acted on](#req-017-stale-results-stop-being-acted-on)
-    TEXT[implementation]: A consumer MUST stop acting on results once none has arrived within a configured
-    TEXT[implementation]: staleness window.
+    TEXT[!MUST,implementation]: A consumer MUST stop acting on results once none has arrived within a configured
+    TEXT[!MUST,implementation]: staleness window.
 
   SECTION: [REQ-018: Reconnection is automatic and rate-limited](#req-018-reconnection-is-automatic-and-rate-limited)
-    TEXT[implementation]: A client MUST re-establish a dropped session automatically, and MUST increase
-    TEXT[implementation]: the delay between successive failed attempts up to a bound.
+    TEXT[!MUST,implementation]: A client MUST re-establish a dropped session automatically, and MUST increase
+    TEXT[!MUST,implementation]: the delay between successive failed attempts up to a bound.
 
   SECTION: [REQ-019: Sessions are authenticated](#req-019-sessions-are-authenticated)
-    TEXT[implementation]: The groundstation MUST reject a session whose client does not present a valid
-    TEXT[implementation]: credential.
+    TEXT[!MUST,implementation]: The groundstation MUST reject a session whose client does not present a valid
+    TEXT[!MUST,implementation]: credential.
 
   SECTION: [REQ-020: The wire format is pinned by shared fixtures](#req-020-the-wire-format-is-pinned-by-shared-fixtures)
-    TEXT[implementation]: Every message type MUST have a golden fixture in the shared contracts package,
-    TEXT[implementation]: and both the producing and the consuming implementation MUST be verified against
-    TEXT[implementation]: that same fixture.
+    TEXT[!MUST,implementation]: Every message type MUST have a golden fixture in the shared contracts package,
+    TEXT[!MUST,implementation]: and both the producing and the consuming implementation MUST be verified against
+    TEXT[!MUST,implementation]: that same fixture.
 
   SECTION: [REQ-021: Detection geometry is resolution-independent](#req-021-detection-geometry-is-resolution-independent)
-    TEXT[implementation]: Positions in results MUST be expressed in normalised image coordinates rather
-    TEXT[implementation]: than pixels.
+    TEXT[!MUST,implementation]: Positions in results MUST be expressed in normalised image coordinates rather
+    TEXT[!MUST,implementation]: than pixels.

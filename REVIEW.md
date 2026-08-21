@@ -11,18 +11,26 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** Two specs are
-registered in `.duvet/config.toml` — perception and groundstation — so
-`duvet report --ci` and `duvet query -c implementation` check those 18
+**`.duvet/snapshot.txt` records annotations, not coverage.** Three specs are
+registered in `.duvet/config.toml` — perception, groundstation and robot-link —
+so `duvet report --ci` and `duvet query -c implementation` check those 30
 requirements and nothing else. The snapshot is nonetheless larger than that:
 duvet loads a specification an annotation points at whether or not it is
 registered, so the file lists the requirement text every annotation cites —
-including the annotations that already point at architecture and robot-link,
-neither of which is registered. Regeneration is
+including the annotations that already point at architecture, which is not
+registered. Regeneration is
 byte-identical, so CI is deterministic — and a green run is evidence about those
-two specs only. A spec is registered by the change that implements it. See
+three specs only. A spec is registered by the change that implements it. See
 `.duvet/config.toml` for why the rest are unregistered, and for why annotations
 are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
+
+An anchor duvet resolves is **not** always the anchor GitHub renders. Duvet
+derives its section identifier from the heading with its own rules, and an
+apostrophe becomes a separator rather than disappearing: ha-satellite REQ-043's
+heading gives duvet `req-043-hardware-access-goes-through-the-daemon-s-media-layer`
+where a markdown link in a change document uses `…-the-daemons-media-layer`. The
+two spellings are both correct for their own reader. Do not "fix" one to match
+the other.
 
 **A vendored file stays as upstream wrote it.** A file carrying a provenance
 header is a derived work, and its directory's `NOTICE` enumerates the complete

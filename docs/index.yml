@@ -118,7 +118,7 @@ changes:
     path: changes/0012-satellite-ports-and-adapters.md
     description: Audio, motion and perception ports with their Reachy adapters and test fakes
     spec: ha-satellite
-    status: draft
+    status: complete
     depends_on: ["0007", "0011"]
   - id: "0013"
     name: satellite-behaviour-and-ui

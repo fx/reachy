@@ -1,0 +1,264 @@
+"""The daemon's surface, declared here so that nothing imports the SDK to use it.
+
+The Reachy Mini daemon owns the microphone array, the speaker, the camera and
+the motors, and hands a running application a handle onto all four. That handle
+is an SDK object — but an adapter that *imported* the SDK to name its type would
+drag PyGObject and GStreamer into every test run, and architecture REQ-005 says
+the suite runs with nothing attached.
+
+So the surface is declared here as protocols, and satisfied structurally: on the
+robot by the SDK's `ReachyMini` and its `MediaManager`, in the test suite by the
+fakes in `tests/support/satellite_support.py`. The signatures below mirror the
+SDK's exactly — parameter names, defaults and all — because that is what makes
+`handle: RobotHandle = reachy_mini` type-check at the composition root rather
+than merely look plausible.
+
+**This module is the SDK's shape and the only place that is true.** Every port
+in `ports.py` is phrased in the behaviour layer's terms instead; the adapters
+between them are where one becomes the other. Widening anything here means the
+daemon offers something new that an adapter needs, and it should be a visible
+edit rather than an attribute reached for at a call site.
+
+Nothing here reads a device. These are types.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+import numpy as np
+import numpy.typing as npt
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+__all__ = [
+    "AudioSamples",
+    "ImageArray",
+    "MediaInterface",
+    "Offload",
+    "PoseMatrix",
+    "RobotHandle",
+    "in_thread",
+]
+
+# The aliases are evaluated at run time rather than declared under
+# `TYPE_CHECKING`, for the same reason the groundstation's `ImageArray` is:
+# anything that resolves an annotation — `typing.get_type_hints` over a
+# dataclass, a documentation tool — would otherwise raise `NameError` on a name
+# that existed only for the type checker.
+
+# One decoded camera frame: eight-bit pixels, height by width by three colour
+# channels, in the blue-green-red order the daemon and OpenCV both use.
+type ImageArray = npt.NDArray[np.uint8]
+
+# One block of recorded audio: float32 samples in the range [-1, 1], shaped
+# samples by channels. This is what the daemon's capture pipeline produces; the
+# conversion to the signed 16-bit little-endian bytes the wake-word models want
+# happens in the audio adapter, not here.
+type AudioSamples = npt.NDArray[np.float32]
+
+# A head pose as the robot's motion layer is commanded with it: a four-by-four
+# homogeneous transformation. The behaviour layer never sees one — `ports.HeadPose`
+# is three angles — and building one is the motion adapter's job.
+type PoseMatrix = npt.NDArray[np.float64]
+
+
+#:= docs/specs/ha-satellite/index.md#req-043-hardware-access-goes-through-the-daemon-s-media-layer
+#:% Microphone capture and audio playback MUST be performed through the robot
+#:% daemon's media interface rather than by opening audio devices directly.
+@runtime_checkable
+class MediaInterface(Protocol):
+    """The daemon's media layer: camera in, microphone in, speaker out.
+
+    Every one of these goes through the daemon rather than to a device. That is
+    REQ-043 and it is not a preference: the daemon holds the microphone array
+    and the speaker open for its own purposes, so an application that opened
+    either directly would be contending with it for hardware it does not own.
+    """
+
+    def get_frame_jpeg(self) -> bytes | None:
+        """Take the current camera frame, already compressed.
+
+        The capture hardware produces JPEG, so these bytes cost nothing to
+        obtain and are what travels on a robot-link session unmodified.
+        Decoding them on the robot in order to re-encode them for transport
+        would spend the robot's scarce cores to achieve nothing.
+
+        Returns:
+            The frame's bytes, or `None` when no camera is available.
+        """
+        ...
+
+    def get_frame(self) -> ImageArray | None:
+        """Take the current camera frame, decoded.
+
+        Wanted only by a detector running on the robot itself, which needs
+        pixels rather than bytes. The daemon has the decoded frame already, so
+        asking for it here is cheaper than decoding the JPEG above.
+
+        Returns:
+            The frame's pixels, or `None` when no camera is available.
+        """
+        ...
+
+    def play_sound(self, sound_file: str) -> None:
+        """Play a local sound file through the daemon's output.
+
+        Args:
+            sound_file: An absolute path, or a name relative to the SDK's own
+                asset directory.
+        """
+        ...
+
+    def start_recording(self) -> None:
+        """Start the daemon's capture pipeline."""
+        ...
+
+    def stop_recording(self) -> None:
+        """Stop the daemon's capture pipeline."""
+        ...
+
+    def start_playing(self) -> None:
+        """Start the daemon's playback pipeline."""
+        ...
+
+    def stop_playing(self) -> None:
+        """Stop the daemon's playback pipeline."""
+        ...
+
+    def get_audio_sample(self) -> AudioSamples | None:
+        """Take whatever recorded audio is waiting.
+
+        Returns:
+            The samples, shaped samples by channels, or `None` when nothing has
+            arrived yet. It does not block.
+        """
+        ...
+
+    def get_input_audio_samplerate(self) -> int:
+        """Say what rate capture runs at.
+
+        Returns:
+            The sample rate in hertz, or a negative number when there is no
+            audio device.
+        """
+        ...
+
+    def get_input_channels(self) -> int:
+        """Say how many channels capture produces.
+
+        Returns:
+            The channel count, or a negative number when there is no audio
+            device.
+        """
+        ...
+
+
+@runtime_checkable
+class RobotHandle(Protocol):
+    """The handle the daemon hands a running application.
+
+    Deliberately three members. The SDK's own object has forty, and naming only
+    what the adapters call is what keeps "which parts of the SDK does this
+    application depend on?" a question with a short answer.
+    """
+
+    @property
+    def media(self) -> MediaInterface:
+        """The daemon's media layer.
+
+        Returns:
+            The interface audio capture, playback and frames all go through.
+        """
+        ...
+
+    def set_target(
+        self,
+        head: PoseMatrix | None = None,
+        antennas: list[float] | None = None,
+        body_yaw: float | None = None,
+    ) -> None:
+        """Command a pose, without waiting for the robot to reach it.
+
+        Args:
+            head: The head pose as a four-by-four homogeneous transformation,
+                or `None` to leave the head where it is.
+            antennas: The two antenna angles in radians, right then left, or
+                `None` to leave them where they are. A `list` rather than a
+                `Sequence`, deliberately: that is what the SDK's own signature
+                takes, and a wider type here would stop its object satisfying
+                this protocol.
+            body_yaw: The body's rotation in radians, or `None` to leave it.
+        """
+        ...
+
+    def look_at_world(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        duration: float = 1.0,
+        perform_movement: bool = True,
+    ) -> PoseMatrix:
+        """Aim the head at a point in the robot's own frame.
+
+        The frame's origin is the neutral head position, with x forward, y to
+        the robot's left and z up. Only the direction matters: the SDK
+        normalises the vector, so a target twice as far away in the same
+        direction is the same movement.
+
+        Args:
+            x: Forward, in metres.
+            y: To the robot's left, in metres.
+            z: Upwards, in metres.
+            duration: How long to take. Zero commands the pose immediately and
+                returns without waiting, which is the only value the motion
+                adapter uses — see `motion_reachy.py`.
+            perform_movement: Whether to move, or only to compute the pose.
+
+        Returns:
+            The head pose the target works out to.
+        """
+        ...
+
+
+class Offload(Protocol):
+    """How an adapter runs a blocking daemon call without stalling the loop.
+
+    Reading the camera pulls from a GStreamer pipeline and running a detector
+    is a hundred milliseconds of arithmetic; doing either inline would stop the
+    ESPHome protocol handling that shares the event loop for exactly that long,
+    several times a second.
+
+    It is a parameter rather than a call to `asyncio.to_thread` at each site so
+    that a test can run the same code inline. A test that went through a real
+    thread pool would be asserting on when the pool got round to it, which is
+    a thing that is true most of the time.
+    """
+
+    def __call__[ResultT](
+        self, function: Callable[[], ResultT], /
+    ) -> Awaitable[ResultT]:
+        """Run something blocking, somewhere that is not the event loop.
+
+        Args:
+            function: What to run.
+
+        Returns:
+            What it returned.
+        """
+        ...
+
+
+async def in_thread[ResultT](function: Callable[[], ResultT]) -> ResultT:
+    """Run a blocking call on a worker thread, which is what the robot does.
+
+    Args:
+        function: What to run.
+
+    Returns:
+        What it returned.
+    """
+    return await asyncio.to_thread(function)

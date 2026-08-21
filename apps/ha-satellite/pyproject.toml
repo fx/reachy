@@ -26,11 +26,20 @@ requires-python = ">=3.12"
 # Deliberately absent: `soundcard` and `python-mpv`, which upstream used for
 # desktop capture and playback. On this robot the daemon owns both devices, so
 # neither library is carried and each became a seam instead — see
-# `esphome/seams.py`. The Reachy Mini SDK is absent too: it belongs behind the
-# ports that change 0012 adds, imported inside adapters, so that this package's
-# test suite runs with no robot attached.
+# `esphome/seams.py`. The Reachy Mini SDK is absent from this list too, and that
+# is the point of the `local-detection` extra below.
 dependencies = [
     "reachy-contracts",
+    # The one client implementation of the robot link session protocol. The
+    # groundstation perception adapter is its second consumer, after
+    # `reachyctl probe`; reachyctl REQ-057 is why there is not a second
+    # implementation of it here.
+    "reachy-session-client",
+    # The daemon hands over camera frames and recorded audio as numpy arrays,
+    # and the head is commanded with a four-by-four matrix. The adapters convert
+    # between those and what the ports carry; nothing else in this package uses
+    # it.
+    "numpy>=2.1,<3",
     # The ESPHome native API: protobuf message types, the frame helper and the
     # entity model Home Assistant speaks.
     "aioesphomeapi>=45.3,<46",
@@ -50,6 +59,29 @@ dependencies = [
     "websockets>=12,<14",
 ]
 
+# Running face detection on the robot itself, which ha-satellite REQ-047 makes
+# one of the three selectable sources. An extra rather than a dependency, and
+# that is not a packaging preference:
+#
+#   - `import reachy_mini.<anything>` executes the distribution's `__init__`,
+#     which transitively imports `reachy_mini.vision.face_tracking`, which does
+#     `import gi`. A hard dependency would therefore put PyGObject and the whole
+#     GStreamer stack between this package's test suite and running at all,
+#     which architecture REQ-005 forbids.
+#   - On the robot it costs nothing: the daemon's shared application environment
+#     already provides the SDK, so the extra is satisfied before the wheel is
+#     installed.
+#
+# `adapters/perception_local.py` loads one module of it by file path, inside the
+# function that needs it, so even here the package is never executed. The three
+# packages beside it are what that module imports.
+[project.optional-dependencies]
+local-detection = [
+    "reachy-mini>=1.9,<2",
+    "huggingface-hub>=1.17",
+    "onnxruntime>=1.19",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -57,7 +89,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/reachy_mini_ha_satellite"]
 
-# By path, never by version range: there is no published reachy-contracts a
-# resolver could pick instead of the one in this tree.
+# By path, never by version range: there is no published reachy-contracts or
+# reachy-session-client a resolver could pick instead of the ones in this tree.
 [tool.uv.sources]
 reachy-contracts = { workspace = true }
+reachy-session-client = { workspace = true }
