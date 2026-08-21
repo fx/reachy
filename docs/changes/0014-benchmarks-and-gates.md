@@ -175,7 +175,7 @@ as everything else in the repository.
 
   | Measurement | This build | Predecessor |
   |---|---:|---:|
-  | Face pass, four threads | 1.9 ms | 38 ms |
+  | Face pass, four threads | 1.9 ms | 51 ms on the curve, 38 ms as the headline face pass |
   | Face pass, one thread | 7.8 ms | 93 ms |
   | Frame decode | 0.46 ms | 2 ms |
   | Result round trip | 4.2 ms | 54 ms |
@@ -192,6 +192,11 @@ as everything else in the repository.
   1.9, 2.5 and 2.7 ms at one, two, four, six and eight threads: four is still
   the knee, on a machine with thirty-two cores rather than four. That is worth
   knowing precisely because it was not assumed.
+- **The spec records two four-thread figures and does not reconcile them** — 38
+  ms for the face pass off the robot, and 51 ms as the curve's four-thread
+  point. Both are committed, under `detect.face.off-robot` and
+  `detect.face.threads.4`, rather than one being chosen: choosing would be
+  inventing a reconciliation the source does not have. Neither is gated.
 - **No gesture timing is reported at all**, and the result carries a note saying
   why. This build wires no gesture model — the perception spec's recorded
   decision — so the capability answers every frame with an empty payload in

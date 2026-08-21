@@ -53,6 +53,11 @@
       "gated": false,
       "description": "The stack this one replaces, measured once by hand on hardware that no longer exists. Never gated against: a comparison would be between two machines as much as between two implementations. It is committed because the rebuild is accountable to it.",
       "measurements": {
+        "detect.face.off-robot": {
+          "value": 38.0,
+          "unit": "ms",
+          "note": "the face pass off the robot, at four threads. This is the headline figure the YuNet model change has to defend, and it is recorded apart from the curve because the spec records it apart from the curve. No benchmark here produces it under this name: the comparable measurement is `detect.face.threads.4`"
+        },
         "detect.face.on-robot": {
           "value": 1199.0,
           "unit": "ms",
@@ -64,9 +69,9 @@
           "note": "the thread-count curve at one thread"
         },
         "detect.face.threads.4": {
-          "value": 38.0,
+          "value": 51.0,
           "unit": "ms",
-          "note": "face pass off the robot, inference runtime at four threads. This is the figure the YuNet model change has to defend"
+          "note": "the thread-count curve at four threads, which is where it turned. The spec records a second four-thread figure \u2014 the 38 ms face pass in `detect.face.off-robot` below \u2014 and does not say why the two differ. Both are recorded here rather than one being chosen, because choosing would be inventing a reconciliation the source does not have"
         },
         "detect.face.threads.6": {
           "value": 55.0,

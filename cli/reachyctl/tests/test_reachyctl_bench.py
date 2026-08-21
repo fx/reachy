@@ -366,3 +366,77 @@ def test_the_command_surface_opens_a_link_when_a_robot_is_named() -> None:
 
     assert result.exit_code == ExitCode.CONFIGURATION
     assert "no such benchmark: nope" in result.stdout
+
+
+def test_a_link_that_will_not_close_does_not_replace_the_error_that_caused_it(
+    fs: FakeFilesystem,
+) -> None:
+    """The command exists to print that the robot could not be reached.
+
+    A teardown raising inside the `finally` would discard the in-flight error
+    and propagate its own, so the operator would read about a link that would
+    not close rather than about a robot that never answered.
+
+    Args:
+        fs: The in-memory filesystem.
+    """
+
+    class Stubborn(UnreachableRobot):
+        """A robot that cannot be reached and will not let its link go."""
+
+        async def aclose(self) -> None:
+            """Refuse to close.
+
+            Raises:
+                RobotAccessError: Always.
+            """
+            message = "the link would not close"
+            raise RobotAccessError(message)
+
+    fs.create_dir("/work")
+    robot = Stubborn()
+    reporter, streams = reporter_for()
+
+    with pytest.raises(UnreachableError, match="did not answer"):
+        execute(
+            _plan("robot-load"),
+            robot,
+            reporter,
+            close=robot.aclose,
+            context=_context(),
+        )
+
+    assert "would not close" in streams.err.getvalue()
+
+
+def test_the_summary_counts_measurements_rather_than_table_rows(
+    fs: FakeFilesystem,
+) -> None:
+    """An excluded benchmark contributes a row and no measurement.
+
+    Counting rows would report a larger number than the document carries,
+    which is a number an operator would act on.
+
+    Args:
+        fs: The in-memory filesystem.
+    """
+    from reachyctl.output import OutputFormat
+
+    fs.create_dir("/work")
+    reporter, streams = reporter_for(output_format=OutputFormat.JSON)
+    plan = BenchPlan(
+        benchmarks=("photon-to-head",),
+        repository=Path("/nowhere"),
+        models_dir=None,
+        output=_OUTPUT,
+        network="",
+        observations_ms=(180.0, 220.0),
+        frame_rate=0.0,
+        sample_seconds=10.0,
+    )
+
+    execute(plan, None, reporter, context=_context())
+
+    document = json.loads(streams.out.getvalue())
+    assert "1 measurement(s) written" in document["summary"]
+    assert len(document["rows"]) == 1

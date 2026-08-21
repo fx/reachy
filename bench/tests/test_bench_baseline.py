@@ -205,9 +205,14 @@ def test_the_committed_baseline_records_the_predecessors_figures() -> None:
 
     assert not profile.gated
     entries = profile.entries
-    assert entries["detect.face.threads.4"].value == 38.0
+    # The curve as the spec states it — 93, 51 and 55 at one, four and six —
+    # and the 38 ms face pass recorded apart from it, because the spec records
+    # it apart from it and does not reconcile the two four-thread figures.
     assert entries["detect.face.threads.1"].value == 93.0
+    assert entries["detect.face.threads.4"].value == 51.0
     assert entries["detect.face.threads.6"].value == 55.0
+    assert entries["detect.face.off-robot"].value == 38.0
+    assert entries["detect.face.on-robot"].value == 1199.0
     assert entries["pipeline.decode"].value == 2.0
     assert entries["session.round_trip"].value == 54.0
     assert entries["session.connect"].value == 378.0

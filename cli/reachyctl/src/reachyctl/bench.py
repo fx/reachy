@@ -202,13 +202,17 @@ def report_for(run: RunResult, plan: BenchPlan) -> Report:
     statuses = run.statuses()
     failed = [name for name, status in statuses.items() if status is Status.FAILED]
     excluded = [name for name, status in statuses.items() if status is Status.EXCLUDED]
+    # Measurements, not rows. A benchmark that measured nothing contributes one
+    # placeholder row so it appears in the table at all, and counting those
+    # would report a larger number than the document actually carries.
+    measured = sum(len(one.measurements) for one in run.benchmarks)
     return Report(
         command="bench",
         ok=not failed,
         summary=(
             f"{len(failed)} benchmark(s) could not measure: {', '.join(failed)}"
             if failed
-            else f"{len(rows)} measurement(s) written to {plan.output}"
+            else f"{measured} measurement(s) written to {plan.output}"
         ),
         data={
             "host_profile": run.context.host.profile,
@@ -297,7 +301,16 @@ def execute(
         # loop and every file descriptor it holds.
         try:
             if close is not None:
-                loop.run_until_complete(close())
+                try:
+                    loop.run_until_complete(close())
+                # Every teardown failure, because none of them may replace the
+                # error that brought us here: an in-flight UnreachableError is
+                # the sentence this command exists to print, and a link that
+                # would not close is a note beside it rather than instead of
+                # it. `BaseException` is deliberately not caught — a
+                # cancellation is not a teardown that failed.
+                except Exception as error:
+                    reporter.note(f"the robot link did not close cleanly: {error}")
         finally:
             loop.close()
 
