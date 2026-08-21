@@ -143,6 +143,71 @@ def test_the_real_registry_is_what_is_verified_against(fs: FakeFilesystem) -> No
         assert any(model.name in problem for problem in report.problems)
 
 
+class _RefusingFinder:
+    """A meta-path finder that raises when asked for one module.
+
+    The import machinery is driven for real rather than a loader being injected
+    into the class under test, because what is being checked is how a *real*
+    import failure is classified — and a seam would only ever raise whatever a
+    test told it to.
+    """
+
+    def __init__(self, target: str, error: BaseException) -> None:
+        """Describe which import fails and how.
+
+        Args:
+            target: The module to refuse.
+            error: What to raise for it.
+        """
+        self._target = target
+        self._error = error
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: object = None,
+        target: object = None,
+    ) -> None:
+        """Refuse the target module and defer on everything else.
+
+        Args:
+            fullname: The module being imported.
+            path: The parent package's search path, unused.
+            target: The module being reloaded, unused.
+
+        Returns:
+            `None` for anything but the target, which lets the finders after
+            this one answer.
+
+        Raises:
+            BaseException: Whatever this finder was told to raise, when the
+                target is asked for.
+        """
+        del path, target
+        if fullname == self._target:
+            raise self._error
+        return
+
+
+def _importing_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    """Make importing the model registry fail with a given error.
+
+    Args:
+        monkeypatch: Used to install the finder and to forget the already
+            imported module, both undone when the test ends.
+        error: What the import should raise.
+    """
+    monkeypatch.delitem(sys.modules, "reachy_groundstation.models", raising=False)
+    monkeypatch.setattr(
+        sys,
+        "meta_path",
+        [_RefusingFinder("reachy_groundstation.models", error), *sys.meta_path],
+    )
+
+
 def test_a_machine_without_the_groundstation_reports_an_absent_prerequisite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -163,6 +228,75 @@ def test_a_machine_without_the_groundstation_reports_an_absent_prerequisite(
     assert report.unavailable == REGISTRY_MISSING
     assert report.problems == ()
     assert report.verified == ()
+
+
+def test_a_broken_transitive_dependency_is_a_fault_and_not_an_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The trap in the type: `ModuleNotFoundError` covers both facts.
+
+    A groundstation that is installed and whose own dependency is missing must
+    not be reported as a groundstation that was never installed. Reporting the
+    wrong link is the worst outcome available to a tool whose job is naming the
+    failing one.
+    """
+    _importing_raises(
+        monkeypatch,
+        ModuleNotFoundError("No module named 'numpy'", name="numpy"),
+    )
+
+    report = GroundstationModelFiles(DIRECTORY).inspect()
+
+    assert report.unavailable == ""
+    assert len(report.problems) == 1
+    assert "installed here but could not be imported" in report.problems[0]
+    # The cause, so the operator sees what actually broke.
+    assert "numpy" in report.problems[0]
+
+
+def test_a_registry_that_refuses_to_load_is_a_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An `ImportError` that is not a missing module is a broken installation."""
+    _importing_raises(
+        monkeypatch,
+        ImportError("cannot import name 'MODELS' from partially initialized module"),
+    )
+
+    report = GroundstationModelFiles(DIRECTORY).inspect()
+
+    assert report.unavailable == ""
+    assert "partially initialized module" in report.problems[0]
+
+
+def test_a_missing_parent_package_is_still_an_absence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing of the groundstation installed reports as `reachy_groundstation`."""
+    _importing_raises(
+        monkeypatch,
+        ModuleNotFoundError(
+            "No module named 'reachy_groundstation'",
+            name="reachy_groundstation",
+        ),
+    )
+
+    report = GroundstationModelFiles(DIRECTORY).inspect()
+
+    assert report.unavailable == REGISTRY_MISSING
+    assert report.problems == ()
+
+
+def test_an_import_failure_with_no_name_is_treated_as_a_fault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing to judge by, so it reports something rather than staying quiet."""
+    _importing_raises(monkeypatch, ModuleNotFoundError("no name on this one"))
+
+    report = GroundstationModelFiles(DIRECTORY).inspect()
+
+    assert report.unavailable == ""
+    assert report.problems
 
 
 def test_a_machine_with_the_registry_reports_nothing_unavailable(
