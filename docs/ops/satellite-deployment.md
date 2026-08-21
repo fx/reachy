@@ -9,6 +9,10 @@ There is deliberately no Hugging Face Space. The daemon can install applications
 from one, but it discovers them through a standard Python entry point either way
 — see the [architecture spec](../specs/architecture/index.md#versioning-and-distribution).
 
+Discovering an application and starting one are different mechanisms, and the
+second is not what the entry point's spelling suggests:
+[How the daemon starts it](#how-the-daemon-starts-it).
+
 ---
 
 ## ⚠️ Before you install: pin the announced identity
@@ -132,6 +136,41 @@ sudo systemctl restart reachy-mini-daemon
 
 The application appears in the daemon's list of installed applications. Nothing
 else registers it.
+
+---
+
+## How the daemon starts it
+
+Worth knowing before reading a log that says nothing, because the mechanism is
+not the one the entry point's spelling suggests.
+
+The entry point is written `<module>:<class>`, but **the daemon does not import
+that module and instantiate that class in its own process.** It reads the
+*module* half — everything left of the colon — and starts the application as a
+separate process, equivalent to:
+
+```
+<the application environment's python> -u -m reachy_mini_ha_satellite.daemon_app
+```
+
+Two consequences follow, and both have cost time already.
+
+**The application runs as its own process, with the daemon's environment.** So
+`REACHY_SATELLITE_*` variables have to be visible to the daemon — see
+[Configuring](#configuring) — and the application's output reaches you through
+the daemon's capture of that process rather than through the daemon's own log.
+
+**The module named by the entry point has to be runnable on its own.** A module
+that is only importable exits 0 immediately under that command, and the daemon
+faithfully reports what it saw: an application that finished, successfully,
+seconds after it was started, having printed nothing — not even the boot
+configuration dump this application always writes. That is what a missing
+execution path looks like from the dashboard, and it looks nothing like a
+crash.
+
+`just wheel-verify` runs the entry point's module the way the daemon runs it and
+refuses a wheel where it exits 0 having done nothing, so a release cannot carry
+that defect silently.
 
 ---
 
@@ -364,6 +403,15 @@ rather than under the daemon, `SIGINT` and `SIGTERM` do the same.
 
 **It refuses to start and talks about the device name.** That is the warning at
 the top of this page. Read it; do not invent a name.
+
+**The dashboard says it finished, successfully, seconds after starting, and it
+printed nothing at all.** Not a configuration problem: a configuration problem
+is loud, and this application dumps its resolved configuration before anything
+else. The daemon *runs* the entry point's module rather than instantiating its
+class — see [How the daemon starts it](#how-the-daemon-starts-it) — so a module
+with no execution path imports, does nothing and exits 0. Check the installed
+wheel is one `just wheel-verify` passed; a wheel built before that check existed
+can carry the defect.
 
 **It refuses to start naming a variable.** The variable is misspelled, or it
 belongs to a setting that no longer exists. The message lists every variable the

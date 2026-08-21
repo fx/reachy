@@ -10,13 +10,15 @@ architecture REQ-005 forbids of the test suite.
 
 The resolution is the one this package already uses for the SDK's face detector:
 confine it. **This module is the only file in the package that names the SDK**,
-and exactly two things import it — the `reachy_mini_apps` entry point the daemon
-resolves, and `__main__.py`, so that `python -m reachy_mini_ha_satellite` and the
-daemon reach the same startup rather than two. Nothing else does, and nothing
-imports it as a side effect of importing something else: `main.py` is handed a
-`RobotHandle` — a protocol in `adapters/daemon.py` — and never learns where it
-came from, which is what lets the whole composition root be exercised against a
-fake on a machine with no GStreamer.
+and the only things that reach it are the ways of starting the application:
+`__main__.py`, so that `python -m reachy_mini_ha_satellite` and the daemon reach
+the same startup rather than two, and the daemon itself — which does not import
+this module at all but *executes* it, as the guard at the foot of the file
+explains. Nothing else reaches it, and nothing imports it as a side effect of
+importing something else: `main.py` is handed a `RobotHandle` — a protocol in
+`adapters/daemon.py` — and never learns where it came from, which is what lets
+the whole composition root be exercised against a fake on a machine with no
+GStreamer.
 
 It is also the bridge between two ways of being asked to stop. The daemon hands
 over a `threading.Event`; the application runs on an event loop and waits on an
@@ -222,3 +224,34 @@ def _stop_on_signals(application: ReachyMiniHaSatellite) -> None:
             # Not the main thread, or a platform without the signal. Neither is
             # worth refusing to start over.
             _LOGGER.debug("could not install a handler for %s", received)
+
+
+# ⚠️ Not redundant with `__main__.py`, and deleting it stops the satellite
+# starting on the robot at all.
+#
+# The daemon does not import this module and instantiate the class the
+# `reachy_mini_apps` entry point names. It takes the **module** half of the entry
+# point — everything left of the colon — and launches the application as a
+# subprocess, `python -u -m reachy_mini_ha_satellite.daemon_app`. So the module
+# the entry point points at has to be a program as well as an import target;
+# `__main__.py` makes the *package* runnable, which is a different name and not
+# the one the daemon runs.
+#
+# Without this block that command imports this module, finds nothing to do and
+# exits 0. The daemon reports the application as finished, successfully, within
+# seconds of starting it and with no output at all — which is what it looked
+# like on the robot, and why it took a hand-patched file to diagnose.
+#
+# `scripts/verify_satellite_wheel.py` executes the entry point's module exactly
+# as the daemon does and refuses a wheel where it exits 0 having done nothing,
+# so this is a red release rather than a silent robot if it goes missing again.
+#
+# REQ-041 is cited twice, here and on the class, because "sufficient for the
+# daemon to find it" takes both: the class is what the declaration resolves to,
+# and this is what makes the thing the daemon actually launches run.
+#:= docs/specs/ha-satellite/index.md#req-041-the-application-is-discoverable-by-the-robot-daemon
+#:% The application MUST advertise itself through the daemon's application entry
+#:% point mechanism so that installing the wheel is sufficient for the daemon to
+#:% find it.
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

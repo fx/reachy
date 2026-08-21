@@ -266,6 +266,12 @@ page offers a **Stop** and says where to start it again, which is the robot
 dashboard's application list — also a web interface, so no shell is involved
 either way.
 
+**`done` seconds after a start, with no output, is not a clean exit.** The
+daemon reports it identically, because from its side an application that exited
+0 is an application that finished. See
+[How the daemon starts it](satellite-deployment.md#how-the-daemon-starts-it) for
+what produces that and what to check.
+
 ---
 
 ## After: prove the chain again
