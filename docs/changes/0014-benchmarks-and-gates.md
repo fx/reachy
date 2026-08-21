@@ -202,14 +202,21 @@ as everything else in the repository.
   decision — so the capability answers every frame with an empty payload in
   microseconds, and putting that beside the predecessor's 5 ms would report an
   absent model as a three-order improvement.
-- **The gate's timing half does not cover the runner class yet.** The committed
-  baseline holds a profile for the machine these numbers were measured on;
-  nothing has been recorded for `github-ubuntu-latest`, because that needs a run
-  on one. Until it is, `bench.yml` reports its numbers, reports the class as
-  unbaselined, and prints the profile block to commit into the job summary —
-  and the *size* half gates regardless, in `images.yml` and `release.yml`, since
-  a size does not depend on the machine that weighed it. Committing that block
-  is the follow-up, and it is one reviewable diff.
+- **The gate's timing half covers the runner class, from one run.** The
+  committed baseline holds a profile for the machine these numbers were measured
+  on and a second for `github-ubuntu-latest`, recorded from the first real run of
+  `bench.yml` — which is the only way to get figures for a pool nobody can run on
+  locally. It is one run rather than the median of ten the development host
+  carries, so it is a starting point the first runs on the default branch confirm
+  or correct, and the job passes `--require-profile` so the class cannot quietly
+  stop being recorded. The *size* half gates regardless, in `images.yml` and
+  `release.yml`, since a size does not depend on the machine that weighed it.
+- **The knee moved with the host, which is the whole reason the curve is
+  measured.** Four threads on the development machine; **two** on the four-core
+  runner, where six and eight threads cost 14.4 and 16.8 ms against 4.9 ms at
+  two, because asking for more threads than the machine has is contention rather
+  than parallelism. A suite that measured only the configured value would have
+  reported one number and revealed none of that.
 - **A latent import cycle in the groundstation was fixed here**, because this
   change is what tripped over it. `reachy_groundstation.pipeline` could not be
   imported before `reachy_groundstation.session`: `pipeline.runner` imports

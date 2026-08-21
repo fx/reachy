@@ -49,74 +49,76 @@
     }
   },
   "profiles": {
-    "predecessor": {
-      "gated": false,
-      "description": "The stack this one replaces, measured once by hand on hardware that no longer exists. Never gated against: a comparison would be between two machines as much as between two implementations. It is committed because the rebuild is accountable to it.",
+    "github-ubuntu-latest": {
+      "gated": true,
+      "description": "The GitHub-hosted ubuntu-latest runner pool: four cores, 16 GiB. Recorded from a SINGLE run rather than from the median of ten that the development-host profile carries, because it takes a run on the pool to get one at all \u2014 so these figures are a starting point that the first runs on the default branch will confirm or correct, not a variance measurement. The millisecond tolerance is the document's 100%, which is wider than anything a single run can justify tightening.",
       "measurements": {
-        "detect.face.off-robot": {
-          "value": 38.0,
-          "unit": "ms",
-          "note": "the face pass off the robot, at four threads. This is the headline figure the YuNet model change has to defend, and it is recorded apart from the curve because the spec records it apart from the curve. No benchmark here produces it under this name: the comparable measurement is `detect.face.threads.4`"
-        },
-        "detect.face.on-robot": {
-          "value": 1199.0,
-          "unit": "ms",
-          "note": "face pass on the robot, the original arrangement before offloading. No benchmark here produces it: this architecture has no on-robot detection path"
-        },
         "detect.face.threads.1": {
-          "value": 93.0,
+          "value": 10.696,
           "unit": "ms",
-          "note": "the thread-count curve at one thread"
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "detect.face.threads.2": {
+          "value": 4.941,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
         },
         "detect.face.threads.4": {
-          "value": 51.0,
+          "value": 5.134,
           "unit": "ms",
-          "note": "the thread-count curve at four threads, which is where it turned. The spec records a second four-thread figure \u2014 the 38 ms face pass in `detect.face.off-robot` below \u2014 and does not say why the two differ. Both are recorded here rather than one being chosen, because choosing would be inventing a reconciliation the source does not have"
+          "note": "one run on a four-core GitHub-hosted runner"
         },
         "detect.face.threads.6": {
-          "value": 55.0,
+          "value": 14.382,
           "unit": "ms",
-          "note": "the thread-count curve at six threads, which is where it turned back upwards"
+          "tolerance": 2.0,
+          "note": "one run on a four-core runner. This sweep point asks for more threads than the machine has, so it is contended by construction \u2014 it is 2.8x the two-thread figure here where it is 0.8x on the development host \u2014 and it carries twice the millisecond tolerance because that contention is the runner's, not this repository's"
         },
-        "footprint.image.cpu.linux-amd64": {
-          "value": 483000000,
-          "unit": "bytes",
-          "note": "recorded as '483 MB' against roughly 2 GB for the alternative packaging. The unit convention was not stated; on either reading this build's image is smaller"
+        "detect.face.threads.8": {
+          "value": 16.762,
+          "unit": "ms",
+          "tolerance": 2.0,
+          "note": "one run on a four-core runner. This sweep point asks for more threads than the machine has, so it is contended by construction \u2014 it is 2.8x the two-thread figure here where it is 0.8x on the development host \u2014 and it carries twice the millisecond tolerance because that contention is the runner's, not this repository's"
         },
         "footprint.resident_memory": {
-          "value": 205.0,
+          "value": 116.0,
           "unit": "MiB",
-          "note": "the robot application's resident set, with no training framework ever imported. What this suite measures is the groundstation, which is where this architecture puts the model runtime, so the two are recorded beside each other rather than compared"
+          "note": "one run on a four-core GitHub-hosted runner"
         },
-        "photon-to-head.stimulus_to_motion": {
-          "value": 200.0,
+        "pipeline.capability.face": {
+          "value": 5.461,
           "unit": "ms",
-          "note": "recorded as a 150-250 ms range end to end; 200 is its midpoint, and the range is what a comparison should be read against"
-        },
-        "pipeline.capability.gesture": {
-          "value": 5.0,
-          "unit": "ms",
-          "note": "gesture pass, sampled every fourth frame. This build wires no gesture model, so nothing here measures it and there is deliberately no counterpart"
+          "note": "one run on a four-core GitHub-hosted runner"
         },
         "pipeline.decode": {
-          "value": 2.0,
+          "value": 0.955,
           "unit": "ms",
-          "note": "frame decode"
+          "note": "one run on a four-core GitHub-hosted runner"
         },
-        "robot-load.cpu_cores": {
-          "value": 1.52,
-          "unit": "cores",
-          "note": "of four cores, while tracking at 10 frames per second with detection offloaded"
+        "pipeline.emit": {
+          "value": 0.009,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "pipeline.end_to_end": {
+          "value": 6.82,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
         },
         "session.connect": {
-          "value": 378.0,
+          "value": 2.205,
           "unit": "ms",
-          "note": "a cold connection to the robot at p50, over the same WLAN. This is the measurement that drove the robot-link design"
+          "note": "one run on a four-core GitHub-hosted runner"
+        },
+        "session.reconnect": {
+          "value": 2.018,
+          "unit": "ms",
+          "note": "one run on a four-core GitHub-hosted runner"
         },
         "session.round_trip": {
-          "value": 54.0,
+          "value": 8.757,
           "unit": "ms",
-          "note": "result delivery per request, with connection reuse enabled, over a 2.4 GHz WLAN at 100-170 ms idle round-trip"
+          "note": "one run on a four-core GitHub-hosted runner"
         }
       }
     },
@@ -189,6 +191,77 @@
           "value": 4.208,
           "unit": "ms",
           "note": "median of ten consecutive runs on an idle host, where the worst single run deviated 36.3% from it; an eleventh run taken while the machine was also running the test suite deviated up to 77%, which is what the millisecond tolerance is set from"
+        }
+      }
+    },
+    "predecessor": {
+      "gated": false,
+      "description": "The stack this one replaces, measured once by hand on hardware that no longer exists. Never gated against: a comparison would be between two machines as much as between two implementations. It is committed because the rebuild is accountable to it.",
+      "measurements": {
+        "detect.face.off-robot": {
+          "value": 38.0,
+          "unit": "ms",
+          "note": "the face pass off the robot, at four threads. This is the headline figure the YuNet model change has to defend, and it is recorded apart from the curve because the spec records it apart from the curve. No benchmark here produces it under this name: the comparable measurement is `detect.face.threads.4`"
+        },
+        "detect.face.on-robot": {
+          "value": 1199.0,
+          "unit": "ms",
+          "note": "face pass on the robot, the original arrangement before offloading. No benchmark here produces it: this architecture has no on-robot detection path"
+        },
+        "detect.face.threads.1": {
+          "value": 93.0,
+          "unit": "ms",
+          "note": "the thread-count curve at one thread"
+        },
+        "detect.face.threads.4": {
+          "value": 51.0,
+          "unit": "ms",
+          "note": "the thread-count curve at four threads, which is where it turned. The spec records a second four-thread figure \u2014 the 38 ms face pass in `detect.face.off-robot` below \u2014 and does not say why the two differ. Both are recorded here rather than one being chosen, because choosing would be inventing a reconciliation the source does not have"
+        },
+        "detect.face.threads.6": {
+          "value": 55.0,
+          "unit": "ms",
+          "note": "the thread-count curve at six threads, which is where it turned back upwards"
+        },
+        "footprint.image.cpu.linux-amd64": {
+          "value": 483000000,
+          "unit": "bytes",
+          "note": "recorded as '483 MB' against roughly 2 GB for the alternative packaging. The unit convention was not stated; on either reading this build's image is smaller"
+        },
+        "footprint.resident_memory": {
+          "value": 205.0,
+          "unit": "MiB",
+          "note": "the robot application's resident set, with no training framework ever imported. What this suite measures is the groundstation, which is where this architecture puts the model runtime, so the two are recorded beside each other rather than compared"
+        },
+        "photon-to-head.stimulus_to_motion": {
+          "value": 200.0,
+          "unit": "ms",
+          "note": "recorded as a 150-250 ms range end to end; 200 is its midpoint, and the range is what a comparison should be read against"
+        },
+        "pipeline.capability.gesture": {
+          "value": 5.0,
+          "unit": "ms",
+          "note": "gesture pass, sampled every fourth frame. This build wires no gesture model, so nothing here measures it and there is deliberately no counterpart"
+        },
+        "pipeline.decode": {
+          "value": 2.0,
+          "unit": "ms",
+          "note": "frame decode"
+        },
+        "robot-load.cpu_cores": {
+          "value": 1.52,
+          "unit": "cores",
+          "note": "of four cores, while tracking at 10 frames per second with detection offloaded"
+        },
+        "session.connect": {
+          "value": 378.0,
+          "unit": "ms",
+          "note": "a cold connection to the robot at p50, over the same WLAN. This is the measurement that drove the robot-link design"
+        },
+        "session.round_trip": {
+          "value": 54.0,
+          "unit": "ms",
+          "note": "result delivery per request, with connection reuse enabled, over a 2.4 GHz WLAN at 100-170 ms idle round-trip"
         }
       }
     }

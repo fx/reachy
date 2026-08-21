@@ -20,11 +20,14 @@ name: Benchmarks
 # emitted. Rebuilding an image here to weigh it would weigh a different build.
 #
 # ⚠️ **The timing half of this gate is only as good as the recorded profile for
-# the runner class below.** A class of machine nobody has measured is reported
-# as unbaselined rather than passed, and the run prints the block to commit into
-# the job summary. Until that block is committed, this job reports the numbers
-# and gates nothing about them; the size gates in the other two workflows are
-# unaffected, because a size does not depend on the machine that weighed it.
+# the runner class below**, and that profile is recorded from a SINGLE run — it
+# takes a run on the pool to get one at all. The first runs on the default
+# branch are what confirm or correct it. `--require-profile` below is what stops
+# it quietly becoming advisory again: a class of machine with nothing recorded
+# is reported as unbaselined and passes, which is right for a machine nobody has
+# measured and wrong for this one, so this job insists its own class is
+# recorded. The size gates in the other two workflows are unaffected either way,
+# because a size does not depend on the machine that weighed it.
 
 on:
   pull_request:
@@ -85,9 +88,10 @@ jobs:
           if-no-files-found: warn
 
       # The gate. It fails when a measurement has regressed beyond its stated
-      # tolerance — naming the measurement and by how much — and also when a
-      # measurement has no recorded figure at all, because a benchmark added
-      # without recording its cost is one nothing will ever compare.
+      # tolerance — naming the measurement and by how much — when a measurement
+      # has no recorded figure at all, because a benchmark added without
+      # recording its cost is one nothing will ever compare, and — because of
+      # `--require-profile` — when nothing is recorded for this runner class.
       #
       # Its output goes to the job summary as well as the log, because the
       # numbers are worth reading on a pull request that did not fail.
@@ -99,7 +103,7 @@ jobs:
             echo
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          just bench-compare --results bench-results.json \
+          just bench-compare --results bench-results.json --require-profile \
             | tee --append "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 

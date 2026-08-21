@@ -126,7 +126,14 @@ same class. Two profiles ship today:
   a comparison between two machines as much as between two implementations. It
   is committed because the rebuild is accountable to it, and `bench-compare`
   prints a run beside it.
-- `linux-x86_64-32c` — a real class of machine, gated.
+- `linux-x86_64-32c` — the development machine these figures were measured on,
+  gated, from the median of ten runs.
+- `github-ubuntu-latest` — the hosted runner pool, gated, from a **single** run,
+  because it takes a run on the pool to get one at all. The first runs on the
+  default branch confirm or correct it. The knee is at two threads there rather
+  than four, and six and eight threads cost three times what two does, because a
+  four-core runner asked for eight threads is contended rather than parallel —
+  those two sweep points carry twice the millisecond tolerance and say why.
 
 ### Adding a class of machine
 
@@ -140,7 +147,8 @@ just bench-record --description "what the machine is"
 A class with no profile is reported as unbaselined and gates nothing about its
 timings; its sizes are gated regardless. Pass `--require-profile` to
 `bench-compare` on a machine whose class *is* recorded — that is what stops the
-timing half of the gate quietly becoming advisory if the label ever moves.
+timing half of the gate quietly becoming advisory if the label ever moves, and
+it is what `bench.yml` passes now that `github-ubuntu-latest` is recorded.
 
 ### Where the tolerances came from
 
