@@ -11,8 +11,11 @@ dependencies = [
     # consumer of it, not a second implementation — see reachyctl REQ-057.
     "reachy-session-client",
     # The command surface and the terminal rendering, which is what the
-    # architecture spec names for this tool.
-    "typer>=0.12",
+    # architecture spec names for this tool. The floor is 0.12.4 rather than
+    # 0.12: the options below are annotated `Path | None`, and Typer did not
+    # read a PEP 604 union until that release — an older one builds a command
+    # that hands a command a `str` where it expects a path.
+    "typer>=0.12.4",
     "rich>=13.7",
 ]
 

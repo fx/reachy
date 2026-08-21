@@ -80,8 +80,14 @@ def _version() -> str:
     Returns:
         The version string. Every artifact in this repository carries the same
         one, so this is also the version of the protocol client it speaks with.
+        A source checkout reached through `PYTHONPATH` rather than installed
+        has no metadata to read, and says so rather than ending in a traceback
+        — `--version` is the first thing anybody runs.
     """
-    return metadata.version(_DISTRIBUTION)
+    try:
+        return metadata.version(_DISTRIBUTION)
+    except metadata.PackageNotFoundError:
+        return "unknown (running from a checkout that was not installed)"
 
 
 def _show_version(show: bool) -> None:

@@ -20,6 +20,7 @@ that was never going to use one.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
@@ -126,11 +127,15 @@ class RecordedFrames:
         """
         for path in self._paths:
             try:
-                yield path.read_bytes()
+                # Off the event loop. `probe` runs this producer and the
+                # session's result loop on one loop, so a blocking read here
+                # stops the client observing a result that has already arrived
+                # — and the delay lands in the round-trip figure the probe
+                # exists to measure.
+                yield await asyncio.to_thread(path.read_bytes)
             except OSError as error:
-                message = (
-                    f"the recorded frame {path} could not be read: {error.strerror}"
-                )
+                reason = error.strerror or type(error).__name__
+                message = f"the recorded frame {path} could not be read: {reason}"
                 raise ConfigurationError(message) from error
 
     def close(self) -> None:
@@ -288,7 +293,11 @@ class CameraFrames:
             Each grabbed frame, compressed to JPEG.
         """
         while True:
-            frame = self._capture.grab_jpeg()
+            # Off the event loop, for the reason `RecordedFrames` gives and
+            # more so: a camera read costs at least one frame period and the
+            # JPEG encode costs more, which is long enough to starve the
+            # session's result loop and the staleness window with it.
+            frame = await asyncio.to_thread(self._capture.grab_jpeg)
             if frame is None:
                 return
             yield frame

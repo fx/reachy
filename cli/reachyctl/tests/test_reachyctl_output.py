@@ -318,3 +318,82 @@ def test_a_list_field_is_rendered_as_its_members() -> None:
 
     assert "agreed\tface,gesture" in streams.result
     assert "offered\t-" in streams.result
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+def test_a_credential_with_a_character_json_escapes_is_removed_anyway() -> None:
+    r"""The structured path is the one a script captures and stores.
+
+    `json.dumps` escapes a non-ASCII character to `\uXXXX` before anything
+    downstream sees the document, so a redactor applied to the serialised text
+    no longer recognises the secret it was given. The values are scrubbed
+    before serialisation for exactly that reason.
+    """
+    # Non-ASCII on purpose, and a placeholder like every other credential in
+    # this repository — see the root AGENTS.md.
+    unicode_credential = "exemplaire-crédentiel-ünicode"
+    reporter, streams = reporter_for(
+        output_format=OutputFormat.JSON,
+        secrets=[unicode_credential],
+    )
+
+    reporter.emit(
+        Report(
+            command="probe",
+            ok=False,
+            summary=f"refused: {unicode_credential}",
+            data={
+                "credential": unicode_credential,
+                "tried": (unicode_credential,),
+            },
+            columns=("credential",),
+            rows=({"credential": unicode_credential},),
+        ),
+    )
+
+    document = json.loads(streams.result)
+    assert unicode_credential not in streams.result
+    assert document["data"]["credential"] == "<redacted>"
+    assert document["data"]["tried"] == ["<redacted>"]
+    assert document["rows"][0]["credential"] == "<redacted>"
+    assert "<redacted>" in document["summary"]
+
+
+def test_a_value_with_brackets_in_it_survives_the_rich_rendering() -> None:
+    """Rich reads a bracket as a styling tag, and eats the text inside it.
+
+    The string this checks is the one whose whole purpose is an exact package
+    name, so losing the bracketed half of it is losing the answer.
+    """
+    reporter, streams = reporter_for(terminal=True)
+
+    reporter.emit(
+        Report(
+            command="probe",
+            ok=False,
+            summary="live frames need OpenCV: install reachyctl[camera]",
+            data={"hint": "install reachyctl[camera]"},
+            columns=("hint",),
+            rows=({"hint": "install reachyctl[camera]"},),
+        ),
+    )
+
+    assert streams.result.count("reachyctl[camera]") == 3
+
+
+def test_a_value_rich_would_read_as_an_unmatched_tag_does_not_crash_the_command() -> (
+    None
+):
+    """An unmatched close tag raises out of the console, aborting the render.
+
+    Exception text reaches the summary through `Reporter.failure`, and nothing
+    stops a path or a message containing one.
+    """
+    reporter, streams = reporter_for(terminal=True)
+
+    code = reporter.failure("probe", "no such file: /tmp/[/oddly-named")
+
+    assert code is ExitCode.FAILURE
+    assert "[/oddly-named" in streams.result

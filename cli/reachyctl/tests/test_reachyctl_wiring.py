@@ -1,9 +1,10 @@
 """How the command layer is put together, at the seams the commands do not show.
 
-Two things live here that the command tests cannot reach without a device: the
-camera branch of the source builder, and the entry points. Both are wiring
-rather than logic, and both would be discovered broken by an operator rather
-than by the suite if they were left unexercised.
+Three things live here that the command tests cannot reach: the camera branch of
+the source builder, which would otherwise need a device; the entry points; and
+what `--version` answers on a checkout that was never installed. All three are
+wiring rather than logic, and all three would be discovered broken by an
+operator rather than by the suite if they were left unexercised.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from importlib import metadata
 from typing import TYPE_CHECKING
 
 import pytest
@@ -76,3 +78,31 @@ def test_the_module_entry_point_reaches_the_same_function() -> None:
     module = importlib.import_module("reachyctl.__main__")
 
     assert module.main is cli.main
+
+
+def test_a_checkout_that_was_never_installed_still_answers_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reached through PYTHONPATH there is no metadata, and no traceback either.
+
+    Args:
+        monkeypatch: Used to remove the distribution metadata the tool reads.
+    """
+
+    def missing(name: str) -> str:
+        """Report that the distribution is not installed.
+
+        Args:
+            name: What was asked for.
+
+        Returns:
+            Nothing; this always raises.
+
+        Raises:
+            metadata.PackageNotFoundError: Always.
+        """
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(metadata, "version", missing)
+
+    assert "not installed" in cli._version()

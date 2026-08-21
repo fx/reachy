@@ -66,6 +66,29 @@ def test_the_delay_grows_and_then_stops_growing() -> None:
     assert bounded == {4.0}
 
 
+#:= docs/specs/robot-link/index.md#req-018-reconnection-is-automatic-and-rate-limited
+#:% A client MUST re-establish a dropped session automatically, and MUST increase
+#:% the delay between successive failed attempts up to a bound.
+def test_the_delay_survives_an_outage_of_any_length() -> None:
+    """Reconnection is unbounded, so the delay has to answer for any attempt.
+
+    Float exponentiation raises `OverflowError` rather than saturating, and
+    with the default policy the exponent reaches 1024 after about eight hours
+    of outage — the second scenario REQ-018 names. An exception there would
+    leave the reconnection loop and end the session for good, which is the
+    opposite of what the requirement asks for.
+    """
+    for attempt in (1_000, 10_000, 10**6, 10**9):
+        assert Backoff().delay(attempt) == Backoff().maximum_seconds
+
+
+def test_a_policy_that_never_grows_is_a_constant_delay() -> None:
+    """A multiplier of one is allowed, and reaches its bound in no steps."""
+    flat = Backoff(initial_seconds=1.0, multiplier=1.0, maximum_seconds=5.0)
+
+    assert [flat.delay(attempt) for attempt in (1, 2, 1_000)] == [1.0, 1.0, 1.0]
+
+
 @pytest.mark.parametrize(
     ("initial", "multiplier", "maximum"),
     [

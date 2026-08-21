@@ -8,8 +8,9 @@ is that this tool can drive a real camera. That is answered by pointing it at
 one, which is the deferred end-to-end session and not this file.
 
 The recorded source reads files, so its tests read files — from `pyfakefs`'s
-in-memory filesystem, and carrying the `filesystem` marker that declares they
-are not unit tests.
+in-memory filesystem, which performs no input or output at all and leaves them
+unit tests. The `filesystem` marker is for a test that touches a real one, and
+is on the integration tests that do.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -59,7 +60,6 @@ async def drained(source: FrameSource) -> list[bytes]:
     return [frame async for frame in source.frames()]
 
 
-@pytest.mark.filesystem  # reads a directory of frames; see the module docstring
 @pytest.mark.asyncio
 async def test_recorded_frames_are_read_in_name_order(fs: FakeFilesystem) -> None:
     """A recording is a sequence, and the file names are what carry it.
@@ -79,7 +79,6 @@ async def test_recorded_frames_are_read_in_name_order(fs: FakeFilesystem) -> Non
     source.close()
 
 
-@pytest.mark.filesystem  # reads a directory of frames; see the module docstring
 def test_a_directory_with_no_frames_in_it_is_the_operators_input(
     fs: FakeFilesystem,
 ) -> None:
@@ -94,7 +93,6 @@ def test_a_directory_with_no_frames_in_it_is_the_operators_input(
         RecordedFrames(RECORDINGS)
 
 
-@pytest.mark.filesystem  # looks for a directory; see the module docstring
 def test_a_path_that_is_not_a_directory_says_so(fs: FakeFilesystem) -> None:
     """Naming a single file is the commonest way to get this wrong.
 
@@ -107,7 +105,6 @@ def test_a_path_that_is_not_a_directory_says_so(fs: FakeFilesystem) -> None:
         RecordedFrames(Path("/recordings.jpg"))
 
 
-@pytest.mark.filesystem  # reads a directory of frames; see the module docstring
 @pytest.mark.asyncio
 async def test_a_frame_that_vanishes_between_listing_and_reading(
     fs: FakeFilesystem,

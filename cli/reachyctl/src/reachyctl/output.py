@@ -33,6 +33,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from reachyctl.exits import ExitCode
@@ -210,14 +211,47 @@ class Reporter:
         Args:
             report: What the command produced.
         """
+        # Scrubbed field by field, *before* `json.dumps` runs, and then again
+        # by `_write` on the way out. The second pass is not the one that
+        # matters here: `ensure_ascii` defaults to true, so a credential with a
+        # non-ASCII character in it leaves the serialiser as `\uXXXX` escapes
+        # and no longer matches what the redactor was given. Scrubbing the raw
+        # values is what makes the structured path — the one a script captures
+        # and stores — as strong as the text path rather than weaker.
         document: dict[str, Any] = {
-            "command": report.command,
+            "command": self._scrub(report.command),
             "ok": report.ok,
-            "summary": report.summary,
-            "data": dict(report.data),
-            "rows": [dict(row) for row in report.rows],
+            "summary": self._scrub(report.summary),
+            "data": {
+                self._scrub(name): self._scrub_field(value)
+                for name, value in report.data.items()
+            },
+            "rows": [
+                {
+                    self._scrub(name): self._scrub_field(value)
+                    for name, value in row.items()
+                }
+                for row in report.rows
+            ],
         }
         self._write(self._out, json.dumps(document, indent=2))
+
+    def _scrub_field(self, value: object) -> object:
+        """Scrub one structured field, whatever shape it is.
+
+        Args:
+            value: The field's value.
+
+        Returns:
+            The value with every string inside it scrubbed, and every other
+            kind of value unchanged — a number cannot carry a credential and
+            rendering one to scrub it would change the document's types.
+        """
+        if isinstance(value, str):
+            return self._scrub(value)
+        if isinstance(value, tuple | list):
+            return [self._scrub_field(item) for item in value]
+        return value
 
     def _emit_plain(self, report: Report) -> None:
         """Write the result as tab-separated text.
@@ -256,17 +290,20 @@ class Reporter:
         if report.columns:
             table = Table(show_header=True, header_style="bold")
             for name in report.columns:
-                table.add_column(self._scrub(name))
+                table.add_column(_markup(self._scrub(name)))
             for row in report.rows:
                 table.add_row(
-                    *(self._scrub(_render(row.get(name))) for name in report.columns),
+                    *(
+                        _markup(self._scrub(_render(row.get(name))))
+                        for name in report.columns
+                    ),
                 )
             self._console.print(table)
         for name, value in report.data.items():
-            self._print(f"{name}: {_render(value)}")
+            self._print(f"{_markup(name)}: {_markup(_render(value))}")
         status = "[green]ok[/green]" if report.ok else "[red]failed[/red]"
-        summary = f" — {report.summary}" if report.summary else ""
-        self._print(f"{report.command}: {status}{summary}")
+        summary = f" — {_markup(report.summary)}" if report.summary else ""
+        self._print(f"{_markup(report.command)}: {status}{summary}")
 
     def _scrub(self, text: str) -> str:
         """Remove every known secret from a string about to be written.
@@ -302,10 +339,36 @@ class Reporter:
         wrapping and the styling — so it has its own choke point, and both of
         them are this class's only ways out.
 
+        The caller escapes the parts of `text` that came from a command; the
+        styling tags this class adds itself are what is left interpreted.
+
         Args:
-            text: What to write.
+            text: What to write, with any untrusted part already escaped.
         """
         self._console.print(self._scrub(text), highlight=False)
+
+
+def _markup(text: str) -> str:
+    """Make a string the console will show rather than read.
+
+    Rich interprets square brackets as styling tags, and every string a command
+    puts in a report is untrusted in that sense: a summary carries exception
+    text, and a field carries a URL or a path. Two things go wrong unescaped.
+    Text disappears — `install reachyctl[camera]`, whose whole purpose is the
+    exact package name, renders on a terminal as `install reachyctl`. And some
+    text aborts the command: an unmatched `[/` raises `MarkupError` out of the
+    console.
+
+    Escaping rather than turning markup off keeps the `[green]ok[/green]` this
+    class adds itself, which is the one place a tag is meant.
+
+    Args:
+        text: What a command produced.
+
+    Returns:
+        The same text, with its brackets shown rather than read.
+    """
+    return escape(text)
 
 
 def _render(value: object) -> str:

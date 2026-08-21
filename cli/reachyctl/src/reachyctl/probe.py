@@ -326,6 +326,10 @@ async def _exchange(
                     timeout=max(0.0, budget),
                 )
             except (TimeoutError, StopAsyncIteration):
+                # Breaking rather than waiting again is not a choice: a timeout
+                # cancels the `anext`, and cancelling `anext` on an
+                # asynchronous generator closes the generator. There is no
+                # second wait to be had on this iteration.
                 break
             collected.append(_outcome(result))
             reporter.detail(

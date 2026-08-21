@@ -100,7 +100,10 @@ def load_credential(
         try:
             content = read(path)
         except OSError as error:
-            message = f"the credential file {path} could not be read: {error.strerror}"
+            # `strerror` is `None` on an error carrying no errno, and "could
+            # not be read: None" tells an operator nothing at all.
+            reason = error.strerror or type(error).__name__
+            message = f"the credential file {path} could not be read: {reason}"
             raise ConfigurationError(message) from error
         return _wrap(content.strip(), f"the credential file {path} is empty")
 

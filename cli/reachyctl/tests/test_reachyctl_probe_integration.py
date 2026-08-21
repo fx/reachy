@@ -11,8 +11,9 @@ are all the real ones too.
 
 Real files are written and read for the same reason: a directory of recorded
 frames is the input `probe --frames` takes, and a fake filesystem here would be
-testing the fake rather than the command. That makes these integration tests
-rather than unit tests, which the socket marker already declares.
+testing the fake rather than the command. That is what the `filesystem` marker
+on each test declares — a real one, unlike the `pyfakefs` unit tests elsewhere
+in this suite, which perform no input or output and carry no marker.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -79,6 +80,7 @@ def probe_arguments(url: str, directory: Path, *extra: str) -> list[str]:
 #:% The probe command MUST establish a session using the same protocol
 #:% implementation the robot application uses.
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_the_probe_exchanges_real_frames_for_real_results(tmp_path: Path) -> None:
     """One command, one session, and one answer per frame sent.
 
@@ -102,6 +104,7 @@ def test_the_probe_exchanges_real_frames_for_real_results(tmp_path: Path) -> Non
 #:% Every command that reports results MUST offer a structured output format
 #:% suitable for consumption by another program.
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_the_structured_report_carries_a_row_per_result_with_its_timing(
     tmp_path: Path,
 ) -> None:
@@ -127,13 +130,18 @@ def test_the_structured_report_carries_a_row_per_result_with_its_timing(
     assert document["data"]["results_applied"] == FRAMES
     assert document["data"]["errors_received"] == 0
     assert [row["sequence"] for row in document["rows"]] == list(range(FRAMES))
-    assert all(row["round_trip_ms"] >= 0 for row in document["rows"])
+    timings = [row["round_trip_ms"] for row in document["rows"]]
+    # Asserted separately, so a row that carried no measurement fails by
+    # naming the missing measurement rather than as a TypeError.
+    assert all(timing is not None for timing in timings), timings
+    assert all(timing >= 0 for timing in timings)
 
 
 #:= docs/specs/robot-link/index.md#req-013-an-empty-result-is-a-valid-result
 #:% A result message carrying no detections MUST be treated as a successful result
 #:% for that frame.
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_a_frame_that_yielded_nothing_is_reported_as_a_successful_result(
     tmp_path: Path,
 ) -> None:
@@ -165,6 +173,7 @@ def test_a_frame_that_yielded_nothing_is_reported_as_a_successful_result(
 #:% byte-for-byte as the capturing side supplied it, so that the capturing side can
 #:% compute the result's age against the same clock that produced it.
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_the_round_trip_is_measured_against_the_clock_that_stamped_the_frame(
     tmp_path: Path,
 ) -> None:
@@ -193,6 +202,7 @@ def test_the_round_trip_is_measured_against_the_clock_that_stamped_the_frame(
 #:% The tool MUST NOT write credentials to its output, its logs, or its error
 #:% messages.
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_a_credential_the_groundstation_refuses_appears_nowhere_in_the_failure(
     tmp_path: Path,
 ) -> None:
@@ -228,6 +238,7 @@ def test_a_credential_the_groundstation_refuses_appears_nowhere_in_the_failure(
 #:% The tool MUST NOT write credentials to its output, its logs, or its error
 #:% messages.
 @pytest.mark.enable_socket  # a real client against nothing; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_a_groundstation_that_is_not_there_is_reported_without_the_credential(
     tmp_path: Path,
 ) -> None:
@@ -259,6 +270,7 @@ def test_a_groundstation_that_is_not_there_is_reported_without_the_credential(
 #:% Both sides MUST exchange the set of capabilities they support, each with a
 #:% version, before any capability-specific message is sent.
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_a_groundstation_that_agrees_to_nothing_is_reported_rather_than_waited_on(
     tmp_path: Path,
 ) -> None:
@@ -287,6 +299,7 @@ def test_a_groundstation_that_agrees_to_nothing_is_reported_rather_than_waited_o
 
 
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_only_as_many_frames_are_sent_as_were_asked_for(tmp_path: Path) -> None:
     """A directory longer than `--count` is a recording, not an instruction.
 
@@ -314,6 +327,7 @@ def test_only_as_many_frames_are_sent_as_were_asked_for(tmp_path: Path) -> None:
 
 
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_results_that_do_not_arrive_in_time_are_reported_as_missing(
     tmp_path: Path,
 ) -> None:
@@ -342,6 +356,7 @@ def test_results_that_do_not_arrive_in_time_are_reported_as_missing(
 
 
 @pytest.mark.enable_socket  # a real server and the real client; see the module docstring
+@pytest.mark.filesystem  # and a real directory of frames; see the module docstring
 def test_a_recording_shorter_than_the_count_is_not_a_run_that_fell_short(
     tmp_path: Path,
 ) -> None:

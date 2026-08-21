@@ -42,7 +42,7 @@ from reachy_session_client import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from reachy_session_client import FrameResult
 
@@ -283,6 +283,42 @@ async def test_a_connection_dropped_for_real_is_re_established_for_real() -> Non
     assert connections.count == 2
 
 
+async def _awaiting_a_result(
+    client: SessionClient,
+    results: AsyncGenerator[FrameResult, None],
+) -> asyncio.Task[FrameResult]:
+    """Start waiting for a result, and return once the session is back up.
+
+    Reconnection happens inside the result iteration, so the iteration has to
+    be driven for it to happen at all — and it is driven by a task rather than
+    polled with a short `wait_for`, because cancelling `anext` on an
+    asynchronous generator closes the generator. A poll built that way ends the
+    iteration on its first timeout and every later call raises
+    `StopAsyncIteration`.
+
+    Args:
+        client: The client to wait on.
+        results: Its result iteration, which the reconnection lives inside.
+
+    Returns:
+        The still-pending wait, for the caller to make its negative assertion
+        against and then cancel.
+
+    Raises:
+        AssertionError: If it never reconnects, so that the test fails rather
+            than the suite hanging.
+    """
+    pending = asyncio.create_task(anext(results), name="one-result")
+    deadline = asyncio.get_running_loop().time() + TIMEOUT
+    while client.stats.reconnections < 1:
+        if asyncio.get_running_loop().time() > deadline:
+            pending.cancel()
+            message = "the client did not re-establish its session"
+            raise AssertionError(message)
+        await asyncio.sleep(0.01)
+    return pending
+
+
 #:= docs/specs/robot-link/index.md#req-012-capabilities-are-negotiated-at-session-start
 #:% Both sides MUST exchange the set of capabilities they support, each with a
 #:% version, before any capability-specific message is sent.
@@ -304,11 +340,24 @@ async def test_a_reconnection_negotiates_against_what_is_offered_now() -> None:
             results = client.results()
             try:
                 async with submitting(client):
-                    # Nothing will answer: the service now agrees to nothing, so
-                    # frames are accepted and routed nowhere. The bound is what
-                    # makes that a passing assertion rather than a hung suite.
+                    # Two different waits, deliberately given two different
+                    # bounds. Reconnecting is something that must happen, so it
+                    # gets the generous one and a loaded runner cannot fail this
+                    # test for a timing reason. Not receiving a result is
+                    # something that must NOT happen, so it gets a short one —
+                    # a negative assertion is only as strong as it is quick.
+                    pending = await _awaiting_a_result(client, results)
+                    # `shield`, so the timeout leaves the wait alive: cancelling
+                    # it would close the iteration, and the iteration is what
+                    # the assertions below read the agreement out of.
                     with pytest.raises(TimeoutError):
-                        await asyncio.wait_for(anext(results), timeout=0.5)
+                        await asyncio.wait_for(asyncio.shield(pending), timeout=0.5)
+                    pending.cancel()
+                    with contextlib.suppress(
+                        asyncio.CancelledError,
+                        StopAsyncIteration,
+                    ):
+                        await pending
             finally:
                 await results.aclose()
 

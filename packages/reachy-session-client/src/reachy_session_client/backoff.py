@@ -15,6 +15,7 @@ delay stops growing at its bound" has to assert against.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Final
 
@@ -72,8 +73,36 @@ class Backoff:
         if attempt < 1:
             message = f"attempts are counted from one, not {attempt}"
             raise ValueError(message)
-        grown = self.initial_seconds * self.multiplier ** (attempt - 1)
-        return min(grown, self.maximum_seconds)
+        return min(
+            self.initial_seconds * self.multiplier ** min(attempt - 1, self._steps()),
+            self.maximum_seconds,
+        )
+
+    def _steps(self) -> int:
+        """How many doublings it takes to reach the bound.
+
+        The exponent is clamped at this rather than left to grow, and that is a
+        correctness fix rather than an optimisation: float exponentiation
+        *raises* `OverflowError` instead of saturating at infinity, so with the
+        default policy `2.0 ** 1024` overflows before `min` can clamp it. The
+        reconnection loop never bounds its attempt count — REQ-018 asks for a
+        bounded delay, not for attempts that stop — so attempt 1025 arrives
+        after about eight hours of outage, which is precisely the case the
+        requirement's second scenario describes. The exception would leave the
+        reconnection loop, leave `results()`, and end the session for good.
+
+        Returns:
+            The number of growth steps after which the delay is already at its
+            bound, so that clamping the exponent there changes no value the
+            policy would otherwise have produced.
+        """
+        if self.multiplier == 1:
+            # A policy that does not grow reaches its bound in no steps at all,
+            # and `log` to base one is undefined.
+            return 0
+        return math.ceil(
+            math.log(self.maximum_seconds / self.initial_seconds, self.multiplier),
+        )
 
 
 # Half a second, doubling, capped at thirty. Against a link whose idle

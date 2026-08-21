@@ -80,6 +80,9 @@ package to a transport. Either way it is a workspace member, not CLI code — th
 placement decision is deliberately left to implementation, but the constraint
 that there is exactly one implementation is not.
 
+**Decided:** the sibling package, `packages/reachy-session-client`. The
+reasoning is under [Open Questions](#open-questions).
+
 The CLI itself is a thin command layer over it, which is what makes the later
 commands in 0008 and 0009 additive.
 

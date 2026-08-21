@@ -1513,7 +1513,7 @@ requires-dist = [
     { name = "reachy-contracts", editable = "packages/reachy-contracts" },
     { name = "reachy-session-client", editable = "packages/reachy-session-client" },
     { name = "rich", specifier = ">=13.7" },
-    { name = "typer", specifier = ">=0.12" },
+    { name = "typer", specifier = ">=0.12.4" },
 ]
 provides-extras = ["camera"]
 

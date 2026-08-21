@@ -41,6 +41,14 @@ reading the golden fixture corpus is not one: those bytes are the contract, so a
 fake would pin whatever the fake was told to return. Do not report the marker as
 weakening the rule. A *unit* test wearing it is a finding; the marker is not.
 
+**A `pyfakefs` test carries no marker, and that is not an omission.** The marker
+declares real input or output. `pyfakefs` performs none — it is an in-memory
+filesystem, which is exactly why it is a development dependency here — so a test
+using the `fs` fixture is an ordinary unit test and marking it would say
+something untrue. A test using pytest's `tmp_path` writes real files and does
+carry it. The dividing line is whether anything reaches a disk, not whether the
+word "filesystem" appears in the test.
+
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a
 suppression's rule identifier. Whether its comment *explains* anything, and

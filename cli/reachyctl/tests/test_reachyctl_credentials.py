@@ -6,9 +6,10 @@ watching a session fail is not finding out. So the order is asserted rather than
 documented.
 
 Reading is reached through a parameter, so these are unit tests that perform no
-input. The one test that does read a file says so with the `filesystem` marker
-and reads from an in-memory filesystem, which is what `pyfakefs` is a
-development dependency of this workspace for.
+input. The last one exercises the default reader instead, over `pyfakefs`'s
+in-memory filesystem — which is what that development dependency is here for,
+and why it stays a unit test and carries no `filesystem` marker: nothing real is
+read.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -159,7 +160,6 @@ def test_a_file_that_cannot_be_read_reports_why_and_not_what() -> None:
     assert "Permission denied" in str(raised.value)
 
 
-@pytest.mark.filesystem  # reads a file through the real reader; see the module docstring
 def test_the_real_reader_reads_the_file_the_option_names(fs: FakeFilesystem) -> None:
     """The default reader is what production uses, so it is exercised too.
 
