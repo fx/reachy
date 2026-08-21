@@ -96,6 +96,15 @@ def validate_session_url(url: str) -> str:
     arriving from a constructor three layers down. There is one rule and it
     lives here, so the check a caller runs early is the check the client runs.
 
+    A URL carrying user information is refused, and that is a privacy rule
+    rather than a syntax one. The address is repeated into verbose output, into
+    a report, and into the text of a connection failure, and what redacts a
+    credential knows the credential it was *given* — not one somebody embedded
+    in an address. `wss://someone:secret@host/v1/session` would therefore reach
+    output whole, which reachyctl REQ-059 forbids. The credential is presented
+    in the offer, and this is what makes "the URL carries no credential" true
+    rather than merely intended.
+
     Args:
         url: The address to check.
 
@@ -103,11 +112,22 @@ def validate_session_url(url: str) -> str:
         The same address, so this can be used where the value is being passed.
 
     Raises:
-        ValueError: If the address does not name a WebSocket scheme.
+        ValueError: If the address does not name a WebSocket scheme, or if it
+            carries user information.
     """
-    scheme = urlsplit(url).scheme
-    if scheme not in _SCHEMES:
-        message = f"a session URL is ws:// or wss://, not {scheme or 'a bare address'}"
+    parts = urlsplit(url)
+    if parts.scheme not in _SCHEMES:
+        message = (
+            f"a session URL is ws:// or wss://, not {parts.scheme or 'a bare address'}"
+        )
+        raise ValueError(message)
+    if parts.username is not None or parts.password is not None:
+        # Deliberately quoting nothing back: the value being refused is the one
+        # thing that must not be repeated.
+        message = (
+            "a session URL carries no credential; remove the user information "
+            "before the @ and present the credential the ordinary way"
+        )
         raise ValueError(message)
     return url
 
@@ -323,18 +343,27 @@ class SessionClient:
     #:% Every frame MUST carry a monotonically increasing sequence number, and every
     #:% result MUST identify the sequence number of the frame it derives from.
     #
-    #:= docs/specs/robot-link/index.md#req-015-overload-drops-frames-rather-than-queueing-them
-    #:% When frames arrive faster than they can be processed, the oldest unprocessed
-    #:% frame MUST be discarded in preference to growing the queue or blocking the
-    #:% producer.
     async def submit_frame(self, payload: bytes) -> FrameHeader | None:
         """Send one already-compressed frame.
 
-        There is no outbound queue, and that is the client's half of REQ-015: a
-        frame produced while no session is up is dropped and counted, rather
-        than being held against a connection that may never come back or
-        blocking the camera that produced it. The newest frame is always the one
-        that goes, because it is the only one there is.
+        **This client holds no outbound queue, and that is the whole of what it
+        offers about overload.** A frame produced while no session is up is
+        dropped and counted rather than held against a connection that may
+        never come back. A frame produced while one is up is handed to the
+        link, and the await that follows is the link's own flow control: the
+        producer is paced by how fast the frame can leave, which is
+        backpressure rather than a queue growing behind it.
+
+        Robot-link REQ-015 is deliberately **not** cited here, and the reason is
+        worth writing down because the obvious alternative is worse. Returning
+        before the frame is on the wire would mean holding it somewhere — a
+        buffer of one — and dropping whatever arrived while it waited. That
+        discards the *newest* frame and keeps the oldest, which is the exact
+        inversion of what the requirement asks for, and the only way to do it
+        the right way round would be to abandon a partly-sent frame, which
+        corrupts the stream. The requirement is about the groundstation's
+        queue, the groundstation implements it with a bounded one that drops
+        the oldest, and this side has no queue for it to be about.
 
         Args:
             payload: The frame's bytes, already compressed by the capture
@@ -529,10 +558,22 @@ class SessionClient:
             message = f"a session opens with an agreement, not {kind.value!r}"
             raise ProtocolError(message)
         try:
-            return SessionAgreement.from_wire(payload)
+            agreement = SessionAgreement.from_wire(payload)
         except ValueError as error:
             message = f"the agreement did not parse: {describe_validation(error)}"
             raise ProtocolError(message) from error
+        # Negotiation reduces an offer; it does not add to one. A groundstation
+        # that agreed to something nobody offered has not negotiated, and
+        # accepting it would let a session carry capability traffic this client
+        # never said it could speak — which is the thing REQ-012 exists to stop.
+        # Reported rather than quietly trimmed: this is a defect in the other
+        # side, and a client that silently corrected it would hide it.
+        unoffered = set(agreement.capabilities) - set(self._capabilities)
+        if unoffered:
+            named = ", ".join(sorted(f"{one.name}:{one.version}" for one in unoffered))
+            message = f"the agreement names capabilities that were not offered: {named}"
+            raise ProtocolError(message)
+        return agreement
 
     def _offer(self) -> SessionOffer:
         """Build the opening message, revealing the credential to do it.
@@ -653,7 +694,15 @@ class SessionClient:
             ProtocolError: If the bytes do not parse as the result type the
                 named capability produces.
         """
-        model = result_model_for(self._capability_of(payload))
+        capability = self._capability_of(payload)
+        if self.agreed(capability) is None:
+            # Not agreed for this session, so nothing asked for it and nothing
+            # downstream is prepared to read it. Ignored rather than refused,
+            # for the same reason an unfamiliar capability is: a session that
+            # ended over traffic it could simply drop would be worse.
+            self._stats.results_ignored += 1
+            return None
+        model = result_model_for(capability)
         if model is None:
             # A capability this build has never heard of. Negotiation means
             # nothing asked for it, and refusing to parse it would make an

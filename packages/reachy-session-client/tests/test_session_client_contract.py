@@ -30,6 +30,7 @@ from session_client_support import (
     RecordedSleep,
     ScriptedTransports,
     StubTransport,
+    agreement,
     credential,
 )
 
@@ -214,10 +215,16 @@ async def test_the_committed_empty_result_is_applied_as_a_success() -> None:
 @pytest.mark.filesystem  # the committed corpus is the contract; see the module docstring
 @pytest.mark.asyncio
 async def test_the_committed_gesture_result_is_applied() -> None:
-    """A capability's payload is routed by the name the result declares."""
+    """A capability's payload is routed by the name the result declares.
+
+    The agreement here is built rather than read from the corpus: the committed
+    one names face alone, and a client only applies a result for a capability
+    this session agreed to. The bytes under test are still the corpus's — what
+    changes is only what the session was told it could expect.
+    """
     transport = StubTransport()
     transport.push(
-        carrying(MessageKind.AGREEMENT, AGREEMENT),
+        agreement(FACE, GESTURE),
         carrying(MessageKind.RESULT, GESTURE_RESULT),
     )
 

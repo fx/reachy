@@ -34,7 +34,7 @@ from session_client_support import (
     session_error,
 )
 
-from reachy_contracts import CloseReason, ErrorCode
+from reachy_contracts import Capability, CloseReason, ErrorCode
 from reachy_session_client import (
     ConnectionFailedError,
     Credential,
@@ -49,7 +49,6 @@ from reachy_session_client import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from reachy_contracts import Capability
     from reachy_session_client import FrameResult
 
 # RFC 5737 TEST-NET-2. No address belonging to anybody's network enters a
@@ -238,13 +237,9 @@ async def test_frames_are_numbered_upwards_and_stamped_forwards() -> None:
     assert client.stats.frames_submitted == 2
 
 
-#:= docs/specs/robot-link/index.md#req-015-overload-drops-frames-rather-than-queueing-them
-#:% When frames arrive faster than they can be processed, the oldest unprocessed
-#:% frame MUST be discarded in preference to growing the queue or blocking the
-#:% producer.
 @pytest.mark.asyncio
 async def test_a_frame_produced_with_no_session_is_dropped_rather_than_queued() -> None:
-    """The producer is never blocked and nothing accumulates behind a dead link."""
+    """Nothing accumulates behind a dead link, because there is nowhere to put it."""
     client, _sleep = build(StubTransport())
 
     dropped = await client.submit_frame(JPEG)
@@ -379,16 +374,28 @@ async def test_a_failure_report_is_counted_and_does_not_end_the_session() -> Non
 
 @pytest.mark.asyncio
 async def test_a_result_from_a_capability_this_build_cannot_parse_is_ignored() -> None:
-    """An older robot goes on holding a session with a newer groundstation."""
+    """An older robot goes on holding a session with a newer groundstation.
+
+    The capability is offered and agreed here, because that is the case worth
+    testing: a name a consumer asked for — `probe --capability something-new`,
+    or a robot configured for a capability this build of the contracts package
+    predates — and for which nothing local knows how to read a payload.
+    """
+    unfamiliar = Capability(name="telepathy", version=1)
     transport = StubTransport()
-    transport.push(agreement(FACE), _unknown_capability_result(), face_result(1))
-    client, _sleep = build(transport)
+    transport.push(
+        agreement(unfamiliar, FACE),
+        _unknown_capability_result(),
+        face_result(1),
+    )
+    client, _sleep = build(transport, capabilities=(unfamiliar, FACE))
     await client.connect()
 
     (result,) = await collect(client, 1)
 
     assert result.capability == "face"
     assert client.stats.results_ignored == 1
+    assert client.connected
 
 
 def _unknown_capability_result() -> str:
@@ -644,3 +651,66 @@ async def test_an_offer_that_will_not_validate_is_reported_without_the_credentia
     assert "credential" in str(raised.value)
     assert too_long not in str(raised.value)
     assert raised.value.__cause__ is None
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+@pytest.mark.parametrize(
+    "url",
+    [
+        "wss://someone:example-secret@198.51.100.10/v1/session",
+        "ws://someone@198.51.100.10:8080/v1/session",
+    ],
+)
+def test_a_url_carrying_user_information_is_refused_without_quoting_it(
+    url: str,
+) -> None:
+    """The address is repeated into output; a credential inside one rides along.
+
+    A redactor knows the credential it was handed, not one somebody embedded in
+    an address, so this has to be refused rather than scrubbed — and the
+    refusal quotes none of it back.
+
+    Args:
+        url: The address to refuse.
+    """
+    with pytest.raises(ValueError, match="carries no credential") as raised:
+        SessionClient(url=url, credential=credential())
+
+    assert "example-secret" not in str(raised.value)
+    assert "someone" not in str(raised.value)
+
+
+#:= docs/specs/robot-link/index.md#req-012-capabilities-are-negotiated-at-session-start
+#:% Both sides MUST exchange the set of capabilities they support, each with a
+#:% version, before any capability-specific message is sent.
+@pytest.mark.asyncio
+async def test_an_agreement_naming_something_nobody_offered_is_refused() -> None:
+    """Negotiation reduces an offer; a set that grew is not one that was agreed."""
+    transport = StubTransport()
+    transport.push(agreement(FACE, GESTURE))
+    client, _sleep = build(transport, capabilities=(FACE,))
+
+    with pytest.raises(ProtocolError, match="were not offered: gesture:1"):
+        await client.connect()
+
+    assert not client.connected
+
+
+#:= docs/specs/robot-link/index.md#req-012-capabilities-are-negotiated-at-session-start
+#:% Both sides MUST exchange the set of capabilities they support, each with a
+#:% version, before any capability-specific message is sent.
+@pytest.mark.asyncio
+async def test_a_result_for_a_capability_this_session_did_not_agree_to() -> None:
+    """The app is not handed results it never said it could interpret."""
+    transport = StubTransport()
+    transport.push(agreement(FACE), gesture_result(0), face_result(1))
+    client, _sleep = build(transport, capabilities=(FACE, GESTURE))
+    await client.connect()
+
+    (result,) = await collect(client, 1)
+
+    assert result.capability == "face"
+    assert client.stats.results_ignored == 1
+    assert client.connected

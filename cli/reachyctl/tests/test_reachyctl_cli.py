@@ -208,3 +208,19 @@ def test_verbose_detail_goes_to_standard_error_and_not_into_the_result() -> None
 
     json.loads(result.stdout)
     assert result.exit_code == ExitCode.CONFIGURATION
+
+
+#:= docs/specs/reachyctl/index.md#req-059-secrets-are-never-written-to-output
+#:% The tool MUST NOT write credentials to its output, its logs, or its error
+#:% messages.
+def test_an_address_with_a_credential_in_it_is_refused_and_not_echoed() -> None:
+    """The address is echoed into the report, so a credential inside one leaks."""
+    result = runner.invoke(
+        app,
+        ["probe", "--url", "wss://someone:example-secret@198.51.100.10/v1/session"],
+        env=CONFIGURED,
+    )
+
+    assert result.exit_code == ExitCode.CONFIGURATION
+    assert "carries no credential" in result.stdout
+    assert "example-secret" not in result.stdout
