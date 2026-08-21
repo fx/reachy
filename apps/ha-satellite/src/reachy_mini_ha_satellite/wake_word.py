@@ -45,6 +45,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
+import numpy.typing as npt
+
 # The one protobuf message this module sends. `satellite.send_messages` is
 # thread-safe — it hops to the event loop when it is called from anywhere else —
 # which is what lets the detection thread announce a resolved threshold.
@@ -58,8 +60,6 @@ from reachy_mini_ha_satellite.esphome.models import WakeWordType
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-
-    import numpy.typing as npt
 
     from reachy_mini_ha_satellite.esphome.models import ServerState
 
@@ -93,6 +93,12 @@ SENSITIVITY_SLOTS: Final = 2
 _NO_SLOT: Final = SENSITIVITY_SLOTS
 
 
+# `numpy.typing` is imported at run time rather than under `TYPE_CHECKING`, for
+# the reason `adapters/daemon.py` and the groundstation's `ports.py` both record
+# at their own aliases: a PEP 695 alias is lazy, so the name is resolved on
+# access to `__value__` rather than here, and anything that resolves an
+# annotation — `typing.get_type_hints`, a documentation tool — would otherwise
+# raise `NameError` on a name that existed only for the type checker.
 type ModelInput = npt.NDArray[Any]
 """One input to a wake-word model.
 
