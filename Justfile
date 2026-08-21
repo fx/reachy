@@ -31,9 +31,105 @@ test:
     {{ uv }} pytest
 
 # Check formatting and lint rules. Fails without modifying anything.
-lint: lint-boundary
+lint: lint-boundary lint-capability-boundary
     {{ uv }} ruff check .
     {{ uv }} ruff format --check .
+
+# Prove the groundstation's capability boundary still fires.
+#
+# Groundstation REQ-022 says adding a capability changes no file belonging to the
+# transport, the session layer, or another capability. What makes that true rather
+# than merely intended is that nothing under `api/`, `session/` or `pipeline/` may
+# import `reachy_groundstation.capabilities` at all: they hold a
+# `CapabilityRegistryPort` handed to them by `reachy_groundstation.service`, which
+# is the one module outside the package that composes it.
+#
+# The rule is ruff's `flake8-tidy-imports` `banned-api`, exactly as the vendored
+# ESPHome boundary above is — but configured on the invocation rather than in
+# `pyproject.toml`, and that is forced rather than chosen. `banned-api` is a single
+# global list, and `pyproject.toml` already spends it on the vendored boundary,
+# whose negated `per-file-ignores` entry switches TID251 off everywhere outside
+# that directory. An entry added there would therefore be dead in the three
+# packages it needs to guard, and it would also ban `reachy_contracts` here, which
+# is the one import the session layer exists to carry. TID253 is spent on the
+# pydantic ban and cannot take a second target without a per-file ignore that would
+# switch the pydantic ban off inside `capabilities/` — the one place a wire type
+# would most plausibly be redeclared. So the ban lives here, with its scope, and
+# this recipe is what runs it.
+#
+# Three checks, and the first two are the ones that make it real. A rule nobody has
+# watched fail is a rule that does not exist, so the failing case is a committed
+# fixture full of the imports the boundary forbids, fed to ruff on standard input
+# under a pretended path — `--stdin-filename` only tells ruff which per-file rules
+# apply, so no probe file is ever left in the tree. The same fixture is then run
+# under a path inside `capabilities/`, where all of it is ordinary, which proves
+# the ban is scoped to the three packages rather than global. Only then is the real
+# tree checked.
+#
+# The fourth check is the backstop TID251 cannot be: it inspects import statements
+# only, so a dynamic import slips past it. A grep for the package's name in the
+# three guarded directories closes that, and the fixture carries two dynamic
+# imports so this half is proved to fire too.
+lint-capability-boundary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    probe='services/groundstation/tests/fixtures/capability_boundary_probe.py.txt'
+    src='services/groundstation/src/reachy_groundstation'
+    guarded="$src/api $src/session $src/pipeline"
+    dynamic='(import_module|__import__)[[:space:]]*\([[:space:]]*[\"'"'"']reachy_groundstation\.capabilities'
+    ban='lint.flake8-tidy-imports.banned-api = { "reachy_groundstation.capabilities" = { msg = "The transport, the session layer and the pipeline route by capability name against a CapabilityRegistryPort handed to them; only reachy_groundstation.service composes the registry. See groundstation REQ-022." } }'
+    scope='lint.per-file-ignores = { "services/groundstation/src/reachy_groundstation/capabilities/**" = ["TID251"], "services/groundstation/src/reachy_groundstation/service.py" = ["TID251"], "services/groundstation/tests/**" = ["TID251"] }'
+
+    if [ ! -f "$probe" ]; then
+        echo "lint-capability-boundary: FAILED — the fixture $probe is missing, so the rule is not proved to fire." >&2
+        exit 1
+    fi
+    for directory in $guarded; do
+        if [ ! -d "$directory" ]; then
+            echo "lint-capability-boundary: FAILED — $directory is not a directory. The layout moved and this recipe no longer checks it." >&2
+            exit 1
+        fi
+    done
+
+    # `--isolated` is what makes this a check rather than a formality: the root
+    # configuration switches TID251 off outside the vendored directory, so a run
+    # that loaded it would pass over any input at all.
+    check=({{ uv }} ruff check --no-cache --isolated --select TID251 --output-format concise --config "$ban" --config "$scope")
+
+    # ruff exits non-zero both when the rule fires and when the invocation is
+    # broken, so the output has to actually name TID251 for this to prove anything.
+    fired="$("${check[@]}" --stdin-filename "$src/session/probe.py" - < "$probe" 2>&1)" && status=0 || status=$?
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$fired"
+        echo 'lint-capability-boundary: FAILED — a capability import inside the session layer did not trip TID251.' >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$fired" | grep -q 'TID251'; then
+        printf '%s\n' "$fired"
+        echo "lint-capability-boundary: FAILED — ruff exited $status without reporting TID251, so it failed for some other reason and proves nothing." >&2
+        exit 1
+    fi
+    printf '%s\n' "$fired" | sed 's/^/    /'
+
+    if ! "${check[@]}" --stdin-filename "$src/capabilities/probe.py" - < "$probe"; then
+        echo 'lint-capability-boundary: FAILED — the same imports are banned inside capabilities/, so the rule is not scoped to the three guarded packages.' >&2
+        exit 1
+    fi
+
+    if ! "${check[@]}" services/groundstation; then
+        echo 'lint-capability-boundary: FAILED — a guarded package imports reachy_groundstation.capabilities.' >&2
+        exit 1
+    fi
+
+    if ! grep -qE "$dynamic" "$probe"; then
+        echo 'lint-capability-boundary: FAILED — the fixture no longer contains a dynamic capability import, so the grep half proves nothing.' >&2
+        exit 1
+    fi
+    if grep -rnE --include='*.py' "$dynamic" $guarded; then
+        echo 'lint-capability-boundary: FAILED — a guarded package reaches a capability module through a dynamic import.' >&2
+        exit 1
+    fi
+    echo 'lint-capability-boundary: TID251 fires inside api/, session/ and pipeline/ and nowhere else, and no dynamic capability import survives there.'
 
 # Prove the vendored ESPHome directory's import-direction boundary still fires.
 #

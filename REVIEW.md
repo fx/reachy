@@ -45,6 +45,24 @@ suppression's rule identifier. Whether its comment *explains* anything, and
 whether a unit test touches the filesystem or sleeps, are review judgements.
 Report a violation, never the absence of a tool.
 
+**`await asyncio.sleep(0)` is a yield, not sleeping.** It reads no clock,
+schedules no timer and adds no wall time — it hands control to the event loop
+and resumes on its next pass, which is how a test drives another task to its
+next await point deterministically. The no-sleeping rule exists so the suite is
+neither slow nor flaky, and a zero-delay yield is the fix for both, not an
+instance of the problem. A test that yields in an *unbounded* loop is a finding
+— it can hang the suite — so bound the turns; the groundstation's tests call
+`hand_control_to_the_event_loop`, which does. A non-zero `asyncio.sleep` in a
+unit test is still a finding. In an integration test it is not: those poll a
+real server, and the bounded wait is what makes them deterministic.
+
+The same distinction governs a **timeout under test**. A unit test that
+configures a real delay and waits for it to elapse is a finding, however short
+the delay; a unit test that configures a timeout already expired by the time the
+event loop looks at it is not, because nothing waits and no outcome can turn on
+how loaded the runner is. The groundstation's three such tests use
+`_ALREADY_ELAPSED`.
+
 **Specs are written in duvet mode.** RFC 2119 keywords appear **only** inside
 `### REQ-NNN:` sections; their absence from Overview, Background, Design,
 Constraints, Open Questions and scenario bodies is required, since a keyword

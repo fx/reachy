@@ -28,12 +28,52 @@ SPECIFICATION: [Architecture](docs/specs/architecture/index.md)
     TEXT[implication]: description from source and fail when the regenerated output differs from the
     TEXT[implication]: committed copy.
 
+  SECTION: [REQ-009: Configuration is validated and self-reporting](#req-009-configuration-is-validated-and-self-reporting)
+    TEXT[implementation]: Every component that reads configuration from its environment MUST fail to start
+    TEXT[implementation]: when it encounters a variable matching its own prefix that it does not
+    TEXT[implementation]: recognise, and MUST emit its fully resolved configuration at startup with every
+    TEXT[implementation]: value marked secret replaced by a redacted placeholder.
+
+SPECIFICATION: [Groundstation](docs/specs/groundstation/index.md)
+  SECTION: [REQ-022: Capabilities register without transport changes](#req-022-capabilities-register-without-transport-changes)
+    TEXT[implementation]: Adding a capability MUST NOT require modification to the session layer, the
+    TEXT[implementation]: transport, or any other capability.
+
+  SECTION: [REQ-025: A failed capability does not take down the service](#req-025-a-failed-capability-does-not-take-down-the-service)
+    TEXT[implementation]: When a capability fails to initialise, the service MUST continue serving the
+    TEXT[implementation]: capabilities that initialised successfully.
+
+  SECTION: [REQ-026: Readiness is distinct from liveness](#req-026-readiness-is-distinct-from-liveness)
+    TEXT[implementation]: The service MUST report itself ready only once every capability it will offer
+    TEXT[implementation]: has completed its warm-up.
+
+  SECTION: [REQ-028: Work is attributable end to end](#req-028-work-is-attributable-end-to-end)
+    TEXT[implementation]: Every log line and metric emitted while handling a frame MUST carry the session
+    TEXT[implementation]: identifier and the frame's sequence number.
+
+  SECTION: [REQ-029: Per-stage timings are measured and exposed](#req-029-per-stage-timings-are-measured-and-exposed)
+    TEXT[implementation]: The service MUST record the duration of each pipeline stage separately and
+    TEXT[implementation]: expose those durations as metrics.
+
+  SECTION: [REQ-030: The effective configuration is retrievable at run time](#req-030-the-effective-configuration-is-retrievable-at-run-time)
+    TEXT[implementation]: The service MUST expose its fully resolved configuration over its own interface
+    TEXT[implementation]: while running, with every value marked secret replaced by a redacted
+    TEXT[implementation]: placeholder.
+
 SPECIFICATION: [Perception](docs/specs/perception/index.md)
   SECTION: [REQ-034: Face detections report a normalised centre and a confidence](#req-034-face-detections-report-a-normalised-centre-and-a-confidence)
     TEXT[implementation]: Each face detection MUST report the face's centre in normalised image
     TEXT[implementation]: coordinates together with a confidence value.
 
 SPECIFICATION: [Robot Link](docs/specs/robot-link/index.md)
+  SECTION: [REQ-010: The robot is a client only](#req-010-the-robot-is-a-client-only)
+    TEXT[implementation]: The robot MUST open the session outbound to the groundstation, and the
+    TEXT[implementation]: groundstation MUST NOT require any inbound listener on the robot.
+
+  SECTION: [REQ-011: One session carries every exchange](#req-011-one-session-carries-every-exchange)
+    TEXT[implementation]: All frames, results, and control messages for a running app MUST travel over a
+    TEXT[implementation]: single session, established once and reused for the lifetime of that session.
+
   SECTION: [REQ-012: Capabilities are negotiated at session start](#req-012-capabilities-are-negotiated-at-session-start)
     TEXT[implementation]: Both sides MUST exchange the set of capabilities they support, each with a
     TEXT[implementation]: version, before any capability-specific message is sent.
@@ -46,10 +86,19 @@ SPECIFICATION: [Robot Link](docs/specs/robot-link/index.md)
     TEXT[implementation]: Every frame MUST carry a monotonically increasing sequence number, and every
     TEXT[implementation]: result MUST identify the sequence number of the frame it derives from.
 
+  SECTION: [REQ-015: Overload drops frames rather than queueing them](#req-015-overload-drops-frames-rather-than-queueing-them)
+    TEXT[implementation]: When frames arrive faster than they can be processed, the oldest unprocessed
+    TEXT[implementation]: frame MUST be discarded in preference to growing the queue or blocking the
+    TEXT[implementation]: producer.
+
   SECTION: [REQ-016: Results return the capture timestamp unaltered](#req-016-results-return-the-capture-timestamp-unaltered)
     TEXT[implementation]: Every result MUST carry the capture timestamp of the frame it derives from,
     TEXT[implementation]: byte-for-byte as the capturing side supplied it, so that the capturing side can
     TEXT[implementation]: compute the result's age against the same clock that produced it.
+
+  SECTION: [REQ-019: Sessions are authenticated](#req-019-sessions-are-authenticated)
+    TEXT[implementation]: The groundstation MUST reject a session whose client does not present a valid
+    TEXT[implementation]: credential.
 
   SECTION: [REQ-020: The wire format is pinned by shared fixtures](#req-020-the-wire-format-is-pinned-by-shared-fixtures)
     TEXT[implementation]: Every message type MUST have a golden fixture in the shared contracts package,

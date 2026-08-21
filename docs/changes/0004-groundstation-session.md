@@ -7,7 +7,7 @@ pipeline and observability — everything except the capabilities themselves and
 the container packaging.
 
 **Spec:** [Groundstation](../specs/groundstation/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0003
 
 ## Motivation
@@ -120,39 +120,94 @@ That is what makes this change independently verifiable.
 
 ## Tasks
 
-- [ ] Implement configuration and observability
-  - [ ] Settings with prefix validation, unknown-variable rejection, and a boot
+- [x] Implement configuration and observability
+  - [x] Settings with prefix validation, unknown-variable rejection, and a boot
         dump that redacts every value marked secret
-  - [ ] A single place that marks which settings are secret, so redaction cannot
+  - [x] A single place that marks which settings are secret, so redaction cannot
         be applied in the log and forgotten at the endpoint
-  - [ ] Structured logging carrying session identifier and sequence number
-  - [ ] Metrics registry and per-stage timing instrumentation
-  - [ ] Tracing spans across pipeline stages
-- [ ] Implement the session layer
-  - [ ] WebSocket endpoint and connection lifecycle
-  - [ ] Credential verification and rejection path
-  - [ ] Capability negotiation against the registry
-  - [ ] Routing by capability name, with the import-direction lint rule
-- [ ] Implement the pipeline
-  - [ ] Bounded per-session queue with drop-oldest and a drop counter
-  - [ ] Single decode per frame, shared across capabilities
-  - [ ] Result assembly keyed to sequence number, including the empty result
-  - [ ] Induced-backpressure and induced-reconnection integration tests
-- [ ] Implement the health and configuration surface
-  - [ ] Liveness and readiness endpoints with distinct semantics
-  - [ ] Capability health reporting, including the degraded case
-  - [ ] Metrics endpoint
-  - [ ] Effective-configuration endpoint
+  - [x] Structured logging carrying session identifier and sequence number
+  - [x] Metrics registry and per-stage timing instrumentation
+  - [x] Tracing spans across pipeline stages
+- [x] Implement the session layer
+  - [x] WebSocket endpoint and connection lifecycle
+  - [x] Credential verification and rejection path
+  - [x] Capability negotiation against the registry
+  - [x] Routing by capability name, with the import-direction lint rule
+- [x] Implement the pipeline
+  - [x] Bounded per-session queue with drop-oldest and a drop counter
+  - [x] Single decode per frame, shared across capabilities
+  - [x] Result assembly keyed to sequence number, including the empty result
+  - [x] Induced-backpressure and induced-reconnection integration tests
+- [x] Implement the health and configuration surface
+  - [x] Liveness and readiness endpoints with distinct semantics
+  - [x] Capability health reporting, including the degraded case
+  - [x] Metrics endpoint
+  - [x] Effective-configuration endpoint
 
 ## Open Questions
 
-- [ ] Whether a session may renegotiate capabilities in place, without
+- [x] Whether a session may renegotiate capabilities in place, without
       reconnecting. Useful if a capability recovers from a failed
       initialisation; more protocol surface. Current lean: no, reconnection
       covers it.
-- [ ] What the queue bound should default to. It trades latency under burst
+      **Resolved: no.** A session negotiates once and holds nothing that
+      outlives its connection. In-place renegotiation would add a message type
+      and a mid-session state change to every one of the protocol's three
+      clients, in exchange for a case — a capability recovering after a failed
+      initialisation — that this build cannot even produce: a failed capability
+      stays unhealthy until the process restarts, and a restart drops the
+      session anyway. Reconnection already covers it, and reconnection is
+      exercised end to end.
+- [x] What the queue bound should default to. It trades latency under burst
       against dropped frames, and the right value depends on the capability mix.
       Current lean: small, and measured in 0014.
+      **Resolved: two, and 0014 measures it.** Small because the value of a
+      frame is its recency: on a link measured at 100–170 ms idle, a frame
+      queued behind two others has already been overtaken by the camera. Two
+      rather than one so that a single slow pass does not discard the frame
+      behind it, and rather than four so that the backlog cannot outlive its own
+      usefulness. It is `REACHY_GROUNDSTATION_QUEUE_BOUND`, so the measurement
+      in 0014 changes a number rather than the code.
+
+## Completion Notes
+
+- The capability boundary is enforced by `just lint-capability-boundary`, which
+  is a dependency of `just lint` and therefore of `just check` and CI. It is
+  ruff's `flake8-tidy-imports` `banned-api`, the same rule the vendored ESPHome
+  boundary uses, but configured on the invocation rather than in
+  `pyproject.toml`: `banned-api` is a single global list already spent on that
+  boundary, whose negated `per-file-ignores` entry switches TID251 off
+  everywhere outside the vendored directory — so an entry added there would be
+  dead in the three packages it needs to guard, and would also ban
+  `reachy_contracts`, which is the one import the session layer exists to carry.
+  The recipe proves the rule fires against a committed fixture, proves it is
+  scoped by running the same fixture under a `capabilities/` path, then runs it
+  over the tree, then greps for the dynamic imports TID251 cannot see.
+- The capability interface and registry live in `capabilities/`, and the types
+  the transport, session and pipeline need live in `ports.py` beside them. That
+  split is what makes the boundary expressible: a rule forbidding those three
+  packages from importing `reachy_groundstation.capabilities` is only
+  enforceable if what they legitimately need is somewhere else.
+- The session identifier and the sequence number reach the metrics as
+  OpenMetrics **exemplars** rather than as labels, which is how
+  [REQ-028](../specs/groundstation/index.md#req-028-work-is-attributable-end-to-end)
+  is satisfied without a series per frame — as labels they would be unbounded
+  cardinality, and the series would outnumber the frames. `/metrics` negotiates
+  the exposition format, because exemplars travel only in the newer one.
+- Framing is `session/framing.py` and is built from `json` and `struct` rather
+  than from a model of its own. The contracts package deliberately leaves
+  framing to the transport, and a pydantic model here would be a second wire
+  type outside the package that owns them — which is what TID253 exists to
+  prevent. A control message embeds the contract type's own canonical bytes
+  verbatim, so the golden fixtures still pin what goes out.
+- No production capability ships here, and that is the design rather than an
+  omission: the registry, the routing and the pipeline are exercised end to end
+  by two unrelated test capabilities, which is what proves the registry is not
+  shaped around whichever capability arrives first. Perception is 0005.
+- Nothing in this change was verified against physical Reachy Mini hardware. The
+  transport, the session and the pipeline are exercised in-process against a
+  real uvicorn server and a real WebSocket client; the robot-side half arrives
+  in 0012 and the end-to-end run against a robot is a separate exercise.
 
 ## References
 

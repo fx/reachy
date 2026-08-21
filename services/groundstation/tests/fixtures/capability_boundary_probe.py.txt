@@ -1,0 +1,25 @@
+# A file of imports the capability boundary must reject, used by
+# `just lint-capability-boundary` to prove the rule actually fires. It is
+# committed with a `.txt` suffix so nothing collects, imports or type-checks it:
+# it is fed to ruff on standard input under a pretended path, and no file by that
+# path ever exists on disk.
+#
+# The first group is what the boundary forbids anywhere under `api/`, `session/`
+# or `pipeline/`. The second group is ordinary everywhere, and the recipe runs
+# this same file under a path inside `capabilities/` to prove the ban is scoped
+# rather than global — if `reachy_contracts` or the ports module tripped it, the
+# session layer could not import the wire types it exists to carry.
+import reachy_groundstation.capabilities
+from reachy_groundstation.capabilities import CapabilityRegistry
+from reachy_groundstation.capabilities.base import CapabilityBase
+from reachy_groundstation.capabilities.registry import register
+
+from importlib import import_module
+
+import reachy_contracts
+from reachy_contracts import FrameHeader, ResultEnvelope
+from reachy_groundstation.config import Settings
+from reachy_groundstation.ports import CapabilityPort, DecodedFrame
+
+_dynamic = import_module("reachy_groundstation.capabilities.registry")
+_also_dynamic = __import__("reachy_groundstation.capabilities")
