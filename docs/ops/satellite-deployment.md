@@ -153,20 +153,26 @@ separate process, equivalent to:
 <the application environment's python> -u -m reachy_mini_ha_satellite.daemon_app
 ```
 
-Two consequences follow, and both have cost time already.
+Three consequences follow, and each has cost time already.
 
 **The application runs as its own process, with the daemon's environment.** So
 `REACHY_SATELLITE_*` variables have to be visible to the daemon — see
-[Configuring](#configuring) — and the application's output reaches you through
-the daemon's capture of that process rather than through the daemon's own log.
+[Configuring](#configuring) — and anything the application writes is captured
+from that process rather than written to the daemon's own log.
+
+**⚠️ The daemon does not report why an application stopped.** It reports
+`state: done` with a **null error** whether the application ran and finished, or
+refused to start and exited non-zero, or raised. An exception the application
+raised does not reach the daemon's API at all. So through the daemon,
+*successfully finished* and *failed at startup* are the same reading, and the
+absence of an error is not evidence that nothing went wrong. This is the single
+most misleading thing about diagnosing the satellite from the dashboard.
 
 **The module named by the entry point has to be runnable on its own.** A module
-that is only importable exits 0 immediately under that command, and the daemon
-faithfully reports what it saw: an application that finished, successfully,
-seconds after it was started, having printed nothing — not even the boot
-configuration dump this application always writes. That is what a missing
-execution path looks like from the dashboard, and it looks nothing like a
-crash.
+that is only importable exits 0 immediately under that command, having printed
+nothing — not even the boot configuration dump this application always writes.
+Combined with the point above, that is indistinguishable from a clean run, which
+is exactly why it took a robot and a hand-patched file to find.
 
 `just wheel-verify` runs the entry point's module the way the daemon runs it and
 refuses a wheel where it exits 0 having done nothing, so a release cannot carry
@@ -405,13 +411,20 @@ rather than under the daemon, `SIGINT` and `SIGTERM` do the same.
 the top of this page. Read it; do not invent a name.
 
 **The dashboard says it finished, successfully, seconds after starting, and it
-printed nothing at all.** Not a configuration problem: a configuration problem
-is loud, and this application dumps its resolved configuration before anything
-else. The daemon *runs* the entry point's module rather than instantiating its
-class — see [How the daemon starts it](#how-the-daemon-starts-it) — so a module
-with no execution path imports, does nothing and exits 0. Check the installed
-wheel is one `just wheel-verify` passed; a wheel built before that check existed
-can carry the defect.
+printed nothing at all.** `done` with no error is not evidence of a clean run:
+the daemon reports a startup failure exactly the same way, and swallows the
+exception — see [How the daemon starts it](#how-the-daemon-starts-it). Two
+different things produce this reading and they need different fixes.
+
+- **The application refused to start.** Every refusal on this page exits
+  non-zero and writes its reason, so run it outside the daemon to see that
+  reason — `python -m reachy_mini_ha_satellite` from the application
+  environment, with the same variables set. That is what this way in exists
+  for.
+- **The installed wheel's entry module has no execution path.** Then it prints
+  nothing however it is run, and running it directly reproduces that in one
+  line. Check the installed wheel is one `just wheel-verify` passed; a wheel
+  built before that check existed can carry the defect.
 
 **It refuses to start naming a variable.** The variable is misspelled, or it
 belongs to a setting that no longer exists. The message lists every variable the
