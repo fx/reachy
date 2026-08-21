@@ -287,7 +287,9 @@ class DaemonClient:
                 mapping would mean "this robot has no settings", which is a
                 different robot from one that did not answer: `config diff`
                 would report every declared setting as missing, and an apply's
-                verification would fail a change that had worked.
+                verification would fail a change that had worked. The message
+                quotes nothing the robot wrote — this is the read that teaches
+                the redactor what to scrub.
         """
         outcome = await self._run(
             [
@@ -299,9 +301,13 @@ class DaemonClient:
             ],
         )
         if not outcome.ok:
+            # `status_only`, not `complaint`: this is the read whose answer
+            # teaches the redactor which values on this robot are secret, so its
+            # own output is the one thing nothing could scrub. See
+            # `CommandOutcome.status_only`.
             message = (
                 f"could not read the environment of {self._layout.daemon_unit}: "
-                f"{outcome.complaint()}"
+                f"{outcome.status_only()}"
             )
             raise RobotAccessError(message)
         settings: dict[str, str] = {}
@@ -520,10 +526,20 @@ class DaemonClient:
         to read with one about tidying up. What it must not do is leave the
         file there quietly, so a refusal is written to the progress stream.
 
+        It is called from the `finally` of steps that may already be failing,
+        including ones that failed because the link broke — so it swallows a
+        link failure too. Letting one out would replace the reason the deploy
+        failed with a message about tidying up, which is the wrong sentence for
+        an operator to be reading.
+
         Args:
             staged: What to remove.
         """
-        outcome = await self._run(["rm", "--force", str(staged)])
+        try:
+            outcome = await self._run(["rm", "--force", str(staged)])
+        except RobotAccessError as error:
+            self._complain(f"could not remove {staged} from the robot: {error}")
+            return
         if not outcome.ok:
             # Nothing is raised, and nothing is silent either.
             self._complain(

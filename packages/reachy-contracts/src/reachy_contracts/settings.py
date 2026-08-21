@@ -214,19 +214,26 @@ class Setting:
             SettingError: If it does not parse as this setting's kind, or falls
                 outside the declared bounds.
         """
-        try:
-            number = (
-                float(value)
-                if self.kind is SettingKind.NUMBER
-                else float(int(value, 10))
-            )
-        except ValueError as error:
-            raise SettingError(self._refusal()) from error
-        # `float("nan")` parses, and every comparison with a NaN is false — so a
-        # bounded setting would accept it while reporting a range it is not in.
-        # Infinity parses too, and is outside every bound that exists.
-        if not math.isfinite(number):
-            raise SettingError(self._refusal())
+        # A whole number is compared as one. Converting it to a float first
+        # would raise `OverflowError` on an integer larger than a float can
+        # hold — a refusal, arriving as a crash — and would silently round one
+        # merely large enough to lose its last digits.
+        number: float | int
+        if self.kind is SettingKind.INTEGER:
+            try:
+                number = int(value, 10)
+            except ValueError as error:
+                raise SettingError(self._refusal()) from error
+        else:
+            try:
+                number = float(value)
+            except ValueError as error:
+                raise SettingError(self._refusal()) from error
+            # `float("nan")` parses, and every comparison with a NaN is false —
+            # so a bounded setting would accept it while reporting a range it is
+            # not in. Infinity parses too, and is outside every bound there is.
+            if not math.isfinite(number):
+                raise SettingError(self._refusal())
         if self.minimum is not None and number < self.minimum:
             raise SettingError(self._refusal())
         if self.maximum is not None and number > self.maximum:

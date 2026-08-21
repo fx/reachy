@@ -22,6 +22,7 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import PurePosixPath
 
 import pytest
@@ -38,6 +39,7 @@ from reachyctl.managed import MalformedRegionError, render_region
 from reachyctl.robot import (
     DEFAULT_APPLICATION,
     DEFAULT_STAGING,
+    CommandOutcome,
     RobotAccessError,
     RobotLayout,
 )
@@ -452,3 +454,69 @@ async def test_a_drop_in_that_is_there_and_unreadable_is_a_fault() -> None:
 
     with pytest.raises(RobotAccessError, match="could not read"):
         await daemon.read_managed_region()
+
+
+@pytest.mark.asyncio
+async def test_the_configuration_read_quotes_nothing_the_robot_wrote() -> None:
+    """It is the read that teaches the redactor what to scrub, so nothing can scrub it.
+
+    Every other message may quote the robot verbatim, because by the time one is
+    produced the redactor knows the robot's secret values. This one is produced
+    while learning them, so it says the command and the status and withholds the
+    output — and says that it is withholding it.
+    """
+    robot = FakeRobot(
+        failing={"systemctl"},
+        environment={"REACHY_GROUNDSTATION_CREDENTIAL": "example-not-a-real-secret"},
+        leaky=True,
+    )
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(RobotAccessError) as raised:
+        await daemon.effective_configuration()
+
+    message = str(raised.value)
+    assert "withheld" in message
+    assert "exited 1" in message
+    assert "this robot was told to refuse" not in message
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_over_a_broken_link_complains_rather_than_raising() -> None:
+    """It is called from the `finally` of a step that may already be failing.
+
+    Letting the link failure out would replace the reason a deploy failed with a
+    message about tidying up.
+    """
+    said: list[str] = []
+
+    class Broken(FakeRemoteAccess):
+        """A link that has gone while a step was in flight."""
+
+        async def run(self, command: Sequence[str]) -> CommandOutcome:
+            """Fail every command.
+
+            Args:
+                command: Ignored.
+
+            Returns:
+                Never.
+
+            Raises:
+                RobotAccessError: Always.
+            """
+            del command
+            message = "the link to the robot failed"
+            raise RobotAccessError(message)
+
+    daemon = DaemonClient(
+        Broken(FakeRobot()),
+        RobotLayout(),
+        elevate=True,
+        complain=said.append,
+    )
+
+    await daemon.discard(PurePosixPath(DEFAULT_STAGING) / "thing")
+
+    assert said
+    assert "could not remove" in said[0]

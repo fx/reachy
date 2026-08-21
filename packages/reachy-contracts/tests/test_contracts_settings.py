@@ -217,3 +217,24 @@ def test_a_non_finite_number_is_refused_by_a_bounded_setting(value: str) -> None
     """
     with pytest.raises(SettingError, match=STALENESS):
         validate_setting(STALENESS, value)
+
+
+def test_an_integer_larger_than_a_float_is_refused_rather_than_overflowing() -> None:
+    """Converting it to a float to compare it would raise rather than refuse.
+
+    A refusal arriving as an `OverflowError` is a crash, not a rejection, and
+    one merely large enough to lose its last digits would compare against a
+    number nobody typed.
+    """
+    enormous = "9" * 400
+
+    with pytest.raises(SettingError, match=INTERVAL):
+        validate_setting(INTERVAL, enormous)
+    with pytest.raises(SettingError, match=INTERVAL):
+        validate_setting(INTERVAL, f"-{enormous}")
+
+
+def test_a_real_number_setting_refuses_what_is_not_a_number() -> None:
+    """The other branch of the same parse, kept separate from the integer one."""
+    with pytest.raises(SettingError, match=STALENESS):
+        validate_setting(STALENESS, "soon")

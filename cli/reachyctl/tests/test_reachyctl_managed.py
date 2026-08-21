@@ -174,13 +174,30 @@ def test_the_committed_document_quotes_exactly_what_this_module_renders() -> Non
     assert str(drop_in_path()) in text
 
 
-def test_a_value_ending_in_a_lone_backslash_is_read_rather_than_swallowed() -> None:
-    """Nothing this format writes ends that way; something else's file might.
+@pytest.mark.parametrize(
+    "line",
+    [
+        # A backslash this format never writes: it escapes only `"` and `\\`.
+        r'Environment="A_SETTING=ends with\q"',
+        # A quote that is not escaped, so the line has three of them.
+        'Environment="A_SETTING=one"two"',
+        # A trailing backslash, which would escape the closing quote.
+        r'Environment="A_SETTING=ends with\"',
+        # A name carrying a quote, which `_escape` never produces.
+        'Environment="A"SETTING=value"',
+    ],
+)
+def test_a_directive_this_format_could_not_have_written_is_refused(line: str) -> None:
+    """Accepting one would mean reporting somebody else's file as a region we own.
 
-    The unescaper walks the value a character at a time, so a backslash with
-    nothing after it is the one position where a loop silently drops a
-    character. It is kept.
+    The next `config set` would then rewrite it. So the parser admits only lines
+    the writer could have produced, which is what makes "this region is ours" a
+    check rather than an assumption.
+
+    Args:
+        line: The directive to refuse.
     """
-    content = f'[Service]\n{BEGIN_MARKER}\nEnvironment="A_SETTING=ends with\\"\n{END_MARKER}\n'
+    content = f"[Service]\n{BEGIN_MARKER}\n{line}\n{END_MARKER}\n"
 
-    assert parse_region(content) == {"A_SETTING": "ends with\\"}
+    with pytest.raises(MalformedRegionError, match="not readable"):
+        parse_region(content)

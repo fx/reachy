@@ -80,10 +80,20 @@ HEADER: Final = (
 _SECTION: Final = "[Service]"
 
 # `Environment="NAME=value"`, with the whole assignment inside one pair of double
-# quotes. Anchored and non-greedy at neither end: the value runs to the last
-# quote on the line, because an escaped quote inside it is `\"` and the closing
-# one is the only unescaped quote there is.
-_ENVIRONMENT_LINE: Final = re.compile(r'^Environment="([^=]+)=(.*)"$')
+# quotes, and the value written the way `_escape` writes one: any character that
+# is neither a quote nor a backslash, or one of the two escapes this format
+# produces. Deliberately not `(.*)`. A permissive value pattern accepts lines
+# this format could never have written — an unbalanced quote, an escape systemd
+# reads differently — and `parse_region` would then report them as settings this
+# tool owns, after which the next apply rewrites somebody else's file. Every line
+# this accepts is a line this module could have produced, which is what makes
+# "the region is ours" a check rather than an assumption.
+# The two escapes `_escape` writes, and the only two `_ENVIRONMENT_LINE` admits.
+_ESCAPED: Final = re.compile(r'\\(["\\])')
+
+_ENVIRONMENT_LINE: Final = re.compile(
+    r'^Environment="([^="\\]+)=((?:[^"\\]|\\["\\])*)"$',
+)
 
 
 class MalformedRegionError(ValueError):
@@ -218,22 +228,15 @@ def _escape(value: str) -> str:
 def _unescape(value: str) -> str:
     """Read a value back out of a double-quoted systemd assignment.
 
+    Total rather than defensive: `_ENVIRONMENT_LINE` has already refused any
+    line whose backslashes are not the two escapes `_escape` writes, so there is
+    no dangling escape to decide what to do with. A line this cannot read is one
+    `parse_region` never reached.
+
     Args:
         value: What appeared between the quotes.
 
     Returns:
         The setting's value.
     """
-    result: list[str] = []
-    escaped = False
-    for character in value:
-        if escaped:
-            result.append(character)
-            escaped = False
-        elif character == "\\":
-            escaped = True
-        else:
-            result.append(character)
-    if escaped:
-        result.append("\\")
-    return "".join(result)
+    return _ESCAPED.sub(r"\1", value)

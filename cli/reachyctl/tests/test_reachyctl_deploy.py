@@ -547,3 +547,23 @@ async def test_an_operator_can_name_the_distribution_the_daemon_knows() -> None:
     assert any(
         "known-by-another-name" in " ".join(command) for command in access.commands
     )
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_that_fails_does_not_replace_the_install_failure() -> None:
+    """The reason a deploy failed must not be replaced by a message about tidying up.
+
+    The link breaks during the install and the cleanup runs over the same broken
+    link, so it fails too. What an operator needs to read is the first one.
+    """
+    said: list[str] = []
+    robot = FakeRobot(failing={"rm"}, install_succeeds=False)
+    daemon, _access = daemon_for(robot, layout=LAYOUT, complain=said.append)
+    reporter, _streams = reporter_for()
+
+    outcome = await run_deploy(_plan(), daemon, reporter)
+
+    steps = _named(outcome.steps.results)
+    assert steps["install"].failed is True
+    assert said
+    assert "could not remove" in said[0]

@@ -200,8 +200,14 @@ async def test_applying_the_same_declaration_twice_changes_nothing_the_second_ti
     assert difference.changes is False
     assert _named(steps.results)["write"].outcome.value == "skipped"
     assert _named(steps.results)["restart"].outcome.value == "skipped"
-    # Two reads and nothing else: no write, no reload, no restart.
-    assert len(access.commands) - sent <= 3
+    # Two reads and nothing else. Asserted by absence rather than by a count:
+    # an edit that added a write while dropping some other command would pass a
+    # budget, and a write is the exact regression this test exists to catch.
+    second = access.commands[sent:]
+    assert not any(command[0] == "<upload>" for command in second)
+    assert not any("install" in command for command in second)
+    assert not any("restart" in command for command in second)
+    assert not any("daemon-reload" in command for command in second)
 
 
 #:= docs/specs/reachyctl/index.md#req-052-configuration-changes-can-be-previewed-without-being-applied

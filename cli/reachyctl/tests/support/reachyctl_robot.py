@@ -693,6 +693,7 @@ def daemon_for(
     robot: FakeRobot | None = None,
     observer: Callable[[Sequence[str]], None] | None = None,
     layout: RobotLayout | None = None,
+    complain: Callable[[str], None] | None = None,
 ) -> tuple[DaemonClient, FakeRemoteAccess]:
     """Build a daemon client over a robot that is not there.
 
@@ -701,13 +702,21 @@ def daemon_for(
         observer: Called with each command as it is sent.
         layout: Where things are on the robot. The defaults are the real ones,
             so a test exercises the paths and unit names that ship.
+        complain: Where the client says what is worth seeing and not worth
+            failing over.
 
     Returns:
         The client and the link underneath it, so a test can assert on both what
         was reported and what was actually sent.
     """
     access = FakeRemoteAccess(robot, observer)
-    return DaemonClient(access, layout or RobotLayout(), elevate=True), access
+    client = DaemonClient(
+        access,
+        layout or RobotLayout(),
+        elevate=True,
+        complain=complain,
+    )
+    return client, access
 
 
 def _is_chmod(argv: list[str]) -> bool:

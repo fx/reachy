@@ -281,6 +281,26 @@ class CommandOutcome:
         """
         return self.exit_status == 0
 
+    def status_only(self) -> str:
+        """Say that this command failed, quoting nothing it wrote.
+
+        For the one read whose failure cannot be scrubbed: the command that
+        fetches the robot's configuration is what teaches the redactor the
+        robot's secret values, so a message quoting *its* output would be the
+        one message no redactor could ever clean. It reports the command and the
+        status, says the output is withheld, and says why — an operator who
+        needs the text can run the command themselves, which is a decision they
+        make rather than one this tool makes for them.
+
+        Returns:
+            The command and its status, and nothing the robot wrote.
+        """
+        return (
+            f"`{self.command}` exited {self.exit_status}. What it wrote is "
+            f"withheld: this is the read that teaches the tool which values on "
+            f"this robot are secret, so nothing could scrub its output"
+        )
+
     def complaint(self) -> str:
         """Say why this command is not an answer, quoting the robot verbatim.
 
