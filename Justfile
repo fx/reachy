@@ -299,12 +299,18 @@ image variant="cpu" tag="reachy-groundstation:dev" *buildx_args:
     # then runs under emulation. The two are a caller who already said where the
     # result goes, since buildx refuses two destinations, and a genuinely
     # multi-platform build, which buildx cannot load into a daemon at all.
+    # Every spelling buildx accepts for a destination, because two exporters is
+    # an error rather than a preference: the long flags, their boolean
+    # assignment forms, and the `-o` shorthand with or without its value
+    # attached.
     output=(--load)
     platforms=''
     previous=''
     for argument in {{ buildx_args }}; do
         case "$argument" in
-            --load|--push|--output|--output=*) output=() ;;
+            --load|--load=*|--push|--push=*|--output|--output=*|-o|-o=*|-o?*)
+                output=()
+                ;;
             --platform=*) platforms="${argument#--platform=}" ;;
         esac
         if [ "$previous" = '--platform' ]; then
