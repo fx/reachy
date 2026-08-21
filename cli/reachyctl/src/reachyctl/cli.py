@@ -3,8 +3,9 @@
 This layer is deliberately thin. It turns arguments into a plan, resolves the
 credential, builds the source, hands all three to the command's own module and
 turns whatever comes back into an exit status. Nothing about the session
-protocol is decided here, which is what makes `doctor` in change 0008 and
-`deploy` in 0009 additive rather than a second round of the same decisions.
+protocol is decided here, and nothing about what a healthy installation is:
+`doctor` runs the shared check registry in `reachy_checks`, which is what makes
+it and the provisioning verification role assert the same conditions.
 
 Three conventions are set here and inherited by every command added later:
 
@@ -44,6 +45,13 @@ from reachyctl.credentials import (
     URL_VARIABLE,
     load_credential,
 )
+from reachyctl.doctor import (
+    INTENT_VARIABLE,
+    MODELS_DIR_VARIABLE,
+    DoctorPlan,
+    load_intent,
+)
+from reachyctl.doctor import execute as execute_doctor
 from reachyctl.errors import CommandError, ConfigurationError
 from reachyctl.exits import ExitCode
 from reachyctl.frames import (
@@ -66,8 +74,9 @@ _DISTRIBUTION: Final = "reachyctl"
 app = typer.Typer(
     name=_DISTRIBUTION,
     help=(
-        "Operate a Reachy Mini running this stack: exercise the groundstation, "
-        "and — as later changes land — deploy, configure and diagnose the robot."
+        "Operate a Reachy Mini running this stack: diagnose the chain end to "
+        "end, exercise the groundstation, and — as later changes land — deploy "
+        "and configure the robot."
     ),
     no_args_is_help=True,
     add_completion=False,
@@ -348,6 +357,135 @@ def probe(
     except CommandError as error:
         raise typer.Exit(
             reporter.failure("probe", str(error), error.exit_code),
+        ) from error
+    raise typer.Exit(code)
+
+
+@app.command()
+def doctor(
+    ctx: typer.Context,
+    url: Annotated[
+        str | None,
+        typer.Option(
+            "--url",
+            envvar=URL_VARIABLE,
+            help=(
+                "The groundstation's session endpoint, ws:// or wss://. "
+                "Without one, the groundstation checks are skipped rather than "
+                "reported as broken."
+            ),
+        ),
+    ] = None,
+    capability: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--capability",
+            help=(
+                "A capability to offer, as 'name' or 'name:version'. Repeatable. "
+                "Defaults to every capability this build knows about."
+            ),
+        ),
+    ] = None,
+    models_dir: Annotated[
+        Path | None,
+        typer.Option(
+            "--models-dir",
+            envvar=MODELS_DIR_VARIABLE,
+            help=(
+                "The directory holding the pinned model files. Without one, "
+                "the model check is skipped."
+            ),
+        ),
+    ] = None,
+    intent: Annotated[
+        Path | None,
+        typer.Option(
+            "--intent",
+            envvar=INTENT_VARIABLE,
+            help=(
+                "A JSON document declaring what the robot is supposed to be: "
+                "'configuration' and 'announced_identity'. Without one, the "
+                "configuration and identity checks are skipped."
+            ),
+        ),
+    ] = None,
+    timeout: Annotated[
+        float,
+        typer.Option(
+            "--timeout",
+            min=0.1,
+            help="Bound on opening the session, and then on waiting for a result.",
+        ),
+    ] = 10.0,
+    staleness: Annotated[
+        float,
+        typer.Option(
+            "--staleness",
+            min=0.1,
+            help="How long a result stays worth acting on.",
+        ),
+    ] = 2.0,
+    credential_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--credential-file",
+            envvar=CREDENTIAL_FILE_VARIABLE,
+            help=(
+                "A file holding the groundstation credential. There is no "
+                "option that takes the credential itself."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Diagnose the chain from this machine to a working robot, link by link.
+
+    Every check runs whatever the ones before it did, so a broken groundstation
+    does not hide the state of the daemon, and the summary names the first link
+    that is actually broken. A check whose prerequisites are absent is reported
+    as skipped rather than failed: not having configured something is not the
+    same as it being broken.
+
+    Args:
+        ctx: The invocation, carrying the reporter.
+        url: The groundstation's session endpoint, if one is configured.
+        capability: What to offer during negotiation.
+        models_dir: Where the pinned model files are.
+        intent: A declaration of what the robot is supposed to be.
+        timeout: Bound on the session and on waiting for a result.
+        staleness: How long a result stays worth acting on.
+        credential_file: Where the credential is kept.
+
+    Raises:
+        typer.Exit: Always, carrying the exit status the run earned.
+    """
+    reporter = _reporter(ctx)
+    try:
+        # Cheapest and most local first, so a mistyped address or an intent
+        # document that is not one is answered before anything is contacted.
+        plan = DoctorPlan(
+            url=None if url is None else _session_url(url),
+            capabilities=(
+                DEFAULT_CAPABILITIES
+                if not capability
+                else tuple(parse_capability(text) for text in capability)
+            ),
+            models_directory=models_dir,
+            intent=None if intent is None else load_intent(intent),
+            timeout=timeout,
+            staleness=staleness,
+        )
+        credential = None
+        if plan.url is not None:
+            # A configured groundstation with no credential is a mistake in the
+            # invocation and not a diagnosis of anything, so it is reported as
+            # one rather than as a groundstation that is skipped or down.
+            credential = load_credential(_environ(), credential_file)
+            reporter.redactor.guard(credential.reveal())
+            reporter.detail(f"credential resolved: {credential}")
+        code = execute_doctor(plan, credential, reporter)
+    except CommandError as error:
+        raise typer.Exit(
+            reporter.failure("doctor", str(error), error.exit_code),
         ) from error
     raise typer.Exit(code)
 

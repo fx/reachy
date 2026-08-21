@@ -7,6 +7,10 @@ dependencies = [
     # The wire vocabulary. Declared once, in the contracts package, and imported
     # here rather than restated — see the root AGENTS.md.
     "reachy-contracts",
+    # The one definition of what a healthy installation is. `doctor` runs these
+    # declarations and the provisioning verification role imports the same ones,
+    # which is what makes reachyctl REQ-056 hold rather than be intended.
+    "reachy-checks",
     # The one client implementation of the session protocol. `probe` is a second
     # consumer of it, not a second implementation — see reachyctl REQ-057.
     "reachy-session-client",
@@ -39,5 +43,6 @@ packages = ["src/reachyctl"]
 # By path, never by version range: there is no published sibling a resolver
 # could pick instead of the one in this tree.
 [tool.uv.sources]
+reachy-checks = { workspace = true }
 reachy-contracts = { workspace = true }
 reachy-session-client = { workspace = true }

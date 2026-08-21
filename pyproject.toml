@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "reachy-bench",
+    "reachy-checks",
     "reachy-contracts",
     "reachy-groundstation",
     "reachy-hygiene",
@@ -106,6 +107,7 @@ requires-dist = ["numpy", "onnxruntime", "huggingface-hub>=1.17"]
 
 [tool.uv.workspace]
 members = [
+    "packages/reachy-checks",
     "packages/reachy-contracts",
     "packages/reachy-session-client",
     "apps/ha-satellite",
@@ -119,6 +121,7 @@ members = [
 # published version of one member that a sibling could be resolved against.
 [tool.uv.sources]
 reachy-bench = { workspace = true }
+reachy-checks = { workspace = true }
 reachy-contracts = { workspace = true }
 reachy-groundstation = { workspace = true }
 reachy-hygiene = { workspace = true }
@@ -135,6 +138,7 @@ reachyctl = { workspace = true }
 line-length = 88
 target-version = "py312"
 src = [
+    "packages/reachy-checks/src",
     "packages/reachy-contracts/src",
     "packages/reachy-session-client/src",
     "apps/ha-satellite/src",
@@ -334,6 +338,7 @@ strict = true
 warn_unreachable = true
 explicit_package_bases = true
 mypy_path = [
+    "packages/reachy-checks/src",
     "packages/reachy-contracts/src",
     "packages/reachy-session-client/src",
     "apps/ha-satellite/src",
@@ -356,6 +361,7 @@ mypy_path = [
     # mypy path root makes the files directly under it top-level modules, and two
     # members' `conftest.py` would then both be the module `conftest`.
     "services/groundstation/tests/support",
+    "packages/reachy-checks/tests/support",
     "packages/reachy-session-client/tests/support",
     "cli/reachyctl/tests/support",
 ]
@@ -494,6 +500,7 @@ testpaths = ["packages", "apps", "services", "cli", "bench", "tools", "scripts"]
 # spends that name. Declaring both here keeps the two new members alike rather
 # than splitting them over a constraint that happens to bind only one.
 pythonpath = [
+    "packages/reachy-checks/tests/support",
     "packages/reachy-session-client/tests/support",
     "cli/reachyctl/tests/support",
 ]
@@ -513,6 +520,7 @@ branch = true
 # Only member source is measured. Test files are not production code, and
 # counting them inflates the number the diff gate reads.
 source = [
+    "packages/reachy-checks/src",
     "packages/reachy-contracts/src",
     "packages/reachy-session-client/src",
     "apps/ha-satellite/src",

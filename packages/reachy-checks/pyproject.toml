@@ -1,0 +1,38 @@
+[project]
+name = "reachy-checks"
+version = "0.1.0"
+description = "The one definition of what a healthy Reachy Mini installation is"
+requires-python = ">=3.12"
+dependencies = [
+    # The wire vocabulary. Declared once, in the contracts package, and imported
+    # here rather than restated — see the root AGENTS.md.
+    "reachy-contracts",
+    # The one client implementation of the session protocol. The groundstation
+    # checks open a real session with it, so what they diagnose is the protocol
+    # the robot speaks rather than a diagnostic dialect of it.
+    "reachy-session-client",
+]
+
+# The model files a check verifies belong to the groundstation's artifact, and
+# the registry that pins them by digest lives in that service. Reusing it is the
+# point — a second copy of the digests would be a second opinion about which
+# weights are the right ones — but the service also pulls OpenCV, onnxruntime
+# and an ASGI stack, none of which a CLI or an Ansible control machine has any
+# use for. So it is an extra: the check runs where the groundstation is
+# installed, and reports itself skipped where it is not.
+[project.optional-dependencies]
+models = ["reachy-groundstation"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reachy_checks"]
+
+# By path, never by version range: there is no published sibling a resolver
+# could pick instead of the one in this tree.
+[tool.uv.sources]
+reachy-contracts = { workspace = true }
+reachy-groundstation = { workspace = true }
+reachy-session-client = { workspace = true }
