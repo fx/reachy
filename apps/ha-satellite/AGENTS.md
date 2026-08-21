@@ -24,6 +24,7 @@ that apply here.
 | `src/reachy_mini_ha_satellite/esphome/seams.py` | The two audio interfaces cut into it. Not vendored; filled by `adapters/audio_reachy.py` |
 | `src/reachy_mini_ha_satellite/assets/` | Wake-word models and sounds that ship in the wheel, with the registry recording each one's terms |
 | `src/reachy_mini_ha_satellite/behaviour/` | The pure decision layer: a pipeline state machine, a face tracker, and what each state looks like |
+| `src/reachy_mini_ha_satellite/wake_word.py` | What actually *runs* the wake-word models over captured audio — the thresholds, the refractory window and the mute check, with only the model calls behind a seam |
 | `src/reachy_mini_ha_satellite/config.py` | Settings, their three layers, and the one place a secret is declared to be one |
 | `src/reachy_mini_ha_satellite/web/` | The settings interface REQ-049 requires |
 | `src/reachy_mini_ha_satellite/main.py` | The composition root: ports to adapters, the loop, and the four services |

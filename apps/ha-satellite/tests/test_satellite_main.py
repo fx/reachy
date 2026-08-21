@@ -34,13 +34,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import httpx
+import numpy as np
 import pytest
 from satellite_support import (
     FakeAudio,
     FakeCapture,
+    FakeMicroWakeWord,
     FakeMotion,
     FakePerception,
     FakeRobot,
+    FakeWakeWordFeatures,
+    available_wake_word,
     face,
 )
 
@@ -71,6 +75,7 @@ from reachy_mini_ha_satellite.main import (
     AdvertisementService,
     EsphomeService,
     SatelliteApplication,
+    WebRTCLike,
     WebService,
     _daemon_thread,
     _NoPerception,
@@ -90,6 +95,7 @@ from reachy_mini_ha_satellite.ports import (
     HeadPose,
     SourceSelection,
 )
+from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -656,6 +662,291 @@ class TestTheEsphomeService:
 
         assert True  # returning at all is the assertion: the loop is bounded
 
+    @pytest.mark.asyncio
+    async def test_detection_returns_at_once_when_no_detector_was_given(self) -> None:
+        """A service built without one never starts the thread; `detect` is public."""
+        service, _state = _esphome_service([], capture=FakeCapture([]))
+        await service.start()
+
+        service.detect()
+
+        assert True  # as above: it returns rather than blocking on the queue
+
+
+class TestTheWakeWordFeed:
+    """The half of the feed that *starts* a conversation.
+
+    This is the regression suite for the defect that reached a robot: the
+    models loaded, Home Assistant listed them, the microphone worked, audio
+    reached Home Assistant once a pipeline was running — and nothing anywhere
+    called `wakeup`, so speaking to the robot did nothing at all. The whole
+    suite passed. Every test here fails if the detection half is removed again.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_model_that_fires_wakes_the_robot(self) -> None:
+        """The one assertion the previous suite was missing entirely."""
+        model = FakeMicroWakeWord("okay_nabu", fires=[True])
+        service, _state, satellite = await self._feed(model)
+
+        service.pump()
+        service.detect()
+
+        assert satellite.woken == [model]
+
+    @pytest.mark.asyncio
+    async def test_it_still_streams_every_chunk_to_home_assistant(self) -> None:
+        """Detection must not cost the streaming half a single chunk."""
+        model = FakeMicroWakeWord("okay_nabu", fires=[True])
+        service, _state, satellite = await self._feed(model, chunks=3)
+
+        service.pump()
+
+        assert len(satellite.chunks) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_muted_robot_is_not_woken(self) -> None:
+        """Asserted here as well as in the detector: it is what mute means."""
+        model = FakeMicroWakeWord("okay_nabu", fires=[True])
+        service, state, satellite = await self._feed(model)
+        state.muted = True
+
+        service.pump()
+        service.detect()
+
+        assert satellite.woken == []
+
+    @pytest.mark.asyncio
+    async def test_the_stop_word_stops_a_response(self) -> None:
+        """The other thing the detection half is for."""
+        model = FakeMicroWakeWord("okay_nabu")
+        stop = FakeMicroWakeWord("stop", fires=[True])
+        service, state, satellite = await self._feed(model, stop_word=stop)
+        state.active_wake_words = {model.id, "stop"}
+
+        service.pump()
+        service.detect()
+
+        assert satellite.stops == 1
+
+    @pytest.mark.asyncio
+    async def test_a_model_that_raises_does_not_end_detection(self) -> None:
+        """A dead detection thread is this defect arrived at from the other side."""
+        broken = FakeMicroWakeWord("okay_nabu", fails=True)
+        service, _state, satellite = await self._feed(broken, chunks=2)
+
+        service.pump()
+        service.detect()
+
+        assert len(satellite.chunks) == 2
+        assert len(broken.inputs) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_backlog_costs_detection_and_not_streaming(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A detector that cannot keep up must not slow the conversation down.
+
+        Args:
+            caplog: Where the pump says it is dropping chunks, which is the
+                only outward sign that it happened.
+        """
+        model = FakeMicroWakeWord("okay_nabu")
+        service, _state, satellite = await self._feed(model, chunks=5, backlog=2)
+
+        with caplog.at_level(logging.WARNING, logger="reachy_mini_ha_satellite.main"):
+            service.pump()
+
+        assert len(satellite.chunks) == 5
+        assert "behind the microphone" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_detection_ends_when_the_microphone_does(self) -> None:
+        """Otherwise `detect` blocks on the queue for ever and shutdown hangs."""
+        model = FakeMicroWakeWord("okay_nabu")
+        service, _state, _satellite = await self._feed(model, chunks=1)
+
+        service.pump()
+        service.detect()
+
+        assert True  # returning at all is the assertion: `detect` is bounded
+
+    @pytest.mark.asyncio
+    async def test_closing_ends_detection_that_never_started(self) -> None:
+        """A service stopped before its first chunk still has a thread to end."""
+        model = FakeMicroWakeWord("okay_nabu")
+        service, _state, _satellite = await self._feed(model)
+
+        await service.aclose()
+        service.detect()
+
+        assert True  # as above: the sentinel `aclose` leaves is what ends it
+
+    async def _feed(
+        self,
+        model: FakeMicroWakeWord,
+        *,
+        chunks: int = 1,
+        stop_word: FakeMicroWakeWord | None = None,
+        backlog: int = 50,
+    ) -> tuple[EsphomeService, ServerState, _RecordingSatellite]:
+        """Build a started service with a real detector over a fake model.
+
+        Real detector, fake model: what is under test is that the pump runs
+        detection at all and acts on what it says, and a canned detector would
+        assert only half of that.
+
+        Args:
+            model: The wake word to activate.
+            chunks: How many chunks the microphone produces.
+            stop_word: The stop word, or a silent one.
+            backlog: How many chunks may wait for detection.
+
+        Returns:
+            The started service, its state, and the connected satellite.
+        """
+        from satellite_support import vendored_server_state
+
+        state = vendored_server_state(
+            wake_words={model.id: model},
+            active_wake_words={model.id},
+            available_wake_words={model.id: available_wake_word(model.id)},
+            stop_word=stop_word if stop_word is not None else FakeMicroWakeWord("stop"),
+        )
+        detector = WakeWordDetector(
+            state,
+            micro_features=FakeWakeWordFeatures,
+            open_features=FakeWakeWordFeatures,
+        )
+        service, _state = _esphome_service(
+            [],
+            capture=FakeCapture([[b"\x00" * 320, b"\x01" * 320]] * chunks),
+            state=state,
+            detector=detector,
+            backlog=backlog,
+        )
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+        return service, state, satellite
+
+
+class TestTheMicrophoneSettings:
+    """The three entities Home Assistant owns that were inert until now."""
+
+    @pytest.mark.asyncio
+    async def test_the_microphone_volume_attenuates_what_is_streamed(self) -> None:
+        """It was persisted, reported back, and applied to nothing."""
+        loud = np.full(160, 1000, dtype="<i2").tobytes()
+        service, state = _esphome_service([], capture=FakeCapture([[loud]]))
+        state.mic_volume = 50
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        streamed = np.frombuffer(satellite.chunks[0][0], dtype="<i2")
+        assert list(streamed) == [500] * 160
+
+    @pytest.mark.asyncio
+    async def test_the_default_volume_leaves_the_audio_exactly_alone(self) -> None:
+        """Which is every chunk on a robot nobody has touched that slider on."""
+        chunk = np.full(160, 1000, dtype="<i2").tobytes()
+        service, state = _esphome_service([], capture=FakeCapture([[chunk]]))
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert satellite.chunks[0][0] is chunk
+
+    @pytest.mark.asyncio
+    async def test_gain_and_noise_suppression_reach_the_conditioner(self) -> None:
+        """Two more entities that took a value and changed nothing audible."""
+        built: list[tuple[int, int]] = []
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[b"\x02" * 320]] * 2),
+            build_webrtc=lambda gain, noise: _FakeWebRTC(built, gain, noise),
+        )
+        state.preferences.mic_auto_gain = 2
+        state.preferences.mic_noise_suppression = 3
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert built == [(2, 3)]
+        assert satellite.chunks[0][0] == b"\x03" * 320
+
+    @pytest.mark.asyncio
+    async def test_a_block_the_conditioner_swallowed_is_not_streamed(self) -> None:
+        """It buffers into ten-millisecond frames and can answer with nothing."""
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[b"\x02" * 320]]),
+            build_webrtc=lambda gain, noise: _FakeWebRTC([], gain, noise, swallow=True),
+        )
+        state.preferences.mic_auto_gain = 1
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert satellite.chunks == []
+
+
+class _FakeWebRTC:
+    """A microphone conditioner that records how it was built and driven."""
+
+    def __init__(
+        self,
+        built: list[tuple[int, int]],
+        agc_level: int,
+        ns_level: int,
+        *,
+        swallow: bool = False,
+    ) -> None:
+        """Record the levels it was built with.
+
+        Args:
+            built: Where to record that it was built.
+            agc_level: The gain level.
+            ns_level: The noise-suppression level.
+            swallow: Whether to answer with nothing, as the real one does while
+                it is still filling a frame.
+        """
+        built.append((agc_level, ns_level))
+        self.updates: list[tuple[int, int]] = []
+        self._swallow = swallow
+
+    def update_settings(self, agc_level: int, ns_level: int) -> None:
+        """Record a change of levels.
+
+        Args:
+            agc_level: The gain level.
+            ns_level: The noise-suppression level.
+        """
+        self.updates.append((agc_level, ns_level))
+
+    def process(self, raw_bytes: bytes) -> bytes:
+        """Condition one chunk, visibly.
+
+        Args:
+            raw_bytes: The audio.
+
+        Returns:
+            Something recognisably different from the input, or nothing at all.
+        """
+        if self._swallow:
+            return b""
+        return bytes(byte + 1 for byte in raw_bytes)
+
 
 class TestTheAdvertisement:
     """The mDNS record Home Assistant discovers the satellite through."""
@@ -914,6 +1205,40 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         assert state.active_wake_words
         assert state.stop_word is not None
 
+    def test_the_persisted_microphone_settings_come_back(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Otherwise every restart quietly puts the four of them back to default.
+
+        The preferences are supplied rather than written to a file: what is
+        under test is that they reach the state, and `load_preferences` has its
+        own tests. The wake-word models still load off the real asset
+        directory, which is why this belongs in this class.
+
+        Args:
+            monkeypatch: Used to hand the assembly a set of preferences.
+        """
+        saved = Preferences(
+            mic_volume=40,
+            mic_auto_gain=2,
+            mic_noise_suppression=3,
+            stop_word_sensitivity=0.25,
+        )
+        monkeypatch.setattr(satellite_main, "load_preferences", lambda _path: saved)
+
+        state = build_server_state(
+            _settings(),
+            identity=_identity(),
+            audio=FakeAudio(),
+            state_dir=Path("/reachy-satellite-main"),
+        )
+
+        assert state.mic_volume == 40
+        assert state.mic_auto_gain == 2
+        assert state.mic_noise_suppression == 3
+        assert state.stop_word_threshold == pytest.approx(0.25)
+
     def test_both_audio_seams_are_filled_by_the_ports(self) -> None:
         """Which is what change 0011 left open and 0012 supplied."""
         audio = FakeAudio()
@@ -1056,6 +1381,8 @@ class _RecordingSatellite:
     def __init__(self) -> None:
         """Start having been handed nothing."""
         self.chunks: list[tuple[bytes, bytes | None]] = []
+        self.woken: list[object] = []
+        self.stops = 0
 
     def handle_audio(
         self,
@@ -1069,6 +1396,18 @@ class _RecordingSatellite:
             audio_chunk_2: The speaker reference, where the device has one.
         """
         self.chunks.append((audio_chunk, audio_chunk_2))
+
+    def wakeup(self, wake_word: object) -> None:
+        """Record that a wake word started a pipeline.
+
+        Args:
+            wake_word: The model that fired.
+        """
+        self.woken.append(wake_word)
+
+    def stop(self) -> None:
+        """Record that a response was told to stop."""
+        self.stops += 1
 
 
 class _FakeZeroconf:
@@ -1140,6 +1479,10 @@ def _esphome_service(
     *,
     capture: FakeCapture | None = None,
     tap: PipelineEventTap | None = None,
+    state: ServerState | None = None,
+    detector: WakeWordDetector | None = None,
+    build_webrtc: Callable[[int, int], WebRTCLike] | None = None,
+    backlog: int = 50,
 ) -> tuple[EsphomeService, ServerState]:
     """Build the protocol service over a state nothing binds a socket for.
 
@@ -1147,13 +1490,18 @@ def _esphome_service(
         bound: Where to record what the service asked to listen on.
         capture: The microphone, or a silent one.
         tap: What pipeline events go into.
+        state: The vendored state, or an inert one.
+        detector: What runs the wake-word models, or nothing at all.
+        build_webrtc: How to make the microphone conditioner.
+        backlog: How many chunks may wait for detection.
 
     Returns:
         The service and the vendored state it was built over.
     """
     from satellite_support import vendored_server_state
 
-    state = vendored_server_state()
+    if state is None:
+        state = vendored_server_state()
 
     async def _listen(factory: object, host: str, port: int) -> _FakeServer:
         """Stand in for opening a listening socket.
@@ -1176,10 +1524,57 @@ def _esphome_service(
         tap if tap is not None else PipelineEventTap(lambda _: None),
         host="127.0.0.1",
         port=6053,
+        detector=detector,
         listen=_listen,
         start_thread=lambda _work: None,
+        build_webrtc=build_webrtc if build_webrtc is not None else _RefusingWebRTC,
+        backlog=backlog,
     )
     return service, state
+
+
+class _RefusingWebRTC:
+    """A conditioner that fails the test if anything asks for one.
+
+    The default in every test that has not asked for microphone conditioning,
+    because the alternative — the real one — loads a native library, and a test
+    that built one by accident would be quietly exercising it.
+    """
+
+    def __init__(self, agc_level: int, ns_level: int) -> None:
+        """Refuse to be built.
+
+        Args:
+            agc_level: The gain level asked for.
+            ns_level: The noise-suppression level asked for.
+
+        Raises:
+            AssertionError: Always.
+        """
+        message = (
+            f"the pump built a microphone conditioner nobody asked for "
+            f"(gain {agc_level}, noise {ns_level})"
+        )
+        raise AssertionError(message)
+
+    def update_settings(self, agc_level: int, ns_level: int) -> None:
+        """Never reached.
+
+        Args:
+            agc_level: The gain level asked for.
+            ns_level: The noise-suppression level asked for.
+        """
+
+    def process(self, raw_bytes: bytes) -> bytes:
+        """Never reached.
+
+        Args:
+            raw_bytes: The audio.
+
+        Returns:
+            The same audio.
+        """
+        return raw_bytes
 
 
 class _FakeServer:

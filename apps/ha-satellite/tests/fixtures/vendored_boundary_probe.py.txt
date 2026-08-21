@@ -24,6 +24,7 @@ import reachy_mini_ha_satellite.behaviour
 import reachy_mini_ha_satellite.config
 import reachy_mini_ha_satellite.main
 import reachy_mini_ha_satellite.ports
+import reachy_mini_ha_satellite.wake_word
 import reachy_mini_ha_satellite.web
 
 # Dynamic forms, which TID251 cannot see at all — it inspects import statements.

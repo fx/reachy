@@ -14,9 +14,10 @@ keeps protobuf out of the state machine — and it composes nothing.
 
 What runs here is a loop and four services. The loop asks the behaviour layer
 what the robot should be doing and applies the answer; the services are the
-things that have a lifetime of their own — the ESPHome protocol server and the
-microphone pump that feeds it, the mDNS advertisement Home Assistant discovers
-the robot through, and the settings interface.
+things that have a lifetime of their own — the ESPHome protocol server, the
+microphone pump that feeds it and the wake-word detection that runs beside it,
+the mDNS advertisement Home Assistant discovers the robot through, and the
+settings interface.
 
 **Shutdown is the part worth reading.** ha-satellite REQ-050 asks for movement to
 stop, the media interface to be released, and the process to exit, and it asks
@@ -43,9 +44,10 @@ import threading
 import time
 from dataclasses import fields
 from pathlib import Path
-from queue import Queue
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from queue import Full, Queue
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast
 
+import numpy as np
 from starlette.types import ASGIApp
 
 from reachy_contracts import FACE_CAPABILITY, Capability, __version__
@@ -83,21 +85,31 @@ from reachy_mini_ha_satellite.config import (
     overrides_path,
     state_directory,
 )
-from reachy_mini_ha_satellite.esphome.models import Preferences, ServerState
+from reachy_mini_ha_satellite.esphome.models import (
+    Preferences,
+    ServerState,
+    initial_stop_word_threshold,
+)
 from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
+from reachy_mini_ha_satellite.esphome.seams import SAMPLE_WIDTH
 from reachy_mini_ha_satellite.esphome.util import get_esphome_version
 from reachy_mini_ha_satellite.esphome.wake_word import (
     find_available_wake_words,
     load_stop_model,
     load_wake_models,
 )
+from reachy_mini_ha_satellite.esphome.webrtc import WebRTCProcessor
 from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
 from reachy_mini_ha_satellite.ports import Detections, SourceSelection
+from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 from reachy_mini_ha_satellite.web import create_app
 from reachy_session_client import Credential, SessionClient
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Sequence
+
+    from pymicro_wakeword import MicroWakeWord
+    from pyopen_wakeword import OpenWakeWord
 
     from reachy_mini_ha_satellite.adapters.daemon import MediaInterface, RobotHandle
     from reachy_mini_ha_satellite.behaviour import MotionIntent, PipelineEvent
@@ -115,6 +127,7 @@ __all__ = [
     "EsphomeService",
     "SatelliteApplication",
     "Service",
+    "WebRTCLike",
     "WebService",
     "apply_intents",
     "build_application",
@@ -440,19 +453,92 @@ class SatelliteApplication:
         _LOGGER.info("satellite.stopped")
 
 
+# How long shutdown waits for either audio thread to notice. Both are already
+# unblocked before this is reached — the audio port is released first, so
+# `read_chunk` has answered `None` and the pump has left the sentinel on the
+# detection queue — so this is the bound on threads that are already finishing
+# rather than a wait anybody expects to spend.
+_THREAD_JOIN_SECONDS: Final = 2.0
+
+# How many conditioned chunks may wait for the wake-word detector. Fifty, which
+# at the ten-millisecond chunks the capture port produces is half a second.
+_DETECTION_BACKLOG: Final = 50
+
+# How often to say that detection is falling behind: once for the first drop,
+# and once per hundred after that. An overloaded robot must not spend what is
+# left of its processor writing about being overloaded.
+_DROP_REPORT_EVERY: Final = 100
+
+# The sample format every chunk crossing the capture seam is in, spelled the way
+# numpy spells it. Derived from the seam's own constant rather than written out,
+# so the two cannot drift apart.
+_PCM_DTYPE: Final = np.dtype(f"<i{SAMPLE_WIDTH}")
+
+
+class WebRTCLike(Protocol):
+    """The microphone conditioner the vendored `WebRTCProcessor` is one of.
+
+    Narrower than the class, and it exists so the pump can be driven without
+    the native audio-processing library being exercised: what the pump owes a
+    test is that it builds one when Home Assistant asks for gain or noise
+    suppression, keeps the one it built, and drops a block the conditioner has
+    swallowed into its own frame buffer.
+    """
+
+    def update_settings(self, agc_level: int, ns_level: int) -> None:
+        """Adopt new levels, rebuilding the processor if they changed.
+
+        Args:
+            agc_level: The automatic gain level Home Assistant asked for.
+            ns_level: The noise-suppression level Home Assistant asked for.
+        """
+        ...
+
+    def process(self, raw_bytes: bytes) -> bytes:
+        """Condition one chunk of channel 0.
+
+        Args:
+            raw_bytes: Signed 16-bit little-endian samples.
+
+        Returns:
+            The conditioned audio, which is empty while the processor is still
+            filling its ten-millisecond frame.
+        """
+        ...
+
+
 class EsphomeService:
     """The protocol server Home Assistant connects to, and the microphone pump.
 
     One service rather than two, because the pump is meaningless without the
-    server: it reads chunks off the capture port and hands them to whichever
-    `VoiceSatelliteProtocol` is currently connected, which is the feed the
-    discarded upstream command-line entry point used to provide.
+    server: it reads chunks off the capture port, applies the microphone
+    settings Home Assistant owns, hands the result to whichever
+    `VoiceSatelliteProtocol` is currently connected, and offers it to the
+    wake-word detector. That is the feed the discarded upstream command-line
+    entry point used to provide, and **both** halves of it: the streaming that
+    carries a conversation Home Assistant has already started, and the
+    detection that starts one.
 
     The pump runs on a thread of its own and that is not optional. `read_chunk`
     blocks until the daemon has audio, and doing that on the event loop would
     stall the protocol for the length of a chunk several times a second. The
     vendored code already expects to be called from another thread and hops back
     to the loop where it matters.
+
+    **Detection runs on a second thread, and that is a decision worth stating.**
+    Upstream runs its models inline in the loop that forwards audio, and on a
+    desktop that is free. This robot has four cores and is also running motion
+    control and the camera, and nothing in this repository has measured a
+    microWakeWord inference on it — so running detection inline would be betting
+    the audio feed on a number nobody here has. That bet loses the worse of the
+    two failures: a pipeline that stutters because detection is slow is a
+    conversation Home Assistant transcribes wrongly, where a wake word that
+    arrives late is a wake word that still works. So `pump` does the input and
+    output and never waits for a model, `detect` runs the models, and a bounded
+    queue joins them — full means the chunk is dropped **for detection only**,
+    with the streaming half of it already done. The two TensorFlow Lite runtimes
+    and numpy release the interpreter lock inside their native calls, so the
+    second thread is a second core rather than a share of this one.
     """
 
     def __init__(
@@ -463,8 +549,11 @@ class EsphomeService:
         *,
         host: str,
         port: int,
+        detector: WakeWordDetector | None = None,
         listen: Callable[..., Awaitable[Any]] | None = None,
         start_thread: Callable[[Callable[[], None]], Any] | None = None,
+        build_webrtc: Callable[[int, int], WebRTCLike] = WebRTCProcessor,
+        backlog: int = _DETECTION_BACKLOG,
     ) -> None:
         """Describe the server without binding anything.
 
@@ -475,22 +564,40 @@ class EsphomeService:
                 the running loop when this service starts.
             host: The address to bind.
             port: The port to bind.
+            detector: What runs the wake-word models. `None` runs the streaming
+                half alone, which is what a test of that half wants and what no
+                deployment wants — `build_application` always supplies one.
             listen: How to open the listening socket. Defaults to the running
                 loop's `create_server`; injected so a test drives the pump and
                 the lifecycle without opening one.
-            start_thread: How to run the pump. Defaults to a daemon thread;
-                injected for the same reason.
+            start_thread: How to run the two threads. Defaults to daemon
+                threads; injected so a test drives `pump` and `detect` itself.
+            build_webrtc: How to make the microphone conditioner, given the
+                gain and the noise-suppression level. Injected so a test can
+                prove the wiring without exercising the native library.
+            backlog: How many chunks may wait for detection. Half a second of
+                audio: long enough to ride out a slow inference, short enough
+                that a detector which has fallen behind is answering about
+                something that was recently said.
         """
         self._state = state
         self._capture = capture
         self._tap = tap
         self._host = host
         self._port = port
+        self._detector = detector
         self._listen = listen
         self._start_thread = start_thread
+        self._build_webrtc = build_webrtc
         self._server: Any = None
-        self._thread: Any = None
+        self._threads: list[Any] = []
         self._running = False
+        self._webrtc: WebRTCLike | None = None
+        # `None` is the sentinel that ends `detect`. Bounded, because an
+        # unbounded queue in front of a detector that cannot keep up is a
+        # memory leak ending in the daemon killing the application.
+        self._pending: Queue[bytes | None] = Queue(maxsize=backlog)
+        self._dropped = 0
 
     async def start(self) -> None:
         """Bind the port, then start feeding the microphone into the protocol."""
@@ -516,7 +623,9 @@ class EsphomeService:
         start_thread = self._start_thread
         if start_thread is None:
             start_thread = _daemon_thread
-        self._thread = start_thread(self.pump)
+        self._threads = [start_thread(self.pump)]
+        if self._detector is not None:
+            self._threads.append(start_thread(self.detect))
 
     def pump(self) -> None:
         """Feed captured audio into whichever connection is live.
@@ -524,42 +633,180 @@ class EsphomeService:
         Public because it is the whole of what the thread does, and a test that
         drives it directly is testing the feed rather than the thread pool.
         """
-        while self._running:
-            chunk = self._capture.read_chunk()
+        try:
+            while self._running:
+                chunk = self._capture.read_chunk()
+                if chunk is None:
+                    # The capture source closed, which is what a released media
+                    # interface looks like. There is nothing left to feed.
+                    return
+                conditioned = self._condition(chunk)
+                if conditioned is None:
+                    continue
+                satellite = self._state.satellite
+                if satellite is None:
+                    # Nothing is connected yet. The chunk is dropped rather than
+                    # queued: Home Assistant transcribes live audio, and a
+                    # backlog replayed at connection time would be a
+                    # conversation that already happened. Detection is skipped
+                    # with it, because a wake word has nothing to wake.
+                    continue
+                primary, second = conditioned
+                # Streaming first, always, and before anything that could be
+                # slow. This is the half that carries a conversation already in
+                # progress, and it must not wait on the half that starts one.
+                satellite.handle_audio(primary, second)
+                self._offer(primary)
+        finally:
+            # However the pump ended, the detector is owed the news: `detect`
+            # blocks on the queue and would otherwise never return.
+            with contextlib.suppress(Full):
+                self._pending.put_nowait(None)
+
+    def detect(self) -> None:
+        """Run the wake-word models over the audio the pump has forwarded.
+
+        Public for the same reason `pump` is: it is the whole of what the
+        second thread does, so a test drives it directly.
+        """
+        detector = self._detector
+        if detector is None:
+            return
+        while True:
+            chunk = self._pending.get()
             if chunk is None:
-                # The capture source closed, which is what a released media
-                # interface looks like. There is nothing left to feed.
                 return
+            try:
+                activations = detector.process(chunk)
+            except Exception:
+                # A model that raises must not take the detection thread with
+                # it. The robot would go on streaming audio and never wake
+                # again — which is the failure this half of the service exists
+                # to fix, arrived at from the other direction.
+                _LOGGER.exception("wake-word detection failed on a chunk")
+                continue
             satellite = self._state.satellite
             if satellite is None:
-                # Nothing is connected yet. The chunk is dropped rather than
-                # queued: Home Assistant transcribes live audio, and a backlog
-                # replayed at connection time would be a conversation that
-                # already happened.
                 continue
-            second = chunk[1] if len(chunk) > 1 else None
-            satellite.handle_audio(chunk[0], second)
+            for model in activations.woken:
+                # The vendored signature names the two concrete runtime classes
+                # where the detector speaks in the structural protocol both of
+                # them satisfy. That is what lets a test drive this loop with a
+                # model that is neither, and the cast is where the two spellings
+                # of the same object meet.
+                satellite.wakeup(cast("MicroWakeWord | OpenWakeWord", model))
+            if activations.stopped:
+                satellite.stop()
+
+    def _condition(self, chunk: Sequence[bytes]) -> tuple[bytes, bytes | None] | None:
+        """Apply the microphone settings Home Assistant owns to one chunk.
+
+        Three settings, and until this existed all three were inert: each
+        entity took a value, persisted it and changed nothing audible, because
+        the loop that read them was the loop that was never carried.
+
+        Args:
+            chunk: One `bytes` per channel, as the capture port produced it.
+
+        Returns:
+            Channel 0 and the reference channel, or `None` when the conditioner
+            has swallowed this block into its own frame buffer and there is
+            nothing yet to forward.
+        """
+        scalar = _mic_volume_scalar(self._state.mic_volume)
+        channels = [_scaled(part, scalar) for part in chunk]
+        primary = channels[0]
+
+        gain = self._state.preferences.mic_auto_gain or 0
+        noise = self._state.preferences.mic_noise_suppression or 0
+        if gain > 0 or noise > 0:
+            if self._webrtc is None:
+                self._webrtc = self._build_webrtc(gain, noise)
+            else:
+                self._webrtc.update_settings(gain, noise)
+            primary = self._webrtc.process(primary)
+            if not primary:
+                return None
+
+        return primary, channels[1] if len(channels) > 1 else None
+
+    def _offer(self, chunk: bytes) -> None:
+        """Hand one chunk to the detection thread, or drop it.
+
+        Args:
+            chunk: Channel 0, conditioned.
+        """
+        if self._detector is None:
+            return
+        try:
+            self._pending.put_nowait(chunk)
+        except Full:
+            self._dropped += 1
+            if self._dropped % _DROP_REPORT_EVERY == 1:
+                _LOGGER.warning(
+                    "wake-word detection is behind the microphone; %d chunks "
+                    "dropped from detection so far. The audio Home Assistant "
+                    "receives is unaffected.",
+                    self._dropped,
+                )
 
     async def aclose(self) -> None:
-        """Stop accepting connections and stop the pump."""
+        """Stop accepting connections and stop both threads."""
         self._running = False
         server, self._server = self._server, None
         if server is not None:
             server.close()
             with contextlib.suppress(Exception):
                 await server.wait_closed()
-        thread, self._thread = self._thread, None
-        if thread is not None and hasattr(thread, "join"):
-            # The pump is already unblocked: the audio port was released before
-            # the services were stopped, so `read_chunk` has answered `None`.
-            thread.join(timeout=_THREAD_JOIN_SECONDS)
+        # The pump ends the detection thread on its way out, but only if it was
+        # ever running. A service closed without having read a chunk has to end
+        # it here instead, and a second sentinel is harmless.
+        with contextlib.suppress(Full):
+            self._pending.put_nowait(None)
+        threads, self._threads = self._threads, []
+        for thread in threads:
+            if thread is not None and hasattr(thread, "join"):
+                # Both threads are already unblocked: the audio port was
+                # released before the services were stopped, so `read_chunk`
+                # has answered `None` and the sentinel is on the queue.
+                thread.join(timeout=_THREAD_JOIN_SECONDS)
 
 
-# How long shutdown waits for the microphone pump to notice. It is unblocked
-# before this is reached — the audio port is released first — so this is the
-# bound on a thread that is already finishing rather than a wait anybody
-# expects to spend.
-_THREAD_JOIN_SECONDS: Final = 2.0
+def _mic_volume_scalar(mic_volume: int) -> float:
+    """Turn Home Assistant's microphone volume into a factor to multiply by.
+
+    Attenuation only, and never to silence: the setting runs from 1 to 100 and
+    100 is the default, so the loudest it can be is the audio exactly as the
+    daemon captured it. A microphone volume that could reach zero would be a
+    second mute switch the mute switch did not know about.
+
+    Args:
+        mic_volume: The setting, as Home Assistant's own entity persisted it.
+
+    Returns:
+        What to multiply every sample by, between 0.1 and 1.0.
+    """
+    return max(0.1, min(1.0, mic_volume / 100.0))
+
+
+def _scaled(pcm: bytes, scalar: float) -> bytes:
+    """Apply the microphone volume to one channel of audio.
+
+    Args:
+        pcm: Signed 16-bit little-endian samples.
+        scalar: What to multiply them by, at most 1.0.
+
+    Returns:
+        The same samples, quieter — or the very same object when nothing was
+        asked for, which is the default and so is every chunk on most robots.
+    """
+    if scalar >= 1.0:
+        return pcm
+    samples = np.frombuffer(pcm, dtype=_PCM_DTYPE)
+    # Rounded rather than truncated, for the reason `adapters/audio_reachy.py`
+    # records at its own conversion: truncation biases every sample towards
+    # zero, and the models were trained on audio that was not biased.
+    return np.rint(samples * scalar).astype(_PCM_DTYPE).tobytes()
 
 
 def _daemon_thread(work: Callable[[], None]) -> threading.Thread:
@@ -779,9 +1026,13 @@ def build_server_state(
     """Assemble the vendored protocol layer's state over this robot's ports.
 
     The wake-word models are loaded here, from files that ship inside the
-    wheel, and nothing about that path reaches the network — which is REQ-044:
-    the wake word fires on a robot whose connection has failed, and the failure
-    surfaces at the point the pipeline needs Home Assistant.
+    wheel, and nothing about that path reaches the network. That is **half** of
+    REQ-044 and the half that is easiest to mistake for all of it — this
+    function loaded both models and announced them to Home Assistant while
+    nothing anywhere ran them. `wake_word.WakeWordDetector` is the other half,
+    and it is what makes the wake word fire on a robot whose connection has
+    failed — with the failure surfacing later, at the point the pipeline needs
+    Home Assistant.
 
     Args:
         settings: The settings in effect.
@@ -867,6 +1118,19 @@ def build_server_state(
         audio_capture=audio.capture,
         audio_input_channels=audio.capture.channels,
         volume=preferences.volume if preferences.volume is not None else 1.0,
+        # The four microphone settings Home Assistant persists, taken back out
+        # of the file at startup. Without these the entities come up at their
+        # defaults every restart: an operator who had turned the microphone
+        # down, or moved the stop word's sensitivity, would find the setting
+        # still shown in Home Assistant and no longer in effect. The stop
+        # word's goes through the vendored resolver, which clamps it and
+        # supplies the default for a robot that has never had one set.
+        mic_volume=preferences.mic_volume,
+        mic_auto_gain=preferences.mic_auto_gain,
+        mic_noise_suppression=preferences.mic_noise_suppression,
+        stop_word_threshold=initial_stop_word_threshold(
+            preferences.stop_word_sensitivity,
+        ),
     )
 
 
@@ -1023,6 +1287,9 @@ def build_application(
             tap,
             host=settings.api_host,
             port=settings.api_port,
+            # REQ-044. The models loaded above are only announced until
+            # something runs them, and this is the something.
+            detector=WakeWordDetector(state),
         ),
     ]
     if settings.advertise:
