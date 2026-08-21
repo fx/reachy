@@ -121,8 +121,8 @@ app = typer.Typer(
     name=_DISTRIBUTION,
     help=(
         "Operate a Reachy Mini running this stack: diagnose the chain end to "
-        "end, exercise the groundstation, and — as later changes land — deploy "
-        "and configure the robot."
+        "end, exercise the groundstation, deploy the application, and configure "
+        "the robot."
     ),
     no_args_is_help=True,
     add_completion=False,

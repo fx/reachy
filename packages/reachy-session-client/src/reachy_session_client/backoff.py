@@ -73,7 +73,7 @@ class Backoff:
         # equal to the first delay is the non-obvious one, because the growth
         # is clamped away on the very first attempt. Neither is reachable from
         # this tool's own surface today, but `Backoff` is public API and the
-        # robot adapter that will construct one is a later change, so a policy
+        # robot's groundstation adapter constructs one of its own, so a policy
         # that cannot satisfy the requirement is refused where it is built
         # rather than discovered as a robot that never retries any faster.
         if self.multiplier <= 1:

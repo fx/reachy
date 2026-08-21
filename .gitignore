@@ -46,6 +46,13 @@ bench-results.*.json
 coverage.xml
 htmlcov/
 
+#:= docs/specs/architecture/index.md#req-003-no-environment-specific-values-in-version-control
+#:% Identifiers belonging to a deployment environment or to private infrastructure —
+#:% its hostnames, addresses, accounts, credentials, and target names — MUST NOT
+#:% appear in tracked files, and each such value MUST be supplied at run time from
+#:% an untracked local file or a repository secret with a tracked `.example` sibling
+#:% documenting its shape.
+#
 # Untracked local files that carry environment-specific values. Each one has a
 # tracked `.example` sibling documenting its shape — the examples arrive with
 # the changes that introduce the files (0002 for the environment files, 0010 for

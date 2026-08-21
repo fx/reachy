@@ -17,9 +17,13 @@ What a consumer needs:
 - `run_checks` — runs all of them independently and collects every result.
 - `CheckRun` — the results, with `ok`, the counts, and the line naming the
   first broken link.
-- `SessionLink` and `GroundstationModelFiles` — the two adapters that reach the
-  world. The robot's own is change 0009's; until it lands, the checks that need
-  it report themselves skipped rather than passing on no evidence.
+- `SessionLink` and `GroundstationModelFiles` — the two adapters this package
+  ships. The robot's own is `reachyctl`'s, supplied through `RobotDaemon`; a
+  run given no robot reports the checks that need one as skipped rather than
+  passing on no evidence.
+- `checks_export` — the published check reference under `docs/contracts/`,
+  generated from `CHECKS` so the troubleshooting runbook and the tool cannot
+  hold two different notions of how to fix something.
 
 Nothing here renders anything, reads the environment, or decides what a process
 exits with. Those belong to the consumer: `reachyctl` settled them in

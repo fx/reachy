@@ -75,9 +75,12 @@ documentation ranges; substitute your own.
 ### 1. Fetch the wheel
 
 ```
-curl --location --output reachy_mini_ha_satellite.whl \
+curl --location --remote-name \
   https://github.com/<owner>/<repository>/releases/download/v<version>/reachy_mini_ha_satellite-<version>-py3-none-any.whl
 ```
+
+**`--remote-name`, not `--output`.** Keeping the published file name is what
+makes the digest check in the next step work at all — see the note there.
 
 Every artifact in a release carries the same version, so the wheel that goes with
 a given groundstation image is the one under the same tag.
@@ -94,16 +97,27 @@ curl --location --remote-name \
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-Expect one `OK` line naming the wheel. Anything else means the file you have is
-not the file that was published, and it should not be installed.
+```
+./reachy_mini_ha_satellite-0.1.0-py3-none-any.whl: OK
+```
 
-The release job writes that file with `sha256sum` over everything it publishes,
-so every wheel in the release is covered, not only this one.
+One `OK` line per wheel present. Anything else means the file you have is not the
+file that was published, and it should not be installed.
+
+⚠️ **`no file was verified` is the failure to watch for.** The release job writes
+that file with `sha256sum ./*.whl`, so every line in it names a versioned wheel
+relative to the directory the check runs in. A wheel renamed on download matches
+no line, and `--ignore-missing` then reports that message rather than a
+mismatch — which reads like success if you are not looking. That is why the fetch
+above uses `--remote-name`.
+
+Every wheel in the release is covered, not only this one.
 
 ### 3. Install it into the daemon's application environment
 
 ```
-/opt/reachy/venv/bin/pip install --upgrade ./reachy_mini_ha_satellite.whl
+/opt/reachy/venv/bin/pip install --upgrade \
+  ./reachy_mini_ha_satellite-<version>-py3-none-any.whl
 ```
 
 The environment is shared with the daemon and with any other application, so the

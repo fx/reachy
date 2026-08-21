@@ -16,6 +16,9 @@
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+#:= docs/specs/architecture/index.md#req-001-single-resolved-dependency-set
+#:% The repository MUST resolve all workspace members against one committed lockfile,
+#:% and continuous integration MUST install from that lockfile without re-resolving.
 uv := "uv run --locked --all-packages"
 
 # List the available recipes.
@@ -1061,11 +1064,24 @@ leak-scan base="origin/main" head="HEAD":
 secret-scan log-opts="":
     gitleaks git --no-banner --redact --log-opts="{{ log-opts }}" .
 
-# Regenerate every published schema and interface description from source. The
-# generators are registered in `reachy_contracts.contracts_export`; the registry
-# is empty until the wire types exist, and the index it writes records that.
+# Regenerate every published schema and interface description from source.
+#
+# Two registries feed one directory: `reachy_contracts.contracts_export` holds a
+# JSON Schema per robot-link message type, and `reachy_checks.checks_export`
+# holds the `doctor` check reference. They are separate because the dependency
+# runs one way — `reachy-checks` depends on `reachy-contracts`, so a registry in
+# the contracts package that imported the checks package would be a cycle — and
+# `scripts/export_contracts.py` is the driver that hands both to one export, so
+# the index it writes lists every artifact rather than half of them.
+#
+# Registering a further generator is a `Contract` in whichever registry owns its
+# source, and nothing here or in the workflow changes.
+#
+# `docs/contracts/` is owned in full: this discards the directory and writes it
+# again, so a contract that was removed or renamed loses its committed artifact
+# instead of keeping it forever behind a gate that cannot see it.
 contracts:
-    {{ uv }} python -m reachy_contracts.contracts_export docs/contracts
+    {{ uv }} python scripts/export_contracts.py docs/contracts
 
 # Fail when the regenerated contracts differ from the committed copies. The
 # `--intent-to-add` is what makes a newly generated file show up as a

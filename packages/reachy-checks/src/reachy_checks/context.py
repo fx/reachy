@@ -6,8 +6,8 @@ what the caller supplied. A check whose needs are not met is skipped, and the
 skip line says which need was absent.
 
 Why the reason is supplied by the caller rather than written here: absence
-means different things to different callers. `reachyctl doctor` has no robot
-connection today because nothing can open one until change 0009 lands, which an
+means different things to different callers. `reachyctl doctor` run without
+`--robot` was given no robot to reach, and says so in those words — which an
 operator should be told plainly rather than left to infer from a blank. An
 Ansible verification role that reached the robot and then lost it means
 something else entirely. Neither reason belongs to the registry, so the

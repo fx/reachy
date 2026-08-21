@@ -139,5 +139,5 @@ changes:
     path: changes/0015-docs-and-runbooks.md
     description: Executed setup and operations runbooks, generated contracts and completed agent documentation
     spec: architecture
-    status: draft
+    status: complete
     depends_on: ["0013", "0014"]

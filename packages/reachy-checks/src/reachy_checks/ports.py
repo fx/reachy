@@ -1,12 +1,13 @@
 """What a check needs of the world, expressed as the narrowest thing that works.
 
-The robot side of this repository does not exist yet: reaching a robot arrives
-with `reachyctl deploy` and `reachyctl app` in change 0009, and the satellite
-itself in 0013. That is why these are protocols rather than clients. Writing a
-robot transport here to have something for the daemon checks to call would mean
-0009 arriving to find one already written, in a package that has no business
-owning it — so the checks are written against the shape of the answer, and
-whoever can obtain that answer supplies it.
+These are protocols rather than clients, and they were protocols before there
+was anything to implement them: reaching a robot arrived with `reachyctl deploy`
+and `reachyctl app` in change 0009, and the satellite itself in 0013. Writing a
+robot transport here to have something for the daemon checks to call would have
+meant 0009 finding one already written, in a package that has no business owning
+it — so the checks are written against the shape of the answer, and whoever can
+obtain that answer supplies it. `reachyctl` supplies it today; an Ansible
+verification role supplies a different one.
 
 The value objects carry a `complaint` beside the answer rather than raising,
 because "the daemon did not respond" is an ordinary diagnosis and an exception

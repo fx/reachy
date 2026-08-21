@@ -13,8 +13,10 @@ one-line import of this file and holds no content of its own.
 
 | Path | What it is |
 |---|---|
-| `docs/` | Specs, change documents, runbooks and generated contracts. `docs/ops/managed-daemon-environment.md` is the byte-level contract for the robot's managed drop-in, which `reachyctl config` and the Ansible `daemon_env` role both write |
-| `docs/ops/satellite-deployment.md` | Installing, configuring and reading the robot application — leads with the identity-pinning hazard |
+| `docs/` | Specs, change documents, runbooks and generated contracts. `docs/index.md` is the map |
+| `docs/setup/` | The task-ordered setup runbooks: the groundstation, the robot, Home Assistant. Every step is a command with the output to expect |
+| `docs/ops/` | Running one: `deploy.md` updates an installation, `troubleshooting.md` is keyed to `doctor`'s check identifiers, `managed-daemon-environment.md` is the byte-level contract for the robot's managed drop-in, `satellite-deployment.md` is the application's own reference |
+| `docs/contracts/` | Generated, never edited. `just contracts` writes it and the drift gate compares it |
 | `packages/reachy-contracts/` | Shared wire types and golden fixtures (`reachy_contracts`) |
 | `packages/reachy-checks/` | The one definition of what a healthy installation is (`reachy_checks`) |
 | `packages/reachy-session-client/` | The one client half of the robot link (`reachy_session_client`) |
@@ -25,7 +27,7 @@ one-line import of this file and holds no content of its own.
 | `tools/repo-hygiene/` | The repository's own leak scanner (`reachy_hygiene`); a member, never published |
 | `provisioning/ansible/` | Stock image to configured robot: four tagged roles, a removal path, and the filter plugins they reach their Python through. Not a Python member, and its plugins are nonetheless linted, type-checked and covered with everything else |
 | `provisioning/ci/` | The container target the idempotency gate applies the playbook against, and the list of what it does and does not model |
-| `scripts/` | Helpers the `Justfile` calls; not a Python member |
+| `scripts/` | Helpers the `Justfile` calls; not a Python member, and linted, type-checked and tested with everything else. `export_contracts.py` is the driver that writes `docs/contracts/` from both registries |
 | `pyproject.toml` | Workspace root and all shared tool configuration |
 | `uv.lock` | One lockfile for every member |
 | `mise.toml` | The pinned toolchain |
@@ -194,6 +196,91 @@ can judge whether a trailing comment explains anything, and a check that only
 demanded some text after the code would be satisfied by `# noqa: F401  # noqa`.
 A suppression without a reason is a change request, not a lint failure.
 
+### Generated documents are generated, and a document that quotes code is checked
+
+`docs/contracts/` is written by `just contracts` and compared by the
+contract-drift gate. Do not edit a file in it: the edit is reverted by the next
+run at best and blocks a merge at worst. **The directory is owned in full** —
+regeneration discards it and writes it again, so what is in it afterwards is
+exactly what the run produced. A generator that only wrote would let a withdrawn
+contract keep its committed artifact forever, and the gate would go on passing
+over a published interface nothing produces any more, which is REQ-008 failing
+by the one route a write-only generator cannot see. Two registries feed it — the wire
+schemas in `reachy_contracts.contracts_export` and the `doctor` check reference
+in `reachy_checks.checks_export` — because `reachy-checks` depends on
+`reachy-contracts` and a registry in the contracts package that imported the
+checks package would be a cycle. `scripts/export_contracts.py` hands both to one
+export, so the index lists every artifact rather than whichever half ran last.
+
+The same rule extends past generation. Where a document reproduces something the
+code decides, something compares them:
+
+| Document | What holds it to the code |
+|---|---|
+| `docs/ops/managed-daemon-environment.md` | A contract test renders `reachyctl.managed`'s own output and requires the fenced block to be it |
+| `docs/ops/troubleshooting.md` | `packages/reachy-checks/tests/test_checks_runbook.py` requires its sections to be the registered identifiers, in order, each quoting that check's remediation word for word |
+| `services/groundstation/deploy/.env.example` | A test requires it to list exactly the settings the service's model declares, at their defaults |
+| `docs/contracts/**` | The drift gate |
+
+**A docstring or a comment asserting something the code does not do is a defect
+here**, not a cosmetic issue, because several of this repository's rules are
+enforced in review rather than by tooling and a reviewer reads those sentences as
+evidence. The commonest form is a forward reference that has come true — "arrives
+in change 0009", "until it lands" — left in place after the change landed.
+
+### Runbooks record what a command printed, not what it should print
+
+Every step in `docs/setup/` and `docs/ops/` is a command paired with the output
+to expect, and the output is a transcript of running it. Expected output written
+from memory is wrong in small ways that train a reader to ignore it, and an agent
+following it cannot tell which parts to trust.
+
+Nothing in this repository has a Reachy Mini attached, so the steps that need one
+are **marked pending hardware verification** rather than being given invented
+output. That marker is honest and useful; a fabricated transcript is the failure
+the convention exists to prevent. `docs/tasks.md` carries the outstanding list.
+
+**Scrub every transcript you paste.** A container id, a host name, a path with an
+account in it or an address all reach a public repository through a runbook more
+easily than through code. Cut what you cut, and say in the document that you cut
+it.
+
+### The model weights are never committed
+
+`just models` fetches them into `.models/` and refuses anything whose digest is
+not the one
+`services/groundstation/src/reachy_groundstation/models/registry.py` pins. That
+registry records each file's licence, attribution, upstream project and retrieval
+URL, and it is what a licence audit reads instead of the bytes. Perception tests
+that run real inference skip without the weights, saying so; on a runner they
+fail instead, because a merge gate that skips when its inputs are missing is not
+a merge gate.
+
+### The Reachy Mini SDK is optional and imported lazily
+
+Exactly one module imports it — the satellite's daemon entry point — and nothing
+else may, including by another name. Importing the SDK's top level alone executes
+an `__init__` that transitively reaches `import gi`, which drags in the whole
+GStreamer stack; a test suite that did it would need a system GTK on every
+runner. The root `pyproject.toml` declares the distribution's metadata statically
+so the parity reference installs without that tree, and
+`just lint-behaviour-boundary` proves the behaviour layer cannot reach it — by
+import, by relative import, or by a dynamic one.
+
+### Skipped is not failed
+
+`reachy_checks` has three outcomes and the third is load-bearing. A check that
+ran and found something wrong is `FAILED`; a check whose prerequisites were never
+supplied is `SKIPPED`. Collapsing them makes the output worth ignoring — an
+operator who has configured no groundstation would be told their installation is
+broken, and after the third time they stop reading. `doctor` with nothing
+configured exits 0 and says *nothing failed, but not everything was checked*.
+
+The same distinction holds in the groundstation's capability health: a capability
+switched off by configuration is `disabled`, not `failed`, so an operator can
+tell "I turned that off" from "that broke". Gestures ship disabled with no model
+wired, which is a recorded decision rather than a gap.
+
 ### Test module names are globally unique
 
 Test files live in each member's `tests/` directory, which is not a package, so
@@ -249,7 +336,7 @@ its step.
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, every released wheel — the `reachyctl` set and the robot application — built, installed into an empty environment, verified, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — six specs registered so far, see below | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — all eight specs, all 73 requirements | `just duvet` |
 | `provisioning.yml` | pull requests, pushes to `main` | `Provisioning lint`; `Idempotency`, which applies the playbook twice against a container target and fails on any changed step in the second application | `just provision-lint`, `just provision-idempotency` |
 | `bench.yml` | pull requests, pushes to `main` | `Benchmark` — the hardware-free suite, judged against the committed baseline | `just bench`, `just bench-compare` |
 
@@ -263,30 +350,30 @@ repository setting rather than a file and cannot be committed. The settings to
 enable, and why direct pushes to the default branch matter, are recorded in the
 completion notes of
 [`docs/changes/0002-ci-and-hygiene-gates.md`](docs/changes/0002-ci-and-hygiene-gates.md).
+That list excluded `Requirements traceability` because it passed vacuously at the
+time. It no longer does — see below — so it belongs in the required set now.
 
 ## Requirements traceability
 
-⚠️ **The "Requirements traceability" check covers seven specs so far.**
-`.duvet/config.toml` registers `docs/specs/perception/index.md`,
-`docs/specs/groundstation/index.md`, `docs/specs/robot-link/index.md`,
-`docs/specs/reachyctl/index.md`, `docs/specs/ha-satellite/index.md`,
-`docs/specs/provisioning/index.md` and `docs/specs/benchmarks/index.md`, and
-nothing else, so a green run is evidence that those 64 requirements are traced
-and is evidence of nothing about the remaining spec — duvet does not load it. A
-spec is registered by the change that implements it, in that change's pull
-request, alongside the annotations that make it pass. Robot-link was registered
-by change 0012, which is the change that closed its set: the contract has three
-consumers and the robot was the last of them to exist. Reachyctl was registered
-by 0009, which completed the tool's operator-facing surface. ha-satellite was
-registered by 0013, which added the behaviour layer, the configuration, the
-settings interface and the packaging to the ports and adapters 0011 and 0012 had
-already built. Provisioning was registered by 0010, which implements the whole of
-it at once — the roles, the removal path and the idempotency gate arrive
-together, so there was no partial implementation to register earlier. Benchmarks
-was registered by 0014, for the same reason: it is the only change that touches
-that spec, and its suite, its committed baseline and its gate arrive together,
-because a gate without a baseline gates nothing. The header comment in that file
-explains why the one remaining spec is deliberately unregistered.
+**All eight specs are registered and all 73 requirements are traced.**
+`.duvet/config.toml` registers every `docs/specs/*/index.md`, so a green
+"Requirements traceability" run is evidence about the whole of this
+repository's requirements rather than about a subset.
+
+A spec is registered by the change that **completes** it, in that change's pull
+request, alongside the annotations that make it pass — never by the change that
+writes it. A registered spec whose requirements nothing implements is a red job
+that stays red, and one that is going to stay red is one somebody switches off.
+That rule is what put architecture last: six changes implemented its nine
+requirements and 0015 registered it, adding the two that were still missing.
+The header comment in `.duvet/config.toml` records which change registered which
+spec and why.
+
+Two requirements are cited from files that are neither Python nor a workflow, and
+both have a `[[source]]` block of their own: REQ-001 from the `Justfile`, whose
+`--locked` installs are what continuous integration actually runs, and REQ-003
+from `.gitignore`, whose ignore rules and their tracked `.example` siblings are
+the mechanism the requirement describes.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and
