@@ -50,6 +50,14 @@ something untrue. A test using pytest's `tmp_path` writes real files and does
 carry it. The dividing line is whether anything reaches a disk, not whether the
 word "filesystem" appears in the test.
 
+The criterion is **the bytes on disk being the thing under test**; the golden
+corpus is the first example, not the list. The second is the deployment files —
+`test_groundstation_deployment.py` reads the Dockerfile, the compose files, the
+scrape configuration and `.env.example` and compares them with the settings
+model, `mise.toml` and the member list, where a fake would compare the
+documentation with itself. Do not report those. A marker on a test that merely
+*used* a real path for convenience still is a finding.
+
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a
 suppression's rule identifier. Whether its comment *explains* anything, and

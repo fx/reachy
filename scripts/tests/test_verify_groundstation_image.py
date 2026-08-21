@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import urllib.error
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -36,7 +37,7 @@ from reachy_groundstation.session.framing import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from pyfakefs.fake_filesystem import FakeFilesystem
 
 _BASE = "http://groundstation:8080"
 
@@ -84,11 +85,19 @@ def test_the_frame_carries_the_image_bytes_unaltered() -> None:
     assert payload == fixture.read_bytes()
 
 
-@pytest.mark.filesystem  # the absence of a file on disk is the case under test
-def test_a_missing_frame_is_reported_as_a_missing_file(tmp_path: Path) -> None:
-    """Better than a stack trace out of `read_bytes` two frames deeper."""
+def test_a_missing_frame_is_reported_as_a_missing_file(fs: FakeFilesystem) -> None:
+    """Better than a stack trace out of `read_bytes` two frames deeper.
+
+    An in-memory filesystem rather than a real temporary one: no bytes on disk
+    are the thing under test here, so this is an ordinary unit test and
+    performs no input or output.
+
+    Args:
+        fs: The in-memory filesystem, which is empty.
+    """
+    del fs
     with pytest.raises(VerificationError, match="is not a file"):
-        frame_for(tmp_path / "no-such-frame.jpg")
+        frame_for(Path("/frames/no-such-frame.jpg"))
 
 
 def test_readiness_is_polled_until_the_service_says_yes(

@@ -12,7 +12,6 @@ the search path and the library loader are all arguments.
 
 from __future__ import annotations
 
-import importlib.util
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -219,31 +218,21 @@ def test_a_shell_at_a_fixed_path_is_found_even_when_it_is_not_on_the_path(
 def test_the_declared_dependencies_are_read_back_in_order(
     fs: FakeFilesystem,
 ) -> None:
-    """The reader is what the whole CUDA check rests on, so it is read back."""
+    """The reader is what the whole CUDA check rests on, so it is read back.
+
+    Against an object assembled here rather than a real one. A real provider
+    library is hundreds of megabytes and belongs to somebody else's wheel, so
+    reading one would make this suite depend on a third-party binary's
+    internals — and there is already a place where the reader meets a real
+    object: `just image-verify` runs this probe inside the built image, against
+    the provider library that image actually ships.
+    """
     library = _provider(fs, "libcublasLt.so.13", _DRIVER, "libc.so.6")
     assert needed_libraries(library) == (
         "libcublasLt.so.13",
         _DRIVER,
         "libc.so.6",
     )
-
-
-@pytest.mark.filesystem  # a real shared object is the only proof the reader is right
-def test_the_reader_agrees_with_a_real_shared_object() -> None:
-    """A hand-assembled ELF proves the parser reads what this test wrote.
-
-    So one real object is read too — the model runtime's own extension module,
-    which is in the environment wherever the groundstation is installed. Every
-    Linux shared object needs the C library, which is what makes this assertable
-    without pinning somebody else's build.
-    """
-    spec = importlib.util.find_spec("onnxruntime")
-    assert spec is not None
-    assert spec.origin is not None
-    capi = Path(spec.origin).parent / "capi"
-    objects = sorted(capi.glob("onnxruntime_pybind11_state*.so"))
-    assert objects, f"no extension module under {capi}"
-    assert "libc.so.6" in needed_libraries(objects[0])
 
 
 @pytest.mark.parametrize(
