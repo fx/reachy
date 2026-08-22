@@ -1790,6 +1790,37 @@ class TestWritingABoostChosenFromHomeAssistant:
         assert adopted == []
         assert "the speaker boost could not be saved" in caplog.text
 
+    def test_a_store_that_cannot_be_read_is_reported_and_not_raised(
+        self,
+        fs: FakeFilesystem,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The read is inside the guard too, so a hand-broken file is reported.
+
+        `OverrideStore.load` raises for a file that exists and is not a JSON
+        object of strings, and the setter reads before it decides whether the
+        write is a repeat. A read left outside the `try` would send that error
+        out of `handle_message` and into the protocol's loop — the very thing
+        the reported-not-raised rule above exists to prevent.
+
+        Args:
+            fs: An in-memory filesystem.
+            caplog: Where the refusal is looked for.
+        """
+        fs.create_file(_BOOST_OVERRIDES, contents="{not json")
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+
+        with caplog.at_level(logging.ERROR):
+            satellite_main.build_boost_setter(
+                store=store,
+                apply_live=adopted.append,
+                environ=_ENVIRONMENT,
+            )(300.0)
+
+        assert adopted == []
+        assert "the speaker boost could not be saved" in caplog.text
+
 
 @pytest.mark.filesystem
 class TestTheWiringAgainstTheWheelsOwnAssets:
