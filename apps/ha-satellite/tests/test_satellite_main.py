@@ -142,6 +142,15 @@ _ROBOT_ONLY: Final = SourceSelection.LOCAL  # leak-scan:allow
 # loopback literal rather than anybody's address.
 _DAEMON_API: Final = "http://127.0.0.1:8000"
 
+# Fake installation details used only to prove lifecycle exceptions are scrubbed.
+_EXCEPTION_IDENTIFIERS: Final = (
+    "192.0.2.44",
+    "46053",
+    "configured-device-name",
+    "/example/account-name",
+)
+_EXCEPTION_DETAIL: Final = ":".join(_EXCEPTION_IDENTIFIERS)
+
 # Where the boost setter's tests keep their overrides file, and the directory
 # holding it. Bound once rather than spelled at each of the four sites, so that
 # a test standing a file where the directory should be cannot end up naming a
@@ -262,6 +271,34 @@ class CancellationResistantService:
             self.cancelled += 1
             await self.resume.wait()
             self.finished.set()
+        finally:
+            self.finalized = True
+
+
+class ShieldSpawningCleanupService:
+    """A cleanup whose shield creates an inner task outside its outer task."""
+
+    def __init__(self) -> None:
+        """Start without a recorded outer task or finalization."""
+        self.task: asyncio.Task[None] | None = None
+        self.entered = asyncio.Event()
+        self.finalized = False
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Keep shielding a fresh wait after each outer cancellation."""
+        task = asyncio.current_task()
+        assert task is not None
+        self.task = task
+        self.entered.set()
+        try:
+            while True:
+                try:
+                    await asyncio.shield(asyncio.Event().wait())
+                except asyncio.CancelledError:
+                    continue
         finally:
             self.finalized = True
 
@@ -924,6 +961,47 @@ class TestShutdown:
 
         asyncio.run(_run_and_close())
 
+    def test_shield_spawned_cleanup_descendants_leave_no_tasks_for_runner(
+        self,
+    ) -> None:
+        """Forced outer finalization must also finish shield-created children."""
+
+        async def _run_and_close() -> None:
+            runner = asyncio.current_task()
+            assert runner is not None
+            before = set(asyncio.all_tasks())
+            stuck = ShieldSpawningCleanupService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, stuck],
+                cleanup_timeout_seconds=0.0,
+            )
+
+            await application.aclose()
+
+            outer = stuck.task
+            assert outer is not None
+            leaked = asyncio.all_tasks() - before - {runner}
+            try:
+                assert outer.done()
+                assert stuck.finalized
+                assert later.closed == 1
+                assert leaked == set()
+            finally:
+                # Bound the RED run itself without letting asyncio.run teardown
+                # conceal the descendant that production shutdown leaked.
+                for task in leaked:
+                    task.cancel()
+                if leaked:
+                    await asyncio.gather(*leaked, return_exceptions=True)
+
+        asyncio.run(_run_and_close())
+
     def test_repeated_owner_cancellation_cannot_abandon_cleanup_finalization(
         self,
     ) -> None:
@@ -1417,6 +1495,44 @@ class TestTheEsphomeService:
         assert delays == [1.0, 2.0, 4.0, 4.0]
 
     @pytest.mark.asyncio
+    async def test_listener_retry_log_omits_bind_exception_identifiers(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed replacement bind reports retry timing, not exception text."""
+        bound: list[_FakeServer] = []
+        attempts = 0
+        service: EsphomeService
+
+        async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+            del factory, host, port
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                raise OSError(_EXCEPTION_DETAIL)
+            server = _FakeServer()
+            bound.append(server)
+            return server
+
+        async def _sleep(seconds: float) -> None:
+            del seconds
+            service._running = False
+
+        service = _listener_service(bound, listen=_listen, sleep=_sleep)
+        await service.start()
+        bound[0].serving = False
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            await service._supervise_listener()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages == [
+            "esphome.listener rebind failed; retrying in 0.5 seconds",
+        ]
+        for identifier in _EXCEPTION_IDENTIFIERS:
+            assert identifier not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_intentional_close_prevents_listener_rebind(self) -> None:
         """Shutdown cannot race its own supervisor into opening a new listener."""
         bound: list[_FakeServer] = []
@@ -1522,6 +1638,53 @@ class TestTheMicrophonePumpSurvivesTransientFailures:
         assert satellite.attempted == [first, later]
         assert [inputs.tobytes() for inputs in model.inputs] == [first, later]
 
+    @pytest.mark.asyncio
+    async def test_chunk_failure_logs_omit_exception_identifiers(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Capture, conditioning and forwarding identify only their static stage."""
+        chunk = b"\x02" * 320
+
+        capture_service, _state = _esphome_service(
+            [],
+            capture=_FlakyCapture([RuntimeError(_EXCEPTION_DETAIL)]),
+        )
+        await capture_service.start()
+
+        conditioner = _FailsOnceWebRTC(_EXCEPTION_DETAIL)
+        condition_service, condition_state = _esphome_service(
+            [],
+            capture=FakeCapture([[chunk]]),
+            build_webrtc=lambda _gain, _noise: conditioner,
+        )
+        condition_state.preferences.mic_auto_gain = 1
+        await condition_service.start()
+
+        forward_service, forward_state = _esphome_service(
+            [],
+            capture=FakeCapture([[chunk]]),
+        )
+        forward_state.satellite = cast(
+            "VoiceSatelliteProtocol",
+            _FailsOneForward(_EXCEPTION_DETAIL),
+        )
+        await forward_service.start()
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            capture_service.pump()
+            condition_service.pump()
+            forward_service.pump()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages == [
+            "microphone capture failed for a chunk; continuing (1 failures)",
+            "microphone conditioning failed for a chunk; continuing (1 failures)",
+            "Home Assistant audio forwarding failed for a chunk; continuing (1 failures)",
+        ]
+        for identifier in _EXCEPTION_IDENTIFIERS:
+            assert identifier not in caplog.text
+
 
 class _FlakyCapture(FakeCapture):
     """A capture seam that can raise before producing later audio."""
@@ -1544,9 +1707,14 @@ class _FlakyCapture(FakeCapture):
 class _FailsOnceWebRTC:
     """A conditioner whose first chunk fails and whose second succeeds."""
 
-    def __init__(self) -> None:
-        """Start with no chunks seen."""
+    def __init__(self, message: str = "conditioning failed") -> None:
+        """Start with no chunks seen.
+
+        Args:
+            message: Exception text for the first chunk.
+        """
         self.inputs: list[bytes] = []
+        self._message = message
 
     def update_settings(self, agc_level: int, ns_level: int) -> None:
         """Accept unchanged settings without rebuilding anything."""
@@ -1556,18 +1724,22 @@ class _FailsOnceWebRTC:
         """Fail once, then pass subsequent chunks through."""
         self.inputs.append(raw_bytes)
         if len(self.inputs) == 1:
-            message = "conditioning failed"
-            raise RuntimeError(message)
+            raise RuntimeError(self._message)
         return raw_bytes
 
 
 class _FailsOneForward:
     """A Home Assistant protocol that rejects only its first chunk."""
 
-    def __init__(self) -> None:
-        """Start having attempted no forwards."""
+    def __init__(self, message: str = "forwarding failed") -> None:
+        """Start having attempted no forwards.
+
+        Args:
+            message: Exception text for the first forwarding attempt.
+        """
         self.attempted: list[bytes] = []
         self.chunks: list[tuple[bytes, bytes | None]] = []
+        self._message = message
 
     def handle_audio(
         self,
@@ -1577,8 +1749,7 @@ class _FailsOneForward:
         """Raise on the first call and record later audio normally."""
         self.attempted.append(audio_chunk)
         if len(self.attempted) == 1:
-            message = "forwarding failed"
-            raise RuntimeError(message)
+            raise RuntimeError(self._message)
         self.chunks.append((audio_chunk, audio_chunk_2))
 
 
