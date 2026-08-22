@@ -32,6 +32,11 @@ from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 
+# pylint: disable=no-name-in-module
+from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message classes inside
+    NumberStateResponse,
+)
+
 from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.adapters.sounds import Sound
 from reachy_mini_ha_satellite.esphome.models import AvailableWakeWord, WakeWordType
@@ -45,6 +50,8 @@ from reachy_mini_ha_satellite.ports import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
     from types import ModuleType
+
+    from google.protobuf import message
 
     from reachy_mini_ha_satellite.adapters.daemon import (
         AudioSamples,
@@ -61,6 +68,7 @@ __all__ = [
     "CREDENTIAL",
     "FakeAudio",
     "FakeCapture",
+    "FakeConnection",
     "FakeDecoder",
     "FakeFaceDetector",
     "FakeMedia",
@@ -74,12 +82,14 @@ __all__ = [
     "ManualClock",
     "ManualDetach",
     "available_wake_word",
+    "connected",
     "face",
     "frame",
     "immediately",
     "inline",
     "no_sleep",
     "playable",
+    "pushed_numbers",
     "sent_packets",
     "silence",
     "steady",
@@ -405,6 +415,7 @@ class FakePlayback:
         self.paused = 0
         self.resumed = 0
         self.volume = 100.0
+        self.boost = 100.0
         self.duck_factor: float | None = None
         self._playing = False
         self._callback: Callable[[], None] | None = None
@@ -457,6 +468,14 @@ class FakePlayback:
             volume: The level in percent.
         """
         self.volume = volume
+
+    def set_boost(self, percent: float) -> None:
+        """Record a boost.
+
+        Args:
+            percent: The software boost, in percent.
+        """
+        self.boost = percent
 
     def duck(self, factor: float = 0.5) -> None:
         """Record a duck.
@@ -564,6 +583,7 @@ class FakeAudio:
         self._speech = speech if speech is not None else FakePlayback()
         self.started = 0
         self.stopped = 0
+        self.boosts: list[float] = []
 
     @property
     def capture(self) -> FakeCapture:
@@ -601,6 +621,16 @@ class FakeAudio:
         self.stopped += 1
         self._music.stop()
         self._speech.stop()
+
+    def set_boost(self, percent: float) -> None:
+        """Record a boost, and fan it out to both outputs as a real one does.
+
+        Args:
+            percent: The software boost, in percent.
+        """
+        self.boosts.append(percent)
+        self._music.set_boost(percent)
+        self._speech.set_boost(percent)
 
 
 # --- Motion ------------------------------------------------------------------
@@ -1181,6 +1211,74 @@ def vendored_server_state(**overrides: object) -> ServerState:
         inert.
     """
     return cast("ServerState", _carried_helpers().make_state(**overrides))
+
+
+class FakeConnection:
+    """A connected client, for the fan-out an unprompted state change goes out on.
+
+    `ServerState.broadcast` walks `ServerState.connections` and calls one method
+    on each entry — `send_messages` — which the real `VoiceSatelliteProtocol`
+    serialises and writes to a transport. This records the messages instead, so
+    a test can read a push back without a socket while everything the push
+    travelled through to reach it stays real.
+
+    Attributes:
+        sent: Every message pushed to this client, in order.
+    """
+
+    def __init__(self) -> None:
+        """Start having been sent nothing."""
+        self.sent: list[message.Message] = []
+
+    def send_messages(self, msgs: Iterable[message.Message]) -> None:
+        """Record what was pushed to this client.
+
+        Args:
+            msgs: What the state broadcast.
+        """
+        self.sent.extend(msgs)
+
+
+def pushed_numbers(client: FakeConnection, key: int) -> list[float]:
+    """Read the number states one client was pushed for one entity.
+
+    Args:
+        client: The recording client.
+        key: The entity every state must be addressed to.
+
+    Returns:
+        The value each state carried, in the order they arrived.
+
+    Raises:
+        AssertionError: If anything but a number state, or one addressed to
+            another entity, reached this client — either would be a message
+            Home Assistant is not expecting on this path.
+    """
+    values: list[float] = []
+    for msg in client.sent:
+        assert isinstance(msg, NumberStateResponse), f"pushed a {type(msg).__name__}"
+        assert msg.key == key, f"pushed for entity {msg.key} rather than {key}"
+        values.append(float(msg.state))
+    return values
+
+
+def connected(state: ServerState, count: int = 1) -> list[FakeConnection]:
+    """Register that many clients on a state, as `connection_made` would.
+
+    Args:
+        state: The state the clients connect to.
+        count: How many of them. More than one is how a test tells a broadcast
+            from a reply to whichever connection an entity happens to hold.
+
+    Returns:
+        The recording clients, in the order they were registered.
+    """
+    clients = [FakeConnection() for _ in range(count)]
+    for client in clients:
+        # The vendored list is annotated as holding protocols; what the
+        # broadcast reaches for is the one method these doubles have.
+        state.connections.append(cast("VoiceSatelliteProtocol", client))
+    return clients
 
 
 def vendored_satellite(**overrides: object) -> VoiceSatelliteProtocol:

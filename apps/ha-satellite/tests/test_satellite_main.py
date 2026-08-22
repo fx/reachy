@@ -46,8 +46,11 @@ from satellite_support import (
     FakeRobot,
     FakeWakeWordFeatures,
     available_wake_word,
+    connected,
     face,
     inline,
+    pushed_numbers,
+    vendored_server_state,
 )
 
 from reachy_mini_ha_satellite import main as satellite_main
@@ -55,6 +58,7 @@ from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
 from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
+from reachy_mini_ha_satellite.audio_entities import SpeakerBoostNumberEntity
 from reachy_mini_ha_satellite.behaviour import (
     LookAhead,
     LookAt,
@@ -66,6 +70,7 @@ from reachy_mini_ha_satellite.behaviour import (
 from reachy_mini_ha_satellite.config import (
     ENV_PREFIX,
     ConfigurationError,
+    OverrideStore,
     Settings,
     load_settings,
     overrides_path,
@@ -133,6 +138,13 @@ _ROBOT_ONLY: Final = SourceSelection.LOCAL  # leak-scan:allow
 # Where the daemon serves its own API, which is this setting's default. The
 # loopback literal rather than anybody's address.
 _DAEMON_API: Final = "http://127.0.0.1:8000"
+
+# Where the boost setter's tests keep their overrides file, and the directory
+# holding it. Bound once rather than spelled at each of the four sites, so that
+# a test standing a file where the directory should be cannot end up naming a
+# different path from the store it is meant to break.
+_BOOST_STATE_DIR: Final = Path("/reachy-satellite-boost")
+_BOOST_OVERRIDES: Final = _BOOST_STATE_DIR / "settings.json"
 
 
 def _recording(asked: list[str]) -> Callable[[str], bool]:
@@ -605,7 +617,7 @@ class TestAdoptingSettingsWithoutARestart:
         assert application.status()["pipeline"] == "processing"
 
     def test_it_installs_the_new_log_level(self) -> None:
-        """One of the six settings that can be swapped into a running process."""
+        """One of the settings that can be swapped into a running process."""
         application, _stop = _application(
             audio=FakeAudio(),
             motion=FakeMotion(),
@@ -615,6 +627,108 @@ class TestAdoptingSettingsWithoutARestart:
         application.apply_live(_settings(log_level="debug"))
 
         assert logging.getLogger().level == logging.DEBUG
+
+    def test_it_hands_the_new_boost_to_both_outputs(self) -> None:
+        """This is the one path from "a boost was chosen" to the speaker.
+
+        Both the settings page and the Home Assistant control write through
+        here, so a boost that stopped arriving would be silently inert on both.
+        """
+        audio = FakeAudio()
+        application, _stop = _application(
+            audio=audio,
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert audio.boosts == [pytest.approx(640.0)]
+        assert audio.music.boost == pytest.approx(640.0)
+        assert audio.speech.boost == pytest.approx(640.0)
+
+    def test_the_settings_it_adopted_are_what_it_reports(self) -> None:
+        """The boost entity reads this, so a stale answer is a stale slider."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="220"))
+
+        assert application.settings.speaker_boost_percent == pytest.approx(220.0)
+
+    def test_the_boost_control_pushes_what_was_adopted(self) -> None:
+        """The settings page changes the boost; Home Assistant has to be told.
+
+        Driven through the real objects the composition root wires together —
+        the application, the vendored state, the control and its broadcast —
+        with only the connected client standing in, because the real one writes
+        to a socket.
+        """
+        state = vendored_server_state()
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        def _unused(percent: float) -> None:
+            """Take a chosen boost and drop it.
+
+            This test is about what a boost *adopted* pushes, and the setter is
+            the other direction — `build_boost_setter` has its own tests.
+
+            Args:
+                percent: What Home Assistant would have chosen.
+            """
+            del percent
+
+        boost = SpeakerBoostNumberEntity(
+            state=state,
+            key=len(state.entities),
+            get_percent=lambda: application.settings.speaker_boost_percent,
+            set_percent=_unused,
+        )
+        state.entities.append(boost)
+        application.publish_live_changes(boost.publish)
+        client = connected(state)[0]
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
+
+    def test_it_pushes_after_the_new_settings_are_in_effect(self) -> None:
+        """A publisher called mid-adoption would report the value it replaced."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+        seen: list[float] = []
+        application.publish_live_changes(
+            lambda: seen.append(application.settings.speaker_boost_percent),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert seen == [pytest.approx(640.0)]
+
+    def test_an_application_with_nothing_registered_adopts_settings_anyway(
+        self,
+    ) -> None:
+        """Every test above builds one, and `run` builds one before the wiring."""
+        audio = FakeAudio()
+        application, _stop = _application(
+            audio=audio,
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="180"))
+
+        assert audio.boosts == [pytest.approx(180.0)]
 
 
 class TestTheEsphomeService:
@@ -1586,6 +1700,217 @@ class TestLogging:
         assert logging.getLogger().level == logging.WARNING
 
 
+class TestWritingABoostChosenFromHomeAssistant:
+    """The setter the speaker-boost control is handed, over a real store."""
+
+    def test_it_persists_the_value_and_adopts_it_at_once(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Persisted, so a restart keeps it; adopted, so the answer changes now.
+
+        Args:
+            fs: An in-memory filesystem, so the overrides file is a real file
+                and nothing reaches a disk.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+
+        satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ=_ENVIRONMENT,
+        )(640.0)
+
+        assert store.load() == {"speaker_boost_percent": "640.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(640.0),
+        ]
+
+    def test_it_leaves_every_other_override_alone(self, fs: FakeFilesystem) -> None:
+        """A slider is not a form: it must not drop what somebody else wrote.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        store.save({"log_level": "debug"})
+        adopted: list[Settings] = []
+
+        satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ=_ENVIRONMENT,
+        )(300.0)
+
+        assert store.load() == {
+            "log_level": "debug",
+            "speaker_boost_percent": "300.0",
+        }
+
+    def test_setting_the_value_already_in_the_file_writes_nothing(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """A scene re-sending what it sent last time must not cost an erase cycle.
+
+        The inode is the evidence, because nothing about the bytes could tell
+        "written again identically" from "not written". So the test moves the
+        value once first, and only then repeats it: the first pair of readings
+        establishes that a write does move the inode here, which is what makes
+        the second pair's equality mean the write was declined.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+        setter = satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ=_ENVIRONMENT,
+        )
+        setter(300.0)
+        before_a_real_change = _BOOST_OVERRIDES.stat().st_ino
+
+        setter(640.0)
+        after_a_real_change = _BOOST_OVERRIDES.stat().st_ino
+
+        # The store renames a new file into place rather than writing in place,
+        # so a write that changes the value leaves a different inode behind.
+        # That is what makes the repeat below mean anything: without it, a
+        # `save` that wrote in place would satisfy the equality while writing
+        # every single time.
+        assert after_a_real_change != before_a_real_change
+
+        setter(640.0)
+
+        assert _BOOST_OVERRIDES.stat().st_ino == after_a_real_change
+        assert store.load() == {"speaker_boost_percent": "640.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(300.0),
+            pytest.approx(640.0),
+        ]
+
+    def test_a_change_after_a_repeat_is_still_written(self, fs: FakeFilesystem) -> None:
+        """The guard drops a repeat, never the next real move of the slider.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+        setter = satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ=_ENVIRONMENT,
+        )
+
+        setter(640.0)
+        setter(640.0)
+        setter(300.0)
+
+        assert store.load() == {"speaker_boost_percent": "300.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(640.0),
+            pytest.approx(300.0),
+        ]
+
+    def test_a_value_equal_to_the_environments_is_still_pinned(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The guard is about the file, not about the layer underneath it.
+
+        A slider has no "revert to the environment" gesture to undo a pin with,
+        so a first set is written even where the environment already says that —
+        which is what `build_boost_setter`'s own docstring promises, and what the
+        skip-an-identical-write guard must not quietly reverse.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+
+        satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ={
+                **_ENVIRONMENT,
+                f"{ENV_PREFIX}SPEAKER_BOOST_PERCENT": "300.0",
+            },
+        )(300.0)
+
+        assert store.load() == {"speaker_boost_percent": "300.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(300.0),
+        ]
+
+    def test_a_store_that_cannot_be_written_is_reported_and_not_raised(
+        self,
+        fs: FakeFilesystem,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """It runs inside the protocol's loop, so raising would drop a client.
+
+        Args:
+            fs: An in-memory filesystem.
+            caplog: Where the refusal is looked for.
+        """
+        # A file where the store wants a directory, so the write cannot succeed
+        # and the failure is the store's own rather than a patched one.
+        fs.create_file(_BOOST_STATE_DIR)
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+
+        with caplog.at_level(logging.ERROR):
+            satellite_main.build_boost_setter(
+                store=store,
+                apply_live=adopted.append,
+                environ=_ENVIRONMENT,
+            )(300.0)
+
+        assert adopted == []
+        assert "the speaker boost could not be saved" in caplog.text
+
+    def test_a_store_that_cannot_be_read_is_reported_and_not_raised(
+        self,
+        fs: FakeFilesystem,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The read is inside the guard too, so a hand-broken file is reported.
+
+        `OverrideStore.load` raises for a file that exists and is not a JSON
+        object of strings, and the setter reads before it decides whether the
+        write is a repeat. A read left outside the `try` would send that error
+        out of `handle_message` and into the protocol's loop — the very thing
+        the reported-not-raised rule above exists to prevent.
+
+        Args:
+            fs: An in-memory filesystem.
+            caplog: Where the refusal is looked for.
+        """
+        fs.create_file(_BOOST_OVERRIDES, contents="{not json")
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+
+        with caplog.at_level(logging.ERROR):
+            satellite_main.build_boost_setter(
+                store=store,
+                apply_live=adopted.append,
+                environ=_ENVIRONMENT,
+            )(300.0)
+
+        assert adopted == []
+        assert "the speaker boost could not be saved" in caplog.text
+
+
 @pytest.mark.filesystem
 class TestTheWiringAgainstTheWheelsOwnAssets:
     """The assembly, reading the wake-word models and sounds the wheel ships.
@@ -1702,6 +2027,41 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         assert any(
             isinstance(service, VolumeService) for service in application.services
         )
+
+    def test_a_boost_adopted_after_assembly_reaches_home_assistant(self) -> None:
+        """The composition root is where the control and the application meet.
+
+        A publisher that was never registered would leave the slider showing the
+        previous number after a change made on the settings page, with nothing
+        else failing anywhere — so this pins the wiring rather than the entity,
+        which `test_satellite_audio_entities.py` covers on its own.
+        """
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            cast("RobotHandle", FakeRobot()),
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        # Reaching past the private name deliberately, exactly as the settings
+        # page's own test below does: `EsphomeService` exists to own a
+        # lifecycle, and widening its public surface so a test could read the
+        # state back would be shaping production code around this check. The
+        # alternative is not pinning the wiring at all.
+        state = esphome._state
+        boost = next(
+            entity
+            for entity in state.entities
+            if isinstance(entity, SpeakerBoostNumberEntity)
+        )
+        client = connected(state)[0]
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
 
     def test_the_whole_application_assembles_over_a_fake_robot(self) -> None:
         """Ports to adapters, the behaviour layer, and the services it owns."""

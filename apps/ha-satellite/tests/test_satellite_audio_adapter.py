@@ -794,6 +794,55 @@ class TestTheVolumeControlIsReal:
         assert _peak_of(media.pushed[0]) > _peak_of(media.pushed[-1])
 
 
+class TestTheBoostIsAControlToo:
+    """It is a Home Assistant Number now, so it changes while a sound plays."""
+
+    def test_a_boost_change_is_heard_within_the_current_sound(self) -> None:
+        """Read per chunk, exactly as the volume is — not at the next sound."""
+        media = FakeMedia()
+        detach = ManualDetach()
+        turn_up = _AfterWaits(2)
+        player = _player(
+            media,
+            _one_sound(),
+            # Constant rather than a ramp, so a difference between two chunks
+            # is the gain changing and cannot be the material.
+            decoder=FakeDecoder(default=steady(1.0, level=0.05)),
+            detach=detach,
+            sleep=turn_up,
+            boost_percent=100.0,
+        )
+        turn_up.action = lambda: player.set_boost(400.0)
+
+        player.play("chime")
+        detach.run_all()
+
+        assert _peak_of(media.pushed[-1]) > _peak_of(media.pushed[0])
+
+    def test_the_port_sets_the_boost_on_both_outputs(self) -> None:
+        """One speaker, so the boost belongs to the device and not to an output."""
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("chime", "/sounds/chime.flac", 0.5)
+        audio = ReachyAudio(
+            media,
+            sounds,
+            detach=immediately,
+            sleep=no_sleep,
+            decode=FakeDecoder(default=playable(0.05, peak=0.1)),
+            boost_percent=100.0,
+        )
+
+        audio.set_boost(300.0)
+        audio.music.play("chime")
+        music_peak = _peak(media)
+        media.pushed.clear()
+        audio.speech.play("chime")
+
+        assert music_peak == pytest.approx(0.3, abs=1e-3)
+        assert _peak(media) == pytest.approx(0.3, abs=1e-3)
+
+
 class TestTheAudioPortIsOneLifecycle:
     """The microphone and the speaker are one piece of hardware."""
 

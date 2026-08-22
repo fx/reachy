@@ -90,7 +90,7 @@ from reachy_mini_ha_satellite.ports import SourceSelection
 from reachy_session_client import validate_session_url
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 __all__ = [
     "BOOTSTRAP_SETTINGS",
@@ -106,6 +106,7 @@ __all__ = [
     "Resolution",
     "SettingSource",
     "Settings",
+    "apply_settings_change",
     "as_configured_string",
     "canonical_string",
     "configuration_report",
@@ -187,6 +188,7 @@ LIVE_SETTINGS: Final[frozenset[str]] = frozenset(
         "gaze_deadzone",
         "gaze_smoothing",
         "idle_seconds",
+        "speaker_boost_percent",
     }
 )
 
@@ -732,6 +734,64 @@ def load_settings(
         ignored_overrides=ignored,
         declared_but_unread=declared_but_unread(source),
     )
+
+
+def apply_settings_change(
+    wanted: Mapping[str, str],
+    *,
+    store: OverrideStore,
+    environ: Mapping[str, str] | None = None,
+    apply_live: Callable[[Settings], None] | None = None,
+) -> Resolution:
+    """Resolve a set of overrides, write them, and adopt what can be adopted.
+
+    The one definition of "apply a settings change", so that the settings page
+    and a Home Assistant control cannot end up doing it in two different orders.
+    The order is the whole of it: **resolve first, write second**. A value that
+    cannot be resolved is refused before anything is persisted, so a submission
+    that would not start the application does not become the file the next start
+    reads.
+
+    Merging is the caller's, deliberately: a form submits every field and drops
+    the ones equal to the layers below, while an entity submits the single name
+    it owns. Both then hand the whole `wanted` mapping here, because the store
+    holds a complete set rather than a patch.
+
+    `apply_live` is a callable rather than a `SettingsHost`, and the reason that
+    matters is **not** the import cycle. A cycle is avoidable — a one-method
+    protocol could be declared here or in `ports.py` and `web/app.py` could
+    import it — so it is a consequence rather than the argument. The argument is
+    that a callable is the narrower dependency: this function needs one thing
+    done with the resolved settings, and taking the whole host would let it
+    reach the running application's other methods and would oblige every future
+    caller to have a host to hand rather than a function. A Home Assistant
+    entity has no host. That said, the cycle is real and worth knowing about:
+    `SettingsHost` lives in `web/app.py`, `web` imports this module, and
+    importing it back would make the two mutually importable — see
+    `SettingsHost`'s own docstring on why it exists at all.
+
+    Args:
+        wanted: The complete set of overrides to store, by setting name.
+        store: Where they are kept.
+        environ: The environment to resolve against. Defaults to the process
+            environment.
+        apply_live: What to hand the newly resolved settings to, or `None` when
+            nothing is running yet.
+
+    Returns:
+        The settings in effect after the change, and where each came from.
+
+    Raises:
+        ConfigurationError: If the overrides do not resolve, or if the file
+            cannot be written. **Both callers must catch this and report it**,
+            for the reason `OverrideStore.save` records: a change that appears
+            to have been accepted and was not is the worst outcome available.
+    """
+    resolved = load_settings(environ, wanted)
+    store.save(wanted)
+    if apply_live is not None:
+        apply_live(resolved.settings)
+    return resolved
 
 
 def _check_coherence(settings: Settings) -> None:

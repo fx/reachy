@@ -609,6 +609,24 @@ class ReachyPlayback:
             self._volume = volume
         self._note_volume()
 
+    def set_boost(self, percent: float) -> None:
+        """Adopt a new software boost.
+
+        Heard from the next pushed chunk onwards, exactly as `set_volume` is:
+        `_gain` reads `_boost_percent` per chunk under this same lock, so a
+        boost changed part way through an answer applies to what is left of
+        *that* answer rather than to the next one.
+
+        Args:
+            percent: The boost, in percent, where 100 is unity. Not clamped
+                here: `Settings` validates the configured value and the Home
+                Assistant entity clamps what it is sent, so a third bound in
+                the adapter would be a third place for the range to drift.
+        """
+        with self._lock:
+            self._boost_percent = percent
+        _LOGGER.debug("%s: boost is now %.0f%%", self._name, percent)
+
     def duck(self, factor: float = 0.5) -> None:
         """Make this output quieter for a while.
 
@@ -1055,6 +1073,26 @@ class ReachyAudio:
             The announcement player.
         """
         return self._speech
+
+    def set_boost(self, percent: float) -> None:
+        """Set the software boost both outputs amplify by.
+
+        Fanned out to music and speech together, because the boost is a
+        property of the device rather than of one output: both play through
+        the one speaker, and the number is makeup gain for how quietly Home
+        Assistant's text-to-speech arrives.
+
+        No clamping happens here. `Settings` validates the configured value
+        against `MIN_BOOST_PERCENT` and `MAX_BOOST_PERCENT`, and the Home
+        Assistant entity clamps what an operator sends it to the same bounds;
+        a third bound in the adapter would be a third place for the range to
+        drift from the one that is declared.
+
+        Args:
+            percent: The boost, in percent, where 100 is unity.
+        """
+        self._music.set_boost(percent)
+        self._speech.set_boost(percent)
 
     def start(self) -> None:
         """Take up the daemon's media interface.

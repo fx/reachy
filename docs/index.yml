@@ -148,3 +148,10 @@ changes:
     spec: ha-satellite
     status: complete
     depends_on: ["0013"]
+  - id: "0017"
+    name: speaker-controls-in-home-assistant
+    path: changes/0017-speaker-controls-in-home-assistant.md
+    description: Speaker volume and software boost as Home Assistant controls, sharing one level with the media player and one store with the settings page
+    spec: ha-satellite
+    status: complete
+    depends_on: ["0016"]

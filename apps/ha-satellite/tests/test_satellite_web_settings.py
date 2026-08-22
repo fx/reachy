@@ -381,6 +381,32 @@ class TestChangingASetting:
         assert "restart=log_level" not in location
 
     @pytest.mark.asyncio
+    async def test_the_speaker_boost_is_saved_without_asking_for_a_restart(
+        self,
+    ) -> None:
+        """Both outputs read it per pushed chunk, so it takes effect at once.
+
+        The page and the Home Assistant control write the same setting through
+        the same path, so a page that asked for a restart would be telling an
+        operator something the control contradicts.
+        """
+        settings = load_settings(ENVIRONMENT, {}).settings
+        host = RecordingHost()
+
+        async with _client(_app(host)) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, speaker_boost_percent="620.0"),
+                headers=_FORM_HEADERS,
+            )
+
+        location = response.headers["location"]
+        assert "saved=speaker_boost_percent" in location
+        assert "restart=" not in location
+        assert _store().load() == {"speaker_boost_percent": "620.0"}
+        assert host.applied[-1].speaker_boost_percent == pytest.approx(620.0)
+
+    @pytest.mark.asyncio
     async def test_the_page_reports_what_the_last_submission_did(self) -> None:
         """Which is what the redirect's query string is for."""
         async with _client(_app(RecordingHost())) as client:
