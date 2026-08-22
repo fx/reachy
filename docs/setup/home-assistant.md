@@ -218,6 +218,34 @@ music while it speaks. Both show up in the same log.
 > address and the second the Home Assistant host. The levels are untouched.
 > [Change 0016](../changes/0016-audible-playback.md) records the rest.
 
+### Both speaker controls are on the device page
+
+You do not have to reach for the environment to change either number. The device
+page carries both, in the **Configuration** group beside **Mic Volume**:
+
+- **Speaker Volume** — 0 to 100%, the same level the media-player card sets.
+  There is one level underneath the two, so moving either moves the other; while
+  the robot is muted this reads 0, and a value set into it is remembered and
+  restored when you unmute rather than applied straight away.
+- **Speaker Boost** — 100 to 800%, the multiplier the section above is about.
+
+A change from either control is written to the overrides file — `settings.json`
+in the state directory, which is the same file the robot's own settings page
+writes — and takes effect without a restart. The boost reaches both outputs from
+the next pushed chunk onwards, so you can move the slider while the robot is
+talking and hear the result. Because it is one file and not two, a boost set from
+Home Assistant is the number the settings page shows afterwards, and it survives
+a restart.
+
+`REACHY_SATELLITE_SPEAKER_BOOST_PERCENT` remains how the **starting** value is
+set — it is what the robot boots at before anything has overridden it, and it is
+still the right place to set a fleet-wide default. Once either control has been
+moved, the overrides file is what wins.
+
+```
+<!-- transcript to be captured on hardware before merge -->
+```
+
 ## 5. Watch the robot, not the screen
 
 The point of a robot satellite is that you can tell what it is doing from across
