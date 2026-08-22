@@ -141,3 +141,10 @@ changes:
     spec: architecture
     status: complete
     depends_on: ["0013", "0014"]
+  - id: "0016"
+    name: audible-playback
+    path: changes/0016-audible-playback.md
+    description: Push-based playback with makeup gain, a soft-knee limiter and per-source headroom, so the robot is audible
+    spec: ha-satellite
+    status: in-progress
+    depends_on: ["0013"]

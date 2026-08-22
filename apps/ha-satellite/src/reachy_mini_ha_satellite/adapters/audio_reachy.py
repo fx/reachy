@@ -14,36 +14,36 @@ imported from `esphome.seams` rather than restated, which is the opposite case
 and deliberately so: they are there precisely so that both sides of the seam
 agree on the sample format, and a second copy here would be free to disagree.
 
-Three things about this module are shaped by what the daemon does *not* offer,
-and each of them is a limitation rather than a design:
+**Playback pushes samples rather than naming a file, and that is the whole of
+change 0016.** The daemon offers both: `play_sound(path)`, which is a thing you
+hand over, and `start_playing` / `push_audio_sample` / `stop_playing`, which is a
+thing you can multiply. Nothing in the first path ever holds a sample, so there
+was nowhere to apply gain — and the robot measured too quiet to hold a
+conversation with, on a speaker whose one hardware control was already at
+`0.00dB`. `decode.py` turns a resolved file into float samples and
+`output_gain.py` amplifies them; this module paces them into the daemon.
 
-* **There is one output.** `play_sound` replaces whatever the daemon was
-  already playing, so the music player and the announcement player share a
-  single channel; starting an announcement silences music at the daemon whether
-  or not the music player knows. The vendored protocol layer already pauses
-  music before an announcement and resumes afterwards, so the two are
-  coordinated in practice — but a caller that plays on both at once gets one of
-  them.
-* **There is no completion signal.** Nothing reports that a sound has ended, so
-  the player schedules a timer for the sound's own length, read out of the
-  file's header by `sounds.py` — WAV and FLAC, which is what this application
-  ships, and MP3, which is what Home Assistant's text-to-speech proxy serves.
-  A format whose length cannot be read is scheduled at `UNKNOWN_LENGTH_SECONDS`
-  instead: far enough out that a stop or the next `play` gets there first in
-  ordinary use, and finite, so a `done_callback` cannot be lost outright. What
-  is not available is a *measurement* of a format nobody here can size; a
-  completion that arrives late is the cost, and one that never arrives would
-  wedge the caller.
-* **There is no output gain.** `set_volume` and `duck` record what was asked
-  for and report it back, and change nothing audible. Home Assistant's volume
-  control therefore round-trips through the media-player entity correctly and
-  does nothing, which is stated here rather than hidden because the fix is a
-  choice between the daemon growing a volume control and this adapter moving to
-  the daemon's push-based playback path, and neither can be decided without the
-  robot.
+Two things the old path documented as limitations are gone with it:
 
-All three are exercised through fakes here and none of them has been near a
-speaker; they are the first things the end-to-end session has to settle.
+* **Completion is observed rather than timed.** The player used to schedule a
+  timer for the sound's own length, read out of the file's header, and to fall
+  back to a five-minute bound for a format it could not size. Now the end of the
+  push loop *is* the end of the sound, so a `done_callback` is neither early nor
+  late, and no magic constant stands in for a measurement.
+* **The volume control does something.** `set_volume`, `duck` and `unduck` used
+  to be recorded and reported back while changing nothing audible. They are read
+  once per pushed chunk now, so Home Assistant's slider and the ducking the
+  vendored layer performs when a wake word fires both take effect part way
+  through an utterance rather than at the next one.
+
+One limitation is unchanged and still worth stating: **there is one output.**
+The music player and the announcement player push into the same daemon pipeline,
+so a caller that plays on both at once hears them mixed. The vendored protocol
+layer pauses music before an announcement and resumes afterwards, so the two are
+coordinated in practice.
+
+None of this has been near a speaker. Every part of it is exercised through the
+fake daemon here, and change 0016's own last task is the listening test.
 """
 
 from __future__ import annotations
@@ -52,10 +52,19 @@ import functools
 import logging
 import threading
 import time
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
+from reachy_mini_ha_satellite.adapters.decode import decode_file
+from reachy_mini_ha_satellite.adapters.output_gain import (
+    DEFAULT_BOOST_PERCENT,
+    LevelMeter,
+    Samples,
+    amplify,
+    effective_gain,
+    headroom_gain,
+)
 from reachy_mini_ha_satellite.esphome.seams import SAMPLE_RATE, SAMPLE_WIDTH
 
 if TYPE_CHECKING:
@@ -67,14 +76,11 @@ if TYPE_CHECKING:
 __all__ = [
     "DEFAULT_CHANNELS",
     "DEFAULT_SAMPLES_PER_CHUNK",
-    "UNKNOWN_LENGTH_SECONDS",
     "AudioSourceError",
-    "Cancellable",
     "ReachyAudio",
     "ReachyCapture",
     "ReachyPlayback",
-    "Scheduler",
-    "ThreadScheduler",
+    "decode_for_playback",
     "run_detached",
 ]
 
@@ -101,13 +107,19 @@ _SAMPLE_DTYPE: Final = np.dtype(f"<i{SAMPLE_WIDTH}")
 # the most negative sample there is — which is the loudest possible click.
 _FULL_SCALE: Final = float(2 ** (8 * SAMPLE_WIDTH - 1) - 1)
 
-# What a sound of unreadable length is timed at. Five minutes: longer than any
-# announcement Home Assistant sends and longer than most tracks, so in ordinary
-# use a stop or the next `play` supersedes it long before it fires — and finite,
-# so a `done_callback` cannot be lost outright. The formats whose length *is*
-# readable are in `sounds.py`, and they cover everything this application ships
-# as well as the text-to-speech Home Assistant produces.
-UNKNOWN_LENGTH_SECONDS: Final = 300.0
+# How much audio one pushed chunk carries. The daemon's playback `appsrc` has a
+# bounded queue and does not block, so a caller that pushes faster than the
+# speaker drains has the excess dropped rather than buffered — the pushes are
+# paced instead. Fifty milliseconds is short enough that a volume change or a
+# duck is heard within one chunk, and long enough that a minute of audio is a
+# thousand pushes rather than sixty thousand.
+_CHUNK_SECONDS: Final = 0.05
+
+# How far ahead of the speaker to stay. The pacing loop is deliberately this
+# much early throughout, so that a late wakeup or a slow push costs some of the
+# lead rather than producing a gap in the audio — and the same amount is waited
+# out at the end, which is the queued audio finishing rather than the pushing.
+_LEAD_SECONDS: Final = 0.2
 
 # How long to wait before asking the daemon for audio again when it had none.
 # Half a chunk: short enough that the buffer never runs dry between reads, long
@@ -124,55 +136,22 @@ class AudioSourceError(RuntimeError):
     """
 
 
-class Cancellable(Protocol):
-    """Something scheduled that has not happened yet."""
+def decode_for_playback(path: str, rate: int) -> Samples:
+    """Decode one file for the player, at the rate the daemon reports.
 
-    def cancel(self) -> None:
-        """Stop it happening. Calling this after it has happened is not an error."""
-        ...
+    A named function rather than a lambda over `decode_file` because it is the
+    player's default and therefore part of its shape: injecting something else
+    is how a test drives playback without reading a file, which the
+    no-input-or-output rule for unit tests requires.
 
+    Args:
+        path: The local file to decode.
+        rate: The sample rate to resample to.
 
-class Scheduler(Protocol):
-    """How the player arranges to be told that a sound has ended.
-
-    Injected because it is the one piece of the player that is about time. A
-    test drives a whole playlist through without waiting for any of it, and
-    what it is testing is the queue, the callbacks and the state — not
-    `threading.Timer`.
+    Returns:
+        The decoded mono samples.
     """
-
-    def call_after(self, delay: float, action: Callable[[], None]) -> Cancellable:
-        """Arrange for something to happen later.
-
-        Args:
-            delay: How long to wait, in seconds.
-            action: What to do. It may run on any thread.
-
-        Returns:
-            A handle that cancels it.
-        """
-        ...
-
-
-class ThreadScheduler:
-    """A scheduler backed by timer threads, which is what runs on the robot."""
-
-    def call_after(self, delay: float, action: Callable[[], None]) -> Cancellable:
-        """Run something on a timer thread after a delay.
-
-        Args:
-            delay: How long to wait, in seconds.
-            action: What to do.
-
-        Returns:
-            The timer, which is `Cancellable`.
-        """
-        timer = threading.Timer(delay, action)
-        # A daemon thread, so a timer waiting out the tail of an announcement
-        # cannot hold the process open after the daemon has asked it to stop.
-        timer.daemon = True
-        timer.start()
-        return timer
+    return decode_file(path, rate=rate)
 
 
 def run_detached(work: Callable[[], None]) -> None:
@@ -405,35 +384,56 @@ class ReachyPlayback:
         media: MediaInterface,
         sounds: SoundSource,
         *,
-        scheduler: Scheduler | None = None,
         detach: Callable[[Callable[[], None]], None] = run_detached,
+        sleep: Callable[[float], None] = time.sleep,
+        decode: Callable[[str, int], Samples] = decode_for_playback,
         name: str = "playback",
         volume: float = 100.0,
+        boost_percent: float = DEFAULT_BOOST_PERCENT,
     ) -> None:
         """Wire an output up without playing anything.
 
         Args:
             media: The daemon's media interface.
-            sounds: How a requested URL becomes a local file with a length.
-            scheduler: How completion is arranged. Defaults to timer threads.
-            detach: How to get resolving a sound off the calling thread.
+            sounds: How a requested URL becomes a local file.
+            detach: How to get resolving, decoding and pushing a sound off the
+                calling thread, which is the event loop the ESPHome protocol
+                runs on.
+            sleep: How the push loop paces itself against the speaker. Injected
+                so the test suite drives a whole playlist through without
+                spending its length, which the no-sleeping rule for unit tests
+                requires.
+            decode: How a resolved file becomes samples. Injected for the same
+                kind of reason: decoding reads a file, and a unit test may not.
+                What the real one does to the wheel's own assets is a contract
+                test of its own.
             name: What to call this output in a log line — "music" or "speech".
             volume: The level to report until something sets another.
+            boost_percent: The software boost, in percent. Makeup gain for
+                Home Assistant's text-to-speech, which arrives quiet; see
+                `output_gain.py` for where the number comes from.
         """
         self._media = media
         self._sounds = sounds
-        self._scheduler = scheduler if scheduler is not None else ThreadScheduler()
         self._detach = detach
+        self._sleep = sleep
+        self._decode = decode
         self._name = name
         self._volume = volume
+        self._boost_percent = boost_percent
         self._duck_factor: float | None = None
-        # One lock over all of the state below, because completion arrives on a
-        # timer thread while `play` and `stop` are called from the event loop.
+        # One lock over all of the state below, because the push loop runs on a
+        # thread of its own while `play`, `stop` and `duck` are called from the
+        # event loop.
         self._lock = threading.RLock()
         self._pending: list[str] = []
         self._current: Sound | None = None
+        # The decoded source, held un-amplified so that `resume` can play it
+        # again — and so that a volume change part way through an utterance
+        # applies to what is left of it rather than to the next one.
+        self._samples: Samples | None = None
         self._callback: Callable[[], None] | None = None
-        self._timer: Cancellable | None = None
+        self._output_rate: int | None = None
         self._paused = False
         # Which start the pending completion and the pending resolution belong
         # to. See `_finished` and `_resolve_and_begin`.
@@ -466,8 +466,9 @@ class ReachyPlayback:
         """The level that was last asked for.
 
         Returns:
-            The volume in percent. It is reported, not applied: see this
-            module's docstring on what the daemon's media interface offers.
+            The volume in percent, ducking included. Since change 0016 this is
+            also what is *applied*: the push loop reads it once per chunk and
+            scales the samples by it.
         """
         with self._lock:
             # Tested against `None` rather than for truth: a duck factor of
@@ -543,7 +544,7 @@ class ReachyPlayback:
             # Advances the generation, which is what abandons a resolution
             # still in flight. Without it a fetch that finished after this
             # would start playing a sound the caller had already paused.
-            self._cancel_timer()
+            self._cancel_playback()
             if self._resolving is not None:
                 self._pending.insert(0, self._resolving)
                 self._resolving = None
@@ -562,8 +563,12 @@ class ReachyPlayback:
             if not self._paused or self._released:
                 return
             self._paused = False
-            if self._current is not None:
-                self._begin(self._current)
+            if self._current is not None and self._samples is not None:
+                # Already decoded, so this restarts it without going back to
+                # the resolver — and from its beginning, because the daemon's
+                # media interface has no seek and re-pushing from an offset
+                # would be a position this player never knew.
+                self._begin(self._current, self._samples)
                 return
             if not self._pending:
                 return
@@ -586,7 +591,11 @@ class ReachyPlayback:
         _invoke(pending)
 
     def set_volume(self, volume: float) -> None:
-        """Record the level Home Assistant asked for.
+        """Adopt the level Home Assistant asked for.
+
+        Heard from the next pushed chunk onwards, which is within
+        `_CHUNK_SECONDS` — so turning the volume down during a long answer
+        turns *that* answer down.
 
         Args:
             volume: The level in percent, from 0.0 to 100.0.
@@ -596,7 +605,11 @@ class ReachyPlayback:
         self._note_volume()
 
     def duck(self, factor: float = 0.5) -> None:
-        """Record that this output should be quieter for a while.
+        """Make this output quieter for a while.
+
+        The vendored protocol layer ducks music when a wake word fires, so this
+        lands part way through whatever is playing and has to be audible there
+        rather than at the next sound.
 
         Args:
             factor: What the volume should be multiplied by.
@@ -606,7 +619,7 @@ class ReachyPlayback:
         self._note_volume()
 
     def unduck(self) -> None:
-        """Record that this output should be at its full level again."""
+        """Return this output to its full level."""
         with self._lock:
             self._duck_factor = None
 
@@ -631,12 +644,13 @@ class ReachyPlayback:
             return self._released
 
     def _note_volume(self) -> None:
-        """Record in the log that a level was set and changed nothing audible."""
-        _LOGGER.debug(
-            "%s: volume is recorded but not applied; the daemon's media "
-            "interface exposes no output gain",
-            self._name,
-        )
+        """Record in the log what the output was asked to do.
+
+        Debug rather than info: Home Assistant sets the volume on connecting and
+        the vendored layer ducks on every wake word, so this is several lines a
+        conversation.
+        """
+        _LOGGER.debug("%s: level is now %.0f%%", self._name, self.volume)
 
     def _take_over(self) -> Callable[[], None] | None:
         """Clear everything queued and hand back the callback that was owed.
@@ -646,7 +660,7 @@ class ReachyPlayback:
             invokes it after releasing the lock, because a callback that calls
             back into this player would otherwise re-enter it mid-change.
         """
-        self._cancel_timer()
+        self._cancel_playback()
         self._pending = []
         self._current = None
         self._loading = False
@@ -654,16 +668,14 @@ class ReachyPlayback:
         callback, self._callback = self._callback, None
         return callback
 
-    def _cancel_timer(self) -> None:
-        """Stop the pending completion, if there is one.
+    def _cancel_playback(self) -> None:
+        """Abandon whatever is being pushed, if anything is.
 
-        The generation moves on as well as the timer being cancelled, because
-        cancelling cannot stop a callback that has already begun running — the
-        generation is what makes such a callback harmless when it arrives.
+        Moving the generation on is the whole mechanism. A push loop already
+        running cannot be interrupted from outside, so it checks the generation
+        between chunks and returns when it no longer matches — and a `_finished`
+        that was already on its way in is harmless for the same reason.
         """
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
         self._generation += 1
 
     def _resolve_and_begin(self, generation: int) -> None:
@@ -723,77 +735,163 @@ class ReachyPlayback:
                     self._name,
                 )
                 continue
+            # Decoding happens here, on this detached thread, for the same
+            # reason resolving does: a long file is not something the ESPHome
+            # protocol should wait behind.
+            try:
+                samples = self._decode(sound.path, self._rate())
+            except Exception:
+                # `DecodeError` for a file that is not audio this can read, and
+                # anything the decoder raises underneath it. Either way the next
+                # item is tried, exactly as an unresolvable one is: a media URL
+                # Home Assistant cannot serve must not end a conversation.
+                _LOGGER.exception(
+                    "%s: %s could not be decoded",
+                    self._name,
+                    sound.path,
+                )
+                continue
             with self._lock:
                 if generation != self._generation:
                     return
                 self._resolving = None
                 self._loading = False
-                self._begin(sound)
+                self._begin(sound, samples)
             return
         # Nothing in the request could be resolved, so the caller is owed its
         # callback now rather than never: it is waiting to be told the
         # announcement has finished, and as far as it can be, it has.
         _invoke(callback)
 
-    def _begin(self, sound: Sound) -> None:
-        """Hand one sound to the daemon and arrange to be told it ended.
+    def _begin(self, sound: Sound, samples: Samples) -> None:
+        """Start pushing one decoded sound at the daemon.
+
+        Called with the lock held, and returns without pushing anything: the
+        loop runs on a thread of its own, because it lasts as long as the sound
+        does and `resume` calls this from the event loop.
+
+        Args:
+            sound: The resolved file, kept so that `resume` knows what is
+                current and a log line can name it.
+            samples: Its decoded, un-amplified audio.
+        """
+        self._current = sound
+        self._samples = samples
+        # Moves the generation on, which is what makes a push loop still
+        # running for the previous sound abandon itself.
+        self._cancel_playback()
+        self._detach(functools.partial(self._push, self._generation, samples))
+
+    def _push(self, generation: int, samples: Samples) -> None:
+        """Feed one sound to the daemon, paced against the speaker.
+
+        **Pacing is not politeness.** The daemon feeds pushed samples into a
+        live GStreamer `appsrc` whose queue is bounded and which does not block,
+        so pushing a whole file at once has most of it dropped. The loop stays
+        `_LEAD_SECONDS` ahead of the speaker and no further.
+
+        The gain is read per chunk rather than once, which is what makes Home
+        Assistant's volume control and the ducking the vendored layer performs
+        on a wake word audible *during* an utterance. Only the headroom cap is
+        computed once, over the whole source: it is a property of the material
+        (change 0016, R5), not of where the loop has got to.
+
+        Args:
+            generation: Which sound this loop belongs to. A `play`, a `pause`,
+                a `stop` or a `release` moves the generation on, and this
+                returns rather than pushing audio nobody asked for any more.
+            samples: The decoded, un-amplified source.
+        """
+        headroom = headroom_gain(samples)
+        meter = LevelMeter()
+        rate = self._rate()
+        per_chunk = max(1, int(rate * _CHUNK_SECONDS))
+        chunk_seconds = per_chunk / rate
+        self._media.start_playing()
+        # The deadline the *next* push is due by, kept as an absolute time so
+        # that a slow chunk is caught up with rather than accumulated into a
+        # drift that ends in an underrun.
+        due = time.monotonic() + _LEAD_SECONDS
+        for start in range(0, samples.size, per_chunk):
+            with self._lock:
+                if generation != self._generation:
+                    return
+                gain = self._gain(headroom)
+            block, levels = amplify(samples[start : start + per_chunk], gain)
+            meter.add(levels, int(block.size))
+            self._media.push_audio_sample(block)
+            due += chunk_seconds
+            delay = due - time.monotonic()
+            if delay > 0:
+                self._sleep(delay)
+        _LOGGER.info("%s: %s", self._name, meter.levels().describe())
+        # What is still queued at the daemon has not been heard yet, so the
+        # sound is not over until it has drained. Without this the callback —
+        # which the vendored layer reads as "the announcement finished" — would
+        # arrive a fifth of a second early, every time.
+        self._sleep(_LEAD_SECONDS)
+        self._finished(generation)
+
+    def _gain(self, headroom: float) -> float:
+        """Say what the current settings ask one chunk to be multiplied by.
 
         Called with the lock held.
 
         Args:
-            sound: The resolved file to play.
+            headroom: The cap this source's own peak allows, measured once over
+                the whole of it.
+
+        Returns:
+            The gain for this chunk.
         """
-        self._current = sound
-        # Cancelling moves the generation on, which is what makes a callback
-        # already in flight for the previous sound harmless.
-        self._cancel_timer()
-        self._media.play_sound(sound.path)
-        delay = sound.duration_seconds
-        if delay is None:
-            # The format's length is unreadable. Something is still scheduled,
-            # far enough out that it is never the reason a sound is considered
-            # finished in ordinary use — a stop or the next `play` will get
-            # there first — and near enough that nothing waits for ever. A
-            # completion that never arrives wedges the caller's state machine,
-            # which is worse than one that arrives late.
-            delay = UNKNOWN_LENGTH_SECONDS
-            _LOGGER.debug(
-                "%s: %s has no readable length; completion is bounded at %.0fs "
-                "rather than measured",
-                self._name,
-                sound.path,
-                delay,
-            )
-        self._timer = self._scheduler.call_after(
-            delay,
-            functools.partial(self._finished, self._generation),
+        # Tested against `None` rather than for truth, for the reason `volume`
+        # records: a duck factor of zero is a legitimate request for silence and
+        # is falsy, so `or 1.0` would play it at full level.
+        duck = 1.0 if self._duck_factor is None else self._duck_factor
+        return effective_gain(
+            volume=self._volume,
+            boost_percent=self._boost_percent,
+            duck=duck,
+            headroom=headroom,
         )
 
-    def _finished(self, generation: int) -> None:
-        """Move on once a sound's own length has elapsed. Runs on any thread.
+    def _rate(self) -> int:
+        """Say what rate to decode and push at.
 
-        The generation is what makes cancellation reliable. `Timer.cancel`
-        cannot stop a callback that has already started running, so a `play`,
-        a `pause` or a `stop` that lands in that window would otherwise have
-        its *replacement* sound marked finished here — firing a callback the
-        caller reads as "the announcement ended" while the announcement is
-        still playing. A callback whose generation is not the current one
-        belongs to a sound this player has already moved past.
+        Read from the daemon once and remembered, because every chunk of every
+        sound is resampled to it and asking per chunk would be asking the same
+        question of the same device thousands of times a minute.
+
+        Returns:
+            The daemon's output sample rate.
+        """
+        if self._output_rate is None:
+            self._output_rate = self._media.get_output_audio_samplerate()
+        return self._output_rate
+
+    def _finished(self, generation: int) -> None:
+        """Move on once a sound has actually been played. Runs on any thread.
+
+        The generation is what makes this safe against a `play`, a `pause` or a
+        `stop` that landed while the last chunk was draining: a completion whose
+        generation is not the current one belongs to a sound this player has
+        already moved past, and firing its callback would tell the caller that
+        the sound now playing had ended.
 
         Args:
-            generation: Which sound this callback was scheduled for.
+            generation: Which sound this completion was reached for.
         """
         with self._lock:
             if generation != self._generation:
                 return
-            self._timer = None
             if self._paused or self._current is None:
                 return
             self._current = None
+            self._samples = None
             if self._pending:
-                # The next item still has to be resolved, and resolving can
-                # fetch. This runs on a timer thread, which must not spend
-                # a fetch's worth of time inside the lock either.
+                # The next item still has to be resolved and decoded, and
+                # resolving can fetch. This runs on the push thread, which must
+                # not spend a fetch's worth of time inside the lock either.
                 self._loading = True
                 self._generation += 1
                 self._detach(
@@ -837,22 +935,26 @@ class ReachyAudio:
         media: MediaInterface,
         sounds: SoundSource,
         *,
-        scheduler: Scheduler | None = None,
         detach: Callable[[Callable[[], None]], None] = run_detached,
         samples_per_chunk: int = DEFAULT_SAMPLES_PER_CHUNK,
         sleep: Callable[[float], None] = time.sleep,
+        decode: Callable[[str, int], Samples] = decode_for_playback,
+        boost_percent: float = DEFAULT_BOOST_PERCENT,
     ) -> None:
         """Build the three surfaces over one media interface.
 
         Args:
             media: The daemon's media interface.
-            sounds: How a requested URL becomes a local file with a length.
-            scheduler: How playback completion is arranged.
-            detach: How each output gets resolving a sound off the calling
-                thread, which is the event loop the ESPHome protocol runs on.
+            sounds: How a requested URL becomes a local file.
+            detach: How each output gets resolving, decoding and pushing a sound
+                off the calling thread, which is the event loop the ESPHome
+                protocol runs on.
             samples_per_chunk: How many samples per channel a capture chunk
                 carries.
-            sleep: How capture waits when the daemon has nothing yet.
+            sleep: How capture waits when the daemon has nothing yet, and how
+                each output paces its pushes against the speaker.
+            decode: How each output turns a resolved file into samples.
+            boost_percent: The software boost both outputs apply.
         """
         self._media = media
         self._capture = ReachyCapture(
@@ -863,16 +965,20 @@ class ReachyAudio:
         self._music = ReachyPlayback(
             media,
             sounds,
-            scheduler=scheduler,
             detach=detach,
+            sleep=sleep,
+            decode=decode,
             name="music",
+            boost_percent=boost_percent,
         )
         self._speech = ReachyPlayback(
             media,
             sounds,
-            scheduler=scheduler,
             detach=detach,
+            sleep=sleep,
+            decode=decode,
             name="speech",
+            boost_percent=boost_percent,
         )
 
     @property

@@ -32,3 +32,4 @@
 | 0013 | [satellite-behaviour-and-ui](changes/0013-satellite-behaviour-and-ui.md) | [ha-satellite](specs/ha-satellite/) | complete | 0002, 0012 |
 | 0014 | [benchmarks-and-gates](changes/0014-benchmarks-and-gates.md) | [benchmarks](specs/benchmarks/) | complete | 0006, 0009, 0013 |
 | 0015 | [docs-and-runbooks](changes/0015-docs-and-runbooks.md) | [architecture](specs/architecture/) | complete | 0013, 0014 |
+| 0016 | [audible-playback](changes/0016-audible-playback.md) | [ha-satellite](specs/ha-satellite/) | in-progress | 0013 |

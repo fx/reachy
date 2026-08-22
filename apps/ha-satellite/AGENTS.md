@@ -6,10 +6,12 @@ The robot-side ESPHome voice satellite for Home Assistant. Distribution
 **Spec:** [ha-satellite](../../docs/specs/ha-satellite/).
 **Fills this in:**
 [0011](../../docs/changes/0011-satellite-esphome-vendoring.md) (done),
-[0012](../../docs/changes/0012-satellite-ports-and-adapters.md) (done) and
-[0013](../../docs/changes/0013-satellite-behaviour-and-ui.md) (done). The
-component is complete: `docs/specs/ha-satellite/index.md` is registered in
-`.duvet/config.toml`, so all eleven of its requirements are traced.
+[0012](../../docs/changes/0012-satellite-ports-and-adapters.md) (done),
+[0013](../../docs/changes/0013-satellite-behaviour-and-ui.md) (done) and
+[0016](../../docs/changes/0016-audible-playback.md) (in progress — its code has
+landed and its listening test has not). `docs/specs/ha-satellite/index.md` is
+registered in `.duvet/config.toml`, so all eleven of its requirements are
+traced.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -20,6 +22,8 @@ that apply here.
 |---|---|
 | `src/reachy_mini_ha_satellite/ports.py` | `AudioPort`, `MotionPort`, `PerceptionPort` and the value types they speak in |
 | `src/reachy_mini_ha_satellite/adapters/` | Everything that touches the robot: the daemon's shape, audio, motion and the two perception sources |
+| `src/reachy_mini_ha_satellite/adapters/output_gain.py` | The boost, the soft knee and the limiter that make the robot audible. Pure arithmetic over arrays; its constants are the predecessor application's, tuned by ear against this speaker |
+| `src/reachy_mini_ha_satellite/adapters/decode.py` | `av`, turning a resolved file into the mono float samples the daemon's push path takes, at the rate the daemon reports |
 | `src/reachy_mini_ha_satellite/esphome/` | The vendored ESPHome protocol layer, with its `LICENSE`, `NOTICE` and per-file provenance |
 | `src/reachy_mini_ha_satellite/esphome/seams.py` | The two audio interfaces cut into it. Not vendored; filled by `adapters/audio_reachy.py` |
 | `src/reachy_mini_ha_satellite/assets/` | Wake-word models and sounds that ship in the wheel, with the registry recording each one's terms |

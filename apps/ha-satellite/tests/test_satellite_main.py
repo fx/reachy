@@ -47,6 +47,7 @@ from satellite_support import (
     FakeWakeWordFeatures,
     available_wake_word,
     face,
+    inline,
 )
 
 from reachy_mini_ha_satellite import main as satellite_main
@@ -76,6 +77,7 @@ from reachy_mini_ha_satellite.main import (
     AdvertisementService,
     EsphomeService,
     SatelliteApplication,
+    VolumeService,
     WebRTCLike,
     WebService,
     _daemon_thread,
@@ -104,6 +106,7 @@ if TYPE_CHECKING:
 
     from pyfakefs.fake_filesystem import FakeFilesystem
 
+    from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
     from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
     from reachy_mini_ha_satellite.ports import PerceptionPort
 
@@ -126,6 +129,35 @@ _ENVIRONMENT: Final[dict[str, str]] = {
 # `adapters/perception_source.py` binds it, and one exempted line is better than
 # several.
 _ROBOT_ONLY: Final = SourceSelection.LOCAL  # leak-scan:allow
+
+# Where the daemon serves its own API, which is this setting's default. The
+# loopback literal rather than anybody's address.
+_DAEMON_API: Final = "http://127.0.0.1:8000"
+
+
+def _recording(asked: list[str]) -> Callable[[str], bool]:
+    """Build a volume setter that records the address it was given.
+
+    Args:
+        asked: Where to record it.
+
+    Returns:
+        A setter that always reports success.
+    """
+
+    def _set(url: str) -> bool:
+        """Record the address and report success.
+
+        Args:
+            url: Where the daemon is.
+
+        Returns:
+            True, always.
+        """
+        asked.append(url)
+        return True
+
+    return _set
 
 
 def _settings(**overrides: str) -> Settings:
@@ -1274,6 +1306,63 @@ class _FakeWebRTC:
         return bytes(byte + 1 for byte in raw_bytes)
 
 
+class TestTheDaemonsOwnVolume:
+    """R7: the coarse control below this application is driven too.
+
+    It was found at 62 of 100 on the robot, with nothing here aware it existed
+    — a third of the level thrown away before the software boost is asked to
+    make any of it up.
+    """
+
+    @pytest.mark.asyncio
+    async def test_starting_asks_the_daemon_for_its_loudest(self) -> None:
+        """Once, at start-up, so the boost begins from the loudest signal."""
+        asked: list[str] = []
+        service = VolumeService(
+            _DAEMON_API,
+            set_volume=_recording(asked),
+            offload=inline,
+        )
+
+        await service.start()
+
+        assert asked == [_DAEMON_API]
+
+    @pytest.mark.asyncio
+    async def test_a_daemon_that_refuses_does_not_stop_the_application(
+        self,
+    ) -> None:
+        """A quieter robot is better than one that would not start."""
+        service = VolumeService(
+            _DAEMON_API,
+            set_volume=lambda _url: False,
+            offload=inline,
+        )
+
+        await service.start()
+
+        assert True  # returning at all is the assertion: nothing propagated
+
+    @pytest.mark.asyncio
+    async def test_closing_leaves_the_volume_where_it_is(self) -> None:
+        """The daemon's volume is the robot's, not this application's.
+
+        An operator who turned it up after start-up should not have it put back
+        because a voice satellite stopped.
+        """
+        asked: list[str] = []
+        service = VolumeService(
+            _DAEMON_API,
+            set_volume=_recording(asked),
+            offload=inline,
+        )
+
+        await service.start()
+        await service.aclose()
+
+        assert asked == [_DAEMON_API]
+
+
 class TestTheAdvertisement:
     """The mDNS record Home Assistant discovers the satellite through."""
 
@@ -1601,6 +1690,18 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
             state.button_long_press_sound,
         ):
             assert Path(slot).is_file()
+
+    def test_the_daemons_volume_service_is_wired_in(self) -> None:
+        """R7: a service nothing starts is a requirement nothing satisfies."""
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            cast("RobotHandle", FakeRobot()),
+            identity=_identity(),
+        )
+
+        assert any(
+            isinstance(service, VolumeService) for service in application.services
+        )
 
     def test_the_whole_application_assembles_over_a_fake_robot(self) -> None:
         """Ports to adapters, the behaviour layer, and the services it owns."""
