@@ -16,12 +16,25 @@ vendored imports these — `main.build_application` does — so they belong at t
 package's top level, beside `wake_word.py`, which is the same arrangement for the
 same reason.
 
-**Neither entity ever sends anything unprompted.** Each one answers the message
-it was handed and yields the responses that answer goes back in; the vendored
-protocol layer's own fan-out is what delivers a message to every entity, and what
-writes the replies. A future change that wants an asynchronous push should use
+**One of the two sends something unprompted, and only one.** Each entity answers
+the message it was handed and yields the responses that answer goes back in; the
+vendored protocol layer's own fan-out is what delivers a message to every entity,
+and what writes the replies. The boost is the exception, because it is the one of
+the two values that changes without Home Assistant having asked for it: the
+application's own settings page writes it too, and a slider showing the old
+number until the next reconnect is this control not working. So
+`SpeakerBoostNumberEntity.publish` pushes the value in effect through
 `ServerState.broadcast`, which reaches every connected client rather than
-whichever connection an entity happens to hold.
+whichever connection an entity happens to hold — `self.server` is `None` for both
+of these and is never read.
+
+**The volume needs no equivalent and has none.** `ServerState.volume` moves only
+when the ESPHome protocol moves it, and the message that moves it is a message
+this control is itself answering, so what a push would carry has already been
+yielded. Nothing outside that protocol reaches the level: the settings page does
+not set it, and the vendored peripheral API — the one other writer of it —
+is never started by this application, which fills that slot with a
+`PipelineEventTap` instead.
 """
 
 from __future__ import annotations
@@ -126,7 +139,7 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
     file this repository does not edit, and this control neither causes nor
     worsens it.
 
-    This never broadcasts. See the module docstring.
+    This never pushes, and does not need to — see the module docstring.
     """
 
     def __init__(
@@ -281,12 +294,19 @@ class SpeakerBoostNumberEntity(ESPHomeEntity):
     overrides file that cannot be written is the case that exists — is reported
     as the value actually in effect rather than as the one that was asked for.
 
-    This never broadcasts. See the module docstring.
+    **It pushes, and it is the only one of the two that does.** `publish` is what
+    `SatelliteApplication.apply_live` calls once a setting has been adopted,
+    whichever surface chose it — so a boost changed on the application's own
+    settings page moves Home Assistant's slider then rather than at the next
+    reconnect. On the Home-Assistant-originated path that push carries the same
+    value as the reply below, which costs one message and keeps the adoption with
+    exactly one call site. See the module docstring.
     """
 
     def __init__(
         self,
         *,
+        state: ServerState,
         key: int,
         get_percent: Callable[[], float],
         set_percent: Callable[[float], None],
@@ -295,6 +315,9 @@ class SpeakerBoostNumberEntity(ESPHomeEntity):
         """Wire the control to whatever reads and writes the boost.
 
         Args:
+            state: The vendored protocol layer's state, which is what a push
+                goes out over: `broadcast` reaches every connected client, where
+                `server` would reach one connection at best.
             key: The identifier Home Assistant addresses this entity by.
             get_percent: What the boost is now. Read at message time rather than
                 once, so a boost changed from the settings page is what Home
@@ -306,9 +329,34 @@ class SpeakerBoostNumberEntity(ESPHomeEntity):
                 `SpeakerVolumeNumberEntity.__init__`.
         """
         ESPHomeEntity.__init__(self, cast("APIServer", server))
+        self._state = state
         self.key = key
         self._get_percent = get_percent
         self._set_percent = set_percent
+
+    def state_message(self) -> NumberStateResponse:
+        """Say what the boost is now, in the message Home Assistant reads it from.
+
+        One definition, used by every branch below that reports the value and by
+        `publish`, so a pushed state and a polled one cannot come to differ.
+
+        Returns:
+            The state response carrying the boost in effect.
+        """
+        return NumberStateResponse(key=self.key, state=self._get_percent())
+
+    def publish(self) -> None:
+        """Push the boost in effect to every connected client.
+
+        Called from `SatelliteApplication.apply_live`, which is the one funnel a
+        boost change passes through whichever surface chose it. Safe from any
+        thread: the vendored `APIServer.send_messages` hands a write to the
+        event loop when it is called from another one.
+
+        A robot nobody is connected to broadcasts to nothing, which is the
+        ordinary case and costs one empty loop.
+        """
+        self._state.broadcast([self.state_message()])
 
     def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
         """Answer one message from Home Assistant.
@@ -333,9 +381,9 @@ class SpeakerBoostNumberEntity(ESPHomeEntity):
                 icon="mdi:volume-vibrate",
             )
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
-            yield NumberStateResponse(key=self.key, state=self._get_percent())
+            yield self.state_message()
         elif isinstance(msg, NumberCommandRequest) and msg.key == self.key:
             self._set_percent(
                 _clamp(float(msg.state), MIN_BOOST_PERCENT, MAX_BOOST_PERCENT),
             )
-            yield NumberStateResponse(key=self.key, state=self._get_percent())
+            yield self.state_message()

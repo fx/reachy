@@ -22,6 +22,12 @@ what the composition root does. Constructing the protocol directly is the only
 way to stand at that point, and its mocked writer is not needed for anything
 here, because nothing below reaches the code that writes.
 
+The push tests are the one place a connection matters, and what they register on
+the state is `satellite_support.FakeConnection` — the double
+`ServerState.broadcast` fans out to, which records the messages a real
+`VoiceSatelliteProtocol` would have serialised onto a transport. The state, the
+control and the broadcast itself are all the real thing.
+
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
 """
@@ -43,7 +49,12 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated p
     SubscribeHomeAssistantStatesRequest,
 )
 from aioesphomeapi.model import EntityCategory, MediaPlayerCommand, NumberMode
-from satellite_support import FakePlayback, vendored_server_state
+from satellite_support import (
+    FakePlayback,
+    connected,
+    pushed_numbers,
+    vendored_server_state,
+)
 
 from reachy_mini_ha_satellite.adapters.output_gain import (
     MAX_BOOST_PERCENT,
@@ -105,12 +116,15 @@ def _boost(
     *,
     key: int = 0,
     initial: float = _A_BOOST,
+    state: ServerState | None = None,
 ) -> tuple[SpeakerBoostNumberEntity, list[float]]:
     """Build a boost control over a setter that records and a getter that reads it.
 
     Args:
         key: The identifier Home Assistant would address it by.
         initial: What the boost is before anything sets it.
+        state: The state a push goes out over. A fresh one holding no
+            connections when a test is not about pushing.
 
     Returns:
         The control, and the list every set appends to — whose last entry is
@@ -120,6 +134,7 @@ def _boost(
     written = [initial]
     return (
         SpeakerBoostNumberEntity(
+            state=state if state is not None else vendored_server_state(),
             key=key,
             get_percent=lambda: written[-1],
             set_percent=written.append,
@@ -699,6 +714,7 @@ class TestSettingTheBoostFromTheControl:
             del percent
 
         entity = SpeakerBoostNumberEntity(
+            state=vendored_server_state(),
             key=0,
             get_percent=lambda: refused[-1],
             set_percent=_refuse,
@@ -714,6 +730,89 @@ class TestSettingTheBoostFromTheControl:
 
         assert _handled(entity, NumberCommandRequest(key=7, state=700.0)) == []
         assert written == [_A_BOOST]
+
+
+class TestPushingTheBoostNobodyAskedFor:
+    """The boost changes without Home Assistant asking, so it has to be told.
+
+    An operator who moves the boost on the application's own settings page hears
+    the change at once. Until this control pushed, Home Assistant's slider went
+    on showing the previous number until the next reconnect — the control being
+    wrong about the value it exists to report.
+    """
+
+    def test_it_reaches_every_connected_client(self) -> None:
+        """A broadcast, not a reply: a second client must not be left stale."""
+        state = vendored_server_state()
+        entity, written = _boost(key=5, initial=200.0, state=state)
+        clients = connected(state, count=2)
+
+        written.append(640.0)
+        entity.publish()
+
+        assert [pushed_numbers(client, entity.key) for client in clients] == [
+            pytest.approx([640.0]),
+            pytest.approx([640.0]),
+        ]
+
+    def test_it_carries_what_the_getter_says_at_the_moment_it_is_called(
+        self,
+    ) -> None:
+        """Which is what makes a push report the value actually in effect."""
+        state = vendored_server_state()
+        entity, written = _boost(initial=100.0, state=state)
+        client = connected(state)[0]
+
+        for percent in (300.0, 450.0):
+            written.append(percent)
+            entity.publish()
+
+        assert pushed_numbers(client, entity.key) == pytest.approx([300.0, 450.0])
+
+    def test_a_robot_nobody_is_connected_to_pushes_nothing(self) -> None:
+        """The ordinary case, and it must not raise on the way through."""
+        state = vendored_server_state()
+        entity, _written = _boost(state=state)
+
+        entity.publish()
+
+        assert state.connections == []
+
+    def test_what_is_pushed_is_what_a_subscription_is_answered_with(self) -> None:
+        """One definition of the state message, so the two cannot come to differ."""
+        state = vendored_server_state()
+        entity, written = _boost(key=3, initial=180.0, state=state)
+        client = connected(state)[0]
+        written.append(720.0)
+
+        entity.publish()
+        answered = _only(
+            _handled(entity, SubscribeHomeAssistantStatesRequest()),
+            NumberStateResponse,
+        )
+
+        assert pushed_numbers(client, entity.key) == pytest.approx([720.0])
+        assert answered.key == entity.key
+        assert answered.state == pytest.approx(720.0)
+
+    def test_a_set_from_home_assistant_is_answered_whether_or_not_it_pushes(
+        self,
+    ) -> None:
+        """The reply is what that path has always been answered with.
+
+        A push started by the setter would duplicate it, which is harmless and
+        is what the composition root ends up doing — but the reply is the
+        entity's own and does not depend on anything having been wired.
+        """
+        state = vendored_server_state()
+        entity, written = _boost(key=4, state=state)
+        client = connected(state)[0]
+
+        answered = _handled(entity, NumberCommandRequest(key=4, state=550.0))
+
+        assert written[-1] == pytest.approx(550.0)
+        assert _only(answered, NumberStateResponse).state == pytest.approx(550.0)
+        assert pushed_numbers(client, entity.key) == []
 
 
 class TestRegisteringBothBeforeTheProtocolExists:

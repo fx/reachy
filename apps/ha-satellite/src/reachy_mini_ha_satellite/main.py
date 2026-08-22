@@ -267,6 +267,10 @@ def configure_logging(settings: Settings) -> None:
     )
 
 
+def _publish_nothing() -> None:
+    """Push nothing, for an application no entity is reporting settings from."""
+
+
 #:= docs/specs/ha-satellite/index.md#req-045-speech-and-intent-processing-stay-in-home-assistant
 #:% The application MUST NOT perform speech-to-text, text-to-speech, or intent
 #:% resolution locally.
@@ -325,6 +329,10 @@ class SatelliteApplication:
         # What the perception source was built for. Held rather than re-read,
         # because it is decided once at startup — see `apply_live`.
         self._tracking_enabled = settings.face_tracking_enabled
+        # What tells Home Assistant about a setting this application adopted.
+        # Nothing until `publish_live_changes` is called, which is what an
+        # application built without the speaker-boost control stays at.
+        self._publish: Callable[[], None] = _publish_nothing
         self._stop: asyncio.Event | None = None
         self._closed = False
 
@@ -340,6 +348,23 @@ class SatelliteApplication:
             services: What to start with the application and stop with it.
         """
         self._services = tuple(services)
+
+    def publish_live_changes(self, publish: Callable[[], None]) -> None:
+        """Hand over what tells Home Assistant about an adopted setting.
+
+        Separate from the constructor for the same reason `attach` is: what
+        does the publishing is an entity built *from* this application — it
+        reads the value back out of `settings` — so it does not exist yet when
+        this is constructed.
+
+        Args:
+            publish: What to call once a live change has been adopted. Called
+                for any live change rather than only for the one it reports,
+                which costs a repeat of a value Home Assistant already has and
+                keeps the alternative — this class knowing which settings which
+                entity shows — out of it.
+        """
+        self._publish = publish
 
     @property
     def services(self) -> tuple[Service, ...]:
@@ -429,6 +454,13 @@ class SatelliteApplication:
         serve both the settings page and the Home Assistant control, whichever
         of the two chose the number.
 
+        **Being one path is also why the push goes out from here.** A boost
+        chosen on the settings page changes what the robot sounds like at once;
+        a Home Assistant slider still showing the previous number until the next
+        reconnect is the control this application offers being wrong about
+        itself. `publish_live_changes` is what the composition root registers,
+        and it is called below whichever surface started the change.
+
         Args:
             settings: The newly resolved settings.
         """
@@ -442,6 +474,9 @@ class SatelliteApplication:
             idle_seconds=settings.idle_seconds,
             tracking_enabled=self._tracking_enabled,
         )
+        # Last, so that what the publisher reads back is what was adopted rather
+        # than what is halfway through being adopted.
+        self._publish()
 
     async def run(self, stop: asyncio.Event) -> None:
         """Start everything, tick until asked to stop, then leave the robot safe.
@@ -1594,16 +1629,22 @@ def build_application(
     state.entities.append(
         SpeakerVolumeNumberEntity(state=state, key=len(state.entities)),
     )
-    state.entities.append(
-        SpeakerBoostNumberEntity(
-            key=len(state.entities),
-            get_percent=lambda: application.settings.speaker_boost_percent,
-            set_percent=build_boost_setter(
-                store=store,
-                apply_live=application.apply_live,
-            ),
+    boost = SpeakerBoostNumberEntity(
+        state=state,
+        key=len(state.entities),
+        get_percent=lambda: application.settings.speaker_boost_percent,
+        set_percent=build_boost_setter(
+            store=store,
+            apply_live=application.apply_live,
         ),
     )
+    state.entities.append(boost)
+    # The other direction, and the reason the boost control needs one where the
+    # volume control does not: the settings page can change this value without
+    # Home Assistant having asked. `apply_live` is what every change of it
+    # passes through, so pushing from there covers both surfaces with one call
+    # site.
+    application.publish_live_changes(boost.publish)
 
     tap = PipelineEventTap(application.deliver)
     state.peripheral_api = tap

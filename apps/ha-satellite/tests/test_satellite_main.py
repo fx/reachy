@@ -46,8 +46,11 @@ from satellite_support import (
     FakeRobot,
     FakeWakeWordFeatures,
     available_wake_word,
+    connected,
     face,
     inline,
+    pushed_numbers,
+    vendored_server_state,
 )
 
 from reachy_mini_ha_satellite import main as satellite_main
@@ -55,6 +58,7 @@ from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
 from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
+from reachy_mini_ha_satellite.audio_entities import SpeakerBoostNumberEntity
 from reachy_mini_ha_satellite.behaviour import (
     LookAhead,
     LookAt,
@@ -654,6 +658,77 @@ class TestAdoptingSettingsWithoutARestart:
         application.apply_live(_settings(speaker_boost_percent="220"))
 
         assert application.settings.speaker_boost_percent == pytest.approx(220.0)
+
+    def test_the_boost_control_pushes_what_was_adopted(self) -> None:
+        """The settings page changes the boost; Home Assistant has to be told.
+
+        Driven through the real objects the composition root wires together —
+        the application, the vendored state, the control and its broadcast —
+        with only the connected client standing in, because the real one writes
+        to a socket.
+        """
+        state = vendored_server_state()
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        def _unused(percent: float) -> None:
+            """Take a chosen boost and drop it.
+
+            This test is about what a boost *adopted* pushes, and the setter is
+            the other direction — `build_boost_setter` has its own tests.
+
+            Args:
+                percent: What Home Assistant would have chosen.
+            """
+            del percent
+
+        boost = SpeakerBoostNumberEntity(
+            state=state,
+            key=len(state.entities),
+            get_percent=lambda: application.settings.speaker_boost_percent,
+            set_percent=_unused,
+        )
+        state.entities.append(boost)
+        application.publish_live_changes(boost.publish)
+        client = connected(state)[0]
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
+
+    def test_it_pushes_after_the_new_settings_are_in_effect(self) -> None:
+        """A publisher called mid-adoption would report the value it replaced."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+        seen: list[float] = []
+        application.publish_live_changes(
+            lambda: seen.append(application.settings.speaker_boost_percent),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert seen == [pytest.approx(640.0)]
+
+    def test_an_application_with_nothing_registered_adopts_settings_anyway(
+        self,
+    ) -> None:
+        """Every test above builds one, and `run` builds one before the wiring."""
+        audio = FakeAudio()
+        application, _stop = _application(
+            audio=audio,
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="180"))
+
+        assert audio.boosts == [pytest.approx(180.0)]
 
 
 class TestTheEsphomeService:
@@ -1952,6 +2027,41 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         assert any(
             isinstance(service, VolumeService) for service in application.services
         )
+
+    def test_a_boost_adopted_after_assembly_reaches_home_assistant(self) -> None:
+        """The composition root is where the control and the application meet.
+
+        A publisher that was never registered would leave the slider showing the
+        previous number after a change made on the settings page, with nothing
+        else failing anywhere — so this pins the wiring rather than the entity,
+        which `test_satellite_audio_entities.py` covers on its own.
+        """
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            cast("RobotHandle", FakeRobot()),
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        # Reaching past the private name deliberately, exactly as the settings
+        # page's own test below does: `EsphomeService` exists to own a
+        # lifecycle, and widening its public surface so a test could read the
+        # state back would be shaping production code around this check. The
+        # alternative is not pinning the wiring at all.
+        state = esphome._state
+        boost = next(
+            entity
+            for entity in state.entities
+            if isinstance(entity, SpeakerBoostNumberEntity)
+        )
+        client = connected(state)[0]
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
 
     def test_the_whole_application_assembles_over_a_fake_robot(self) -> None:
         """Ports to adapters, the behaviour layer, and the services it owns."""
