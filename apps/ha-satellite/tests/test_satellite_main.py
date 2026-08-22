@@ -1820,6 +1820,65 @@ class TestTheEsphomeService:
         assert len(bound) == 1
 
     @pytest.mark.asyncio
+    async def test_close_during_initial_bind_does_not_revive_background_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bind completing after shutdown cannot restart the closed service."""
+        bind_started = asyncio.Event()
+        finish_bind = asyncio.Event()
+        server = _FakeServer()
+        started_work: list[Callable[[], None]] = []
+
+        async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+            del factory, host, port
+            bind_started.set()
+            await finish_bind.wait()
+            return server
+
+        def _start_thread(work: Callable[[], None]) -> None:
+            started_work.append(work)
+
+        service = EsphomeService(
+            vendored_server_state(),
+            FakeCapture([]),
+            PipelineEventTap(lambda _: None),
+            host="127.0.0.1",
+            port=6053,
+            detector=cast("WakeWordDetector", object()),
+            listen=_listen,
+            pump_sleep=no_sleep,
+        )
+
+        async def _supervise_listener() -> None:
+            return
+
+        monkeypatch.setattr(satellite_main, "_daemon_thread", _start_thread)
+        monkeypatch.setattr(service, "_supervise_listener", _supervise_listener)
+        start = asyncio.create_task(service.start())
+        await bind_started.wait()
+        close = asyncio.create_task(service.aclose())
+
+        await close
+        finish_bind.set()
+        await start
+        running_after_start = service._running
+        supervisor_after_start = service._supervisor
+        threads_after_start = list(service._threads)
+        await service.aclose()
+
+        assert server.closed == 1
+        assert server.waited == 1
+        assert not running_after_start
+        assert supervisor_after_start is None
+        assert threads_after_start == []
+        assert started_work == []
+        assert start.done()
+        assert close.done()
+        assert service._supervisor is None
+        assert service._threads == []
+
+    @pytest.mark.asyncio
     async def test_close_releases_all_accepted_protocols_and_disconnects_once(
         self,
     ) -> None:
