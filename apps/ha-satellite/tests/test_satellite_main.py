@@ -1182,9 +1182,19 @@ class TestShutdown:
         """Replacing inherited context cannot detach a child from cleanup scope."""
 
         async def _run_and_close() -> None:
+            loop = asyncio.get_running_loop()
             runner = asyncio.current_task()
             assert runner is not None
             before = set(asyncio.all_tasks())
+            factory_calls: list[Coroutine[Any, Any, Any]] = []
+
+            def _legacy_factory(
+                task_loop: asyncio.AbstractEventLoop,
+                coroutine: Coroutine[Any, Any, Any],
+            ) -> asyncio.Task[Any]:
+                factory_calls.append(coroutine)
+                return asyncio.Task(coroutine, loop=task_loop)
+
             service = ExplicitBlankContextCleanupService()
             later = RecordingService()
             application = SatelliteApplication(
@@ -1196,6 +1206,7 @@ class TestShutdown:
                 services=[later, service],
             )
 
+            loop.set_task_factory(_legacy_factory)
             try:
                 await application.aclose()
 
@@ -1203,11 +1214,14 @@ class TestShutdown:
                 grandchild = service.grandchild
                 assert child is not None
                 assert grandchild is not None
+                assert sum(call is child.get_coro() for call in factory_calls) == 1
                 assert child.done()
                 assert grandchild.done()
                 assert later.closed == 1
                 assert asyncio.all_tasks() - before - {runner} == set()
+                assert loop.get_task_factory() is _legacy_factory
             finally:
+                loop.set_task_factory(None)
                 await _finish_test_tasks(before, runner)
 
         asyncio.run(_run_and_close())
