@@ -878,12 +878,7 @@ class EsphomeService:
                 await server.wait_closed()
             return
         self._server = server
-        _LOGGER.info(
-            "esphome.listening host=%s port=%s name=%s",
-            self._host,
-            self._port,
-            self._state.name,
-        )
+        _LOGGER.info("esphome.listening")
 
     async def check_listener(self) -> None:
         """Rebind only a listener that demonstrably stopped while still owned."""
