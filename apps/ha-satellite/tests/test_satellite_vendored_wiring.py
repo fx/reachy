@@ -17,11 +17,11 @@ inverted to make it work.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 # pylint: disable=no-name-in-module
-from aioesphomeapi.api_pb2 import (
-    AuthenticationRequest,  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message class inside
+from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message class inside
+    AuthenticationRequest,
 )
 from satellite_support import (
     FakeDecoder,
@@ -114,8 +114,8 @@ class TestOverlappingHomeAssistantConnections:
         assert state.satellite is older
         assert state.connections == [older]
         assert state.connected
-        assert state.music_player.stop.call_count == 0
-        assert state.tts_player.stop.call_count == 0
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
         assert events.events == []
 
     def test_losing_a_non_active_protocol_leaves_the_active_one_unchanged(
@@ -138,8 +138,8 @@ class TestOverlappingHomeAssistantConnections:
         assert state.satellite is newest
         assert state.connections == [newest]
         assert state.connected
-        assert state.music_player.stop.call_count == 0
-        assert state.tts_player.stop.call_count == 0
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
         assert events.events == []
 
     def test_losing_the_final_protocol_clears_and_disconnects_shared_state(
@@ -159,8 +159,8 @@ class TestOverlappingHomeAssistantConnections:
         assert state.satellite is None
         assert state.connections == []
         assert not state.connected
-        state.music_player.stop.assert_called_once()
-        state.tts_player.stop.assert_called_once()
+        cast(Any, state.music_player.stop).assert_called_once()
+        cast(Any, state.tts_player.stop).assert_called_once()
         assert events.events == [LVAEvent.DISCONNECTED]
 
     def test_protocol_close_closes_its_accepted_transport(self) -> None:

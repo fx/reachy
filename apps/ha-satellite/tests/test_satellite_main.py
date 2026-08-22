@@ -49,6 +49,7 @@ from satellite_support import (
     connected,
     face,
     inline,
+    no_sleep,
     pushed_numbers,
     vendored_server_state,
 )
@@ -1096,7 +1097,7 @@ class TestTheEsphomeService:
 
         assert [protocol.closed for protocol in accepted] == [1, 1]
         assert state.connections == []
-        assert state.satellite is None
+        assert cast("object | None", state.satellite) is None
         assert not state.connected
 
 
@@ -2727,6 +2728,7 @@ def _esphome_service(
         start_thread=lambda _work: None,
         build_webrtc=build_webrtc if build_webrtc is not None else _RefusingWebRTC,
         backlog=backlog,
+        pump_sleep=no_sleep,
     )
     return service, state
 
@@ -2835,11 +2837,6 @@ def _listener_service(
         bound.append(server)
         return server
 
-    options: dict[str, object] = {}
-    if sleep is not None:
-        options["sleep"] = sleep
-    if backoff is not None:
-        options["backoff"] = backoff
     return EsphomeService(
         vendored_server_state(),
         FakeCapture([]),
@@ -2848,7 +2845,9 @@ def _listener_service(
         port=6053,
         listen=listen if listen is not None else _listen,
         start_thread=lambda _work: None,
-        **options,
+        sleep=sleep if sleep is not None else asyncio.sleep,
+        backoff=backoff if backoff is not None else Backoff(),
+        pump_sleep=no_sleep,
     )
 
 

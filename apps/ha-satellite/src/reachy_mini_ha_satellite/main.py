@@ -111,7 +111,7 @@ from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
 from reachy_mini_ha_satellite.ports import Detections, SourceSelection
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 from reachy_mini_ha_satellite.web import create_app
-from reachy_session_client import Credential, SessionClient
+from reachy_session_client import DEFAULT_BACKOFF, Backoff, Credential, SessionClient
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -239,15 +239,27 @@ def _guard(what: str, release: Callable[[], None]) -> None:
         _LOGGER.exception("%s failed to stop cleanly", what)
 
 
-async def _aguard(what: str, release: Callable[[], Awaitable[None]]) -> None:
-    """The same, for a step that has to be awaited.
+_CLEANUP_TIMEOUT_SECONDS: Final = 5.0
+
+
+async def _aguard(
+    what: str,
+    release: Callable[[], Awaitable[None]],
+    timeout_seconds: float,
+) -> None:
+    """Bound and guard one asynchronous shutdown step.
 
     Args:
         what: What is being let go of, for the log line.
         release: How to let go of it.
+        timeout_seconds: The deadline for this step alone. Later cleanup still
+            runs if it expires.
     """
     try:
-        await release()
+        async with asyncio.timeout(timeout_seconds):
+            await release()
+    except TimeoutError:
+        _LOGGER.error("%s timed out while stopping; continuing cleanup", what)
     except Exception:
         _LOGGER.exception("%s failed to stop cleanly", what)
 
@@ -302,6 +314,7 @@ class SatelliteApplication:
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        cleanup_timeout_seconds: float = _CLEANUP_TIMEOUT_SECONDS,
     ) -> None:
         """Hold everything the application runs on.
 
@@ -316,6 +329,8 @@ class SatelliteApplication:
             clock: The monotonic source the behaviour layer is given.
             sleep: How the loop waits between ticks. Injected so the test suite
                 drives a hundred ticks without spending five seconds.
+            cleanup_timeout_seconds: The deadline for each asynchronous cleanup
+                step independently. Injected as zero by the non-returning test.
         """
         self._settings = settings
         self._audio = audio
@@ -326,6 +341,7 @@ class SatelliteApplication:
         self._clock = clock
         self._sleep = sleep
         self._tick_seconds = settings.behaviour_tick_seconds
+        self._cleanup_timeout_seconds = cleanup_timeout_seconds
         # What the perception source was built for. Held rather than re-read,
         # because it is decided once at startup — see `apply_live`.
         self._tracking_enabled = settings.face_tracking_enabled
@@ -520,9 +536,17 @@ class SatelliteApplication:
         _guard("the media interface", self._audio.stop)
 
         for service in reversed(self._services):
-            await _aguard("a service", service.aclose)
+            await _aguard(
+                "a service",
+                service.aclose,
+                self._cleanup_timeout_seconds,
+            )
 
-        await _aguard("the perception source", self._perception.aclose)
+        await _aguard(
+            "the perception source",
+            self._perception.aclose,
+            self._cleanup_timeout_seconds,
+        )
         _LOGGER.info("satellite.stopped")
 
 
@@ -542,10 +566,16 @@ _DETECTION_BACKLOG: Final = 50
 # then is a pump that has already been told to stop.
 _SENTINEL_ATTEMPTS_MARGIN: Final = 4
 
-# How often to say that detection is falling behind: once for the first drop,
-# and once per hundred after that. An overloaded robot must not spend what is
-# left of its processor writing about being overloaded.
+# How often to say that detection or a pump edge is failing: once for the first,
+# and once per hundred after that. A degraded robot must not spend what is left
+# of its processor repeatedly writing the same traceback.
 _DROP_REPORT_EVERY: Final = 100
+_PUMP_FAILURE_REPORT_EVERY: Final = 100
+
+# A failed capture read is the only pump failure that happens before the capture
+# adapter's own poll wait. Give the daemon a short recovery window rather than
+# turning a persistent failure into a hot loop.
+_PUMP_RETRY_SECONDS: Final = 0.05
 
 # The sample format every chunk crossing the capture seam is in, spelled the way
 # numpy spells it. Derived from the seam's own constant rather than written out,
@@ -632,6 +662,9 @@ class EsphomeService:
         start_thread: Callable[[Callable[[], None]], Any] | None = None,
         build_webrtc: Callable[[int, int], WebRTCLike] = WebRTCProcessor,
         backlog: int = _DETECTION_BACKLOG,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        backoff: Backoff = DEFAULT_BACKOFF,
+        pump_sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         """Describe the server without binding anything.
 
@@ -649,7 +682,8 @@ class EsphomeService:
                 loop's `create_server`; injected so a test drives the pump and
                 the lifecycle without opening one.
             start_thread: How to run the two threads. Defaults to daemon
-                threads; injected so a test drives `pump` and `detect` itself.
+                threads; injected so a test drives `pump`, `detect` and listener
+                health checks itself rather than leaving autonomous work behind.
             build_webrtc: How to make the microphone conditioner, given the
                 gain and the noise-suppression level. Injected so a test can
                 prove the wiring without exercising the native library.
@@ -657,6 +691,11 @@ class EsphomeService:
                 audio: long enough to ride out a slow inference, short enough
                 that a detector which has fallen behind is answering about
                 something that was recently said.
+            sleep: How listener supervision waits between health checks and
+                retries. Injected so tests advance without wall time.
+            backoff: The increasing, capped delay after replacement binds fail.
+            pump_sleep: How a failed capture read avoids a hot retry loop.
+                Injected so tests perform no wall-time wait.
         """
         self._state = state
         self._capture = capture
@@ -667,10 +706,16 @@ class EsphomeService:
         self._listen = listen
         self._start_thread = start_thread
         self._build_webrtc = build_webrtc
+        self._sleep = sleep
+        self._backoff = backoff
+        self._pump_sleep = pump_sleep
         self._server: Any = None
+        self._supervisor: asyncio.Task[None] | None = None
         self._threads: list[Any] = []
         self._running = False
+        self._closing = False
         self._webrtc: WebRTCLike | None = None
+        self._pump_failures: dict[str, int] = {}
         # `None` is the sentinel that ends `detect`. Bounded, because an
         # unbounded queue in front of a detector that cannot keep up is a
         # memory leak ending in the daemon killing the application.
@@ -682,19 +727,48 @@ class EsphomeService:
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
-        """Bind the port, then start feeding the microphone into the protocol."""
+        """Bind the port, supervise it, then feed audio into the protocol."""
         loop = asyncio.get_running_loop()
         self._loop = loop
         self._tap.bind(loop)
 
+        # Initial binding stays startup-fatal. Retrying here would advertise an
+        # application whose protocol never started; supervision owns only a
+        # listener that was demonstrably serving and then stopped.
+        await self._bind_listener()
+        self._running = True
+        start_thread = self._start_thread
+        if start_thread is None:
+            self._supervisor = asyncio.create_task(
+                self._supervise_listener(),
+                name="satellite-esphome-listener",
+            )
+            self._supervisor.add_done_callback(_report_if_it_failed)
+            start_thread = _daemon_thread
+        self._threads = [start_thread(self.pump)]
+        if self._detector is not None:
+            self._threads.append(start_thread(self.detect))
+
+    async def _bind_listener(self) -> None:
+        """Perform one listener bind, propagating any refusal to its caller."""
         listen = self._listen
         if listen is None:
+            loop = self._loop
+            if loop is None:
+                message = "the ESPHome service has no event loop"
+                raise RuntimeError(message)
             listen = loop.create_server
-        self._server = await listen(
+        server = await listen(
             lambda: VoiceSatelliteProtocol(self._state),
             self._host,
             self._port,
         )
+        if self._closing:
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+            return
+        self._server = server
         _LOGGER.info(
             "esphome.listening host=%s port=%s name=%s",
             self._host,
@@ -702,41 +776,79 @@ class EsphomeService:
             self._state.name,
         )
 
-        self._running = True
-        start_thread = self._start_thread
-        if start_thread is None:
-            start_thread = _daemon_thread
-        self._threads = [start_thread(self.pump)]
-        if self._detector is not None:
-            self._threads.append(start_thread(self.detect))
+    async def check_listener(self) -> None:
+        """Rebind only a listener that demonstrably stopped while still owned."""
+        if not self._running:
+            return
+        server = self._server
+        if server is not None and server.is_serving():
+            return
+        if server is not None:
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+        self._server = None
+        _LOGGER.warning("esphome.listener stopped unexpectedly; rebinding")
+        await self._bind_listener()
+
+    async def _supervise_listener(self) -> None:
+        """Keep checking listener health and retry replacement binds with a cap."""
+        attempt = 0
+        while self._running:
+            try:
+                await self.check_listener()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                attempt += 1
+                delay = self._backoff.delay(attempt)
+                _LOGGER.exception(
+                    "esphome.listener rebind failed; retrying in %.1f seconds",
+                    delay,
+                )
+                await self._sleep(delay)
+                continue
+            attempt = 0
+            await self._sleep(self._backoff.initial_seconds)
 
     def pump(self) -> None:
-        """Feed captured audio into whichever connection is live.
+        """Feed captured audio into the live connection, isolating each chunk.
 
         Public because it is the whole of what the thread does, and a test that
         drives it directly is testing the feed rather than the thread pool.
         """
         try:
             while self._running:
-                chunk = self._capture.read_chunk()
+                try:
+                    chunk = self._capture.read_chunk()
+                except Exception:
+                    self._pump_failed("capture")
+                    self._pump_sleep(_PUMP_RETRY_SECONDS)
+                    continue
                 if chunk is None:
                     # The capture source closed, which is what a released media
                     # interface looks like. There is nothing left to feed.
                     return
-                conditioned = self._condition(chunk)
+                try:
+                    conditioned = self._condition(chunk)
+                except Exception:
+                    self._pump_failed("conditioning")
+                    continue
                 if conditioned is None:
                     continue
                 primary, reference = conditioned
                 satellite = self._state.satellite
                 if satellite is not None:
-                    # Streaming first, always, and before anything that could be
-                    # slow. This is the half that carries a conversation already
-                    # in progress, and it must not wait on the half that starts
-                    # one. A chunk arriving while nobody is connected is dropped
-                    # rather than queued: Home Assistant transcribes live audio,
-                    # and a backlog replayed at connection time would be a
-                    # conversation that already happened.
-                    satellite.handle_audio(primary, reference)
+                    # Forwarding is not allowed to own local detection. A stale
+                    # Home Assistant transport may reject this chunk, but the
+                    # network-independent wake model still receives the same one
+                    # below and the pump continues with the next.
+                    try:
+                        satellite.handle_audio(primary, reference)
+                    except Exception:
+                        self._offer(primary)
+                        self._pump_failed("forwarding")
+                        continue
                 # Detection runs whether or not Home Assistant is there, and
                 # that is REQ-044 rather than a nicety. `connection_lost` sets
                 # `state.satellite` to `None`, so a robot whose network has
@@ -753,6 +865,17 @@ class EsphomeService:
             # However the pump ended, the detector is owed the news: `detect`
             # blocks on the queue and would otherwise never return.
             self._end_detection()
+
+    def _pump_failed(self, edge: str) -> None:
+        """Rate-limit a per-chunk failure while preserving its traceback."""
+        failures = self._pump_failures.get(edge, 0) + 1
+        self._pump_failures[edge] = failures
+        if failures % _PUMP_FAILURE_REPORT_EVERY == 1:
+            _LOGGER.exception(
+                "microphone %s failed for a chunk; continuing (%d failures)",
+                edge,
+                failures,
+            )
 
     def detect(self) -> None:
         """Run the wake-word models over the audio the pump has forwarded.
@@ -948,13 +1071,32 @@ class EsphomeService:
         )
 
     async def aclose(self) -> None:
-        """Stop accepting connections and stop both threads."""
+        """Stop supervision, accepted protocols, the listener and both threads."""
+        self._closing = True
         self._running = False
+        supervisor, self._supervisor = self._supervisor, None
+        if supervisor is not None:
+            supervisor.cancel()
+
+        # Stop new accepts before snapshotting the accepted protocols. A listening
+        # server's close does not close those transports, so close each explicitly
+        # before waiting for the listener, then clear the shared active view even
+        # when a fake transport does not call connection_lost back into us.
         server, self._server = self._server, None
         if server is not None:
             server.close()
+        connections, self._state.connections = self._state.connections, []
+        for connection in connections:
+            with contextlib.suppress(Exception):
+                connection.close()
+        self._state.satellite = None
+        self._state.connected = False
+        if server is not None:
             with contextlib.suppress(Exception):
                 await server.wait_closed()
+        if supervisor is not None:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await supervisor
         # The pump ends the detection thread on its way out, but only if it was
         # ever running. A service closed without having read a chunk has to end
         # it here instead, and a second sentinel is harmless.
