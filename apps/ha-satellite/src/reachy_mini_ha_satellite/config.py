@@ -81,6 +81,11 @@ from pydantic import (  # noqa: TID253  # configuration, not a wire type: `Secre
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from reachy_contracts.settings import ROBOT_SETTINGS
+from reachy_mini_ha_satellite.adapters.output_gain import (
+    DEFAULT_BOOST_PERCENT,
+    MAX_BOOST_PERCENT,
+    MIN_BOOST_PERCENT,
+)
 from reachy_mini_ha_satellite.ports import SourceSelection
 from reachy_session_client import validate_session_url
 
@@ -297,6 +302,17 @@ class Settings(BaseSettings):
             moves. One follows instantly and jitters; zero never arrives.
         idle_seconds: How long without a visible face before the robot settles
             into its idle behaviour.
+        daemon_api_url: Where the robot daemon serves its own HTTP API, which
+            is how its coarse output volume is reached — there is no method for
+            it on the media interface. Driven to maximum once at startup so the
+            software boost begins from the loudest signal the hardware will
+            pass. Empty turns that off, which also stops the test sound the
+            daemon plays whenever the volume is written.
+        speaker_boost_percent: How much every sample pushed to the speaker is
+            amplified by, before the per-source cap and before Home Assistant's
+            own volume. The robot's one hardware playback control is already at
+            its maximum, so this is where loudness comes from — see change 0016
+            and `adapters/output_gain.py` for where the default was measured.
         log_level: The lowest severity emitted.
     """
 
@@ -366,6 +382,13 @@ class Settings(BaseSettings):
     gaze_deadzone: float = Field(default=0.02, ge=0.0, le=1.0)
     gaze_smoothing: float = Field(default=0.35, gt=0.0, le=1.0)
     idle_seconds: float = Field(default=6.0, gt=0.0, le=3600.0)
+
+    daemon_api_url: str = Field(default="http://127.0.0.1:8000", max_length=512)
+    speaker_boost_percent: float = Field(
+        default=DEFAULT_BOOST_PERCENT,
+        ge=MIN_BOOST_PERCENT,
+        le=MAX_BOOST_PERCENT,
+    )
 
     log_level: Literal["debug", "info", "warning", "error"] = "info"
 

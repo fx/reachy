@@ -17,11 +17,15 @@ inverted to make it work.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from satellite_support import (
+    FakeDecoder,
     FakeMedia,
     FakeSoundSource,
-    ManualScheduler,
+    ManualDetach,
     immediately,
+    no_sleep,
     sent_packets,
     silence,
     vendored_satellite,
@@ -32,7 +36,11 @@ from reachy_mini_ha_satellite.adapters.audio_reachy import (
     ReachyCapture,
     ReachyPlayback,
 )
+from reachy_mini_ha_satellite.adapters.sounds import SoundSource
 from reachy_mini_ha_satellite.esphome.seams import SAMPLE_WIDTH
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _MUTE_SOUND = "/sounds/mute.flac"
 _UNMUTE_SOUND = "/sounds/unmute.flac"
@@ -64,10 +72,8 @@ class TestTheSeamsAreFilledRatherThanOpen:
         media = FakeMedia()
         sounds = _sounds()
         state = vendored_server_state(
-            music_player=ReachyPlayback(
-                media, sounds, name="music", detach=immediately
-            ),
-            tts_player=ReachyPlayback(media, sounds, name="speech", detach=immediately),
+            music_player=_playback(media, sounds, name="music"),
+            tts_player=_playback(media, sounds, name="speech"),
         )
         assert isinstance(state.music_player, ReachyPlayback)
         assert isinstance(state.tts_player, ReachyPlayback)
@@ -86,64 +92,61 @@ class TestTheVendoredCodeDrivesTheAdapters:
         of the adapter on its own.
         """
         media = FakeMedia()
-        scheduler = ManualScheduler()
+        decoder = FakeDecoder()
+        detach = ManualDetach()
         sounds = _sounds()
         satellite = vendored_satellite(
-            music_player=ReachyPlayback(
-                media, sounds, scheduler=scheduler, detach=immediately
-            ),
-            tts_player=ReachyPlayback(
-                media, sounds, scheduler=scheduler, detach=immediately
-            ),
+            music_player=_playback(media, sounds, decoder=decoder, detach=detach),
+            tts_player=_playback(media, sounds, decoder=decoder, detach=detach),
             mute_sound=_MUTE_SOUND,
             unmute_sound=_UNMUTE_SOUND,
         )
+
         satellite._set_muted(True)
-        assert media.played == ["/sounds/mute.flac"]
+        detach.run()
+
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/mute.flac"]
         assert satellite.state.tts_player.is_playing
 
     def test_unmuting_plays_the_other_chime(self) -> None:
         """The same path, the other way, so both call sites are exercised."""
         media = FakeMedia()
+        decoder = FakeDecoder()
         sounds = _sounds()
         satellite = vendored_satellite(
-            music_player=ReachyPlayback(
-                media, sounds, scheduler=ManualScheduler(), detach=immediately
-            ),
-            tts_player=ReachyPlayback(
-                media, sounds, scheduler=ManualScheduler(), detach=immediately
-            ),
+            music_player=_playback(media, sounds, decoder=decoder),
+            tts_player=_playback(media, sounds, decoder=decoder),
             mute_sound=_MUTE_SOUND,
             unmute_sound=_UNMUTE_SOUND,
         )
-        satellite._set_muted(False)
-        assert media.played == ["/sounds/unmute.flac"]
 
-    def test_the_chime_ends_when_its_own_length_has_elapsed(self) -> None:
+        satellite._set_muted(False)
+
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/unmute.flac"]
+
+    def test_the_chime_ends_when_its_samples_have_been_played(self) -> None:
         """Which is how the vendored code learns an announcement finished."""
         media = FakeMedia()
-        scheduler = ManualScheduler()
+        detach = ManualDetach()
         sounds = _sounds()
         satellite = vendored_satellite(
-            music_player=ReachyPlayback(
-                media, sounds, scheduler=scheduler, detach=immediately
-            ),
-            tts_player=ReachyPlayback(
-                media, sounds, scheduler=scheduler, detach=immediately
-            ),
+            music_player=_playback(media, sounds, detach=detach),
+            tts_player=_playback(media, sounds, detach=detach),
             mute_sound=_MUTE_SOUND,
             unmute_sound=_UNMUTE_SOUND,
         )
+
         satellite._set_muted(True)
-        assert scheduler.fire()
+        detach.run_all()
+
         assert not satellite.state.tts_player.is_playing
 
     def test_ducking_music_reaches_the_music_adapter_alone(self) -> None:
         """`satellite.duck()` is what runs while the assistant is speaking."""
         media = FakeMedia()
         sounds = _sounds()
-        music = ReachyPlayback(media, sounds, name="music", detach=immediately)
-        speech = ReachyPlayback(media, sounds, name="speech", detach=immediately)
+        music = _playback(media, sounds, name="music")
+        speech = _playback(media, sounds, name="speech")
         satellite = vendored_satellite(music_player=music, tts_player=speech)
         music.set_volume(80.0)
         speech.set_volume(80.0)
@@ -204,3 +207,37 @@ def _no_wait(seconds: float) -> None:
         seconds: How long the caller wanted to wait, ignored.
     """
     del seconds
+
+
+def _playback(
+    media: FakeMedia,
+    sounds: SoundSource,
+    *,
+    name: str = "playback",
+    decoder: FakeDecoder | None = None,
+    detach: Callable[[Callable[[], None]], None] = immediately,
+) -> ReachyPlayback:
+    """Build a real output over the fake daemon, with decoding faked.
+
+    The point of this file is that the *vendored* code drives real adapters, so
+    the player is the real one. Only the two things a unit test may not do —
+    read a file and start a thread — are stood in for.
+
+    Args:
+        media: The fake daemon's media layer.
+        sounds: How a URL becomes a path.
+        name: What the output calls itself in a log line.
+        decoder: How a path becomes samples.
+        detach: How work leaves the calling thread.
+
+    Returns:
+        The output.
+    """
+    return ReachyPlayback(
+        media,
+        sounds,
+        name=name,
+        detach=detach,
+        sleep=no_sleep,
+        decode=decoder if decoder is not None else FakeDecoder(),
+    )

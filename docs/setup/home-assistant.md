@@ -175,6 +175,49 @@ demand.
 
 `REACHY_SATELLITE_ACTIVE_WAKE_WORD` selects which shipped wake word listens.
 
+### What a working answer sounds like, and how to check it
+
+The robot amplifies what it plays: Home Assistant's text-to-speech arrives
+quiet, and the robot's one hardware volume control is already at its maximum, so
+the loudness comes from `REACHY_SATELLITE_SPEAKER_BOOST_PERCENT` — 500 by
+default, and adjustable between 100 and 800. Every utterance logs what that did:
+
+```
+reachyctl app logs --robot reachy@192.0.2.20
+```
+
+```
+speech: peak in -16.1dBFS out -2.3dBFS limited 0.2% gain 5.00x
+speech: peak in -11.6dBFS out -0.9dBFS limited 0.3% gain 3.79x
+music: level is now 50%
+```
+
+**Read the line rather than guessing at the sound.** "Still too quiet" and "it
+sounds distorted" are different faults with different fixes, and the three
+numbers tell them apart:
+
+- **`out` near 0 dBFS and `limited` under about 1%** is the healthy case — the
+  robot is running as loud as it can without squashing anything.
+- **`out` well below −6 dBFS** means it is quiet because the source was quiet and
+  the boost has run out of room. Raise
+  `REACHY_SATELLITE_SPEAKER_BOOST_PERCENT`.
+- **`limited` in the tens of percent** means the boost is set higher than this
+  material wants and peaks are being compressed. Lower it.
+- **`gain` below what the boost asks for** — the `3.79x` above, against a
+  configured 5.00× — is not a fault. Each source is capped at the gain that
+  brings *it* to full scale, so that a chime mastered loud is not given the
+  multiplier a quiet voice needs.
+
+Home Assistant's own volume control works on top of that, and the robot ducks
+music while it speaks. Both show up in the same log.
+
+> **Verified on hardware.** Announcements at the default were judged audible at
+> a normal speaking distance, and the numbers above are transcribed from that
+> session — with the `assist_satellite` entity identifier and the
+> text-to-speech URLs removed, because the first embeds the robot's hardware
+> address and the second the Home Assistant host. The levels are untouched.
+> [Change 0016](../changes/0016-audible-playback.md) records the rest.
+
 ## 5. Watch the robot, not the screen
 
 The point of a robot satellite is that you can tell what it is doing from across

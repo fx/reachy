@@ -103,15 +103,6 @@ class MediaInterface(Protocol):
         """
         ...
 
-    def play_sound(self, sound_file: str) -> None:
-        """Play a local sound file through the daemon's output.
-
-        Args:
-            sound_file: An absolute path, or a name relative to the SDK's own
-                asset directory.
-        """
-        ...
-
     def start_recording(self) -> None:
         """Start the daemon's capture pipeline."""
         ...
@@ -124,8 +115,39 @@ class MediaInterface(Protocol):
         """Start the daemon's playback pipeline."""
         ...
 
+    def push_audio_sample(self, data: AudioSamples) -> None:
+        """Hand the daemon audio to play, as samples rather than as a file.
+
+        This is the path that makes gain expressible. The daemon also offers a
+        `play_sound(name)` that plays a file for you, and it is deliberately not
+        declared here: it never lets the application hold a sample, so there is
+        nowhere in it to multiply, and change 0016 moved playback off it for
+        exactly that reason.
+
+        Faster than real time is not free. The daemon feeds these into a live
+        GStreamer `appsrc` whose queue is bounded and which does not block, so a
+        caller that pushes a whole file at once has most of it dropped with a
+        warning. `audio_reachy.ReachyPlayback` paces its pushes accordingly.
+
+        Args:
+            data: Float32 samples in [-1, 1]. One dimension is mono, which the
+                daemon copies out to however many channels the output device
+                has; two dimensions are samples by channels.
+        """
+        ...
+
     def stop_playing(self) -> None:
         """Stop the daemon's playback pipeline."""
+        ...
+
+    def get_output_audio_samplerate(self) -> int:
+        """Say what rate playback runs at.
+
+        Returns:
+            The sample rate in hertz, or a negative number when there is no
+            audio device. Pushed samples are resampled to it rather than
+            assumed — ha-satellite change 0016, R9.
+        """
         ...
 
     def get_audio_sample(self) -> AudioSamples | None:

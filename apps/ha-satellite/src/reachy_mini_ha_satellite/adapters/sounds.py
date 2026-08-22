@@ -7,15 +7,20 @@ gap, and it is a separate module from the player because it is a separate
 concern: the player owns a queue, a position and a callback, and this owns
 "where are the bytes and how long are they".
 
-**Duration is why this exists at all.** The daemon's media interface has no
-completion signal — no end-of-stream callback, no "is it still playing" — so the
-only way the player can tell that a sound has finished is to know how long it
-was, and the vendored protocol layer advances its conversation on that callback.
-Three formats are read here and they are not an arbitrary three: **WAV** and
-**FLAC** are what this application ships as chimes, and **MP3** is what Home
-Assistant's text-to-speech proxy serves. Between them they cover every sound the
-satellite plays in ordinary use. Anything else is reported as unknown, and
-`ReachyPlayback` bounds it rather than waiting for ever.
+**Duration is no longer why this exists.** It was: the daemon's `play_sound`
+reported nothing about progress, so the only way the player could tell that a
+sound had finished was to know how long it was. Change 0016 moved playback onto
+the daemon's push path, where the end of the stream is an observed fact, so
+`Sound.duration_seconds` no longer drives anything — the readers below are kept
+because they are cheap, tested and occasionally worth logging, not because a
+callback depends on them. What this module is *for* now is the other half of its
+job: turning what Home Assistant asks for into a local file, fetching it where
+that means fetching it.
+
+The three formats it can measure are not an arbitrary three: **WAV** and **FLAC**
+are what this application ships as chimes, and **MP3** is what Home Assistant's
+text-to-speech proxy serves. They are the same three `decode.py` has to decode,
+which is the property that actually matters now.
 
 Nothing here is guessed from a file extension. A `.wav` that is really an MP3
 would report a length that is wrong rather than absent, which is worse, so every
@@ -178,9 +183,12 @@ class Sound:
     """One playable sound, resolved to something the daemon can open.
 
     Attributes:
-        path: The local file, as an absolute path.
+        path: The local file, as an absolute path. This is what playback
+            decodes, and the only field it reads.
         duration_seconds: How long it plays for, or `None` when the format is
-            not one whose length this module can read.
+            not one whose length this module can read. **Informational since
+            change 0016**: completion used to be a timer sized from it, and is
+            now the end of the push loop.
     """
 
     path: str

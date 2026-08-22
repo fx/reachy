@@ -49,7 +49,9 @@ Catch-all task list for work not tracked in a specific [change document](changes
         `mic_auto_gain` and `mic_noise_suppression` — and confirm the
         conditioner improves a noisy room rather than damaging a quiet one. All
         three were inert until the detection loop landed and none of them has
-        been near a microphone
+        been near a microphone. **These are the capture side and are still
+        outstanding**; the speaker's own volume and ducking were settled by
+        [0016](changes/0016-audible-playback.md)
       - The three required antenna motions read as distinct across a room —
         still, opposed, together — and the head tracks smoothly at the tuned
         deadzone and smoothing
@@ -60,7 +62,12 @@ Catch-all task list for work not tracked in a specific [change document](changes
         identity
       - An upgrade **keeps** the entity history rather than registering a second
         device. This is the one that matters
-      - A voice pipeline runs: wake word, listening, processing, responding
+      - A voice pipeline runs: wake word, listening, processing, responding.
+        **The responding leg is done** — announcements played through the real
+        speaker, judged audible at a normal speaking distance, with the volume
+        control and the ducking measured across their range;
+        [0016](changes/0016-audible-playback.md) records the numbers. What is
+        left of this bullet is the three legs in front of it
 
       **The benchmarks**
       - `just bench photon-to-head` and `just bench robot-load`, the two

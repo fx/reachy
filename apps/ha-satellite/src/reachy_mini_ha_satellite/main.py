@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import math
@@ -53,6 +54,7 @@ from starlette.types import ASGIApp
 from reachy_contracts import FACE_CAPABILITY, Capability, __version__
 from reachy_mini_ha_satellite.adapters.audio_reachy import ReachyAudio
 from reachy_mini_ha_satellite.adapters.daemon import in_thread
+from reachy_mini_ha_satellite.adapters.daemon_volume import set_daemon_volume
 from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
 from reachy_mini_ha_satellite.adapters.motion_reachy import ReachyMotion
 from reachy_mini_ha_satellite.adapters.network import (
@@ -111,7 +113,11 @@ if TYPE_CHECKING:
     from pymicro_wakeword import MicroWakeWord
     from pyopen_wakeword import OpenWakeWord
 
-    from reachy_mini_ha_satellite.adapters.daemon import MediaInterface, RobotHandle
+    from reachy_mini_ha_satellite.adapters.daemon import (
+        MediaInterface,
+        Offload,
+        RobotHandle,
+    )
     from reachy_mini_ha_satellite.behaviour import MotionIntent, PipelineEvent
     from reachy_mini_ha_satellite.ports import (
         AudioPort,
@@ -128,6 +134,7 @@ __all__ = [
     "EsphomeService",
     "SatelliteApplication",
     "Service",
+    "VolumeService",
     "WebRTCLike",
     "WebService",
     "apply_intents",
@@ -971,6 +978,51 @@ class Advertiser(Protocol):
         ...
 
 
+class VolumeService:
+    """Turns the daemon's own coarse volume up, once, when the app starts.
+
+    Change 0016's R7, and a service rather than a line in `build_application`
+    for one reason: it makes an HTTP request, and `build_application` is called
+    by tests that may not perform input or output. A service does its work in
+    `start`, which only a running application reaches.
+
+    The request is made on a worker thread. It is a local call and normally
+    immediate, but "normally" is not a property the event loop that answers
+    Home Assistant should depend on.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        set_volume: Callable[[str], bool] = set_daemon_volume,
+        offload: Offload = in_thread,
+    ) -> None:
+        """Say where the daemon is, without asking it anything.
+
+        Args:
+            base_url: Where the daemon serves its API. Empty turns this off.
+            set_volume: How to set it. Injected so a test drives the wiring
+                without a socket.
+            offload: How to get the request off the event loop.
+        """
+        self._base_url = base_url
+        self._set_volume = set_volume
+        self._offload = offload
+
+    async def start(self) -> None:
+        """Ask the daemon for its loudest, and carry on either way."""
+        await self._offload(functools.partial(self._set_volume, self._base_url))
+
+    async def aclose(self) -> None:
+        """Leave the volume where it is.
+
+        Deliberately nothing. The daemon's volume is the robot's, not this
+        application's: an operator who raised it after start-up should not have
+        it put back because a voice satellite stopped.
+        """
+
+
 class AdvertisementService:
     """The mDNS record Home Assistant discovers the satellite through."""
 
@@ -1380,6 +1432,7 @@ def build_application(
         handle.media,
         FileSoundSource(state_dir / "media"),
         samples_per_chunk=settings.samples_per_chunk,
+        boost_percent=settings.speaker_boost_percent,
     )
     motion = ReachyMotion(
         handle,
@@ -1416,6 +1469,7 @@ def build_application(
     state.peripheral_api = tap
 
     services: list[Service] = [
+        VolumeService(settings.daemon_api_url),
         EsphomeService(
             state,
             audio.capture,

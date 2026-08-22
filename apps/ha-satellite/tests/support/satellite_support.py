@@ -51,6 +51,7 @@ if TYPE_CHECKING:
         ImageArray,
         PoseMatrix,
     )
+    from reachy_mini_ha_satellite.adapters.output_gain import Samples
     from reachy_mini_ha_satellite.adapters.perception_local import PixelFace
     from reachy_mini_ha_satellite.esphome.models import ServerState
     from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
@@ -60,6 +61,7 @@ __all__ = [
     "CREDENTIAL",
     "FakeAudio",
     "FakeCapture",
+    "FakeDecoder",
     "FakeFaceDetector",
     "FakeMedia",
     "FakeMicroWakeWord",
@@ -70,15 +72,17 @@ __all__ = [
     "FakeSoundSource",
     "FakeWakeWordFeatures",
     "ManualClock",
-    "ManualScheduler",
-    "ScheduledCall",
+    "ManualDetach",
     "available_wake_word",
     "face",
     "frame",
     "immediately",
     "inline",
+    "no_sleep",
+    "playable",
     "sent_packets",
     "silence",
+    "steady",
     "tone",
     "vendored_satellite",
     "vendored_server_state",
@@ -152,70 +156,168 @@ class ManualClock:
         self.now += seconds
 
 
-class ScheduledCall:
-    """Something a `ManualScheduler` was asked to do later."""
+class ManualDetach:
+    """A `detach` that queues work instead of starting a thread.
 
-    def __init__(self, delay: float, action: Callable[[], None]) -> None:
-        """Record what was scheduled.
+    Change 0016 made playback a loop rather than a timer: `play` resolves,
+    decodes and pushes on a detached thread, and completion is the end of that
+    loop. So this is what a test uses to stand between the two — `play` queues
+    the work here, the test asserts the player reports itself playing, and then
+    runs it.
 
-        Args:
-            delay: How long it was to have waited.
-            action: What it was to have done.
-        """
-        self.delay = delay
-        self.action = action
-        self.cancelled = False
-
-    def cancel(self) -> None:
-        """Stop it happening. Cancelling twice is not an error."""
-        self.cancelled = True
-
-
-class ManualScheduler:
-    """A scheduler that never waits, and fires only when a test tells it to."""
+    `immediately` is the other half of the pair, for a test that wants the whole
+    thing to have happened by the time `play` returns.
+    """
 
     def __init__(self) -> None:
-        """Start with nothing scheduled."""
-        self.scheduled: list[ScheduledCall] = []
+        """Start with nothing queued."""
+        self.queued: list[Callable[[], None]] = []
 
-    def call_after(self, delay: float, action: Callable[[], None]) -> ScheduledCall:
-        """Record something to do later.
+    def __call__(self, work: Callable[[], None]) -> None:
+        """Queue something instead of running it.
 
         Args:
-            delay: How long it should have waited.
-            action: What to do.
+            work: What a thread would have run.
+        """
+        self.queued.append(work)
+
+    def run(self) -> bool:
+        """Run the oldest queued piece of work.
 
         Returns:
-            The handle that cancels it.
+            True if something ran, False if nothing was queued.
         """
-        call = ScheduledCall(delay, action)
-        self.scheduled.append(call)
-        return call
-
-    @property
-    def pending(self) -> ScheduledCall | None:
-        """The most recent call that has neither fired nor been cancelled.
-
-        Returns:
-            The pending call, or `None` when nothing is waiting.
-        """
-        for call in reversed(self.scheduled):
-            if not call.cancelled:
-                return call
-        return None
-
-    def fire(self) -> bool:
-        """Run the pending call as though its delay had elapsed.
-
-        Returns:
-            True if something ran, False if nothing was pending.
-        """
-        call = self.pending
-        if call is None:
+        if not self.queued:
             return False
-        call.cancelled = True
-        call.action()
+        self.queued.pop(0)()
         return True
+
+    def run_all(self) -> int:
+        """Run everything queued, including work that queuing produced.
+
+        A playlist advances by queuing the next item as the last one finishes,
+        so draining is a loop rather than one pass.
+
+        Returns:
+            How many pieces of work ran.
+
+        Raises:
+            AssertionError: If the queue will not drain, which means the player
+                is re-queuing for ever rather than making progress.
+        """
+        ran = 0
+        while self.run():
+            ran += 1
+            if ran > _DRAIN_LIMIT:
+                message = f"detached work did not drain after {_DRAIN_LIMIT} runs"
+                raise AssertionError(message)
+        return ran
+
+
+# How much queued work counts as a playlist rather than a loop that will not
+# end. Far more than any test queues, and finite, so a player that re-queues
+# itself fails the test instead of hanging the suite.
+_DRAIN_LIMIT: Final = 1000
+
+
+def no_sleep(seconds: float) -> None:
+    """Stand in for the pacing the push loop does against the speaker.
+
+    `ReachyPlayback` sleeps between pushed chunks so that it stays just ahead of
+    the daemon rather than overrunning its bounded queue. A test wants every
+    chunk pushed and none of the waiting, which is also what the no-sleeping
+    rule for unit tests requires.
+
+    Args:
+        seconds: How long it would have waited.
+    """
+    del seconds
+
+
+class FakeDecoder:
+    """Turns a path into samples without reading anything.
+
+    Decoding is file input, so a unit test may not do it — the real decoder is
+    covered by contract tests over the wheel's own assets instead. This answers
+    with whatever the test scripted, and records what it was asked for.
+    """
+
+    def __init__(
+        self,
+        samples: dict[str, Samples | None] | None = None,
+        *,
+        default: Samples | None = None,
+    ) -> None:
+        """Script what each path decodes to.
+
+        Args:
+            samples: What to answer for each path. `None` scripts a path as
+                undecodable, which is what a URL that answered with something
+                that is not audio looks like.
+            default: What to answer for a path not in `samples`. A tenth of a
+                second of quiet audio when nothing is given, so a test that does
+                not care what is playing does not have to say.
+        """
+        self.samples = dict(samples or {})
+        self.default = default if default is not None else playable(0.1)
+        self.decoded: list[tuple[str, int]] = []
+
+    def __call__(self, path: str, rate: int) -> Samples:
+        """Answer with this path's scripted samples.
+
+        Args:
+            path: The file that would have been read.
+            rate: The rate it would have been resampled to.
+
+        Returns:
+            The scripted samples.
+
+        Raises:
+            RuntimeError: If the test scripted this path as undecodable, which
+                is what a media URL that is not audio looks like.
+        """
+        self.decoded.append((path, rate))
+        scripted = self.samples.get(path, self.default)
+        if scripted is None:
+            message = f"{path!r} cannot be decoded"
+            raise RuntimeError(message)
+        return scripted
+
+
+def playable(seconds: float, *, rate: int = 48000, peak: float = 0.5) -> Samples:
+    """Build audio that is not silence, so a gain has something to act on.
+
+    Args:
+        seconds: How long it runs for.
+        rate: The sample rate it is meant to be played at.
+        peak: Its loudest sample, which is what decides its headroom.
+
+    Returns:
+        A ramp from zero to `peak`, as float32 — a shape no limiter rounds off
+        by accident, so a test asserting on peaks is asserting on the gain.
+    """
+    count = max(1, int(seconds * rate))
+    return np.linspace(0.0, peak, count, dtype=np.float32)
+
+
+def steady(seconds: float, *, rate: int = 48000, level: float = 0.1) -> Samples:
+    """Build audio whose every sample is the same size.
+
+    The counterpart to `playable`: a ramp is what a test wants when it is
+    asserting on one peak, and a constant is what it wants when it is comparing
+    peaks between chunks — a ramp's own shape would be indistinguishable from
+    the gain changing.
+
+    Args:
+        seconds: How long it runs for.
+        rate: The sample rate it is meant to be played at.
+        level: Every sample's magnitude.
+
+    Returns:
+        The audio, as float32.
+    """
+    count = max(1, int(seconds * rate))
+    return np.full(count, level, dtype=np.float32)
 
 
 # --- Audio -------------------------------------------------------------------
@@ -717,6 +819,7 @@ class FakeMedia:
         audio: Iterable[AudioSamples] = (),
         sample_rate: int = 16000,
         channels: int = 2,
+        output_rate: int = 48000,
     ) -> None:
         """Script what the daemon will produce.
 
@@ -729,17 +832,21 @@ class FakeMedia:
                 looks like.
             sample_rate: What the daemon says it captures at.
             channels: How many channels it says it captures.
+            output_rate: What the daemon says it plays back at, which is the
+                rate playback is decoded and resampled to.
         """
         self.jpeg = jpeg
         self.image = image
         self.audio = list(audio)
         self.sample_rate = sample_rate
         self.channels = channels
-        self.played: list[str] = []
+        self.output_rate = output_rate
+        self.pushed: list[AudioSamples] = []
         self.recording = False
         self.playing = True
         self.jpeg_reads = 0
         self.image_reads = 0
+        self.start_playing_calls = 0
         self.stop_playing_calls = 0
 
     def get_frame_jpeg(self) -> bytes | None:
@@ -760,15 +867,6 @@ class FakeMedia:
         self.image_reads += 1
         return self.image
 
-    def play_sound(self, sound_file: str) -> None:
-        """Record a sound the daemon was asked to play.
-
-        Args:
-            sound_file: The local path.
-        """
-        self.played.append(sound_file)
-        self.playing = True
-
     def start_recording(self) -> None:
         """Record that capture started."""
         self.recording = True
@@ -779,7 +877,25 @@ class FakeMedia:
 
     def start_playing(self) -> None:
         """Record that the playback pipeline started."""
+        self.start_playing_calls += 1
         self.playing = True
+
+    def push_audio_sample(self, data: AudioSamples) -> None:
+        """Record one chunk of audio the daemon was asked to play.
+
+        Args:
+            data: The samples, which the test reads back to check what was
+                actually going to reach the speaker.
+        """
+        self.pushed.append(data)
+
+    def get_output_audio_samplerate(self) -> int:
+        """Say what rate playback runs at.
+
+        Returns:
+            The scripted output rate.
+        """
+        return self.output_rate
 
     def stop_playing(self) -> None:
         """Record that the playback pipeline stopped."""

@@ -52,6 +52,15 @@ dependencies = [
     "zeroconf>=0.130,<1",
     # Microphone gain control and noise suppression (`esphome/webrtc.py`).
     "webrtc-noise-gain>=1,<2",
+    # Decoding playback to float samples, and resampling it to the rate the
+    # daemon reports. It handles all three formats the robot is actually sent —
+    # the MP3 Home Assistant's text-to-speech proxy serves, and the FLAC and WAV
+    # this wheel ships — where `soundfile`, which is also present in the robot's
+    # environment, does not do the first. Declared rather than left ambient: it
+    # is already resolved into that environment, and an install that only worked
+    # because something else had asked for it is one dependency change away from
+    # not working. See change 0016.
+    "av>=13,<16",
     # The peripheral WebSocket API (`esphome/peripheral_api.py`). Upstream
     # imports it lazily and degrades to a log line when it is missing; it is
     # declared here so the feature is actually present rather than accidentally

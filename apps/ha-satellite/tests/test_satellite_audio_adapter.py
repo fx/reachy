@@ -6,42 +6,60 @@ ha-satellite REQ-043 is about: what these tests establish is that the adapter
 goes *through* that interface and never round it, which is a property of the
 calls it makes rather than of any audio anybody heard.
 
-Nothing sleeps and nothing waits. `ReachyCapture` takes its sleep as an argument
-so that a test drives a blocking read to completion without spending any wall
-time, and `ReachyPlayback` takes its scheduler for the same reason: playback
-completion is a timer, and a suite that waited for one would be slow and would
-still only be testing `threading.Timer`.
+Nothing sleeps, nothing waits and nothing reads a file. `ReachyCapture` takes
+its sleep as an argument so that a test drives a blocking read to completion
+without spending any wall time. `ReachyPlayback` takes three for the same kind
+of reason: its `sleep` is how it paces pushes against the speaker, so a suite
+that let it wait would spend the length of every sound it played; its `detach`
+is how work leaves the calling thread, so a test can stand in the middle of a
+sound or let the whole of one happen inline; and its `decode` reads a file,
+which a unit test may not. What the real decoder does to the wheel's own assets
+is `test_satellite_decode.py`, and one test here — `TestTheDefaultDecoder` —
+carries `@pytest.mark.filesystem` and checks that the default is wired to it.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 import pytest
 from satellite_support import (
+    FakeDecoder,
     FakeMedia,
     FakeSoundSource,
-    ManualScheduler,
+    ManualDetach,
     immediately,
+    no_sleep,
+    playable,
     silence,
+    steady,
     tone,
 )
 
 from reachy_mini_ha_satellite.adapters.audio_reachy import (
+    # The two pacing constants are reached by their private names on purpose:
+    # a test that restated them would go on passing while the loop paced itself
+    # to something else entirely.
+    _CHUNK_SECONDS,
+    _LEAD_SECONDS,
     DEFAULT_CHANNELS,
-    UNKNOWN_LENGTH_SECONDS,
     AudioSourceError,
     ReachyAudio,
     ReachyCapture,
     ReachyPlayback,
-    ThreadScheduler,
+    decode_for_playback,
 )
-from reachy_mini_ha_satellite.adapters.sounds import Sound
+from reachy_mini_ha_satellite.adapters.decode import DEFAULT_OUTPUT_RATE
+from reachy_mini_ha_satellite.adapters.output_gain import DEFAULT_BOOST_PERCENT
+from reachy_mini_ha_satellite.adapters.sounds import Sound, SoundSource
+from reachy_mini_ha_satellite.assets.registry import assets_dir
 from reachy_mini_ha_satellite.esphome.seams import SAMPLE_RATE, SAMPLE_WIDTH
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from reachy_mini_ha_satellite.adapters.output_gain import Samples
 
 
 def _never_sleeps(seconds: float) -> None:
@@ -232,51 +250,71 @@ class TestCaptureRebuffers:
 
 
 class TestPlaybackGoesThroughTheDaemon:
-    """REQ-043 again, for the speaker."""
+    """REQ-043 again, for the speaker — and change 0016's push path."""
 
-    def test_playing_hands_the_daemon_a_local_file(self) -> None:
-        """Nothing here opens an output; the daemon does."""
+    def test_playing_pushes_the_decoded_samples(self) -> None:
+        """Nothing here opens an output; the daemon is handed the audio."""
         media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("chime", "/sounds/chime.flac", 0.5)
-        player = ReachyPlayback(
-            media, sounds, scheduler=ManualScheduler(), detach=immediately
-        )
-        player.play("chime")
-        assert media.played == ["/sounds/chime.flac"]
-        assert player.is_playing
+        decoder = FakeDecoder({"/sounds/chime.flac": playable(0.2)})
+        player = _player(media, sounds, decoder=decoder)
 
-    def test_a_sound_ends_when_its_own_length_has_elapsed(self) -> None:
-        """The daemon reports no completion, so the length is the signal."""
-        scheduler = ManualScheduler()
+        player.play("chime")
+
+        assert decoder.decoded == [("/sounds/chime.flac", 48000)]
+        assert media.start_playing_calls == 1
+        assert _pushed(media).size == playable(0.2).size
+
+    def test_it_decodes_at_the_rate_the_daemon_reports(self) -> None:
+        """Change 0016's R9: the output rate is asked for, never assumed."""
+        media = FakeMedia(output_rate=16000)
+        sounds = FakeSoundSource()
+        sounds.add("chime", "/sounds/chime.flac", 0.5)
+        decoder = FakeDecoder()
+        player = _player(media, sounds, decoder=decoder)
+
+        player.play("chime")
+
+        assert decoder.decoded == [("/sounds/chime.flac", 16000)]
+
+    def test_a_sound_ends_when_its_samples_have_been_played(self) -> None:
+        """R8: observed, rather than a timer sized from the file's header."""
         sounds = FakeSoundSource()
         sounds.add("chime", "/sounds/chime.flac", 0.75)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=scheduler, detach=immediately
-        )
+        detach = ManualDetach()
+        player = _player(FakeMedia(), sounds, detach=detach)
         finished: list[str] = []
+
         player.play("chime", done_callback=lambda: finished.append("done"))
-        assert scheduler.pending is not None
-        assert scheduler.pending.delay == 0.75
-        scheduler.fire()
+        assert player.is_playing
+        assert finished == []
+        detach.run_all()
+
         assert finished == ["done"]
         assert not player.is_playing
 
     def test_a_list_plays_in_order_and_reports_once_at_the_end(self) -> None:
         """Which is what an announcement made of several parts needs."""
-        scheduler = ManualScheduler()
         media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("one", "/sounds/one.wav", 0.1)
         sounds.add("two", "/sounds/two.wav", 0.2)
-        player = ReachyPlayback(media, sounds, scheduler=scheduler, detach=immediately)
+        decoder = FakeDecoder()
+        detach = ManualDetach()
+        player = _player(media, sounds, decoder=decoder, detach=detach)
         finished: list[str] = []
+
         player.play(["one", "two"], done_callback=lambda: finished.append("done"))
-        assert media.played == ["/sounds/one.wav"]
-        scheduler.fire()
-        assert media.played == ["/sounds/one.wav", "/sounds/two.wav"]
+        detach.run()
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/one.wav"]
         assert finished == []
-        scheduler.fire()
+        detach.run_all()
+
+        assert [path for path, _rate in decoder.decoded] == [
+            "/sounds/one.wav",
+            "/sounds/two.wav",
+        ]
         assert finished == ["done"]
 
     def test_stopping_invokes_the_callback_the_caller_was_owed(self) -> None:
@@ -289,197 +327,485 @@ class TestPlaybackGoesThroughTheDaemon:
         """
         sounds = FakeSoundSource()
         sounds.add("chime", "/sounds/chime.flac", 5.0)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=ManualScheduler(), detach=immediately
-        )
+        detach = ManualDetach()
+        player = _player(FakeMedia(), sounds, detach=detach)
         finished: list[str] = []
+
         player.play("chime", done_callback=lambda: finished.append("done"))
         player.stop()
+
         assert finished == ["done"]
         assert not player.is_playing
 
     def test_stopping_silences_the_daemons_output(self) -> None:
         """There is one output, so stopping means stopping the daemon's."""
         media = FakeMedia()
-        player = ReachyPlayback(
-            media,
-            FakeSoundSource(),
-            scheduler=ManualScheduler(),
-            detach=immediately,
-        )
+        player = _player(media, FakeSoundSource())
+
         player.stop()
+
         assert media.stop_playing_calls == 1
 
     def test_superseding_a_sound_reports_the_one_it_replaced(self) -> None:
         """A callback that silently never fires leaves a caller waiting."""
-        scheduler = ManualScheduler()
         sounds = FakeSoundSource()
         sounds.add("first", "/sounds/first.wav", 5.0)
         sounds.add("second", "/sounds/second.wav", 5.0)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=scheduler, detach=immediately
-        )
+        detach = ManualDetach()
+        player = _player(FakeMedia(), sounds, detach=detach)
         finished: list[str] = []
+
         player.play("first", done_callback=lambda: finished.append("first"))
         player.play("second", done_callback=lambda: finished.append("second"))
         assert finished == ["first"]
-        scheduler.fire()
+        detach.run_all()
+
         assert finished == ["first", "second"]
 
-    def test_the_superseded_sounds_timer_does_not_fire_later(self) -> None:
-        """Otherwise the replacement would end when its predecessor would."""
-        scheduler = ManualScheduler()
+    def test_the_superseded_sound_stops_being_pushed(self) -> None:
+        """Otherwise two sounds would be mixed into the one output.
+
+        The push loop cannot be interrupted from outside, so it checks the
+        generation between chunks — which is what a supersede moves on.
+        """
+        media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("first", "/sounds/first.wav", 5.0)
-        sounds.add("second", "/sounds/second.wav", 1.0)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=scheduler, detach=immediately
+        sounds.add("second", "/sounds/second.wav", 5.0)
+        detach = ManualDetach()
+        player = _player(
+            media,
+            sounds,
+            decoder=FakeDecoder(default=playable(1.0)),
+            detach=detach,
         )
+
         player.play("first")
         player.play("second")
-        pending = scheduler.pending
-        assert pending is not None
-        assert pending.delay == 1.0
-        assert scheduler.scheduled[0].cancelled
+        detach.run_all()
+
+        # One sound's worth of audio reached the daemon, not two: the first
+        # loop was abandoned before it pushed anything.
+        assert _pushed(media).size == playable(1.0).size
+
+    def test_a_stopped_sound_never_opens_the_daemons_output(self) -> None:
+        """The loop is queued by `play` and may run after a `stop` lands.
+
+        Everything it would do is behind the generation check, `start_playing`
+        included — otherwise stopping a sound before its loop ran would still
+        start the daemon's pipeline for it.
+        """
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("chime", "/sounds/chime.flac", 1.0)
+        detach = ManualDetach()
+        player = _player(media, sounds, detach=detach)
+
+        player.play("chime")
+        detach.run()
+        player.stop()
+        started = media.start_playing_calls
+        detach.run_all()
+
+        assert media.start_playing_calls == started
+        assert media.pushed == []
+
+    def test_superseding_flushes_what_the_daemon_still_holds(self) -> None:
+        """Abandoning the push loop does not take back what it already pushed.
+
+        The loop stays `_LEAD_SECONDS` ahead of the speaker on purpose, so
+        without this the tail of the superseded sound plays underneath the
+        start of its replacement. The vendored layer supersedes without
+        `stop_first` on its ordinary path, so the player has to do it.
+        """
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("first", "/sounds/first.wav", 5.0)
+        sounds.add("second", "/sounds/second.wav", 5.0)
+        detach = ManualDetach()
+        player = _player(media, sounds, detach=detach)
+
+        player.play("first")
+        detach.run()
+        before = media.stop_playing_calls
+        player.play("second")
+        detach.run_all()
+
+        assert media.stop_playing_calls > before
 
     def test_an_unresolvable_sound_is_skipped_and_the_rest_still_play(
         self,
     ) -> None:
         """A media URL Home Assistant cannot serve is its problem, not ours."""
-        media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("good", "/sounds/good.wav", 0.1)
-        player = ReachyPlayback(
-            media, sounds, scheduler=ManualScheduler(), detach=immediately
-        )
+        decoder = FakeDecoder()
+        player = _player(FakeMedia(), sounds, decoder=decoder)
+
         player.play(["missing", "good"])
-        assert media.played == ["/sounds/good.wav"]
+
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/good.wav"]
+
+    def test_an_undecodable_sound_is_skipped_and_the_rest_still_play(
+        self,
+    ) -> None:
+        """Resolving says the bytes arrived; decoding says what they were.
+
+        A URL that answers with something that is not audio gets through the
+        resolver and fails here, and it must cost the playlist one item rather
+        than all of it.
+        """
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("broken", "/cache/notaudio.bin", None)
+        sounds.add("good", "/sounds/good.wav", 0.1)
+        decoder = FakeDecoder({"/cache/notaudio.bin": None})
+        player = _player(media, sounds, decoder=decoder)
+
+        player.play(["broken", "good"])
+
+        assert [path for path, _rate in decoder.decoded] == [
+            "/cache/notaudio.bin",
+            "/sounds/good.wav",
+        ]
+        assert media.pushed
 
     def test_a_request_that_resolves_to_nothing_still_reports_completion(
         self,
     ) -> None:
         """The caller is waiting to be told it finished, and it has."""
-        player = ReachyPlayback(
-            FakeMedia(),
-            FakeSoundSource(),
-            scheduler=ManualScheduler(),
-            detach=immediately,
-        )
+        player = _player(FakeMedia(), FakeSoundSource())
         finished: list[str] = []
+
         player.play("missing", done_callback=lambda: finished.append("done"))
+
         assert finished == ["done"]
         assert not player.is_playing
-
-    def test_a_sound_of_unreadable_length_is_bounded_rather_than_measured(
-        self,
-    ) -> None:
-        """The daemon offers no end-of-stream, and not every format has a length.
-
-        WAV, FLAC and MP3 are read — between them, everything this application
-        ships and everything Home Assistant's text-to-speech serves. What is
-        left is bounded so that a completion cannot be lost outright.
-        """
-        scheduler = ManualScheduler()
-        sounds = FakeSoundSource()
-        sounds.add("speech", "/cache/speech.opus", None)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=scheduler, detach=immediately
-        )
-        player.play("speech")
-        pending = scheduler.pending
-        assert pending is not None
-        assert pending.delay == UNKNOWN_LENGTH_SECONDS
-        assert player.is_playing
 
     def test_pausing_silences_the_output_and_keeps_the_sound(self) -> None:
         """Which is what the vendored code does before an announcement."""
         media = FakeMedia()
-        scheduler = ManualScheduler()
         sounds = FakeSoundSource()
         sounds.add("music", "/sounds/music.wav", 30.0)
-        player = ReachyPlayback(media, sounds, scheduler=scheduler, detach=immediately)
+        detach = ManualDetach()
+        player = _player(media, sounds, detach=detach)
+
         player.play("music")
+        detach.run()
+        before = media.stop_playing_calls
         player.pause()
-        assert media.stop_playing_calls == 1
+
+        assert media.stop_playing_calls == before + 1
         assert player.is_playing
-        assert scheduler.pending is None
 
     def test_resuming_restarts_the_item_because_there_is_no_seek(self) -> None:
         """Stated rather than hidden: the daemon's interface has no position.
 
-        Restarting the item *and* re-timing the whole of it is the only pair of
-        choices that leaves the audio and the completion callback agreeing.
+        It restarts from what was already decoded rather than going back to the
+        resolver, which is the one thing change 0016 made cheaper here.
         """
         media = FakeMedia()
-        scheduler = ManualScheduler()
         sounds = FakeSoundSource()
         sounds.add("music", "/sounds/music.wav", 30.0)
-        player = ReachyPlayback(media, sounds, scheduler=scheduler, detach=immediately)
+        decoder = FakeDecoder(default=playable(0.2))
+        detach = ManualDetach()
+        player = _player(media, sounds, decoder=decoder, detach=detach)
+
         player.play("music")
+        # Resolved and decoded, with the push queued behind it. Pausing here
+        # abandons that push; resuming has to start a new one from the samples
+        # already in hand rather than going back to the resolver.
+        detach.run()
         player.pause()
         player.resume()
-        assert media.played == ["/sounds/music.wav", "/sounds/music.wav"]
-        assert scheduler.pending is not None
-        assert scheduler.pending.delay == 30.0
+        detach.run_all()
+
+        assert len(decoder.decoded) == 1
+        assert _pushed(media).size == playable(0.2).size
 
     def test_resuming_something_that_was_not_paused_does_nothing(self) -> None:
         """The vendored code resumes music that may never have been playing."""
         media = FakeMedia()
-        player = ReachyPlayback(
-            media,
-            FakeSoundSource(),
-            scheduler=ManualScheduler(),
-            detach=immediately,
-        )
+        player = _player(media, FakeSoundSource())
+
         player.resume()
-        assert media.played == []
+
+        assert media.pushed == []
 
     def test_a_volume_is_recorded_and_reported(self) -> None:
-        """It changes nothing audible; the daemon exposes no output gain."""
-        player = ReachyPlayback(FakeMedia(), FakeSoundSource(), detach=immediately)
+        """The settings interface and Home Assistant both read it back."""
+        player = _player(FakeMedia(), FakeSoundSource())
+
         player.set_volume(40.0)
+
         assert player.volume == pytest.approx(40.0)
 
     def test_ducking_scales_the_reported_level_and_unducking_restores_it(
         self,
     ) -> None:
         """So a settings interface can show what was asked for."""
-        player = ReachyPlayback(FakeMedia(), FakeSoundSource(), detach=immediately)
+        player = _player(FakeMedia(), FakeSoundSource())
+
         player.set_volume(80.0)
         player.duck(0.25)
         assert player.volume == pytest.approx(20.0)
+
         player.unduck()
         assert player.volume == pytest.approx(80.0)
 
     def test_a_failing_completion_callback_does_not_escape(self) -> None:
-        """It runs on a timer thread, where an exception has nowhere to go."""
-        scheduler = ManualScheduler()
+        """It runs on the push thread, where an exception has nowhere to go."""
         sounds = FakeSoundSource()
         sounds.add("chime", "/sounds/chime.flac", 0.1)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=scheduler, detach=immediately
-        )
+        player = _player(FakeMedia(), sounds)
 
         def _explode() -> None:
             message = "the caller's callback failed"
             raise RuntimeError(message)
 
         player.play("chime", done_callback=_explode)
-        scheduler.fire()
+
         assert not player.is_playing
+
+
+@pytest.mark.filesystem
+class TestTheDefaultDecoder:
+    """The one piece of the player that is a real file read.
+
+    Every other test in this file replaces it, because a unit test may not read
+    a file — so this is where the default is shown to be wired to something
+    that works, rather than merely to something with the right signature.
+    """
+
+    def test_it_decodes_a_sound_this_wheel_ships(self) -> None:
+        """`decode_for_playback` is what `ReachyPlayback` reaches for."""
+        path = str(assets_dir() / "sounds" / "processing.wav")
+
+        samples = decode_for_playback(path, 48000)
+
+        assert samples.dtype == np.float32
+        assert samples.size > 0
+
+
+class TestThePacing:
+    """The push loop against the daemon's bounded, non-blocking queue."""
+
+    def test_it_builds_a_lead_before_it_waits_at_all(self) -> None:
+        """Otherwise the speaker runs dry at the start of every sound.
+
+        The daemon's queue is bounded and does not block, so the loop cannot
+        push everything; but pacing from the first chunk means one chunk of
+        audio and then a wait, which is a gap the listener hears.
+        """
+        media = FakeMedia()
+        waits = _Waits(media)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(2.0)),
+            sleep=waits,
+        )
+
+        player.play("chime")
+
+        # Everything within the lead went out before the loop waited once.
+        assert waits.pushes_before_first_wait >= int(_LEAD_SECONDS / _CHUNK_SECONDS)
+
+    def test_it_waits_out_what_is_still_queued_before_reporting_the_end(
+        self,
+    ) -> None:
+        """The vendored layer reads the callback as "the announcement finished".
+
+        Reporting it while a fifth of a second is still queued would cut the
+        end off every answer, from that layer's point of view.
+        """
+        media = FakeMedia()
+        waits = _Waits(media)
+        finished: list[str] = []
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(2.0)),
+            sleep=waits,
+        )
+
+        player.play("chime", done_callback=lambda: finished.append("done"))
+
+        assert finished == ["done"]
+        # The last wait happens after the last push: it is the queue draining
+        # rather than the loop pacing itself.
+        assert waits.pushed_at_last_wait == len(media.pushed)
+
+    def test_a_sound_shorter_than_the_lead_is_not_padded_to_it(self) -> None:
+        """The drain is measured, not assumed to be the whole lead.
+
+        A chime is shorter than the lead, so it was never that far ahead — and
+        waiting the lead out anyway would report every one of them late.
+        """
+        media = FakeMedia()
+        waits = _Waits(media)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(_CHUNK_SECONDS)),
+            sleep=waits,
+        )
+
+        player.play("chime")
+
+        assert all(wait < _LEAD_SECONDS for wait in waits.seconds)
+
+    def test_a_stop_part_way_through_stops_the_pushing(self) -> None:
+        """The loop cannot be interrupted, so it checks between chunks.
+
+        Without that check a stopped announcement would go on being handed to
+        the daemon until its samples ran out, however long it was.
+        """
+        media = FakeMedia()
+        stop_it = _AfterWaits(1)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(2.0)),
+            sleep=stop_it,
+        )
+        stop_it.action = player.stop
+
+        player.play("chime")
+
+        # Two seconds of audio at fifty milliseconds a chunk is forty chunks;
+        # the loop stopped a long way short of them.
+        assert len(media.pushed) < 40
+
+    def test_a_daemon_with_no_output_device_does_not_flood_it(self) -> None:
+        """It reports a negative rate, which is not a rate to divide by.
+
+        Used raw, it makes a chunk one sample and a chunk's duration negative:
+        tens of thousands of unpaced pushes for one short sound.
+        """
+        media = FakeMedia(output_rate=-1)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(0.2)),
+        )
+
+        player.play("chime")
+
+        assert len(media.pushed) == 4
+        assert media.pushed[0].size == int(DEFAULT_OUTPUT_RATE * _CHUNK_SECONDS)
+
+
+class TestTheVolumeControlIsReal:
+    """Change 0016's R1 and R2: the slider changes what reaches the speaker."""
+
+    def test_the_default_boost_amplifies_a_quiet_source(self) -> None:
+        """R1. Text-to-speech arrives around -15 dBFS and has to carry a room."""
+        media = FakeMedia()
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(0.05, peak=0.1)),
+        )
+
+        player.play("chime")
+
+        # 500% of a peak of 0.1, which is well inside the source's headroom.
+        assert _peak(media) == pytest.approx(0.5, abs=1e-3)
+
+    def test_turning_the_volume_down_is_audible(self) -> None:
+        """R2, and the whole of what the operator asked for."""
+        loud, quiet = FakeMedia(), FakeMedia()
+        decoder = FakeDecoder(default=playable(0.05, peak=0.1))
+
+        _player(loud, _one_sound(), decoder=decoder).play("chime")
+        half = _player(quiet, _one_sound(), decoder=decoder)
+        half.set_volume(50.0)
+        half.play("chime")
+
+        assert _peak(quiet) == pytest.approx(_peak(loud) / 2.0, rel=1e-3)
+
+    def test_ducking_is_audible_too(self) -> None:
+        """The vendored layer ducks music so a wake word can be heard over it."""
+        plain, ducked = FakeMedia(), FakeMedia()
+        decoder = FakeDecoder(default=playable(0.05, peak=0.1))
+
+        _player(plain, _one_sound(), decoder=decoder).play("chime")
+        quieter = _player(ducked, _one_sound(), decoder=decoder)
+        quieter.duck(0.25)
+        quieter.play("chime")
+
+        assert _peak(ducked) == pytest.approx(_peak(plain) / 4.0, rel=1e-3)
+
+    def test_a_hot_cue_is_not_given_the_voices_gain(self) -> None:
+        """R5. `timer_finished.flac` peaks at 0.0 dBFS and has no headroom."""
+        media = FakeMedia()
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(0.05, peak=1.0)),
+        )
+
+        player.play("chime")
+
+        assert _peak(media) == pytest.approx(1.0, abs=1e-3)
+
+    def test_the_volume_still_works_on_a_source_with_no_headroom(self) -> None:
+        """The cap applies to the boost, not to the result.
+
+        Capping the result instead would leave three quarters of Home
+        Assistant's slider doing nothing for any source mastered near full
+        scale — which is every cue this wheel ships.
+        """
+        media = FakeMedia()
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(0.05, peak=1.0)),
+        )
+
+        player.set_volume(50.0)
+        player.play("chime")
+
+        assert _peak(media) == pytest.approx(0.5, abs=1e-3)
+
+    def test_a_volume_change_is_heard_within_the_current_sound(self) -> None:
+        """Not at the next one: an operator turning a long answer down means it."""
+        media = FakeMedia()
+        detach = ManualDetach()
+        turn_down = _AfterWaits(2)
+        player = _player(
+            media,
+            _one_sound(),
+            # Constant rather than a ramp, so that a difference between two
+            # chunks is the gain changing and cannot be the material.
+            decoder=FakeDecoder(default=steady(1.0, level=0.1)),
+            detach=detach,
+            sleep=turn_down,
+        )
+        turn_down.action = lambda: player.set_volume(10.0)
+
+        player.set_volume(100.0)
+        player.play("chime")
+        detach.run_all()
+
+        # The loop reads the level per chunk, so the ones pushed after the
+        # change are quieter than the ones pushed before it.
+        assert _peak_of(media.pushed[0]) > _peak_of(media.pushed[-1])
 
 
 class TestTheAudioPortIsOneLifecycle:
     """The microphone and the speaker are one piece of hardware."""
 
     def test_starting_takes_up_capture(self) -> None:
-        """Playback needs nothing started: the daemon builds it per sound."""
+        """Playback needs nothing started here: the push loop starts it."""
         media = FakeMedia()
         audio = ReachyAudio(
             media,
             FakeSoundSource(),
-            scheduler=ManualScheduler(),
             detach=immediately,
+            sleep=no_sleep,
+            decode=FakeDecoder(),
         )
         audio.start()
         assert media.recording
@@ -493,8 +819,9 @@ class TestTheAudioPortIsOneLifecycle:
         audio = ReachyAudio(
             media,
             sounds,
-            scheduler=ManualScheduler(),
             detach=immediately,
+            sleep=no_sleep,
+            decode=FakeDecoder(),
         )
         audio.start()
         audio.music.play("music")
@@ -511,8 +838,9 @@ class TestTheAudioPortIsOneLifecycle:
         audio = ReachyAudio(
             media,
             FakeSoundSource(),
-            scheduler=ManualScheduler(),
             detach=immediately,
+            sleep=no_sleep,
+            decode=FakeDecoder(),
         )
         audio.start()
         audio.stop()
@@ -531,8 +859,9 @@ class TestTheAudioPortIsOneLifecycle:
         audio = ReachyAudio(
             media,
             FakeSoundSource(),
-            scheduler=ManualScheduler(),
             detach=immediately,
+            sleep=no_sleep,
+            decode=FakeDecoder(),
         )
         audio.start()
         audio.stop()
@@ -548,15 +877,16 @@ class TestTheAudioPortIsOneLifecycle:
         audio = ReachyAudio(
             media,
             sounds,
-            scheduler=ManualScheduler(),
             detach=immediately,
+            sleep=no_sleep,
+            decode=FakeDecoder(),
         )
         audio.start()
         audio.stop()
         finished: list[str] = []
         audio.music.play("chime")
         audio.speech.play("chime", done_callback=lambda: finished.append("done"))
-        assert media.played == []
+        assert media.pushed == []
         assert not audio.music.is_playing
         assert not audio.speech.is_playing
         # Still told it finished: a caller waiting on an announcement that
@@ -568,98 +898,67 @@ class TestTheAudioPortIsOneLifecycle:
         media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("music", "/sounds/music.wav", 30.0)
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=ManualScheduler(),
-            detach=immediately,
-        )
+        detach = ManualDetach()
+        player = _player(media, sounds, detach=detach)
         player.play("music")
+        detach.run()
+        pushed = len(media.pushed)
         player.pause()
         player.release()
         player.resume()
-        assert media.played == ["/sounds/music.wav"]
+        detach.run_all()
+        assert len(media.pushed) == pushed
         assert player.released
 
     def test_the_two_outputs_are_separate_objects(self) -> None:
         """Music and speech are ducked and paused independently."""
-        audio = ReachyAudio(FakeMedia(), FakeSoundSource(), detach=immediately)
+        audio = ReachyAudio(
+            FakeMedia(),
+            FakeSoundSource(),
+            detach=immediately,
+            sleep=no_sleep,
+        )
         assert audio.music is not audio.speech
 
 
-class TestTheDefaultScheduler:
-    """The one piece that is a timer thread rather than a fake."""
-
-    def test_a_cancelled_call_never_runs(self) -> None:
-        """Cancelling is what supersession and stopping both do."""
-        scheduler = ThreadScheduler()
-        ran: list[str] = []
-        # An hour away, so the assertion below is about the cancellation and
-        # not about how quickly this test got to the next line.
-        handle = scheduler.call_after(3600.0, lambda: ran.append("late"))
-        handle.cancel()
-        assert ran == []
-
-
-class TestTheHazardsOfTimersAndChannels:
+class TestTheHazardsOfSupersessionAndChannels:
     """Three defects that are silent when they are present."""
 
     def test_a_completion_already_running_cannot_finish_its_replacement(
         self,
     ) -> None:
-        """`Timer.cancel` cannot stop a callback that has already begun.
+        """A push loop cannot be interrupted between its last chunk and its end.
 
-        The window is real: `play` takes the lock, and a timer action that
-        entered `_finished` just before it waits there and then runs against
-        state that now belongs to a different sound. Without a generation it
-        would mark the replacement finished — firing a callback the vendored
-        protocol layer reads as "the announcement ended" while it is still
-        playing.
+        The window is real: `play` takes the lock, and a push loop that entered
+        `_finished` just before it waits there and then runs against state that
+        now belongs to a different sound. Without a generation it would mark the
+        replacement finished — firing a callback the vendored protocol layer
+        reads as "the announcement ended" while it is still playing.
         """
-        scheduler = ManualScheduler()
         sounds = FakeSoundSource()
         sounds.add("first", "/sounds/first.wav", 1.0)
         sounds.add("second", "/sounds/second.wav", 30.0)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=scheduler, detach=immediately
-        )
+        detach = ManualDetach()
+        player = _player(FakeMedia(), sounds, detach=detach)
         player.play("first")
-        stale = scheduler.scheduled[0]
+        detach.run()
         finished: list[str] = []
+
         player.play("second", done_callback=lambda: finished.append("second"))
-        # The superseded sound's action, arriving after the replacement is
-        # already playing. Invoked directly, which is what a timer thread that
-        # had already started would do.
-        stale.action()
+        detach.run()
+        # The superseded sound's completion, arriving after the replacement is
+        # already playing. Invoked directly, which is what a push thread that
+        # had already reached its end would do.
+        player._finished(
+            _SUPERSEDED
+        )  # the race is between two threads inside one method, and no public call can put a test in the middle of it
+
         assert finished == []
         assert player.is_playing
 
-    def test_a_sound_of_unreadable_length_still_completes_eventually(
-        self,
-    ) -> None:
-        """A callback that never fires wedges the caller's state machine.
-
-        The daemon reports no end of stream and an MP3 fetched from Home
-        Assistant may not carry a readable length, so the completion is bounded
-        rather than measured. Late is worse than exact and better than never.
-        """
-        scheduler = ManualScheduler()
-        sounds = FakeSoundSource()
-        sounds.add("speech", "/cache/speech.opus", None)
-        player = ReachyPlayback(
-            FakeMedia(), sounds, scheduler=scheduler, detach=immediately
-        )
-        finished: list[str] = []
-        player.play("speech", done_callback=lambda: finished.append("done"))
-        pending = scheduler.pending
-        assert pending is not None
-        assert pending.delay == UNKNOWN_LENGTH_SECONDS
-        scheduler.fire()
-        assert finished == ["done"]
-
     def test_ducking_to_silence_is_not_reported_as_full_volume(self) -> None:
         """Zero is falsy, and a factor of zero is a request rather than absence."""
-        player = ReachyPlayback(FakeMedia(), FakeSoundSource(), detach=immediately)
+        player = _player(FakeMedia(), FakeSoundSource())
         player.set_volume(80.0)
         player.duck(0.0)
         assert player.volume == pytest.approx(0.0)
@@ -697,21 +996,17 @@ class TestResolvingASoundStaysOffTheCallingThread:
         """
         media = FakeMedia()
         sounds = _SlowSource()
+        decoder = FakeDecoder()
         detached: list[Callable[[], None]] = []
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=ManualScheduler(),
-            detach=detached.append,
-        )
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
         player.play("https://198.51.100.10/track.mp3")
-        assert media.played == []
+        assert decoder.decoded == []
         assert detached
         # The seam counts loading as playing, and it has to: `play` returns
         # before the sound exists.
         assert player.is_playing
         detached[0]()
-        assert media.played == ["/cache/track.mp3"]
+        assert [path for path, _rate in decoder.decoded] == ["/cache/track.mp3"]
 
     def test_a_resolution_the_caller_superseded_is_abandoned(self) -> None:
         """A fetch in flight when a new request lands must not start late."""
@@ -719,64 +1014,80 @@ class TestResolvingASoundStaysOffTheCallingThread:
         sounds = FakeSoundSource()
         sounds.add("slow", "/cache/slow.mp3", 5.0)
         sounds.add("quick", "/sounds/quick.wav", 1.0)
+        decoder = FakeDecoder()
         detached: list[Callable[[], None]] = []
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=ManualScheduler(),
-            detach=detached.append,
-        )
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
         player.play("slow")
         player.play("quick")
         # The second request's resolution runs first; the first one's arrives
         # afterwards and finds its generation gone.
         detached[1]()
         detached[0]()
-        assert media.played == ["/sounds/quick.wav"]
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/quick.wav"]
+
+    def test_a_supersede_during_a_decode_is_abandoned_after_it(self) -> None:
+        """Decoding is the long part, and a request can land in the middle of it.
+
+        The generation is checked again after the decode for that reason: the
+        one before it was true when the fetch started and says nothing about
+        what happened while a file was being read.
+        """
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("slow", "/cache/slow.mp3", 5.0)
+        sounds.add("quick", "/sounds/quick.wav", 1.0)
+        detached: list[Callable[[], None]] = []
+        decoder = _SupersedesWhileDecoding()
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
+        decoder.take_over = lambda: player.play("quick")
+
+        player.play("slow")
+        detached[0]()
+
+        # The decode finished, the generation had moved on, and nothing of the
+        # superseded sound reached the daemon.
+        assert decoder.decoded == ["/cache/slow.mp3"]
+        assert media.pushed == []
 
     def test_a_stop_during_a_resolution_leaves_nothing_playing(self) -> None:
         """The vendored code stops the announcement player to cancel one."""
         media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("slow", "/cache/slow.mp3", 5.0)
+        decoder = FakeDecoder()
         detached: list[Callable[[], None]] = []
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=ManualScheduler(),
-            detach=detached.append,
-        )
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
         finished: list[str] = []
         player.play("slow", done_callback=lambda: finished.append("done"))
         player.stop()
         assert finished == ["done"]
         detached[0]()
-        assert media.played == []
+        assert decoder.decoded == []
         assert not player.is_playing
 
     def test_the_next_item_in_a_list_is_resolved_off_the_thread_too(
         self,
     ) -> None:
-        """Completion arrives on a timer thread, which must not fetch either."""
+        """Completion arrives on the push thread, which must not fetch either."""
         media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("one", "/sounds/one.wav", 0.1)
         sounds.add("two", "/sounds/two.wav", 0.2)
-        scheduler = ManualScheduler()
+        decoder = FakeDecoder()
         detached: list[Callable[[], None]] = []
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=scheduler,
-            detach=detached.append,
-        )
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
         player.play(["one", "two"])
         detached[0]()
-        assert media.played == ["/sounds/one.wav"]
-        scheduler.fire()
-        assert media.played == ["/sounds/one.wav"]
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/one.wav"]
+        # The first sound's push loop, which ends by queuing the next
+        # resolution rather than performing it on the push thread.
         detached[1]()
-        assert media.played == ["/sounds/one.wav", "/sounds/two.wav"]
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/one.wav"]
+        detached[2]()
+        assert [path for path, _rate in decoder.decoded] == [
+            "/sounds/one.wav",
+            "/sounds/two.wav",
+        ]
 
     def test_pausing_during_a_resolution_does_not_start_the_sound(self) -> None:
         """The one thing a pause could otherwise fail to stop.
@@ -788,36 +1099,28 @@ class TestResolvingASoundStaysOffTheCallingThread:
         media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("slow", "/cache/slow.mp3", 5.0)
+        decoder = FakeDecoder()
         detached: list[Callable[[], None]] = []
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=ManualScheduler(),
-            detach=detached.append,
-        )
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
         player.play("slow")
         player.pause()
         detached[0]()
-        assert media.played == []
+        assert decoder.decoded == []
 
     def test_resuming_after_that_pause_resolves_the_item_again(self) -> None:
         """It went back to the head of the queue rather than being lost."""
         media = FakeMedia()
         sounds = FakeSoundSource()
         sounds.add("slow", "/cache/slow.mp3", 5.0)
+        decoder = FakeDecoder()
         detached: list[Callable[[], None]] = []
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=ManualScheduler(),
-            detach=detached.append,
-        )
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
         player.play("slow")
         player.pause()
         detached[0]()
         player.resume()
         detached[1]()
-        assert media.played == ["/cache/slow.mp3"]
+        assert [path for path, _rate in decoder.decoded] == ["/cache/slow.mp3"]
 
 
 class TestAResolverThatRaisesCannotWedgeTheOutput:
@@ -835,17 +1138,12 @@ class TestAResolverThatRaisesCannotWedgeTheOutput:
         a far smaller failure than a wedged one.
         """
         media = FakeMedia()
-        player = ReachyPlayback(
-            media,
-            _RefusesToResolve(),
-            scheduler=ManualScheduler(),
-            detach=immediately,
-        )
+        player = _player(media, _RefusesToResolve())
         finished: list[str] = []
         player.play(
             "https://198.51.100.10/x.mp3", done_callback=lambda: finished.append("done")
         )
-        assert media.played == []
+        assert media.pushed == []
         assert not player.is_playing
         assert finished == ["done"]
 
@@ -854,14 +1152,10 @@ class TestAResolverThatRaisesCannotWedgeTheOutput:
         media = FakeMedia()
         sounds = _RaisesOnce()
         sounds.add("good", "/sounds/good.wav", 0.1)
-        player = ReachyPlayback(
-            media,
-            sounds,
-            scheduler=ManualScheduler(),
-            detach=immediately,
-        )
+        decoder = FakeDecoder()
+        player = _player(media, sounds, decoder=decoder)
         player.play(["broken", "good"])
-        assert media.played == ["/sounds/good.wav"]
+        assert [path for path, _rate in decoder.decoded] == ["/sounds/good.wav"]
 
 
 class _RefusesToResolve:
@@ -925,3 +1219,200 @@ class _SlowSource:
         """
         del url
         return Sound(path="/cache/track.mp3", duration_seconds=None)
+
+
+# The generation a superseded sound belongs to. Zero, because the player starts
+# there and every supersession moves it on — so this is always in the past, and
+# is what a completion arriving late for an abandoned sound carries.
+_SUPERSEDED: Final = 0
+
+
+def _player(
+    media: FakeMedia,
+    sounds: SoundSource,
+    *,
+    decoder: Callable[[str, int], Samples] | None = None,
+    detach: Callable[[Callable[[], None]], None] = immediately,
+    sleep: Callable[[float], None] = no_sleep,
+    boost_percent: float = DEFAULT_BOOST_PERCENT,
+) -> ReachyPlayback:
+    """Build an output whose decoding, threading and pacing are all fakes.
+
+    Args:
+        media: The daemon's media layer.
+        sounds: How a URL becomes a path.
+        decoder: How a path becomes samples, or one that answers with a tenth
+            of a second of quiet audio for anything. Typed as the seam rather
+            than as `FakeDecoder`, because two tests supply something else.
+        detach: How work leaves the calling thread. `immediately` runs it
+            inline, so a sound is over by the time `play` returns; a
+            `ManualDetach` is what a test uses to stand in the middle of one.
+        sleep: How the push loop paces itself, which by default is not at all.
+        boost_percent: The software boost.
+
+    Returns:
+        The output.
+    """
+    return ReachyPlayback(
+        media,
+        sounds,
+        detach=detach,
+        sleep=sleep,
+        decode=decoder if decoder is not None else FakeDecoder(),
+        boost_percent=boost_percent,
+    )
+
+
+def _one_sound() -> FakeSoundSource:
+    """A source with exactly one thing in it, named "chime".
+
+    Returns:
+        The source.
+    """
+    sounds = FakeSoundSource()
+    sounds.add("chime", "/sounds/chime.flac", 0.5)
+    return sounds
+
+
+def _pushed(media: FakeMedia) -> Samples:
+    """Join everything the daemon was handed back into one array.
+
+    Args:
+        media: The daemon's media layer.
+
+    Returns:
+        Every pushed sample in order, or an empty array when nothing played.
+    """
+    if not media.pushed:
+        return np.zeros(0, dtype=np.float32)
+    return np.concatenate(media.pushed)
+
+
+def _peak(media: FakeMedia) -> float:
+    """Say how loud the loudest pushed sample was.
+
+    Args:
+        media: The daemon's media layer.
+
+    Returns:
+        The peak magnitude, or zero when nothing played.
+    """
+    return _peak_of(_pushed(media))
+
+
+def _peak_of(samples: Samples) -> float:
+    """Say how loud the loudest sample in one block was.
+
+    Args:
+        samples: The block.
+
+    Returns:
+        The peak magnitude, or zero for an empty block.
+    """
+    return float(np.abs(samples).max()) if samples.size else 0.0
+
+
+class _SupersedesWhileDecoding:
+    """A decoder that lets another request land while it is working.
+
+    Decoding is the one part of a resolution long enough for a supersede to
+    arrive inside it, and there is no other way for a test to stand there.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing decoded and nothing to do."""
+        self.decoded: list[str] = []
+        self.take_over: Callable[[], None] | None = None
+
+    def __call__(self, path: str, rate: int) -> Samples:
+        """Decode, with another request landing part way through.
+
+        Args:
+            path: The file that would have been read.
+            rate: The rate it would have been resampled to.
+
+        Returns:
+            A short sound, which the caller should then abandon.
+        """
+        del rate
+        self.decoded.append(path)
+        if self.take_over is not None:
+            self.take_over()
+        return playable(0.1)
+
+
+class _Waits:
+    """A pacing sleep that records when it was called and how much was queued.
+
+    Pacing is the one part of the push loop with no other outward sign: the
+    daemon sees the same pushes either way, and only the *timing* between them
+    differs. So the fake sleep is what a test watches.
+    """
+
+    def __init__(self, media: FakeMedia) -> None:
+        """Watch one daemon's queue.
+
+        Args:
+            media: The media layer whose pushes are counted.
+        """
+        self._media = media
+        self.seconds: list[float] = []
+        self.pushed_at: list[int] = []
+
+    def __call__(self, seconds: float) -> None:
+        """Record a wait instead of performing one.
+
+        Args:
+            seconds: How long the loop wanted to wait.
+        """
+        self.seconds.append(seconds)
+        self.pushed_at.append(len(self._media.pushed))
+
+    @property
+    def pushes_before_first_wait(self) -> int:
+        """How much went out before the loop first paced itself.
+
+        Returns:
+            The number of pushes, or every one of them if it never waited.
+        """
+        return self.pushed_at[0] if self.pushed_at else len(self._media.pushed)
+
+    @property
+    def pushed_at_last_wait(self) -> int:
+        """How much had been pushed by the last wait.
+
+        Returns:
+            The number of pushes, or zero if it never waited.
+        """
+        return self.pushed_at[-1] if self.pushed_at else 0
+
+
+class _AfterWaits:
+    """A pacing sleep that does something part way through a sound.
+
+    The push loop reads the volume, the ducking and the generation once per
+    chunk, and the only place a test can stand between two chunks is the pacing
+    call between them. So this is a `sleep` that counts, and runs whatever the
+    test handed it once enough chunks have gone by.
+    """
+
+    def __init__(self, after: int) -> None:
+        """Say when to act.
+
+        Args:
+            after: How many chunks to let past first.
+        """
+        self._after = after
+        self._calls = 0
+        self.action: Callable[[], None] | None = None
+
+    def __call__(self, seconds: float) -> None:
+        """Count a chunk, and act once enough have gone by.
+
+        Args:
+            seconds: How long the loop would have waited.
+        """
+        del seconds
+        self._calls += 1
+        if self._calls == self._after and self.action is not None:
+            self.action()
