@@ -146,11 +146,11 @@ any production implementation is added.
 
 ## Verification
 
-The RED phase is verified only against the hardware-free focused tests. The
-implementation phase will rerun those tests, the HA satellite member tests and
-the repository merge gates. Robot verification, if later requested, must be a
-separate scrubbed session; none is required or performed by this change's RED
-phase.
+The RED phase was verified only against the hardware-free focused tests. The
+implementation phase reran those tests, the HA satellite member tests and the
+repository merge gates. Live robot verification was not required; the later
+separately requested scrubbed session and its remaining limitation are recorded
+below.
 
 The later live verification was recorded as prose only; raw output was omitted
 and every environment identifier was scrubbed. The controlled SDK wake
