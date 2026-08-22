@@ -1369,15 +1369,21 @@ class EsphomeService:
 
         # Stop new accepts before snapshotting the accepted protocols. A listening
         # server's close does not close those transports, so close each explicitly
-        # before waiting for the listener, then clear the shared active view even
-        # when a fake transport does not call connection_lost back into us.
+        # and complete its lifecycle while the authoritative list still contains
+        # every survivor. A real transport schedules connection_lost for later; by
+        # then this synchronous call has made that duplicate callback idempotent.
         server, self._server = self._server, None
         if server is not None:
             server.close()
-        connections, self._state.connections = self._state.connections, []
+        connections = list(self._state.connections)
         for connection in connections:
             with contextlib.suppress(Exception):
                 connection.close()
+            with contextlib.suppress(Exception):
+                connection.connection_lost(None)
+        # Preserve the shutdown postcondition even for a malformed protocol whose
+        # lifecycle callback raised before deregistering itself.
+        self._state.connections.clear()
         self._state.satellite = None
         self._state.connected = False
         if server is not None:
