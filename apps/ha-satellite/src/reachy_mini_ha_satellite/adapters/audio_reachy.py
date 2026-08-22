@@ -56,7 +56,7 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from reachy_mini_ha_satellite.adapters.decode import decode_file
+from reachy_mini_ha_satellite.adapters.decode import DEFAULT_OUTPUT_RATE, decode_file
 from reachy_mini_ha_satellite.adapters.output_gain import (
     DEFAULT_BOOST_PERCENT,
     LevelMeter,
@@ -817,31 +817,56 @@ class ReachyPlayback:
         meter = LevelMeter()
         rate = self._rate()
         per_chunk = max(1, int(rate * _CHUNK_SECONDS))
-        chunk_seconds = per_chunk / rate
-        self._media.start_playing()
-        # The deadline the *next* push is due by, kept as an absolute time so
-        # that a slow chunk is caught up with rather than accumulated into a
-        # drift that ends in an underrun.
-        due = time.monotonic() + _LEAD_SECONDS
+
+        with self._lock:
+            if generation != self._generation:
+                return
+            self._media.start_playing()
+        started = time.monotonic()
+        # How much audio has been handed over, in seconds of playing time. The
+        # speaker consumes it in real time, so `started + pushed` is when what
+        # has been pushed will have finished being heard — which is what both
+        # the pacing and the drain below are expressed in.
+        pushed = 0.0
+
         for start in range(0, samples.size, per_chunk):
             with self._lock:
                 if generation != self._generation:
                     return
                 gain = self._gain(headroom)
-            block, levels = amplify(samples[start : start + per_chunk], gain)
+                block, levels = amplify(samples[start : start + per_chunk], gain)
+                # Pushed **under the lock**, with the generation check. Outside
+                # it, a `stop`, a `release` or a superseding `play` could land
+                # in between, flush the daemon's queue, and then have this line
+                # push the block it had just discarded — which for `release` is
+                # audio after REQ-050 has shut the application down.
+                self._media.push_audio_sample(block)
             meter.add(levels, int(block.size))
-            self._media.push_audio_sample(block)
-            due += chunk_seconds
-            delay = due - time.monotonic()
-            if delay > 0:
-                self._sleep(delay)
+            pushed += float(block.size) / rate
+            # Sleep only once the daemon is more than the lead ahead of the
+            # speaker. The first few chunks therefore go straight out and build
+            # that lead, which is what stops the speaker running dry at the
+            # start of every sound.
+            self._wait_until(started + pushed - _LEAD_SECONDS)
+
         _LOGGER.info("%s: %s", self._name, meter.levels().describe())
         # What is still queued at the daemon has not been heard yet, so the
-        # sound is not over until it has drained. Without this the callback —
-        # which the vendored layer reads as "the announcement finished" — would
-        # arrive a fifth of a second early, every time.
-        self._sleep(_LEAD_SECONDS)
+        # sound is not over until it has drained. Measured rather than assumed
+        # to be the lead: a sound shorter than the lead was never that far
+        # ahead, and the callback the vendored layer reads as "the announcement
+        # finished" would then arrive late for every chime.
+        self._wait_until(started + pushed)
         self._finished(generation)
+
+    def _wait_until(self, deadline: float) -> None:
+        """Wait until a moment on the monotonic clock, if it has not passed.
+
+        Args:
+            deadline: When to return, as `time.monotonic` reads it.
+        """
+        delay = deadline - time.monotonic()
+        if delay > 0:
+            self._sleep(delay)
 
     def _gain(self, headroom: float) -> float:
         """Say what the current settings ask one chunk to be multiplied by.
@@ -874,10 +899,16 @@ class ReachyPlayback:
         question of the same device thousands of times a minute.
 
         Returns:
-            The daemon's output sample rate.
+            The daemon's output sample rate, or `DEFAULT_OUTPUT_RATE` when it
+            reports the negative number it answers with for an output device it
+            does not have. Normalised **here** rather than only inside the
+            decoder: the raw value also sizes the chunks and paces the loop, and
+            a negative one makes a chunk a single sample and a chunk's duration
+            negative — tens of thousands of unpaced pushes for one short sound.
         """
         if self._output_rate is None:
-            self._output_rate = self._media.get_output_audio_samplerate()
+            reported = self._media.get_output_audio_samplerate()
+            self._output_rate = reported if reported > 0 else DEFAULT_OUTPUT_RATE
         return self._output_rate
 
     def _finished(self, generation: int) -> None:

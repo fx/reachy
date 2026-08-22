@@ -6,11 +6,16 @@ ha-satellite REQ-043 is about: what these tests establish is that the adapter
 goes *through* that interface and never round it, which is a property of the
 calls it makes rather than of any audio anybody heard.
 
-Nothing sleeps and nothing waits. `ReachyCapture` takes its sleep as an argument
-so that a test drives a blocking read to completion without spending any wall
-time, and `ReachyPlayback` takes its scheduler for the same reason: playback
-completion is a timer, and a suite that waited for one would be slow and would
-still only be testing `threading.Timer`.
+Nothing sleeps, nothing waits and nothing reads a file. `ReachyCapture` takes
+its sleep as an argument so that a test drives a blocking read to completion
+without spending any wall time. `ReachyPlayback` takes three for the same kind
+of reason: its `sleep` is how it paces pushes against the speaker, so a suite
+that let it wait would spend the length of every sound it played; its `detach`
+is how work leaves the calling thread, so a test can stand in the middle of a
+sound or let the whole of one happen inline; and its `decode` reads a file,
+which a unit test may not. What the real decoder does to the wheel's own assets
+is `test_satellite_decode.py`, and one test here — `TestTheDefaultDecoder` —
+carries `@pytest.mark.filesystem` and checks that the default is wired to it.
 """
 
 from __future__ import annotations
@@ -33,6 +38,11 @@ from satellite_support import (
 )
 
 from reachy_mini_ha_satellite.adapters.audio_reachy import (
+    # The two pacing constants are reached by their private names on purpose:
+    # a test that restated them would go on passing while the loop paced itself
+    # to something else entirely.
+    _CHUNK_SECONDS,
+    _LEAD_SECONDS,
     DEFAULT_CHANNELS,
     AudioSourceError,
     ReachyAudio,
@@ -40,6 +50,7 @@ from reachy_mini_ha_satellite.adapters.audio_reachy import (
     ReachyPlayback,
     decode_for_playback,
 )
+from reachy_mini_ha_satellite.adapters.decode import DEFAULT_OUTPUT_RATE
 from reachy_mini_ha_satellite.adapters.output_gain import DEFAULT_BOOST_PERCENT
 from reachy_mini_ha_satellite.adapters.sounds import Sound, SoundSource
 from reachy_mini_ha_satellite.assets.registry import assets_dir
@@ -377,6 +388,28 @@ class TestPlaybackGoesThroughTheDaemon:
         # loop was abandoned before it pushed anything.
         assert _pushed(media).size == playable(1.0).size
 
+    def test_a_stopped_sound_never_opens_the_daemons_output(self) -> None:
+        """The loop is queued by `play` and may run after a `stop` lands.
+
+        Everything it would do is behind the generation check, `start_playing`
+        included — otherwise stopping a sound before its loop ran would still
+        start the daemon's pipeline for it.
+        """
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("chime", "/sounds/chime.flac", 1.0)
+        detach = ManualDetach()
+        player = _player(media, sounds, detach=detach)
+
+        player.play("chime")
+        detach.run()
+        player.stop()
+        started = media.start_playing_calls
+        detach.run_all()
+
+        assert media.start_playing_calls == started
+        assert media.pushed == []
+
     def test_superseding_flushes_what_the_daemon_still_holds(self) -> None:
         """Abandoning the push loop does not take back what it already pushed.
 
@@ -554,6 +587,115 @@ class TestTheDefaultDecoder:
         assert samples.size > 0
 
 
+class TestThePacing:
+    """The push loop against the daemon's bounded, non-blocking queue."""
+
+    def test_it_builds_a_lead_before_it_waits_at_all(self) -> None:
+        """Otherwise the speaker runs dry at the start of every sound.
+
+        The daemon's queue is bounded and does not block, so the loop cannot
+        push everything; but pacing from the first chunk means one chunk of
+        audio and then a wait, which is a gap the listener hears.
+        """
+        media = FakeMedia()
+        waits = _Waits(media)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(2.0)),
+            sleep=waits,
+        )
+
+        player.play("chime")
+
+        # Everything within the lead went out before the loop waited once.
+        assert waits.pushes_before_first_wait >= int(_LEAD_SECONDS / _CHUNK_SECONDS)
+
+    def test_it_waits_out_what_is_still_queued_before_reporting_the_end(
+        self,
+    ) -> None:
+        """The vendored layer reads the callback as "the announcement finished".
+
+        Reporting it while a fifth of a second is still queued would cut the
+        end off every answer, from that layer's point of view.
+        """
+        media = FakeMedia()
+        waits = _Waits(media)
+        finished: list[str] = []
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(2.0)),
+            sleep=waits,
+        )
+
+        player.play("chime", done_callback=lambda: finished.append("done"))
+
+        assert finished == ["done"]
+        # The last wait happens after the last push: it is the queue draining
+        # rather than the loop pacing itself.
+        assert waits.pushed_at_last_wait == len(media.pushed)
+
+    def test_a_sound_shorter_than_the_lead_is_not_padded_to_it(self) -> None:
+        """The drain is measured, not assumed to be the whole lead.
+
+        A chime is shorter than the lead, so it was never that far ahead — and
+        waiting the lead out anyway would report every one of them late.
+        """
+        media = FakeMedia()
+        waits = _Waits(media)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(_CHUNK_SECONDS)),
+            sleep=waits,
+        )
+
+        player.play("chime")
+
+        assert all(wait < _LEAD_SECONDS for wait in waits.seconds)
+
+    def test_a_stop_part_way_through_stops_the_pushing(self) -> None:
+        """The loop cannot be interrupted, so it checks between chunks.
+
+        Without that check a stopped announcement would go on being handed to
+        the daemon until its samples ran out, however long it was.
+        """
+        media = FakeMedia()
+        stop_it = _AfterWaits(1)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(2.0)),
+            sleep=stop_it,
+        )
+        stop_it.action = player.stop
+
+        player.play("chime")
+
+        # Two seconds of audio at fifty milliseconds a chunk is forty chunks;
+        # the loop stopped a long way short of them.
+        assert len(media.pushed) < 40
+
+    def test_a_daemon_with_no_output_device_does_not_flood_it(self) -> None:
+        """It reports a negative rate, which is not a rate to divide by.
+
+        Used raw, it makes a chunk one sample and a chunk's duration negative:
+        tens of thousands of unpaced pushes for one short sound.
+        """
+        media = FakeMedia(output_rate=-1)
+        player = _player(
+            media,
+            _one_sound(),
+            decoder=FakeDecoder(default=playable(0.2)),
+        )
+
+        player.play("chime")
+
+        assert len(media.pushed) == 4
+        assert media.pushed[0].size == int(DEFAULT_OUTPUT_RATE * _CHUNK_SECONDS)
+
+
 class TestTheVolumeControlIsReal:
     """Change 0016's R1 and R2: the slider changes what reaches the speaker."""
 
@@ -631,7 +773,7 @@ class TestTheVolumeControlIsReal:
         """Not at the next one: an operator turning a long answer down means it."""
         media = FakeMedia()
         detach = ManualDetach()
-        turn_down = _TurnDownAfter(2)
+        turn_down = _AfterWaits(2)
         player = _player(
             media,
             _one_sound(),
@@ -641,7 +783,7 @@ class TestTheVolumeControlIsReal:
             detach=detach,
             sleep=turn_down,
         )
-        turn_down.player = player
+        turn_down.action = lambda: player.set_volume(10.0)
 
         player.set_volume(100.0)
         player.play("chime")
@@ -1145,31 +1287,78 @@ def _peak_of(samples: Samples) -> float:
     return float(np.abs(samples).max()) if samples.size else 0.0
 
 
-class _TurnDownAfter:
-    """A pacing sleep that turns the volume down part way through a sound.
+class _Waits:
+    """A pacing sleep that records when it was called and how much was queued.
 
-    The push loop reads the level once per chunk, and the only place a test can
-    stand between two chunks is the pacing call between them. So this is a
-    `sleep` that counts, and on the nth call asks the player for less.
+    Pacing is the one part of the push loop with no other outward sign: the
+    daemon sees the same pushes either way, and only the *timing* between them
+    differs. So the fake sleep is what a test watches.
+    """
+
+    def __init__(self, media: FakeMedia) -> None:
+        """Watch one daemon's queue.
+
+        Args:
+            media: The media layer whose pushes are counted.
+        """
+        self._media = media
+        self.seconds: list[float] = []
+        self.pushed_at: list[int] = []
+
+    def __call__(self, seconds: float) -> None:
+        """Record a wait instead of performing one.
+
+        Args:
+            seconds: How long the loop wanted to wait.
+        """
+        self.seconds.append(seconds)
+        self.pushed_at.append(len(self._media.pushed))
+
+    @property
+    def pushes_before_first_wait(self) -> int:
+        """How much went out before the loop first paced itself.
+
+        Returns:
+            The number of pushes, or every one of them if it never waited.
+        """
+        return self.pushed_at[0] if self.pushed_at else len(self._media.pushed)
+
+    @property
+    def pushed_at_last_wait(self) -> int:
+        """How much had been pushed by the last wait.
+
+        Returns:
+            The number of pushes, or zero if it never waited.
+        """
+        return self.pushed_at[-1] if self.pushed_at else 0
+
+
+class _AfterWaits:
+    """A pacing sleep that does something part way through a sound.
+
+    The push loop reads the volume, the ducking and the generation once per
+    chunk, and the only place a test can stand between two chunks is the pacing
+    call between them. So this is a `sleep` that counts, and runs whatever the
+    test handed it once enough chunks have gone by.
     """
 
     def __init__(self, after: int) -> None:
-        """Say when to turn it down.
+        """Say when to act.
 
         Args:
             after: How many chunks to let past first.
         """
         self._after = after
         self._calls = 0
-        self.player: ReachyPlayback | None = None
+        self.action: Callable[[], None] | None = None
 
     def __call__(self, seconds: float) -> None:
-        """Count a chunk, and turn the volume down once enough have gone by.
+        """Count a chunk, and act once enough have gone by.
 
         Args:
             seconds: How long the loop would have waited.
         """
         del seconds
         self._calls += 1
-        if self._calls == self._after and self.player is not None:
-            self.player.set_volume(10.0)
+        if self._calls == self._after and self.action is not None:
+            self.action()
