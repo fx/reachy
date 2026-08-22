@@ -8,10 +8,11 @@ The robot-side ESPHome voice satellite for Home Assistant. Distribution
 [0011](../../docs/changes/0011-satellite-esphome-vendoring.md) (done),
 [0012](../../docs/changes/0012-satellite-ports-and-adapters.md) (done),
 [0013](../../docs/changes/0013-satellite-behaviour-and-ui.md) (done) and
-[0016](../../docs/changes/0016-audible-playback.md) (in progress — its code has
-landed and its listening test has not). `docs/specs/ha-satellite/index.md` is
-registered in `.duvet/config.toml`, so all eleven of its requirements are
-traced.
+[0016](../../docs/changes/0016-audible-playback.md) (done, on the robot as well
+as in the suite: announcements were played through the real speaker and judged
+audible across a room, and that change's own Outcome section records the
+levels). `docs/specs/ha-satellite/index.md` is registered in
+`.duvet/config.toml`, so all eleven of its requirements are traced.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.

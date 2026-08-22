@@ -31,9 +31,13 @@ import urllib.request
 from typing import Final
 from urllib.parse import urlsplit
 
-__all__ = ["MAX_DAEMON_VOLUME", "set_daemon_volume"]
+__all__ = ["MAX_DAEMON_VOLUME", "MIN_DAEMON_VOLUME", "set_daemon_volume"]
 
-# The loudest the daemon's own control goes. Its API takes 0-100.
+# The range the daemon's own control takes. Its API is 0-100, and a level
+# outside that is clamped here rather than forwarded: this is a best-effort call
+# whose only failure mode is a line in a log, so sending 150 to find out what the
+# daemon makes of it is not better than sending 100.
+MIN_DAEMON_VOLUME: Final = 0
 MAX_DAEMON_VOLUME: Final = 100
 
 # Where the setter lives, appended to the configured base.
@@ -57,7 +61,8 @@ def set_daemon_volume(base_url: str, level: int = MAX_DAEMON_VOLUME) -> bool:
     Args:
         base_url: Where the daemon serves its API, without a path. Empty turns
             this off and is reported as such.
-        level: The level to set, from 0 to 100.
+        level: The level to set. Clamped to 0-100, which is what the daemon's
+            API takes — the docstring is not the enforcement, this is.
 
     Returns:
         Whether the daemon accepted it. `False` is logged rather than raised:
@@ -85,7 +90,14 @@ def set_daemon_volume(base_url: str, level: int = MAX_DAEMON_VOLUME) -> bool:
         _LOGGER.warning("daemon volume: refusing to address a %r URL", scheme)
         return False
 
-    payload = json.dumps({"volume": level}).encode("utf-8")
+    wanted = min(max(level, MIN_DAEMON_VOLUME), MAX_DAEMON_VOLUME)
+    if wanted != level:
+        _LOGGER.warning(
+            "daemon volume: %d is outside 0-100; asking for %d instead",
+            level,
+            wanted,
+        )
+    payload = json.dumps({"volume": wanted}).encode("utf-8")
     request = urllib.request.Request(  # noqa: S310  # the scheme is checked against an http/https allowlist immediately above; the address is this application's own configuration, defaulting to the loopback interface the daemon serves on
         f"{base_url.rstrip('/')}{_VOLUME_PATH}",
         data=payload,
@@ -109,10 +121,10 @@ def set_daemon_volume(base_url: str, level: int = MAX_DAEMON_VOLUME) -> bool:
         # take the whole application down through the service-startup loop.
         # "Best-effort" would then be true of the sentence above and of nothing
         # else.
-        _LOGGER.warning("daemon volume: could not set it to %d: %s", level, error)
+        _LOGGER.warning("daemon volume: could not set it to %d: %s", wanted, error)
         return False
     if ok:
-        _LOGGER.info("daemon volume: set to %d", level)
+        _LOGGER.info("daemon volume: set to %d", wanted)
     else:
-        _LOGGER.warning("daemon volume: the daemon refused %d", level)
+        _LOGGER.warning("daemon volume: the daemon refused %d", wanted)
     return ok

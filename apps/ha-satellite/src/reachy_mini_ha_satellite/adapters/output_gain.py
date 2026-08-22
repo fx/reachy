@@ -9,10 +9,12 @@ samples before they are pushed. That is the whole of what this module is for.
 
 **The curve and its constants are prior work, not a derivation.** They come from
 `output_gain.py` in the application this one replaces, which ran on this robot
-and through this speaker, and they were tuned by ear against it. This repository
-has no listening test, so re-deriving them here would be substituting taste for
-the only evidence that exists. Two of that module's findings are carried with
-them, in its own words:
+and through this speaker, and they were tuned by ear against it. Nothing in this
+repository's suite can hear, so re-deriving them here would have been
+substituting taste for the only evidence there was — and change 0016 then played
+announcements through the real speaker at these values and found them audible
+across a room, which is the second piece of evidence and points the same way.
+Two of that module's findings are carried with them, in its own words:
 
 * Plain `np.clip` on a boosted signal "squares off every peak and sounds harsh",
   which is why a knee and a `tanh` sit in front of the clip rather than the clip

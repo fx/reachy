@@ -21,6 +21,7 @@ import pytest
 
 from reachy_mini_ha_satellite.adapters.daemon_volume import (
     MAX_DAEMON_VOLUME,
+    MIN_DAEMON_VOLUME,
     set_daemon_volume,
 )
 
@@ -163,6 +164,53 @@ class TestAskingTheDaemonForItsLoudest:
         urlopen: _Recorder,
     ) -> None:
         """The default is the maximum; the argument is what makes that a choice.
+
+        Args:
+            urlopen: The recorder standing in for the network.
+        """
+        set_daemon_volume(_DAEMON, 40)
+
+        assert _body(urlopen.requests[0]) == {"volume": 40}
+
+
+class TestTheLevelItAsksFor:
+    """The range the docstring promises, kept by the code rather than by it."""
+
+    def test_a_level_above_the_maximum_is_clamped(
+        self,
+        urlopen: _Recorder,
+    ) -> None:
+        """Forwarding 150 to see what the daemon makes of it is not better.
+
+        This is a best-effort call whose only failure mode is a line in a log,
+        so an out-of-range level asks for the nearest one the daemon takes
+        rather than for something it may reject or, worse, accept.
+
+        Args:
+            urlopen: The recorder standing in for the network.
+        """
+        set_daemon_volume(_DAEMON, 150)
+
+        assert _body(urlopen.requests[0]) == {"volume": MAX_DAEMON_VOLUME}
+
+    def test_a_level_below_the_minimum_is_clamped(
+        self,
+        urlopen: _Recorder,
+    ) -> None:
+        """A negative level is not a quieter one.
+
+        Args:
+            urlopen: The recorder standing in for the network.
+        """
+        set_daemon_volume(_DAEMON, -20)
+
+        assert _body(urlopen.requests[0]) == {"volume": MIN_DAEMON_VOLUME}
+
+    def test_a_level_inside_the_range_is_sent_as_it_is(
+        self,
+        urlopen: _Recorder,
+    ) -> None:
+        """The clamp is a guard, not a transformation.
 
         Args:
             urlopen: The recorder standing in for the network.

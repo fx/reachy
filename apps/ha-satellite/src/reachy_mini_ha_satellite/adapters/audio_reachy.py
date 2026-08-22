@@ -42,8 +42,11 @@ so a caller that plays on both at once hears them mixed. The vendored protocol
 layer pauses music before an announcement and resumes afterwards, so the two are
 coordinated in practice.
 
-None of this has been near a speaker. Every part of it is exercised through the
-fake daemon here, and change 0016's own last task is the listening test.
+Every part of this is exercised through the fake daemon here, and none of that
+can say whether a room can hear it — so change 0016 ended by playing
+announcements through the real speaker and measuring what came out. They were
+audible at a normal speaking distance, at -0.9 to -1.6 dBFS with under half a
+percent of samples limited; that change's Outcome section carries the numbers.
 """
 
 from __future__ import annotations

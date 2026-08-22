@@ -1025,6 +1025,30 @@ class TestResolvingASoundStaysOffTheCallingThread:
         detached[0]()
         assert [path for path, _rate in decoder.decoded] == ["/sounds/quick.wav"]
 
+    def test_a_supersede_during_a_decode_is_abandoned_after_it(self) -> None:
+        """Decoding is the long part, and a request can land in the middle of it.
+
+        The generation is checked again after the decode for that reason: the
+        one before it was true when the fetch started and says nothing about
+        what happened while a file was being read.
+        """
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("slow", "/cache/slow.mp3", 5.0)
+        sounds.add("quick", "/sounds/quick.wav", 1.0)
+        detached: list[Callable[[], None]] = []
+        decoder = _SupersedesWhileDecoding()
+        player = _player(media, sounds, decoder=decoder, detach=detached.append)
+        decoder.take_over = lambda: player.play("quick")
+
+        player.play("slow")
+        detached[0]()
+
+        # The decode finished, the generation had moved on, and nothing of the
+        # superseded sound reached the daemon.
+        assert decoder.decoded == ["/cache/slow.mp3"]
+        assert media.pushed == []
+
     def test_a_stop_during_a_resolution_leaves_nothing_playing(self) -> None:
         """The vendored code stops the announcement player to cancel one."""
         media = FakeMedia()
@@ -1207,7 +1231,7 @@ def _player(
     media: FakeMedia,
     sounds: SoundSource,
     *,
-    decoder: FakeDecoder | None = None,
+    decoder: Callable[[str, int], Samples] | None = None,
     detach: Callable[[Callable[[], None]], None] = immediately,
     sleep: Callable[[float], None] = no_sleep,
     boost_percent: float = DEFAULT_BOOST_PERCENT,
@@ -1218,7 +1242,8 @@ def _player(
         media: The daemon's media layer.
         sounds: How a URL becomes a path.
         decoder: How a path becomes samples, or one that answers with a tenth
-            of a second of quiet audio for anything.
+            of a second of quiet audio for anything. Typed as the seam rather
+            than as `FakeDecoder`, because two tests supply something else.
         detach: How work leaves the calling thread. `immediately` runs it
             inline, so a sound is over by the time `play` returns; a
             `ManualDetach` is what a test uses to stand in the middle of one.
@@ -1285,6 +1310,35 @@ def _peak_of(samples: Samples) -> float:
         The peak magnitude, or zero for an empty block.
     """
     return float(np.abs(samples).max()) if samples.size else 0.0
+
+
+class _SupersedesWhileDecoding:
+    """A decoder that lets another request land while it is working.
+
+    Decoding is the one part of a resolution long enough for a supersede to
+    arrive inside it, and there is no other way for a test to stand there.
+    """
+
+    def __init__(self) -> None:
+        """Start with nothing decoded and nothing to do."""
+        self.decoded: list[str] = []
+        self.take_over: Callable[[], None] | None = None
+
+    def __call__(self, path: str, rate: int) -> Samples:
+        """Decode, with another request landing part way through.
+
+        Args:
+            path: The file that would have been read.
+            rate: The rate it would have been resampled to.
+
+        Returns:
+            A short sound, which the caller should then abandon.
+        """
+        del rate
+        self.decoded.append(path)
+        if self.take_over is not None:
+            self.take_over()
+        return playable(0.1)
 
 
 class _Waits:
