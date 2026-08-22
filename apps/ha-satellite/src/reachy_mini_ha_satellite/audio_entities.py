@@ -225,11 +225,11 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
             level = _clamp(float(msg.state), _VOLUME_MINIMUM, _VOLUME_MAXIMUM)
             level /= _VOLUME_MAXIMUM
             player.apply_volume_from_state(level)
+            # Guarded, because while muted this level belongs in
+            # `previous_volume` and nowhere else: persisting it would make
+            # `ServerState.volume` non-zero while the device is silent, and the
+            # two controls would then report different numbers.
             if not player.muted:
-                # Muted, this level belongs in `previous_volume` and nowhere
-                # else: persisting it would make `ServerState.volume` non-zero
-                # while the device is silent, and the two controls would then
-                # report different numbers.
                 self._state.persist_volume(level)
             yield NumberStateResponse(key=self.key, state=self._level())
             # The media player's own state, so Home Assistant's two views of one
