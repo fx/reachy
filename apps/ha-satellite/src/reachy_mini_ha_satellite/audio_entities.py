@@ -103,15 +103,28 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
     `ServerState.volume` — and both write it through the media player's own
     public methods. Nothing here is a second store of the level.
 
-    **The muted rule, which is what a reviewer will ask about.** While the device
-    is muted this control reads 0, and a value set into it is *remembered rather
-    than applied*: `MediaPlayerEntity.apply_volume_from_state` stores it into
-    `previous_volume`, nothing is persisted, and unmuting restores it. Home
-    Assistant's slider therefore snaps back to 0, which is honest — the device is
-    muted, and 0 is the level in effect. It is also what keeps the two controls
-    agreeing in every state, because the vendored MUTE branch sets
-    `ServerState.volume` to 0 and the UNMUTE branch puts it back, so
-    `ServerState.volume * 100` is the one answer both of them give.
+    **The guarantee is that the two controls always report the same level**, in
+    every state including muted — not that this one reads 0 whenever the device
+    is muted. `ServerState.volume * 100` is the one answer both of them give, so
+    there is nothing to keep in step.
+
+    **What muting does to it, which is what a reviewer will ask about.** The
+    vendored MUTE branch sets `ServerState.volume` to 0, so this control reads 0
+    too. A value then set *through this control* is **remembered rather than
+    applied**: `MediaPlayerEntity.apply_volume_from_state` stores it into
+    `previous_volume`, the guard below persists nothing, and unmuting restores
+    it — so the control goes on reading 0 and Home Assistant's slider snaps back
+    to it, which is honest, because 0 is the level in effect.
+
+    A media-player `VOLUME_SET` arriving while muted is a **different path with a
+    different outcome**, and this control does not pretend otherwise. The
+    vendored `has_volume` branch applies that level to both outputs and persists
+    it, leaving the mute flag set, so `ServerState.volume` is non-zero while
+    `muted` is true. This control mirrors that level rather than contradicting
+    the media player and the state both. What it leaves the vendored player in is
+    recorded as a known limitation in change 0017; it is upstream behaviour in a
+    file this repository does not edit, and this control neither causes nor
+    worsens it.
 
     This never broadcasts. See the module docstring.
     """
@@ -145,8 +158,8 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
         """Say the level in effect, in the percent Home Assistant asked for.
 
         Returns:
-            `ServerState.volume` as a percentage — which is 0 while muted, and
-            is the same number the media-player entity reports.
+            `ServerState.volume` as a percentage, which is the same number the
+            media-player entity reports in every state.
         """
         return float(self._state.volume) * _PERCENT_PER_UNIT
 
@@ -159,8 +172,10 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
 
         Derived from the request rather than read back from the media player,
         which is what makes this independent of whether the fan-out reached that
-        entity before or after this one. Nothing below is read from post-command
-        state except `previous_volume`, and neither MUTE nor UNMUTE changes it.
+        entity before or after this one. The one thing read from post-command
+        state below is `previous_volume`, and only in the UNMUTE branch — which
+        is the one command that does not itself change it, so that read gives
+        the same answer whichever of the two entities ran first.
 
         The branch order mirrors `MediaPlayerEntity.handle_message`: a media URL
         first, then a command, then a volume.
@@ -225,9 +240,10 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
             )
             player.apply_volume_from_state(fraction)
             # Guarded, because while muted this level belongs in
-            # `previous_volume` and nowhere else: persisting it would make
-            # `ServerState.volume` non-zero while the device is silent, and the
-            # two controls would then report different numbers.
+            # `previous_volume` and nowhere else: `apply_volume_from_state`
+            # leaves the media player's own level where it was, so persisting
+            # this one would move `ServerState.volume` away from it and the two
+            # controls would then report different numbers.
             if not player.muted:
                 self._state.persist_volume(fraction)
             yield NumberStateResponse(key=self.key, state=self._level())
