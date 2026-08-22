@@ -27,6 +27,7 @@ Test module names are globally unique across the workspace — see the root
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import socket
 import threading
@@ -268,11 +269,17 @@ class CancellationResistantService:
 class IndefinitelyCancellationResistantService:
     """A cleanup step that suppresses every ordinary task cancellation."""
 
-    def __init__(self) -> None:
-        """Start without a child task or finalization."""
+    def __init__(self, on_cancel: Callable[[], None] | None = None) -> None:
+        """Start without a child task or finalization.
+
+        Args:
+            on_cancel: What to call after the first suppressed cancellation.
+        """
         self.task: asyncio.Task[None] | None = None
+        self.entered = asyncio.Event()
         self.cancelled = 0
         self.finalized = False
+        self._on_cancel = on_cancel
 
     async def start(self) -> None:
         """Do nothing."""
@@ -282,12 +289,15 @@ class IndefinitelyCancellationResistantService:
         task = asyncio.current_task()
         assert task is not None
         self.task = task
+        self.entered.set()
         try:
             while True:
                 try:
                     await asyncio.Event().wait()
                 except asyncio.CancelledError:
                     self.cancelled += 1
+                    if self.cancelled == 1 and self._on_cancel is not None:
+                        self._on_cancel()
         finally:
             self.finalized = True
 
@@ -802,6 +812,59 @@ class TestShutdown:
                     coroutine.close()
                     task.cancel()
                     await asyncio.sleep(0)
+
+        asyncio.run(_run_and_close())
+
+    def test_repeated_owner_cancellation_cannot_abandon_cleanup_finalization(
+        self,
+    ) -> None:
+        """A second cancel cannot strand a child during the finalization turn."""
+
+        async def _run_and_close() -> None:
+            closing: asyncio.Task[None] | None = None
+
+            def _cancel_owner_again() -> None:
+                assert closing is not None
+                closing.cancel()
+
+            stuck = IndefinitelyCancellationResistantService(_cancel_owner_again)
+            later = RecordingService()
+            perception = FakePerception()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=perception,
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, stuck],
+            )
+            closing = asyncio.create_task(application.aclose())
+            await stuck.entered.wait()
+
+            closing.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            task = stuck.task
+            assert task is not None
+            try:
+                assert stuck.cancelled >= 1
+                assert task.done()
+                assert stuck.finalized
+                assert later.closed == 1
+                assert perception.closed == 1
+            finally:
+                # Bound the RED run itself while still asserting that production
+                # shutdown, rather than asyncio.run teardown, finished the child.
+                if not task.done():
+                    coroutine = task.get_coro()
+                    assert coroutine is not None
+                    coroutine.close()
+                    task.cancel()
+                    await asyncio.sleep(0)
+                if task.done():
+                    with contextlib.suppress(BaseException):
+                        task.result()
 
         asyncio.run(_run_and_close())
 
