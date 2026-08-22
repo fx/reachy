@@ -105,7 +105,8 @@ enumerable. It is:
    handshake to the end so survivor promotion follows authentication rather than
    transport-acceptance order. An unauthenticated loss performs no shared
    disconnect; an authenticated loss promotes the newest authenticated survivor,
-   and only the final authenticated loss disconnects.
+   and only the final authenticated loss disconnects. Player-stop failures on
+   that final transition log static stage text without exception payloads.
 
 Nothing beyond the changes enumerated above was touched. In particular the code
 is not reformatted, its docstrings are not rewritten, and its typing is not

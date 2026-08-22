@@ -1110,12 +1110,12 @@ class VoiceSatelliteProtocol(APIServer):
         try:
             self.state.music_player.stop()
         except Exception:  # pylint: disable=broad-except
-            _LOGGER.exception("Failed to stop music player during disconnect")
+            _LOGGER.error("Failed to stop music player during disconnect")
 
         try:
             self.state.tts_player.stop()
         except Exception:  # pylint: disable=broad-except
-            _LOGGER.exception("Failed to stop TTS player during disconnect")
+            _LOGGER.error("Failed to stop TTS player during disconnect")
 
         self.state.stop_word.is_active = False  # type: ignore[attr-defined]
         self.state.connected = False

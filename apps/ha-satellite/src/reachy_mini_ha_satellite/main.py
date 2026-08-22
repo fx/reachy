@@ -43,6 +43,7 @@ import logging
 import math
 import threading
 import time
+from contextvars import Context, ContextVar
 from dataclasses import fields
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -242,8 +243,28 @@ def _guard(what: str, release: Callable[[], None]) -> None:
 _CLEANUP_TIMEOUT_SECONDS: Final = 5.0
 
 
+class _CleanupTaskScope:
+    """Tasks created from one cleanup coroutine and its descendants."""
+
+    def __init__(self, preexisting: set[asyncio.Task[Any]]) -> None:
+        """Start with no descendants and ordinary task creation enabled.
+
+        Args:
+            preexisting: Tasks already on the loop, which this scope never owns.
+        """
+        self.preexisting = preexisting
+        self.tasks: set[asyncio.Task[Any]] = set()
+        self.finalizing = False
+
+
+_CLEANUP_TASK_OWNER: Final[ContextVar[_CleanupTaskScope | None]] = ContextVar(
+    "satellite_cleanup_task_owner",
+    default=None,
+)
+
+
 def _consume_cleanup_result(
-    task: asyncio.Task[None],
+    task: asyncio.Task[Any],
     *,
     what: str,
     forced: bool = False,
@@ -263,7 +284,50 @@ def _consume_cleanup_result(
         if forced:
             _LOGGER.error("%s was force-finalized after ignoring cancellation", what)
         else:
-            _LOGGER.exception("%s failed to stop cleanly", what)
+            _LOGGER.error("%s failed to stop cleanly", what)
+
+
+def _install_cleanup_task_tracking(
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[Callable[..., asyncio.Future[Any]] | None, _CleanupTaskScope]:
+    """Install scoped descendant tracking and return prior factory plus scope."""
+    previous = loop.get_task_factory()
+    scope = _CleanupTaskScope(asyncio.all_tasks(loop))
+
+    def _tracked(
+        task_loop: asyncio.AbstractEventLoop,
+        coroutine: Coroutine[Any, Any, Any],
+        context: Context | None = None,
+    ) -> asyncio.Future[Any]:
+        if previous is None:
+            task: asyncio.Future[Any] = asyncio.Task(
+                coroutine,
+                loop=task_loop,
+                context=context,
+            )
+        else:
+            task = cast("Any", previous)(
+                task_loop,
+                coroutine,
+                context=context,
+            )
+        owner = _CLEANUP_TASK_OWNER.get()
+        if owner is not None and isinstance(task, asyncio.Task):
+            owner.tasks.add(task)
+            if owner.finalizing:
+                task.cancel()
+        return task
+
+    loop.set_task_factory(_tracked)
+    return previous, scope
+
+
+def _restore_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    previous: Callable[..., asyncio.Future[Any]] | None,
+) -> None:
+    """Restore the event loop's task factory after one cleanup step."""
+    loop.set_task_factory(previous)
 
 
 async def _finalization_turn() -> asyncio.CancelledError | None:
@@ -280,15 +344,63 @@ async def _finalization_turn() -> asyncio.CancelledError | None:
     return None
 
 
+async def _stop_cleanup_descendants(
+    scope: _CleanupTaskScope,
+    *,
+    outer: asyncio.Task[None],
+    what: str,
+) -> asyncio.CancelledError | None:
+    """Force and consume cleanup-owned descendants to a fixed point.
+
+    Args:
+        scope: The task-creation scope installed before the cleanup started.
+        outer: The already-finalized top-level cleanup task.
+        what: What was being released, for static log text.
+
+    Returns:
+        Owner cancellation delivered during descendant finalization.
+    """
+    deferred: asyncio.CancelledError | None = None
+    consumed: set[asyncio.Task[Any]] = set()
+    scope.finalizing = True
+    while True:
+        candidates = scope.tasks - scope.preexisting - {outer} - consumed
+        if not candidates:
+            return deferred
+        for task in candidates:
+            if task.done():
+                _consume_cleanup_result(task, what=what, forced=True)
+                consumed.add(task)
+                continue
+            coroutine = task.get_coro()
+            if coroutine is not None:
+                try:
+                    coroutine.close()
+                except (Exception, asyncio.CancelledError):
+                    _LOGGER.error(
+                        "%s descendant raised while being force-finalized", what
+                    )
+            task.cancel()
+        repeated = await _finalization_turn()
+        if deferred is None:
+            deferred = repeated
+        for task in candidates:
+            if task.done():
+                _consume_cleanup_result(task, what=what, forced=True)
+                consumed.add(task)
+
+
 async def _stop_cleanup_task(
     cleanup: asyncio.Task[None],
     *,
+    scope: _CleanupTaskScope,
     what: str,
 ) -> asyncio.CancelledError | None:
     """Cancel and finalize a child without letting re-cancellation abandon it.
 
     Args:
         cleanup: The child to finish before application shutdown returns.
+        scope: Tasks created by this cleanup and no pre-existing loop task.
         what: What the child was releasing, for the log line.
 
     Returns:
@@ -299,7 +411,12 @@ async def _stop_cleanup_task(
     deferred = await _finalization_turn()
     if cleanup.done():
         _consume_cleanup_result(cleanup, what=what)
-        return deferred
+        descendant_cancel = await _stop_cleanup_descendants(
+            scope,
+            outer=cleanup,
+            what=what,
+        )
+        return deferred or descendant_cancel
 
     coroutine = cleanup.get_coro()
     if coroutine is not None:
@@ -313,10 +430,14 @@ async def _stop_cleanup_task(
         deferred = repeated
     if cleanup.done():
         _consume_cleanup_result(cleanup, what=what, forced=True)
-        return deferred
-
-    _LOGGER.error("%s remained pending after force-finalization", what)
-    return deferred
+    else:
+        _LOGGER.error("%s remained pending after force-finalization", what)
+    descendant_cancel = await _stop_cleanup_descendants(
+        scope,
+        outer=cleanup,
+        what=what,
+    )
+    return deferred or descendant_cancel
 
 
 async def _aguard(
@@ -328,10 +449,12 @@ async def _aguard(
 
     The release runs in a child task so a coroutine that suppresses cancellation
     cannot extend this caller's deadline. A child that ignores ordinary task
-    cancellation is force-closed and observed before this returns, so the
-    process-level event-loop runner never inherits a pending cleanup task. Owner
-    cancellation delivered during finalization is retained for re-raising only
-    after the child is terminal.
+    cancellation is force-closed and observed before this returns. Tasks spawned
+    inside that cleanup are tracked from creation and finalized to a fixed point,
+    while tasks that predate it are never touched, so the process-level runner
+    inherits no cleanup-owned task. Owner cancellation delivered during
+    finalization is retained for re-raising only after every owned task is
+    terminal.
 
     Args:
         what: What is being let go of, for the log line.
@@ -343,23 +466,42 @@ async def _aguard(
     async def _release() -> None:
         await release()
 
+    loop = asyncio.get_running_loop()
+    previous_factory, scope = _install_cleanup_task_tracking(loop)
+    owner_token = _CLEANUP_TASK_OWNER.set(scope)
     try:
-        cleanup = asyncio.create_task(_release(), name="satellite-cleanup")
-    except Exception:
-        _LOGGER.exception("%s failed to start cleanup", what)
-        return
-    try:
-        done, _pending = await asyncio.wait({cleanup}, timeout=timeout_seconds)
-    except asyncio.CancelledError as error:
-        repeated = await _stop_cleanup_task(cleanup, what=what)
-        raise (repeated or error) from None
-    if cleanup not in done:
-        _LOGGER.error("%s timed out while stopping; continuing cleanup", what)
-        repeated = await _stop_cleanup_task(cleanup, what=what)
-        if repeated is not None:
-            raise repeated
-        return
-    _consume_cleanup_result(cleanup, what=what)
+        try:
+            cleanup = asyncio.create_task(_release(), name="satellite-cleanup")
+        except Exception:
+            _LOGGER.error("%s failed to start cleanup", what)
+            return
+        scope.tasks.discard(cleanup)
+        try:
+            done, _pending = await asyncio.wait(
+                {cleanup},
+                timeout=timeout_seconds,
+            )
+        except asyncio.CancelledError as error:
+            repeated = await _stop_cleanup_task(
+                cleanup,
+                scope=scope,
+                what=what,
+            )
+            raise (repeated or error) from None
+        if cleanup not in done:
+            _LOGGER.error("%s timed out while stopping; continuing cleanup", what)
+            repeated = await _stop_cleanup_task(
+                cleanup,
+                scope=scope,
+                what=what,
+            )
+            if repeated is not None:
+                raise repeated
+            return
+        _consume_cleanup_result(cleanup, what=what)
+    finally:
+        _CLEANUP_TASK_OWNER.reset(owner_token)
+        _restore_task_factory(loop, previous_factory)
 
 
 def configure_logging(settings: Settings) -> None:
@@ -906,7 +1048,7 @@ class EsphomeService:
             except Exception:
                 attempt += 1
                 delay = self._backoff.delay(attempt)
-                _LOGGER.exception(
+                _LOGGER.error(
                     "esphome.listener rebind failed; retrying in %.1f seconds",
                     delay,
                 )
@@ -969,11 +1111,11 @@ class EsphomeService:
             self._end_detection()
 
     def _chunk_failed(self, edge: str) -> None:
-        """Rate-limit a per-chunk failure while preserving its traceback."""
+        """Rate-limit a failure to its static stage and aggregate count."""
         failures = self._chunk_failures.get(edge, 0) + 1
         self._chunk_failures[edge] = failures
         if failures % _CHUNK_FAILURE_REPORT_EVERY == 1:
-            _LOGGER.exception(
+            _LOGGER.error(
                 "%s failed for a chunk; continuing (%d failures)",
                 edge,
                 failures,
@@ -1466,7 +1608,7 @@ def _report_if_it_failed(task: asyncio.Task[None]) -> None:
         return
     error = task.exception()
     if error is not None:
-        _LOGGER.error("%s stopped: %s", task.get_name(), error)
+        _LOGGER.error("%s stopped unexpectedly", task.get_name())
 
 
 def _sound_paths() -> dict[str, str]:

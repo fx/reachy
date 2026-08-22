@@ -281,6 +281,7 @@ class ShieldSpawningCleanupService:
     def __init__(self) -> None:
         """Start without a recorded outer task or finalization."""
         self.task: asyncio.Task[None] | None = None
+        self.spawned: list[asyncio.Task[bool]] = []
         self.entered = asyncio.Event()
         self.finalized = False
 
@@ -288,15 +289,24 @@ class ShieldSpawningCleanupService:
         """Do nothing."""
 
     async def aclose(self) -> None:
-        """Keep shielding a fresh wait after each outer cancellation."""
+        """Keep shielding waits that spawn a descendant while finalizing."""
         task = asyncio.current_task()
         assert task is not None
         self.task = task
         self.entered.set()
+
+        async def _wait_and_spawn() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # A nested cleanup may allocate its own finalizer task. The
+                # production scope must discover this after its first snapshot.
+                self.spawned.append(asyncio.create_task(asyncio.Event().wait()))
+
         try:
             while True:
                 try:
-                    await asyncio.shield(asyncio.Event().wait())
+                    await asyncio.shield(_wait_and_spawn())
                 except asyncio.CancelledError:
                     continue
         finally:
@@ -969,6 +979,8 @@ class TestShutdown:
         async def _run_and_close() -> None:
             runner = asyncio.current_task()
             assert runner is not None
+            unrelated = asyncio.create_task(asyncio.Event().wait())
+            await asyncio.sleep(0)
             before = set(asyncio.all_tasks())
             stuck = ShieldSpawningCleanupService()
             later = RecordingService()
@@ -991,14 +1003,20 @@ class TestShutdown:
                 assert outer.done()
                 assert stuck.finalized
                 assert later.closed == 1
+                assert not unrelated.done()
                 assert leaked == set()
             finally:
                 # Bound the RED run itself without letting asyncio.run teardown
                 # conceal the descendant that production shutdown leaked.
-                for task in leaked:
-                    task.cancel()
-                if leaked:
-                    await asyncio.gather(*leaked, return_exceptions=True)
+                pending = leaked
+                while pending:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    pending = asyncio.all_tasks() - before - {runner}
+                unrelated.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await unrelated
 
         asyncio.run(_run_and_close())
 
@@ -1525,7 +1543,11 @@ class TestTheEsphomeService:
         with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
             await service._supervise_listener()
 
-        messages = [record.getMessage() for record in caplog.records]
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno >= logging.ERROR
+        ]
         assert messages == [
             "esphome.listener rebind failed; retrying in 0.5 seconds",
         ]
@@ -1676,7 +1698,11 @@ class TestTheMicrophonePumpSurvivesTransientFailures:
             condition_service.pump()
             forward_service.pump()
 
-        messages = [record.getMessage() for record in caplog.records]
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno >= logging.ERROR
+        ]
         assert messages == [
             "microphone capture failed for a chunk; continuing (1 failures)",
             "microphone conditioning failed for a chunk; continuing (1 failures)",
@@ -3617,11 +3643,11 @@ class TestASettingsInterfaceThatStopsOnItsOwn:
     """A task nobody awaits until shutdown is a failure nobody sees."""
 
     @pytest.mark.asyncio
-    async def test_a_server_that_will_not_start_says_why(
+    async def test_a_server_failure_omits_exception_identifiers(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Binding a port already in use is the ordinary way for this to fail.
+        """Background failure is visible without carrying exception text.
 
         Args:
             caplog: Captures what the failure was reported as.
@@ -3633,8 +3659,7 @@ class TestASettingsInterfaceThatStopsOnItsOwn:
             Raises:
                 OSError: As binding a port in use does.
             """
-            message = "address already in use"
-            raise OSError(message)
+            raise OSError(_EXCEPTION_DETAIL)
 
         service = WebService(_nothing_asgi, host="127.0.0.1", port=8088, serve=_refuse)
 
@@ -3649,8 +3674,9 @@ class TestASettingsInterfaceThatStopsOnItsOwn:
 
         await service.aclose()
 
-        assert "satellite-settings stopped" in reported
-        assert "address already in use" in reported
+        assert "satellite-settings stopped unexpectedly" in reported
+        for identifier in _EXCEPTION_IDENTIFIERS:
+            assert identifier not in reported
 
     @pytest.mark.asyncio
     async def test_a_server_cancelled_on_the_way_out_reports_nothing(self) -> None:

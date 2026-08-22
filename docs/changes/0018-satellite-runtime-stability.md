@@ -84,12 +84,15 @@ requirements.
 - **Bound asynchronous cleanup independently.** A cleanup that does not return
   cannot prevent later cleanup. Shutdown records the timeout, gives cancellation
   one event-loop turn, then force-finalizes and observes a child that still will
-  not stop so the process runner inherits no pending cleanup task. Repeated owner
-  cancellation is deferred until that finalization and later cleanup attempts
-  have finished, then re-raised.
+  not stop. It snapshots pre-existing loop tasks and owns only tasks the cleanup
+  spawns, finalizing nested shield descendants to a fixed point without touching
+  unrelated runner work. Repeated owner cancellation is deferred until that
+  finalization and later cleanup attempts have finished, then re-raised.
 - **Log lifecycle transitions, not environment identity.** Startup, promotion,
   listener retry/rebind, isolated audio failure and cleanup timeout logs carry no
-  host, address, account, credential or other installation identifier.
+  host, address, account, credential or other installation identifier. Failure
+  logs name only their static stage, aggregate count or numeric retry delay;
+  exception text and tracebacks are not lifecycle-log payloads.
 
 ### Non-goals
 
@@ -121,10 +124,14 @@ The focused suite covers:
 5. listener health, stopped-listener rebind, capped bind retry and intentional
    close;
 6. explicit closure of every accepted protocol transport and clearing of active
-   connection state; and
+   connection state;
 7. bounded non-returning asynchronous cleanup followed by later cleanup,
-   including a child that suppresses every cancellation and repeated owner
-   cancellation during finalization while the process-level runner still returns.
+   including a child that suppresses every cancellation, nested tasks created by
+   repeated `asyncio.shield` calls, and repeated owner cancellation during
+   finalization while the process-level runner still returns; and
+8. listener retry and per-chunk failures whose exception text contains fake
+   installation identifiers, proving lifecycle logs retain only static stage,
+   count and retry-delay data.
 
 The mandatory RED commit contains only tests and minimal test support. The
 focused command must fail for the intended missing lifecycle behaviour before
