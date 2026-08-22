@@ -242,19 +242,60 @@ def _guard(what: str, release: Callable[[], None]) -> None:
 _CLEANUP_TIMEOUT_SECONDS: Final = 5.0
 
 
-def _report_late_cleanup(task: asyncio.Task[None], *, what: str) -> None:
-    """Consume and report a detached cleanup task's eventual result.
+def _consume_cleanup_result(
+    task: asyncio.Task[None],
+    *,
+    what: str,
+    forced: bool = False,
+) -> None:
+    """Consume one cleanup task's result without leaking an exception.
 
     Args:
-        task: The child that outlived its caller's deadline.
+        task: The child whose result must be retrieved.
         what: What the child was releasing, for the log line.
+        forced: Whether its coroutine was force-closed after ignoring cancel.
     """
     if task.cancelled():
         return
     try:
         task.result()
-    except Exception:
-        _LOGGER.exception("%s failed after its cleanup deadline", what)
+    except (Exception, asyncio.CancelledError):
+        if forced:
+            _LOGGER.error("%s was force-finalized after ignoring cancellation", what)
+        else:
+            _LOGGER.exception("%s failed to stop cleanly", what)
+
+
+async def _stop_cleanup_task(
+    cleanup: asyncio.Task[None],
+    *,
+    what: str,
+) -> None:
+    """Cancel a cleanup child, then force-close one that refuses cancellation.
+
+    Args:
+        cleanup: The child to finish before application shutdown returns.
+        what: What the child was releasing, for the log line.
+    """
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    if cleanup.done():
+        _consume_cleanup_result(cleanup, what=what)
+        return
+
+    coroutine = cleanup.get_coro()
+    if coroutine is not None:
+        try:
+            coroutine.close()
+        except (Exception, asyncio.CancelledError):
+            _LOGGER.error("%s raised while being force-finalized", what)
+    cleanup.cancel()
+    await asyncio.sleep(0)
+    if cleanup.done():
+        _consume_cleanup_result(cleanup, what=what, forced=True)
+        return
+
+    _LOGGER.error("%s remained pending after force-finalization", what)
 
 
 async def _aguard(
@@ -265,9 +306,9 @@ async def _aguard(
     """Bound and guard one asynchronous shutdown step.
 
     The release runs in a child task so a coroutine that suppresses cancellation
-    cannot extend this caller's deadline. A detached child keeps a callback that
-    consumes and reports its eventual result rather than leaking an unobserved
-    exception.
+    cannot extend this caller's deadline. A child that ignores ordinary task
+    cancellation is force-closed and observed before this returns, so the
+    process-level event-loop runner never inherits a pending cleanup task.
 
     Args:
         what: What is being let go of, for the log line.
@@ -287,24 +328,13 @@ async def _aguard(
     try:
         done, _pending = await asyncio.wait({cleanup}, timeout=timeout_seconds)
     except asyncio.CancelledError:
-        cleanup.cancel()
-        cleanup.add_done_callback(
-            functools.partial(_report_late_cleanup, what=what),
-        )
+        await _stop_cleanup_task(cleanup, what=what)
         raise
     if cleanup not in done:
-        cleanup.cancel()
-        cleanup.add_done_callback(
-            functools.partial(_report_late_cleanup, what=what),
-        )
         _LOGGER.error("%s timed out while stopping; continuing cleanup", what)
+        await _stop_cleanup_task(cleanup, what=what)
         return
-    try:
-        cleanup.result()
-    except asyncio.CancelledError:
-        _LOGGER.error("%s cancelled itself while stopping", what)
-    except Exception:
-        _LOGGER.exception("%s failed to stop cleanly", what)
+    _consume_cleanup_result(cleanup, what=what)
 
 
 def configure_logging(settings: Settings) -> None:

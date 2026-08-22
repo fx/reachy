@@ -248,6 +248,7 @@ class CancellationResistantService:
         self.cancelled = 0
         self.resume = asyncio.Event()
         self.finished = asyncio.Event()
+        self.finalized = False
 
     async def start(self) -> None:
         """Do nothing."""
@@ -260,6 +261,8 @@ class CancellationResistantService:
             self.cancelled += 1
             await self.resume.wait()
             self.finished.set()
+        finally:
+            self.finalized = True
 
 
 class IndefinitelyCancellationResistantService:
@@ -761,39 +764,46 @@ class TestShutdown:
         assert stuck.cancelled == 1
         assert later.closed == 1
         assert not stuck.finished.is_set()
-        stuck.resume.set()
-        await stuck.finished.wait()
+        assert stuck.finalized
 
-    @pytest.mark.asyncio
-    async def test_indefinitely_resistant_cleanup_leaves_no_task_for_runner(
+    def test_indefinitely_resistant_cleanup_leaves_no_task_for_runner(
         self,
     ) -> None:
         """Application shutdown must leave nothing for `asyncio.run` to await."""
-        stuck = IndefinitelyCancellationResistantService()
-        later = RecordingService()
-        application = SatelliteApplication(
-            settings=_settings(),
-            audio=FakeAudio(),
-            motion=FakeMotion(),
-            perception=FakePerception(),
-            behaviour=SatelliteBehaviour(now=0.0),
-            services=[later, stuck],
-            cleanup_timeout_seconds=0.0,
-        )
 
-        await application.aclose()
+        async def _run_and_close() -> None:
+            stuck = IndefinitelyCancellationResistantService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, stuck],
+                cleanup_timeout_seconds=0.0,
+            )
 
-        task = stuck.task
-        assert task is not None
-        try:
-            assert task.done()
-            assert stuck.finalized
-            assert later.closed == 1
-        finally:
-            if not task.done():
-                task.get_coro().close()
-                task.cancel()
-                await asyncio.sleep(0)
+            await application.aclose()
+
+            task = stuck.task
+            assert task is not None
+            try:
+                assert task.done()
+                assert stuck.finalized
+                assert later.closed == 1
+            finally:
+                # This makes the RED test itself bounded: before the fix the
+                # assertion fails, then the test closes the leaked child so the
+                # process-level runner can return rather than hiding the failure.
+                if not task.done():
+                    coroutine = task.get_coro()
+                    assert coroutine is not None
+                    coroutine.close()
+                    task.cancel()
+                    await asyncio.sleep(0)
+
+        asyncio.run(_run_and_close())
 
     @pytest.mark.asyncio
     async def test_owner_cancellation_attempts_every_remaining_cleanup(self) -> None:

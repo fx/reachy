@@ -79,8 +79,9 @@ requirements.
 - **Close what the service accepted.** Shutdown closes every accepted protocol
   transport and clears shared active-connection state before returning.
 - **Bound asynchronous cleanup independently.** A cleanup that does not return
-  cannot prevent later cleanup. Shutdown records the timeout and continues in a
-  deterministic order.
+  cannot prevent later cleanup. Shutdown records the timeout, gives cancellation
+  one event-loop turn, then force-finalizes and observes a child that still will
+  not stop so the process runner inherits no pending cleanup task.
 - **Log lifecycle transitions, not environment identity.** Startup, promotion,
   listener retry/rebind, isolated audio failure and cleanup timeout logs carry no
   host, address, account, credential or other installation identifier.
@@ -115,7 +116,9 @@ The focused suite covers:
    close;
 6. explicit closure of every accepted protocol transport and clearing of active
    connection state; and
-7. bounded non-returning asynchronous cleanup followed by later cleanup.
+7. bounded non-returning asynchronous cleanup followed by later cleanup,
+   including a child that suppresses every cancellation while the process-level
+   event-loop runner still returns.
 
 The mandatory RED commit contains only tests and minimal test support. The
 focused command must fail for the intended missing lifecycle behaviour before
