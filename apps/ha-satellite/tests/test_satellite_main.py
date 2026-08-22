@@ -262,6 +262,33 @@ class CancellationResistantService:
             self.finished.set()
 
 
+class IndefinitelyCancellationResistantService:
+    """A cleanup step that suppresses every ordinary task cancellation."""
+
+    def __init__(self) -> None:
+        """Start without a child task or finalization."""
+        self.task: asyncio.Task[None] | None = None
+        self.cancelled = 0
+        self.finalized = False
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Keep waiting after every `CancelledError`, until forcibly finalized."""
+        task = asyncio.current_task()
+        assert task is not None
+        self.task = task
+        try:
+            while True:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled += 1
+        finally:
+            self.finalized = True
+
+
 def _application(
     *,
     audio: FakeAudio,
@@ -736,6 +763,37 @@ class TestShutdown:
         assert not stuck.finished.is_set()
         stuck.resume.set()
         await stuck.finished.wait()
+
+    @pytest.mark.asyncio
+    async def test_indefinitely_resistant_cleanup_leaves_no_task_for_runner(
+        self,
+    ) -> None:
+        """Application shutdown must leave nothing for `asyncio.run` to await."""
+        stuck = IndefinitelyCancellationResistantService()
+        later = RecordingService()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(now=0.0),
+            services=[later, stuck],
+            cleanup_timeout_seconds=0.0,
+        )
+
+        await application.aclose()
+
+        task = stuck.task
+        assert task is not None
+        try:
+            assert task.done()
+            assert stuck.finalized
+            assert later.closed == 1
+        finally:
+            if not task.done():
+                task.get_coro().close()
+                task.cancel()
+                await asyncio.sleep(0)
 
     @pytest.mark.asyncio
     async def test_owner_cancellation_attempts_every_remaining_cleanup(self) -> None:
