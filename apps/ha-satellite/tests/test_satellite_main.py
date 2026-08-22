@@ -79,6 +79,7 @@ from reachy_mini_ha_satellite.config import (
     overrides_path,
 )
 from reachy_mini_ha_satellite.esphome.models import Preferences, ServerState
+from reachy_mini_ha_satellite.esphome.peripheral_api import LVAEvent
 from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
 from reachy_mini_ha_satellite.main import (
     _THREAD_JOIN_SECONDS,
@@ -1819,24 +1820,35 @@ class TestTheEsphomeService:
         assert len(bound) == 1
 
     @pytest.mark.asyncio
-    async def test_close_releases_all_accepted_protocols_and_shared_state(
+    async def test_close_releases_all_accepted_protocols_and_disconnects_once(
         self,
     ) -> None:
-        """Closing the listening socket alone leaves accepted transports alive."""
+        """Transport callbacks own one final shared disconnect during shutdown."""
         state = vendored_server_state()
-        accepted = [_AcceptedProtocol(), _AcceptedProtocol()]
-        state.connections.extend(cast("Sequence[VoiceSatelliteProtocol]", accepted))
-        state.satellite = cast("VoiceSatelliteProtocol", accepted[-1])
+        events = _RecordingPeripheralEvents()
+        state.peripheral_api = events
+        accepted = [VoiceSatelliteProtocol(state), VoiceSatelliteProtocol(state)]
+        transports = [_DisconnectLifecycleTransport(protocol) for protocol in accepted]
+        for protocol, transport in zip(accepted, transports, strict=True):
+            protocol.connection_made(transport)
+            protocol._authenticated = True
+        state.satellite = accepted[-1]
         state.connected = True
         service, _state = _esphome_service([], state=state)
         await service.start()
 
         await service.aclose()
+        await asyncio.sleep(0)
 
-        assert [protocol.closed for protocol in accepted] == [1, 1]
+        assert [transport.closed for transport in transports] == [1, 1]
         assert state.connections == []
         assert cast("object | None", state.satellite) is None
         assert not state.connected
+        assert (
+            cast(Any, state.music_player.stop).call_count,
+            cast(Any, state.tts_player.stop).call_count,
+            events.events,
+        ) == (1, 1, [LVAEvent.DISCONNECTED])
 
 
 class TestTheMicrophonePumpSurvivesTransientFailures:
@@ -3610,16 +3622,54 @@ class _FakeServer:
         self.waited += 1
 
 
-class _AcceptedProtocol:
-    """One accepted protocol whose transport-facing close is observable."""
+class _DisconnectLifecycleTransport:
+    """An accepted transport that schedules the real lost-connection callback."""
 
-    def __init__(self) -> None:
-        """Start open."""
+    def __init__(self, protocol: VoiceSatelliteProtocol) -> None:
+        """Remember the protocol and the event loop that owns its lifecycle.
+
+        Args:
+            protocol: The accepted protocol this transport serves.
+        """
         self.closed = 0
+        self.writes: list[object] = []
+        self._protocol = protocol
+        self._loop = asyncio.get_running_loop()
+
+    def writelines(self, packets: object) -> None:
+        """Record protocol writes without opening a socket.
+
+        Args:
+            packets: Encoded packets written by the protocol.
+        """
+        self.writes.append(packets)
 
     def close(self) -> None:
-        """Record an explicit close."""
+        """Schedule connection loss as an asyncio transport does."""
         self.closed += 1
+        self._loop.call_soon(self._protocol.connection_lost, None)
+
+
+class _RecordingPeripheralEvents:
+    """Record the shared connection-lifecycle events emitted during shutdown."""
+
+    def __init__(self) -> None:
+        """Start without an emitted event."""
+        self.events: list[LVAEvent] = []
+
+    def emit_event_sync(
+        self,
+        event: LVAEvent,
+        data: dict[str, object] | None = None,
+    ) -> None:
+        """Record one event and ignore its payload.
+
+        Args:
+            event: The lifecycle transition.
+            data: An optional transition payload.
+        """
+        del data
+        self.events.append(event)
 
 
 def _listener_service(
