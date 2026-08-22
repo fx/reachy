@@ -570,7 +570,7 @@ _SENTINEL_ATTEMPTS_MARGIN: Final = 4
 # and once per hundred after that. A degraded robot must not spend what is left
 # of its processor repeatedly writing the same traceback.
 _DROP_REPORT_EVERY: Final = 100
-_PUMP_FAILURE_REPORT_EVERY: Final = 100
+_CHUNK_FAILURE_REPORT_EVERY: Final = 100
 
 # A failed capture read is the only pump failure that happens before the capture
 # adapter's own poll wait. Give the daemon a short recovery window rather than
@@ -715,7 +715,7 @@ class EsphomeService:
         self._running = False
         self._closing = False
         self._webrtc: WebRTCLike | None = None
-        self._pump_failures: dict[str, int] = {}
+        self._chunk_failures: dict[str, int] = {}
         # `None` is the sentinel that ends `detect`. Bounded, because an
         # unbounded queue in front of a detector that cannot keep up is a
         # memory leak ending in the daemon killing the application.
@@ -822,7 +822,7 @@ class EsphomeService:
                 try:
                     chunk = self._capture.read_chunk()
                 except Exception:
-                    self._pump_failed("capture")
+                    self._chunk_failed("microphone capture")
                     self._pump_sleep(_PUMP_RETRY_SECONDS)
                     continue
                 if chunk is None:
@@ -832,7 +832,7 @@ class EsphomeService:
                 try:
                     conditioned = self._condition(chunk)
                 except Exception:
-                    self._pump_failed("conditioning")
+                    self._chunk_failed("microphone conditioning")
                     continue
                 if conditioned is None:
                     continue
@@ -846,9 +846,7 @@ class EsphomeService:
                     try:
                         satellite.handle_audio(primary, reference)
                     except Exception:
-                        self._offer(primary)
-                        self._pump_failed("forwarding")
-                        continue
+                        self._chunk_failed("Home Assistant audio forwarding")
                 # Detection runs whether or not Home Assistant is there, and
                 # that is REQ-044 rather than a nicety. `connection_lost` sets
                 # `state.satellite` to `None`, so a robot whose network has
@@ -866,13 +864,13 @@ class EsphomeService:
             # blocks on the queue and would otherwise never return.
             self._end_detection()
 
-    def _pump_failed(self, edge: str) -> None:
+    def _chunk_failed(self, edge: str) -> None:
         """Rate-limit a per-chunk failure while preserving its traceback."""
-        failures = self._pump_failures.get(edge, 0) + 1
-        self._pump_failures[edge] = failures
-        if failures % _PUMP_FAILURE_REPORT_EVERY == 1:
+        failures = self._chunk_failures.get(edge, 0) + 1
+        self._chunk_failures[edge] = failures
+        if failures % _CHUNK_FAILURE_REPORT_EVERY == 1:
             _LOGGER.exception(
-                "microphone %s failed for a chunk; continuing (%d failures)",
+                "%s failed for a chunk; continuing (%d failures)",
                 edge,
                 failures,
             )
@@ -910,7 +908,7 @@ class EsphomeService:
                 # it. The robot would go on streaming audio and never wake
                 # again — which is the failure this half of the service exists
                 # to fix, arrived at from the other direction.
-                _LOGGER.exception("wake-word detection failed on a chunk")
+                self._chunk_failed("wake-word detection")
                 continue
             if not activations.woken and not activations.stopped:
                 # Which is nearly every chunk. Nothing is handed to the loop for
@@ -1364,7 +1362,7 @@ def _report_if_it_failed(task: asyncio.Task[None]) -> None:
         return
     error = task.exception()
     if error is not None:
-        _LOGGER.error("the settings interface stopped: %s", error)
+        _LOGGER.error("%s stopped: %s", task.get_name(), error)
 
 
 def _sound_paths() -> dict[str, str]:

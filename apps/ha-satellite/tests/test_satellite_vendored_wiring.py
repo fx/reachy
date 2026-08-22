@@ -163,13 +163,14 @@ class TestOverlappingHomeAssistantConnections:
         cast(Any, state.tts_player.stop).assert_called_once()
         assert events.events == [LVAEvent.DISCONNECTED]
 
-    def test_protocol_close_closes_its_accepted_transport(self) -> None:
-        """Service shutdown needs a transport-facing close on each protocol."""
+    def test_protocol_close_closes_its_accepted_transport_once(self) -> None:
+        """Service shutdown needs an idempotent close on each protocol."""
         state = vendored_server_state()
         protocol = VoiceSatelliteProtocol(state)
         transport = _ProtocolTransport()
         protocol.connection_made(transport)
 
+        protocol.close()
         protocol.close()
 
         assert transport.closed == 1

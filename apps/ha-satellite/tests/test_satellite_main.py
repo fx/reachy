@@ -1385,16 +1385,29 @@ class TestTheWakeWordFeed:
         assert satellite.stops == 1
 
     @pytest.mark.asyncio
-    async def test_a_model_that_raises_does_not_end_detection(self) -> None:
-        """A dead detection thread is this defect arrived at from the other side."""
+    async def test_a_model_that_raises_does_not_end_or_flood_detection(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A broken model stays isolated without logging every audio chunk.
+
+        Args:
+            caplog: Captures the rate-limited detector failures.
+        """
         broken = FakeMicroWakeWord("okay_nabu", fails=True)
-        service, _state, satellite = await self._feed(broken, chunks=2)
+        service, _state, satellite = await self._feed(
+            broken,
+            chunks=101,
+            backlog=102,
+        )
 
         service.pump()
-        service.detect()
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            service.detect()
 
-        assert len(satellite.chunks) == 2
-        assert len(broken.inputs) == 2
+        assert len(satellite.chunks) == 101
+        assert len(broken.inputs) == 101
+        assert caplog.text.count("wake-word detection failed for a chunk") == 2
 
     @pytest.mark.asyncio
     async def test_a_backlog_costs_detection_and_not_streaming(
@@ -3103,6 +3116,7 @@ class TestASettingsInterfaceThatStopsOnItsOwn:
 
         await service.aclose()
 
+        assert "satellite-settings stopped" in reported
         assert "address already in use" in reported
 
     @pytest.mark.asyncio

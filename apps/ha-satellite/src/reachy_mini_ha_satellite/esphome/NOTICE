@@ -99,11 +99,11 @@ enumerable. It is:
    extend to it: a suppression naming what it suppresses is the one rule worth
    keeping even here.
 
-8. `satellite.py` tracks whether each accepted protocol authenticated, promotes
-   the newest authenticated survivor when overlapping Home Assistant connections
-   hand off, defers shared disconnect behaviour until the final authenticated
-   connection is gone, and exposes an idempotent transport close for application
-   shutdown.
+8. `api_server.py` exposes an idempotent transport close for application
+   shutdown. `satellite.py` tracks whether each accepted protocol authenticated,
+   promotes the newest authenticated survivor when overlapping Home Assistant
+   connections hand off, and defers shared disconnect behaviour until the final
+   authenticated connection is gone.
 
 Nothing beyond the changes enumerated above was touched. In particular the code
 is not reformatted, its docstrings are not rewritten, and its typing is not

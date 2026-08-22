@@ -1110,13 +1110,6 @@ class VoiceSatelliteProtocol(APIServer):
 
         _LOGGER.info("Disconnected from Home Assistant; waiting for reconnection")
 
-    def close(self) -> None:
-        """Close this accepted protocol transport, once, during service shutdown."""
-        transport, self._transport = self._transport, None
-        self._writelines = None
-        if transport is not None:
-            transport.close()
-
     def process_packet(self, msg_type: int, packet_data: bytes) -> None:
         super().process_packet(msg_type, packet_data)
 
