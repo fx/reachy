@@ -224,9 +224,16 @@ You do not have to reach for the environment to change either number. The device
 page carries both, in the **Configuration** group beside **Mic Volume**:
 
 - **Speaker Volume** — 0 to 100%, the same level the media-player card sets.
-  There is one level underneath the two, so moving either moves the other; while
-  the robot is muted this reads 0, and a value set into it is remembered and
-  restored when you unmute rather than applied straight away.
+  There is one level underneath the two, so moving either moves the other and
+  they never show different numbers. Muting takes the level to 0, so this reads
+  0 too; a value you then set *here* is remembered and restored when you unmute
+  rather than applied straight away. Setting the volume from the **media-player
+  card** while muted is the one case that behaves differently — that level is
+  applied and this slider follows it, and the robot stays marked muted while
+  being audible. That last part is upstream behaviour rather than something
+  these controls do; [change
+  0017](../changes/0017-speaker-controls-in-home-assistant.md#known-limitations)
+  records it.
 - **Speaker Boost** — 100 to 800%, the multiplier the section above is about.
 
 Both take effect without a restart and both survive one, but they are kept in

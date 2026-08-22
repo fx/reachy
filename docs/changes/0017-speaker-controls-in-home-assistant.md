@@ -123,20 +123,30 @@ The volume control holds no level of its own. It reports
 vendored layer uses. That is what makes R5 true by construction rather than by
 synchronisation.
 
-**The muted rule follows from it, and is the part a reviewer will ask about.**
-The vendored MUTE branch sets `ServerState.volume` to 0 and persists that;
-UNMUTE restores it from `previous_volume`. So while the device is muted:
+**What muting does to it is the part a reviewer will ask about, and the
+guarantee is R5 rather than any particular number.** The vendored MUTE branch
+sets `ServerState.volume` to 0 and persists that; UNMUTE restores it from
+`previous_volume`. So after a mute:
 
 - the Number **reports 0**, because that is the level in effect;
-- a value **set** into it is *remembered rather than applied* —
+- a value **set through the Number** is *remembered rather than applied* —
   `apply_volume_from_state` stores it into `previous_volume`, nothing is
-  persisted, and nothing reaches the speaker;
+  persisted, nothing reaches the speaker, and the Number goes on reporting 0;
 - **unmuting restores it**, which is the vendored UNMUTE branch doing what it
   already did.
 
-Home Assistant's slider therefore snaps back to 0 after a set made while muted,
-which is honest rather than a bug: the device is muted, and 0 is the level in
-effect.
+Home Assistant's slider therefore snaps back to 0 after a set made *through the
+Number* while muted, which is honest rather than a bug: the device is muted, and
+0 is the level in effect.
+
+**A media-player `VOLUME_SET` while muted is a different path, and the Number
+does not report 0 after one.** The vendored `has_volume` branch applies that
+level to both outputs and persists it with the mute flag left set, so
+`ServerState.volume` is non-zero while `muted` is true — and the Number mirrors
+that level rather than contradicting the state and the media player both.
+Forcing it back to 0 there would be R5 broken to preserve a sentence. What that
+leaves the vendored player in is recorded under [Known
+limitations](#known-limitations) below.
 
 `ServerState.volume` is the one number both entities read **in every one of
 those states** — muted, unmuted, and mid-change — so the control and the media
@@ -238,6 +248,24 @@ Neither is done here — the version stays at 1.10 and the constant is untouched
 This is written down so the next change that touches the version knows what it is
 standing on, because nothing in either file would tell it.
 
+### Known limitations
+
+**A `VOLUME_SET` after a MUTE leaves the vendored media player muted and
+audible, and this change does not fix it.** `MediaPlayerEntity.handle_message`'s
+`has_volume` branch calls `_apply_volume(..., persist=True)`, which sets both
+outputs' volume and `self.volume`, and it never clears `self.muted`. So
+`MUTE` followed by `VOLUME_SET(0.5)` leaves the player reporting `muted=True`
+with `volume=0.5`, having genuinely set both outputs to 50%: Home Assistant
+shows the device muted while it is audible.
+
+That is upstream behaviour in `esphome/entity.py`, which is vendored and which
+this change does not touch — `git diff --name-only main..HEAD -- '*/esphome/*'`
+prints nothing. It predates this change and neither of the new controls causes
+or worsens it; the Speaker Volume Number reports the same level the media player
+does throughout, which is R5. Correcting the vendored mute flag is a separate
+proposal, because it is a departure from upstream and belongs in the `NOTICE`
+beside that file with the rest of them.
+
 ## Tasks
 
 - [x] `AudioPort.set_boost`, and `ReachyPlayback`/`ReachyAudio` implementing it —
@@ -275,9 +303,10 @@ standing on, because nothing in either file would tell it.
 ⏳ **Pending hardware verification.** Nothing in this repository has a Reachy
 Mini or a Home Assistant instance attached, so what is established here is what
 the test suite can establish: the messages the entities declare and answer, the
-level the two views agree on across a sweep of commands, the muted rule in each
-of its three states, the clamping, the read-back, and the file the boost is
-written to.
+level the two views agree on across a sweep of commands, what muting does along
+each of its paths — including the media-player `VOLUME_SET` that leaves the
+level non-zero while the mute flag is set — the clamping, the read-back, and the
+file the boost is written to.
 
 Whether Home Assistant renders the two controls in the Configuration group where
 this document says it will is the one claim that needs the robot, and it is the
