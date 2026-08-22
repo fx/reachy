@@ -81,7 +81,9 @@ requirements.
 - **Bound asynchronous cleanup independently.** A cleanup that does not return
   cannot prevent later cleanup. Shutdown records the timeout, gives cancellation
   one event-loop turn, then force-finalizes and observes a child that still will
-  not stop so the process runner inherits no pending cleanup task.
+  not stop so the process runner inherits no pending cleanup task. Repeated owner
+  cancellation is deferred until that finalization and later cleanup attempts
+  have finished, then re-raised.
 - **Log lifecycle transitions, not environment identity.** Startup, promotion,
   listener retry/rebind, isolated audio failure and cleanup timeout logs carry no
   host, address, account, credential or other installation identifier.
@@ -117,8 +119,8 @@ The focused suite covers:
 6. explicit closure of every accepted protocol transport and clearing of active
    connection state; and
 7. bounded non-returning asynchronous cleanup followed by later cleanup,
-   including a child that suppresses every cancellation while the process-level
-   event-loop runner still returns.
+   including a child that suppresses every cancellation and repeated owner
+   cancellation during finalization while the process-level runner still returns.
 
 The mandatory RED commit contains only tests and minimal test support. The
 focused command must fail for the intended missing lifecycle behaviour before

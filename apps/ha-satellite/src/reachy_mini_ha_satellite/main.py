@@ -266,22 +266,40 @@ def _consume_cleanup_result(
             _LOGGER.exception("%s failed to stop cleanly", what)
 
 
+async def _finalization_turn() -> asyncio.CancelledError | None:
+    """Give finalization one loop turn while deferring owner cancellation.
+
+    Returns:
+        Cancellation delivered during the turn, for the caller to re-raise only
+        after the cleanup child has reached a terminal state.
+    """
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError as error:
+        return error
+    return None
+
+
 async def _stop_cleanup_task(
     cleanup: asyncio.Task[None],
     *,
     what: str,
-) -> None:
-    """Cancel a cleanup child, then force-close one that refuses cancellation.
+) -> asyncio.CancelledError | None:
+    """Cancel and finalize a child without letting re-cancellation abandon it.
 
     Args:
         cleanup: The child to finish before application shutdown returns.
         what: What the child was releasing, for the log line.
+
+    Returns:
+        Owner cancellation delivered during finalization, for re-raising after
+        the child is done.
     """
     cleanup.cancel()
-    await asyncio.sleep(0)
+    deferred = await _finalization_turn()
     if cleanup.done():
         _consume_cleanup_result(cleanup, what=what)
-        return
+        return deferred
 
     coroutine = cleanup.get_coro()
     if coroutine is not None:
@@ -290,12 +308,15 @@ async def _stop_cleanup_task(
         except (Exception, asyncio.CancelledError):
             _LOGGER.error("%s raised while being force-finalized", what)
     cleanup.cancel()
-    await asyncio.sleep(0)
+    repeated = await _finalization_turn()
+    if deferred is None:
+        deferred = repeated
     if cleanup.done():
         _consume_cleanup_result(cleanup, what=what, forced=True)
-        return
+        return deferred
 
     _LOGGER.error("%s remained pending after force-finalization", what)
+    return deferred
 
 
 async def _aguard(
@@ -308,7 +329,9 @@ async def _aguard(
     The release runs in a child task so a coroutine that suppresses cancellation
     cannot extend this caller's deadline. A child that ignores ordinary task
     cancellation is force-closed and observed before this returns, so the
-    process-level event-loop runner never inherits a pending cleanup task.
+    process-level event-loop runner never inherits a pending cleanup task. Owner
+    cancellation delivered during finalization is retained for re-raising only
+    after the child is terminal.
 
     Args:
         what: What is being let go of, for the log line.
@@ -327,12 +350,14 @@ async def _aguard(
         return
     try:
         done, _pending = await asyncio.wait({cleanup}, timeout=timeout_seconds)
-    except asyncio.CancelledError:
-        await _stop_cleanup_task(cleanup, what=what)
-        raise
+    except asyncio.CancelledError as error:
+        repeated = await _stop_cleanup_task(cleanup, what=what)
+        raise (repeated or error) from None
     if cleanup not in done:
         _LOGGER.error("%s timed out while stopping; continuing cleanup", what)
-        await _stop_cleanup_task(cleanup, what=what)
+        repeated = await _stop_cleanup_task(cleanup, what=what)
+        if repeated is not None:
+            raise repeated
         return
     _consume_cleanup_result(cleanup, what=what)
 
