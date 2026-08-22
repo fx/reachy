@@ -37,6 +37,15 @@ robot, network socket, filesystem access or wall-clock delay.
 
 ## Requirements
 
+### Testing Requirements
+
+This change MUST satisfy the project's standing testing rules (see
+[Testing conventions](../specs/architecture/index.md#testing-conventions)). CI
+enforces those rules as merge gates. This change additionally sequences the
+focused RED regressions and hardware-free lifecycle verification below.
+
+### Behaviour
+
 The existing HA satellite specification owns the acceptance criteria. This
 change is linked specifically to
 [REQ-044](../specs/ha-satellite/index.md#req-044-wake-word-detection-runs-on-the-robot),
@@ -123,18 +132,21 @@ phase.
 ## Tasks
 
 - [ ] Stabilize the HA satellite runtime lifecycle in one follow-up PR
-  - [ ] Add deterministic failing regressions for all seven lifecycle defects
+  - [x] Add deterministic failing regressions for all seven lifecycle defects
         before changing production code
-  - [ ] Perform the approved controlled wake before normal service composition
-  - [ ] Preserve and promote surviving authenticated Home Assistant protocols
-  - [ ] Supervise and rebind an unexpectedly stopped listener with capped retry
-  - [ ] Keep capture, conditioning, forwarding and local wake detection alive
+  - [x] Perform the approved controlled wake before normal service composition
+  - [x] Preserve and promote surviving authenticated Home Assistant protocols
+  - [x] Supervise and rebind an unexpectedly stopped listener with capped retry
+  - [x] Keep capture, conditioning, forwarding and local wake detection alive
         across transient per-chunk failures
-  - [ ] Close accepted protocol transports and clear active connection state
-  - [ ] Bound each asynchronous cleanup so later cleanup still runs
-  - [ ] Add identifier-free lifecycle logs for the new transitions
-  - [ ] Run the focused, member and repository verification required for the
-        implementation phase
+  - [x] Close accepted protocol transports and clear active connection state
+  - [x] Bound each asynchronous cleanup so later cleanup still runs
+  - [x] Add identifier-free lifecycle logs for the new transitions
+  - [x] Run the focused, member and repository-local automated verification
+        required for the implementation phase
+  - [ ] Perform scrubbed live robot verification of wake and runtime recovery
+  - [ ] Complete the required review channels
+  - [ ] Pass the pull request's continuous-integration checks
 
 ## References
 

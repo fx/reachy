@@ -16,9 +16,9 @@ and each is that way because the alternative would be a test of a fake:
 * `TestStartingUpFromTheEnvironment` binds the real ESPHome port on the loopback
   interface — `@pytest.mark.enable_socket`, because a startup path that never
   bound anything would prove nothing about the one thing startup has to do;
-* `TestTheDefaultThreadStarter` starts a real daemon thread, which is what the
-  microphone pump runs on. It is the one thing in this module that is neither
-  faked nor injected, because what is under test *is* the thread.
+* the thread-boundary tests start real daemon threads for the default starter
+  and saturated-queue shutdown. They are not faked or injected because what is
+  under test is the thread's own start or exit behaviour.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -223,6 +223,7 @@ class NeverReturningService:
     def __init__(self) -> None:
         """Start neither entered nor cancelled."""
         self.entered = 0
+        self.entered_event = asyncio.Event()
         self.cancelled = 0
 
     async def start(self) -> None:
@@ -231,6 +232,7 @@ class NeverReturningService:
     async def aclose(self) -> None:
         """Wait forever, recording cancellation by a cleanup deadline."""
         self.entered += 1
+        self.entered_event.set()
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -244,19 +246,19 @@ class CancellationResistantService:
     def __init__(self) -> None:
         """Start unfinished and without a cancellation."""
         self.cancelled = 0
+        self.resume = asyncio.Event()
         self.finished = asyncio.Event()
 
     async def start(self) -> None:
         """Do nothing."""
 
     async def aclose(self) -> None:
-        """Suppress cancellation briefly, as a third-party cleanup may do."""
+        """Suppress cancellation until the test permits late completion."""
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             self.cancelled += 1
-            for _ in range(3):
-                await asyncio.sleep(0)
+            await self.resume.wait()
             self.finished.set()
 
 
@@ -732,6 +734,7 @@ class TestShutdown:
         assert stuck.cancelled == 1
         assert later.closed == 1
         assert not stuck.finished.is_set()
+        stuck.resume.set()
         await stuck.finished.wait()
 
     @pytest.mark.asyncio
@@ -749,7 +752,7 @@ class TestShutdown:
             services=[later, stuck],
         )
         closing = asyncio.create_task(application.aclose())
-        await asyncio.sleep(0)
+        await stuck.entered_event.wait()
         assert stuck.entered == 1
 
         closing.cancel()

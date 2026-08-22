@@ -977,8 +977,13 @@ class FakeRobot:
         self.motor_enables = 0
         self.wake_ups = 0
 
-    def enable_motors(self) -> None:
-        """Record that startup enabled the motors."""
+    def enable_motors(self, ids: list[str] | None = None) -> None:
+        """Record that startup enabled the requested motors.
+
+        Args:
+            ids: Motor identifiers, or `None` for every motor.
+        """
+        del ids
         self.motor_enables += 1
 
     def wake_up(self) -> None:

@@ -187,8 +187,12 @@ class RobotHandle(Protocol):
     this application depend on?" a question with a short answer.
     """
 
-    def enable_motors(self) -> None:
-        """Enable the motors before asking the SDK for controlled movement."""
+    def enable_motors(self, ids: list[str] | None = None) -> None:
+        """Enable all motors, or only the SDK identifiers supplied.
+
+        Args:
+            ids: Motor identifiers, or `None` for every motor.
+        """
         ...
 
     def wake_up(self) -> None:

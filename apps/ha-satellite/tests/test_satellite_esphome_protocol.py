@@ -23,9 +23,9 @@ from esphome_test_support import make_satellite, make_state
 
 
 class TestInit:
-    def test_satellite_stored_on_state(self, tmp_path):
+    def test_satellite_is_not_stored_before_authentication(self, tmp_path):
         sat = make_satellite(tmp_path)
-        assert sat.state.satellite is sat
+        assert sat.state.satellite is None
 
     def test_connected_starts_false(self, tmp_path):
         sat = make_satellite(tmp_path)
@@ -348,6 +348,8 @@ class TestDuckUnduck:
 class TestConnectionLost:
     def test_connection_lost_clears_connected_flag(self, tmp_path):
         sat = make_satellite(tmp_path)
+        sat._authenticated = True
+        sat.state.satellite = sat
         sat.state.connected = True
         sat.connection_lost(None)
         assert sat.state.connected is False
@@ -371,10 +373,14 @@ class TestConnectionLost:
 
     def test_connection_lost_stops_music_player(self, tmp_path):
         sat = make_satellite(tmp_path)
+        sat._authenticated = True
+        sat.state.satellite = sat
         sat.connection_lost(None)
         sat.state.music_player.stop.assert_called()
 
     def test_connection_lost_stops_tts_player(self, tmp_path):
         sat = make_satellite(tmp_path)
+        sat._authenticated = True
+        sat.state.satellite = sat
         sat.connection_lost(None)
         sat.state.tts_player.stop.assert_called()

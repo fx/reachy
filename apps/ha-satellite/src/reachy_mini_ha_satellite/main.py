@@ -242,6 +242,21 @@ def _guard(what: str, release: Callable[[], None]) -> None:
 _CLEANUP_TIMEOUT_SECONDS: Final = 5.0
 
 
+def _report_late_cleanup(task: asyncio.Task[None], *, what: str) -> None:
+    """Consume and report a detached cleanup task's eventual result.
+
+    Args:
+        task: The child that outlived its caller's deadline.
+        what: What the child was releasing, for the log line.
+    """
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:
+        _LOGGER.exception("%s failed after its cleanup deadline", what)
+
+
 async def _aguard(
     what: str,
     release: Callable[[], Awaitable[None]],
@@ -249,17 +264,45 @@ async def _aguard(
 ) -> None:
     """Bound and guard one asynchronous shutdown step.
 
+    The release runs in a child task so a coroutine that suppresses cancellation
+    cannot extend this caller's deadline. A detached child keeps a callback that
+    consumes and reports its eventual result rather than leaking an unobserved
+    exception.
+
     Args:
         what: What is being let go of, for the log line.
         release: How to let go of it.
         timeout_seconds: The deadline for this step alone. Later cleanup still
             runs if it expires.
     """
+
+    async def _release() -> None:
+        await release()
+
     try:
-        async with asyncio.timeout(timeout_seconds):
-            await release()
-    except TimeoutError:
+        cleanup = asyncio.create_task(_release(), name="satellite-cleanup")
+    except Exception:
+        _LOGGER.exception("%s failed to start cleanup", what)
+        return
+    try:
+        done, _pending = await asyncio.wait({cleanup}, timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        cleanup.cancel()
+        cleanup.add_done_callback(
+            functools.partial(_report_late_cleanup, what=what),
+        )
+        raise
+    if cleanup not in done:
+        cleanup.cancel()
+        cleanup.add_done_callback(
+            functools.partial(_report_late_cleanup, what=what),
+        )
         _LOGGER.error("%s timed out while stopping; continuing cleanup", what)
+        return
+    try:
+        cleanup.result()
+    except asyncio.CancelledError:
+        _LOGGER.error("%s cancelled itself while stopping", what)
     except Exception:
         _LOGGER.exception("%s failed to stop cleanly", what)
 
@@ -535,19 +578,30 @@ class SatelliteApplication:
         _guard("motion", self._motion.release)
         _guard("the media interface", self._audio.stop)
 
+        cancelled: asyncio.CancelledError | None = None
         for service in reversed(self._services):
+            try:
+                await _aguard(
+                    "a service",
+                    service.aclose,
+                    self._cleanup_timeout_seconds,
+                )
+            except asyncio.CancelledError as error:
+                if cancelled is None:
+                    cancelled = error
+
+        try:
             await _aguard(
-                "a service",
-                service.aclose,
+                "the perception source",
+                self._perception.aclose,
                 self._cleanup_timeout_seconds,
             )
-
-        await _aguard(
-            "the perception source",
-            self._perception.aclose,
-            self._cleanup_timeout_seconds,
-        )
+        except asyncio.CancelledError as error:
+            if cancelled is None:
+                cancelled = error
         _LOGGER.info("satellite.stopped")
+        if cancelled is not None:
+            raise cancelled
 
 
 # How long shutdown waits for either audio thread to notice. Both are already
