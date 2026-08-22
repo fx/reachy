@@ -150,6 +150,17 @@ the repository merge gates. Robot verification, if later requested, must be a
 separate scrubbed session; none is required or performed by this change's RED
 phase.
 
+The later live verification was recorded as prose only; raw output was omitted
+and every environment identifier was scrubbed. The controlled SDK wake
+completed with motors enabled, tracking moved the robot and Home Assistant
+reconnected. Detector input was absent until a daemon restart reset its stale
+media transport; forced detection then succeeded, followed by a manually
+confirmed real wake-word and voice exchange on the immediately preceding
+candidate. The final delta changed only cleanup task-factory dispatch. The exact
+final source hash matched the installed source, and the final application
+restarted healthy. No listener-loss fault was forcibly induced, so this session
+did not directly verify supervised listener rebind on hardware.
+
 ## Tasks
 
 - [ ] Stabilize the HA satellite runtime lifecycle in one follow-up PR
@@ -165,7 +176,7 @@ phase.
   - [x] Add identifier-free lifecycle logs for the new transitions
   - [x] Run the focused, member and repository-local automated verification
         required for the implementation phase
-  - [ ] Perform scrubbed live robot verification of wake and runtime recovery
+  - [x] Perform scrubbed live robot verification of wake and runtime recovery
   - [ ] Complete the required review channels
   - [ ] Pass the pull request's continuous-integration checks
 
