@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import inspect
 import json
 import logging
 import math
@@ -253,7 +254,7 @@ class _CleanupTaskScope:
             preexisting: Tasks already on the loop, which this scope never owns.
         """
         self.preexisting = preexisting
-        self.tasks: set[asyncio.Task[Any]] = set()
+        self.tasks: set[asyncio.Future[Any]] = set()
         self.finalizing = False
 
 
@@ -264,7 +265,7 @@ _CLEANUP_TASK_OWNER: Final[ContextVar[_CleanupTaskScope | None]] = ContextVar(
 
 
 def _consume_cleanup_result(
-    task: asyncio.Task[Any],
+    task: asyncio.Future[Any],
     *,
     what: str,
     forced: bool = False,
@@ -287,6 +288,24 @@ def _consume_cleanup_result(
             _LOGGER.error("%s failed to stop cleanly", what)
 
 
+async def _cancelled_cleanup_child() -> None:
+    """Provide a never-started coroutine for a directly canceled task."""
+
+
+def _factory_accepts_context(
+    factory: Callable[..., asyncio.Future[Any]],
+) -> bool:
+    """Return whether a task factory declares the modern context keyword."""
+    try:
+        parameters = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "context" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 def _install_cleanup_task_tracking(
     loop: asyncio.AbstractEventLoop,
 ) -> tuple[Callable[..., asyncio.Future[Any]] | None, _CleanupTaskScope]:
@@ -299,24 +318,46 @@ def _install_cleanup_task_tracking(
         coroutine: Coroutine[Any, Any, Any],
         context: Context | None = None,
     ) -> asyncio.Future[Any]:
+        inherited_owner = _CLEANUP_TASK_OWNER.get()
+        if inherited_owner is not None and inherited_owner.finalizing:
+            # Do not delegate this branch: an eager factory would execute the
+            # submitted coroutine through its finalizer before it can be canceled,
+            # letting each finalizer spawn the next task forever.
+            coroutine.close()
+            canceled = asyncio.Task(_cancelled_cleanup_child(), loop=task_loop)
+            canceled.cancel()
+            inherited_owner.tasks.add(canceled)
+            return canceled
+
+        derived_context = context.copy() if context is not None else None
+        if inherited_owner is not None and derived_context is not None:
+            derived_context.run(_CLEANUP_TASK_OWNER.set, inherited_owner)
+
         if previous is None:
-            task: asyncio.Future[Any] = asyncio.Task(
+            created: asyncio.Future[Any] = asyncio.Task(
                 coroutine,
                 loop=task_loop,
-                context=context,
+                context=derived_context,
             )
-        else:
-            task = cast("Any", previous)(
+        elif derived_context is None:
+            # The task-factory protocol was two positional arguments before the
+            # context keyword existed; preserve that valid legacy surface.
+            created = previous(task_loop, coroutine)
+        elif _factory_accepts_context(previous):
+            created = cast("Any", previous)(
                 task_loop,
                 coroutine,
-                context=context,
+                context=derived_context,
             )
-        owner = _CLEANUP_TASK_OWNER.get()
-        if owner is not None and isinstance(task, asyncio.Task):
-            owner.tasks.add(task)
-            if owner.finalizing:
-                task.cancel()
-        return task
+        else:
+            created = asyncio.Task(
+                coroutine,
+                loop=task_loop,
+                context=derived_context,
+            )
+        if inherited_owner is not None:
+            inherited_owner.tasks.add(created)
+        return created
 
     loop.set_task_factory(_tracked)
     return previous, scope
@@ -361,7 +402,7 @@ async def _stop_cleanup_descendants(
         Owner cancellation delivered during descendant finalization.
     """
     deferred: asyncio.CancelledError | None = None
-    consumed: set[asyncio.Task[Any]] = set()
+    consumed: set[asyncio.Future[Any]] = set()
     scope.finalizing = True
     while True:
         candidates = scope.tasks - scope.preexisting - {outer} - consumed
@@ -372,14 +413,15 @@ async def _stop_cleanup_descendants(
                 _consume_cleanup_result(task, what=what, forced=True)
                 consumed.add(task)
                 continue
-            coroutine = task.get_coro()
-            if coroutine is not None:
-                try:
-                    coroutine.close()
-                except (Exception, asyncio.CancelledError):
-                    _LOGGER.error(
-                        "%s descendant raised while being force-finalized", what
-                    )
+            if isinstance(task, asyncio.Task):
+                coroutine = task.get_coro()
+                if coroutine is not None:
+                    try:
+                        coroutine.close()
+                    except (Exception, asyncio.CancelledError):
+                        _LOGGER.error(
+                            "%s descendant raised while being force-finalized", what
+                        )
             task.cancel()
         repeated = await _finalization_turn()
         if deferred is None:
@@ -499,6 +541,13 @@ async def _aguard(
                 raise repeated
             return
         _consume_cleanup_result(cleanup, what=what)
+        repeated = await _stop_cleanup_descendants(
+            scope,
+            outer=cleanup,
+            what=what,
+        )
+        if repeated is not None:
+            raise repeated
     finally:
         _CLEANUP_TASK_OWNER.reset(owner_token)
         _restore_task_factory(loop, previous_factory)

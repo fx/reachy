@@ -85,9 +85,12 @@ requirements.
   cannot prevent later cleanup. Shutdown records the timeout, gives cancellation
   one event-loop turn, then force-finalizes and observes a child that still will
   not stop. It snapshots pre-existing loop tasks and owns only tasks the cleanup
-  spawns, finalizing nested shield descendants to a fixed point without touching
-  unrelated runner work. Repeated owner cancellation is deferred until that
-  finalization and later cleanup attempts have finished, then re-raised.
+  spawns, including descendants of a normally returning cleanup and children
+  created with an explicit context. Nested descendants are finalized to a fixed
+  point without touching unrelated runner work; children submitted during that
+  finalization are closed before an eager task factory can execute them. Repeated
+  owner cancellation is deferred until finalization and later cleanup attempts
+  have finished, then re-raised.
 - **Log lifecycle transitions, not environment identity.** Startup, promotion,
   listener retry/rebind, isolated audio failure and cleanup timeout logs carry no
   host, address, account, credential or other installation identifier. Failure
@@ -125,10 +128,12 @@ The focused suite covers:
    close;
 6. explicit closure of every accepted protocol transport and clearing of active
    connection state;
-7. bounded non-returning asynchronous cleanup followed by later cleanup,
-   including a child that suppresses every cancellation, nested tasks created by
-   repeated `asyncio.shield` calls, and repeated owner cancellation during
-   finalization while the process-level runner still returns; and
+7. bounded asynchronous cleanup followed by later cleanup, including a normally
+   returning cleanup with a pending child, a child that suppresses every
+   cancellation, nested tasks created by repeated `asyncio.shield` calls,
+   explicit blank task contexts, legacy task factories, eager finalizer-created
+   successors, and repeated owner cancellation while the process-level runner
+   still returns; and
 8. listener retry and per-chunk failures whose exception text contains fake
    installation identifiers, proving lifecycle logs retain only static stage,
    count and retry-delay data.

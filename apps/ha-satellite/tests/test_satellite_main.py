@@ -29,9 +29,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from contextvars import Context
 import socket
 import threading
+from contextvars import Context
 from pathlib import Path
 from queue import Empty, Full
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -110,7 +110,7 @@ from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 from reachy_session_client import Backoff
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
     from queue import Queue
 
     from pyfakefs.fake_filesystem import FakeFilesystem
