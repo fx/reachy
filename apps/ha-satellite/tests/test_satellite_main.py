@@ -1681,6 +1681,12 @@ class TestWritingABoostChosenFromHomeAssistant:
     ) -> None:
         """A scene re-sending what it sent last time must not cost an erase cycle.
 
+        The inode is the evidence, because nothing about the bytes could tell
+        "written again identically" from "not written". So the test moves the
+        value once first, and only then repeats it: the first pair of readings
+        establishes that a write does move the inode here, which is what makes
+        the second pair's equality mean the write was declined.
+
         Args:
             fs: An in-memory filesystem.
         """
@@ -1692,17 +1698,25 @@ class TestWritingABoostChosenFromHomeAssistant:
             apply_live=adopted.append,
             environ=_ENVIRONMENT,
         )
+        setter(300.0)
+        before_a_real_change = _BOOST_OVERRIDES.stat().st_ino
+
         setter(640.0)
+        after_a_real_change = _BOOST_OVERRIDES.stat().st_ino
+
         # The store renames a new file into place rather than writing in place,
-        # so a second save leaves a different inode behind. Nothing about the
-        # bytes could tell "written again identically" from "not written".
-        first = _BOOST_OVERRIDES.stat().st_ino
+        # so a write that changes the value leaves a different inode behind.
+        # That is what makes the repeat below mean anything: without it, a
+        # `save` that wrote in place would satisfy the equality while writing
+        # every single time.
+        assert after_a_real_change != before_a_real_change
 
         setter(640.0)
 
-        assert _BOOST_OVERRIDES.stat().st_ino == first
+        assert _BOOST_OVERRIDES.stat().st_ino == after_a_real_change
         assert store.load() == {"speaker_boost_percent": "640.0"}
         assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(300.0),
             pytest.approx(640.0),
         ]
 
