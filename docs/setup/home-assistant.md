@@ -229,18 +229,27 @@ page carries both, in the **Configuration** group beside **Mic Volume**:
   restored when you unmute rather than applied straight away.
 - **Speaker Boost** — 100 to 800%, the multiplier the section above is about.
 
-A change from either control is written to the overrides file — `settings.json`
-in the state directory, which is the same file the robot's own settings page
-writes — and takes effect without a restart. The boost reaches both outputs from
-the next pushed chunk onwards, so you can move the slider while the robot is
-talking and hear the result. Because it is one file and not two, a boost set from
-Home Assistant is the number the settings page shows afterwards, and it survives
-a restart.
+Both take effect without a restart and both survive one, but they are kept in
+two different places, and which one a value lands in is worth knowing before you
+go looking for it:
 
-`REACHY_SATELLITE_SPEAKER_BOOST_PERCENT` remains how the **starting** value is
+- **Speaker Volume** is written to `preferences.json` in the state directory —
+  the same store the media-player volume has always used. That is why the two
+  controls cannot disagree: they are not being kept in step, they are the one
+  level.
+- **Speaker Boost** is written to the overrides file, `settings.json` in the
+  same state directory, which is the same file the robot's own settings page
+  writes. Because it is one file and not two, a boost set from Home Assistant is
+  the number the settings page shows afterwards.
+
+The boost reaches both outputs from the next pushed chunk onwards, so you can
+move the slider while the robot is talking and hear the result.
+
+`REACHY_SATELLITE_SPEAKER_BOOST_PERCENT` remains how the **starting** boost is
 set — it is what the robot boots at before anything has overridden it, and it is
-still the right place to set a fleet-wide default. Once either control has been
-moved, the overrides file is what wins.
+still the right place to set a fleet-wide default. Once the boost has been moved
+from either surface, the overrides file is what wins. The variable says nothing
+about Speaker Volume, which has no environment setting of its own.
 
 ```
 <!-- transcript to be captured on hardware before merge -->
