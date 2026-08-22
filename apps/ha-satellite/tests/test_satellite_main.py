@@ -104,9 +104,10 @@ from reachy_mini_ha_satellite.ports import (
     SourceSelection,
 )
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
+from reachy_session_client import Backoff
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
     from queue import Queue
 
     from pyfakefs.fake_filesystem import FakeFilesystem
@@ -215,6 +216,27 @@ class RecordingService:
             raise RuntimeError(message)
 
 
+class NeverReturningService:
+    """A cleanup step that yields forever until its owner cancels it."""
+
+    def __init__(self) -> None:
+        """Start neither entered nor cancelled."""
+        self.entered = 0
+        self.cancelled = 0
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Wait forever, recording cancellation by a cleanup deadline."""
+        self.entered += 1
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
 def _application(
     *,
     audio: FakeAudio,
@@ -266,6 +288,137 @@ def _application(
         sleep=_wait,
     )
     return application, stop
+
+
+class TestControlledWakeBeforeStartup:
+    """The approved SDK wake sequence is the first hardware lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_motors_and_wake_finish_before_application_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both blocking SDK calls are offloaded, ordered, and finish first.
+
+        Args:
+            monkeypatch: Replaces configuration and composition with inert fakes.
+        """
+        events: list[str] = []
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            robot,
+            "wake_up",
+            lambda: events.append("wake_up"),
+            raising=False,
+        )
+
+        async def _offload(work: Callable[[], object]) -> object:
+            """Record that a blocking SDK call left the event loop."""
+            events.append("offload")
+            return work()
+
+        class _Application:
+            async def run(self, stop: asyncio.Event) -> None:
+                """Record where normal application execution begins."""
+                del stop
+                events.append("application.run")
+
+        def _build(resolution: object, handle: object) -> _Application:
+            """Record composition without constructing any real service."""
+            del resolution
+            assert handle is robot
+            events.append("build_application")
+            return _Application()
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+        await run(robot, asyncio.Event())
+
+        assert events == [
+            "offload",
+            "enable_motors",
+            "offload",
+            "wake_up",
+            "build_application",
+            "application.run",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_wake_failure_aborts_normal_application_startup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed wake cannot leave a normally advertised half-started app.
+
+        Args:
+            monkeypatch: Replaces configuration, offload and composition.
+        """
+        events: list[str] = []
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+
+        def _fail_wake() -> None:
+            events.append("wake_up")
+            message = "controlled wake failed"
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(robot, "wake_up", _fail_wake, raising=False)
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _must_not_build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after wake failed")
+
+        _patch_startup(monkeypatch, build=_must_not_build, offload=_offload)
+
+        with pytest.raises(RuntimeError, match="controlled wake failed"):
+            await run(robot, asyncio.Event())
+
+        assert events == ["enable_motors", "wake_up"]
+
+
+def _patch_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    build: Callable[..., object],
+    offload: Callable[[Callable[[], object]], Awaitable[object]],
+) -> None:
+    """Replace startup's configuration edges, leaving lifecycle order real.
+
+    Args:
+        monkeypatch: Installs the inert edges.
+        build: What stands in for normal application composition.
+        offload: What runs SDK calls without starting a worker thread.
+    """
+
+    class _Store:
+        def load(self) -> dict[str, str]:
+            """Return no persisted overrides without reading a file."""
+            return {}
+
+    resolution = load_settings(_ENVIRONMENT)
+    monkeypatch.setattr(satellite_main, "OverrideStore", lambda _path: _Store())
+    monkeypatch.setattr(satellite_main, "load_settings", lambda **_kwargs: resolution)
+    monkeypatch.setattr(satellite_main, "configure_logging", lambda _settings: None)
+    monkeypatch.setattr(
+        satellite_main, "log_resolved_configuration", lambda _resolution: None
+    )
+    monkeypatch.setattr(satellite_main, "build_application", build)
+    monkeypatch.setattr(satellite_main, "in_thread", offload)
 
 
 def _advancing() -> Callable[[], float]:
@@ -510,6 +663,29 @@ class TestShutdown:
         assert healthy.closed == 1
         assert perception.closed == 1
         assert motion.released
+
+    @pytest.mark.asyncio
+    async def test_a_non_returning_cleanup_is_bounded_and_later_cleanup_runs(
+        self,
+    ) -> None:
+        """One half-closed service cannot hold every later release hostage."""
+        stuck = NeverReturningService()
+        later = RecordingService()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(now=0.0),
+            services=[later, stuck],
+            cleanup_timeout_seconds=0.0,
+        )
+
+        await application.aclose()
+
+        assert stuck.entered == 1
+        assert stuck.cancelled == 1
+        assert later.closed == 1
 
     @pytest.mark.asyncio
     async def test_a_perception_source_that_fails_to_stop_is_survived(self) -> None:
@@ -819,6 +995,241 @@ class TestTheEsphomeService:
         service.detect()
 
         assert True  # as above: it returns rather than blocking on the queue
+
+    @pytest.mark.asyncio
+    async def test_a_healthy_listener_is_not_rebound(self) -> None:
+        """A health check must leave the listener that is still serving alone."""
+        bound: list[_FakeServer] = []
+        service = _listener_service(bound)
+        await service.start()
+
+        await service.check_listener()
+
+        assert len(bound) == 1
+        assert bound[0].closed == 0
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_listener_is_rebound(self) -> None:
+        """A listener that died unexpectedly is replaced without a socket test."""
+        bound: list[_FakeServer] = []
+        service = _listener_service(bound)
+        await service.start()
+        bound[0].serving = False
+
+        await service.check_listener()
+
+        assert len(bound) == 2
+        assert bound[0].closed == 1
+        assert bound[0].waited == 1
+        assert bound[1].serving
+
+    @pytest.mark.asyncio
+    async def test_listener_bind_failures_use_a_capped_backoff(self) -> None:
+        """Repeated bind refusal grows the delay only up to its declared cap."""
+        bound: list[_FakeServer] = []
+        delays: list[float] = []
+        attempts = 0
+        service: EsphomeService
+
+        async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+            """Succeed initially, then refuse every replacement bind."""
+            del factory, host, port
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                message = "address is unavailable"
+                raise OSError(message)
+            server = _FakeServer()
+            bound.append(server)
+            return server
+
+        async def _sleep(seconds: float) -> None:
+            """Record virtual delay and stop after the cap has repeated."""
+            delays.append(seconds)
+            if len(delays) == 4:
+                service._running = False
+
+        service = _listener_service(
+            bound,
+            listen=_listen,
+            sleep=_sleep,
+            backoff=Backoff(
+                initial_seconds=1.0,
+                multiplier=2.0,
+                maximum_seconds=4.0,
+            ),
+        )
+        await service.start()
+        bound[0].serving = False
+
+        await service._supervise_listener()
+
+        assert delays == [1.0, 2.0, 4.0, 4.0]
+
+    @pytest.mark.asyncio
+    async def test_intentional_close_prevents_listener_rebind(self) -> None:
+        """Shutdown cannot race its own supervisor into opening a new listener."""
+        bound: list[_FakeServer] = []
+        service = _listener_service(bound)
+        await service.start()
+        bound[0].serving = False
+
+        await service.aclose()
+        await service.check_listener()
+
+        assert len(bound) == 1
+
+    @pytest.mark.asyncio
+    async def test_close_releases_all_accepted_protocols_and_shared_state(
+        self,
+    ) -> None:
+        """Closing the listening socket alone leaves accepted transports alive."""
+        state = vendored_server_state()
+        accepted = [_AcceptedProtocol(), _AcceptedProtocol()]
+        state.connections.extend(cast("Sequence[VoiceSatelliteProtocol]", accepted))
+        state.satellite = cast("VoiceSatelliteProtocol", accepted[-1])
+        state.connected = True
+        service, _state = _esphome_service([], state=state)
+        await service.start()
+
+        await service.aclose()
+
+        assert [protocol.closed for protocol in accepted] == [1, 1]
+        assert state.connections == []
+        assert state.satellite is None
+        assert not state.connected
+
+
+class TestTheMicrophonePumpSurvivesTransientFailures:
+    """One bad chunk must not become a permanently deaf satellite."""
+
+    @pytest.mark.asyncio
+    async def test_a_capture_failure_does_not_discard_the_next_chunk(self) -> None:
+        """A transient daemon read error is isolated to that read."""
+        later = b"\x02" * 320
+        capture = _FlakyCapture([RuntimeError("capture failed"), [later]])
+        service, _state = _esphome_service([], capture=capture)
+        satellite = _RecordingSatellite()
+        _state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert satellite.chunks == [(later, None)]
+
+    @pytest.mark.asyncio
+    async def test_a_conditioning_failure_does_not_discard_the_next_chunk(
+        self,
+    ) -> None:
+        """Native conditioning may fail once without ending the pump."""
+        first, later = b"\x02" * 320, b"\x04" * 320
+        conditioner = _FailsOnceWebRTC()
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[first], [later]]),
+            build_webrtc=lambda _gain, _noise: conditioner,
+        )
+        state.preferences.mic_auto_gain = 1
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert conditioner.inputs == [first, later]
+        assert satellite.chunks == [(later, None)]
+
+    @pytest.mark.asyncio
+    async def test_forwarding_failure_still_detects_that_chunk_and_continues(
+        self,
+    ) -> None:
+        """Local wake detection is independent of Home Assistant forwarding."""
+        first, later = b"\x02" * 320, b"\x04" * 320
+        model = FakeMicroWakeWord("okay_nabu")
+        state = vendored_server_state(
+            wake_words={model.id: model},
+            active_wake_words={model.id},
+            available_wake_words={model.id: available_wake_word(model.id)},
+            stop_word=FakeMicroWakeWord("stop"),
+        )
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[first], [later]]),
+            state=state,
+            detector=WakeWordDetector(
+                state,
+                micro_features=FakeWakeWordFeatures,
+                open_features=FakeWakeWordFeatures,
+            ),
+        )
+        satellite = _FailsOneForward()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+        service.detect()
+
+        assert satellite.attempted == [first, later]
+        assert [inputs.tobytes() for inputs in model.inputs] == [first, later]
+
+
+class _FlakyCapture(FakeCapture):
+    """A capture seam that can raise before producing later audio."""
+
+    def __init__(self, outcomes: Sequence[object]) -> None:
+        """Script exceptions and chunks in their exact read order."""
+        super().__init__()
+        self._outcomes = list(outcomes)
+
+    def read_chunk(self) -> Sequence[bytes] | None:
+        """Raise or return the next scripted outcome."""
+        if not self._outcomes:
+            return None
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return cast("Sequence[bytes]", outcome)
+
+
+class _FailsOnceWebRTC:
+    """A conditioner whose first chunk fails and whose second succeeds."""
+
+    def __init__(self) -> None:
+        """Start with no chunks seen."""
+        self.inputs: list[bytes] = []
+
+    def update_settings(self, agc_level: int, ns_level: int) -> None:
+        """Accept unchanged settings without rebuilding anything."""
+        del agc_level, ns_level
+
+    def process(self, raw_bytes: bytes) -> bytes:
+        """Fail once, then pass subsequent chunks through."""
+        self.inputs.append(raw_bytes)
+        if len(self.inputs) == 1:
+            message = "conditioning failed"
+            raise RuntimeError(message)
+        return raw_bytes
+
+
+class _FailsOneForward:
+    """A Home Assistant protocol that rejects only its first chunk."""
+
+    def __init__(self) -> None:
+        """Start having attempted no forwards."""
+        self.attempted: list[bytes] = []
+        self.chunks: list[tuple[bytes, bytes | None]] = []
+
+    def handle_audio(
+        self,
+        audio_chunk: bytes,
+        audio_chunk_2: bytes | None = None,
+    ) -> None:
+        """Raise on the first call and record later audio normally."""
+        self.attempted.append(audio_chunk)
+        if len(self.attempted) == 1:
+            message = "forwarding failed"
+            raise RuntimeError(message)
+        self.chunks.append((audio_chunk, audio_chunk_2))
 
 
 class TestTheWakeWordFeed:
@@ -2365,13 +2776,80 @@ class _RefusingWebRTC:
 
 
 class _FakeServer:
-    """An asyncio server that never listened."""
+    """An asyncio server whose serving state a test controls directly."""
+
+    def __init__(self) -> None:
+        """Start healthy and open."""
+        self.serving = True
+        self.closed = 0
+        self.waited = 0
+
+    def is_serving(self) -> bool:
+        """Report the scripted listener health."""
+        return self.serving
 
     def close(self) -> None:
-        """Record nothing."""
+        """Record closure and stop serving."""
+        self.closed += 1
+        self.serving = False
 
     async def wait_closed(self) -> None:
-        """Return at once."""
+        """Record that closure was awaited, without wall time."""
+        self.waited += 1
+
+
+class _AcceptedProtocol:
+    """One accepted protocol whose transport-facing close is observable."""
+
+    def __init__(self) -> None:
+        """Start open."""
+        self.closed = 0
+
+    def close(self) -> None:
+        """Record an explicit close."""
+        self.closed += 1
+
+
+def _listener_service(
+    bound: list[_FakeServer],
+    *,
+    listen: Callable[..., Awaitable[_FakeServer]] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    backoff: Backoff | None = None,
+) -> EsphomeService:
+    """Build a listener service with every health/retry edge deterministic.
+
+    Args:
+        bound: Every successfully bound fake listener.
+        listen: A custom bind attempt, or one that always succeeds.
+        sleep: The virtual retry wait.
+        backoff: The retry policy under test.
+
+    Returns:
+        The service, not yet started.
+    """
+
+    async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+        del factory, host, port
+        server = _FakeServer()
+        bound.append(server)
+        return server
+
+    options: dict[str, object] = {}
+    if sleep is not None:
+        options["sleep"] = sleep
+    if backoff is not None:
+        options["backoff"] = backoff
+    return EsphomeService(
+        vendored_server_state(),
+        FakeCapture([]),
+        PipelineEventTap(lambda _: None),
+        host="127.0.0.1",
+        port=6053,
+        listen=listen if listen is not None else _listen,
+        start_thread=lambda _work: None,
+        **options,
+    )
 
 
 class TestTheDefaultThreadStarter:
