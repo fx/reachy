@@ -460,10 +460,20 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
 
 
 class TestTheMutedRule:
-    """Muted, the control reads zero and a set is remembered rather than applied."""
+    """What muting does, along each of the two paths a level can arrive by.
 
-    def test_it_reads_zero_while_muted(self, control: _Control) -> None:
+    A set made *through this control* while muted is remembered rather than
+    applied, so the control goes on reading zero. A media-player `VOLUME_SET`
+    while muted is applied and persisted by the vendored handler, and the
+    control mirrors it. The guarantee that holds across both is what the last
+    two tests pin: the two controls report the same level at every step.
+    """
+
+    def test_it_reads_zero_after_a_mute(self, control: _Control) -> None:
         """Which is the level in effect: the device is silent.
+
+        Named for the command rather than for the state, because a mute is not
+        the only way to be muted — see the `VOLUME_SET` test below.
 
         Args:
             control: The control, wired as the robot wires it.
@@ -477,12 +487,16 @@ class TestTheMutedRule:
 
         assert reported.state == pytest.approx(0.0)
 
-    def test_a_set_while_muted_is_remembered_and_not_persisted(
+    def test_a_set_through_this_control_while_muted_is_remembered_not_persisted(
         self,
         control: _Control,
         tmp_path: Path,
     ) -> None:
         """It lands in `previous_volume`, which is what unmuting restores.
+
+        The path a `NumberCommandRequest` takes, which is the one the guard in
+        `handle_message` is about. A media-player `VOLUME_SET` is the other one
+        and does not behave this way.
 
         Args:
             control: The control, wired as the robot wires it.
@@ -526,6 +540,87 @@ class TestTheMutedRule:
             _handled(control.entity, SubscribeHomeAssistantStatesRequest()),
             NumberStateResponse,
         ).state == pytest.approx(30.0)
+
+    def test_a_media_player_volume_set_while_muted_is_mirrored_not_contradicted(
+        self,
+        control: _Control,
+    ) -> None:
+        """The one path where muted does *not* mean the control reads zero.
+
+        The vendored `has_volume` branch applies the level to both outputs and
+        persists it without clearing the mute flag, so `ServerState.volume` is
+        non-zero while `muted` is true. Reporting 0 here would contradict the
+        polled state and the media player at once, which is R5 broken to
+        preserve a sentence — so this pins the level being mirrored instead,
+        along with the vendored state it is mirroring.
+
+        Args:
+            control: The control, wired as the robot wires it.
+        """
+        commands = (
+            MediaPlayerCommandRequest(
+                key=control.player.key,
+                has_volume=True,
+                volume=0.8,
+            ),
+            MediaPlayerCommandRequest(
+                key=control.player.key,
+                has_command=True,
+                command=MediaPlayerCommand.MUTE,
+            ),
+            MediaPlayerCommandRequest(
+                key=control.player.key,
+                has_volume=True,
+                volume=0.5,
+            ),
+            MediaPlayerCommandRequest(
+                key=control.player.key,
+                has_command=True,
+                command=MediaPlayerCommand.UNMUTE,
+            ),
+        )
+        answered: list[float] = []
+        polled: list[float] = []
+        player: list[tuple[float, float, bool]] = []
+
+        for command in commands:
+            answered.append(
+                _levels_from(control.satellite, control.entity.key, command),
+            )
+            polled.append(
+                _only(
+                    _handled(control.entity, SubscribeHomeAssistantStatesRequest()),
+                    NumberStateResponse,
+                ).state,
+            )
+            player.append(
+                (
+                    control.player.volume * 100.0,
+                    control.player.previous_volume,
+                    control.player.muted,
+                ),
+            )
+
+        assert answered == pytest.approx([80.0, 0.0, 50.0, 50.0])
+        assert polled == pytest.approx([80.0, 0.0, 50.0, 50.0])
+        assert [level for level, _previous, _muted in player] == pytest.approx(
+            [80.0, 0.0, 50.0, 50.0],
+        )
+        assert [previous for _level, previous, _muted in player] == pytest.approx(
+            [0.8, 0.8, 0.5, 0.5],
+        )
+        assert [muted for _level, _previous, muted in player] == [
+            False,
+            True,
+            True,
+            False,
+        ]
+        assert all(
+            reported == pytest.approx(level)
+            for reported, (level, _previous, _muted) in zip(polled, player, strict=True)
+        ), (
+            f"the two controls disagreed somewhere in {list(zip(polled, player, strict=True))}"
+        )
 
     def test_the_two_controls_agree_after_every_step_of_a_sweep(
         self,
