@@ -83,6 +83,7 @@ EXEMPT_FILES = frozenset(
         "apps/ha-satellite/tests/test_satellite_asset_registry.py",
         "apps/ha-satellite/tests/test_satellite_asset_verify.py",
         "apps/ha-satellite/tests/test_satellite_audio_adapter.py",
+        "apps/ha-satellite/tests/test_satellite_audio_entities.py",
         "apps/ha-satellite/tests/test_satellite_audio_seams.py",
         "apps/ha-satellite/tests/test_satellite_behaviour_movement.py",
         "apps/ha-satellite/tests/test_satellite_behaviour_pipeline.py",
@@ -90,6 +91,8 @@ EXEMPT_FILES = frozenset(
         "apps/ha-satellite/tests/test_satellite_behaviour_tracking.py",
         "apps/ha-satellite/tests/test_satellite_config.py",
         "apps/ha-satellite/tests/test_satellite_daemon_app.py",
+        "apps/ha-satellite/tests/test_satellite_daemon_volume.py",
+        "apps/ha-satellite/tests/test_satellite_decode.py",
         "apps/ha-satellite/tests/test_satellite_main.py",
         "apps/ha-satellite/tests/test_satellite_motion_adapter.py",
         "apps/ha-satellite/tests/test_satellite_network.py",
@@ -98,9 +101,11 @@ EXEMPT_FILES = frozenset(
         "apps/ha-satellite/tests/test_satellite_perception_remote.py",
         "apps/ha-satellite/tests/test_satellite_perception_source.py",
         "apps/ha-satellite/tests/test_satellite_pipeline_events.py",
+        "apps/ha-satellite/tests/test_satellite_output_gain.py",
         "apps/ha-satellite/tests/test_satellite_ports.py",
         "apps/ha-satellite/tests/test_satellite_sounds.py",
         "apps/ha-satellite/tests/test_satellite_vendored_wiring.py",
+        "apps/ha-satellite/tests/test_satellite_wake_word.py",
         "apps/ha-satellite/tests/test_satellite_web_settings.py",
     }
 )
