@@ -69,11 +69,20 @@ def set_daemon_volume(base_url: str, level: int = MAX_DAEMON_VOLUME) -> bool:
             "daemon volume: not set, because no daemon API address is configured",
         )
         return False
-    if urlsplit(base_url).scheme not in _FETCHABLE:
+    try:
+        scheme = urlsplit(base_url).scheme
+    except ValueError as error:
+        # `daemon_api_url` is configuration, constrained only by length, and
+        # `urlsplit` raises on some malformed addresses rather than answering
+        # with an empty scheme — `http://[` is one. Left to propagate it would
+        # leave the satellite refusing to start over a typo in the address of a
+        # volume control.
         _LOGGER.warning(
-            "daemon volume: refusing to address a %r URL",
-            urlsplit(base_url).scheme,
+            "daemon volume: %r is not a usable address: %s", base_url, error
         )
+        return False
+    if scheme not in _FETCHABLE:
+        _LOGGER.warning("daemon volume: refusing to address a %r URL", scheme)
         return False
 
     payload = json.dumps({"volume": level}).encode("utf-8")

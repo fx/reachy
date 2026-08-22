@@ -196,6 +196,22 @@ class TestWhenItDoesNotWork:
         assert not set_daemon_volume("file:///etc/passwd")
         assert urlopen.requests == []
 
+    def test_an_address_that_cannot_be_parsed_is_refused(
+        self,
+        urlopen: _Recorder,
+    ) -> None:
+        """`urlsplit` raises on some malformed addresses rather than answering.
+
+        `daemon_api_url` is configuration constrained only by length, so a typo
+        reaches this function — and left to propagate it would leave the
+        satellite refusing to start over the address of a volume control.
+
+        Args:
+            urlopen: The recorder, which should record nothing.
+        """
+        assert not set_daemon_volume("http://[")
+        assert urlopen.requests == []
+
     def test_a_daemon_that_is_not_there_is_reported_rather_than_raised(
         self,
         monkeypatch: pytest.MonkeyPatch,

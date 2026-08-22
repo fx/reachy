@@ -115,10 +115,12 @@ _FULL_SCALE: Final = float(2 ** (8 * SAMPLE_WIDTH - 1) - 1)
 # thousand pushes rather than sixty thousand.
 _CHUNK_SECONDS: Final = 0.05
 
-# How far ahead of the speaker to stay. The pacing loop is deliberately this
-# much early throughout, so that a late wakeup or a slow push costs some of the
-# lead rather than producing a gap in the audio — and the same amount is waited
-# out at the end, which is the queued audio finishing rather than the pushing.
+# How far ahead of the speaker the pacing loop aims to stay. Roughly rather than
+# exactly: audio is handed over a chunk at a time, so the lead swings between
+# this and this plus one chunk, and a sound shorter than it is simply pushed
+# whole. What the lead buys is that a late wakeup or a slow push costs some of
+# it instead of producing a gap in the audio. What is waited out at the end is
+# the audio still queued, which is measured rather than assumed to be this.
 _LEAD_SECONDS: Final = 0.2
 
 # How long to wait before asking the daemon for audio again when it had none.
@@ -798,8 +800,9 @@ class ReachyPlayback:
 
         **Pacing is not politeness.** The daemon feeds pushed samples into a
         live GStreamer `appsrc` whose queue is bounded and which does not block,
-        so pushing a whole file at once has most of it dropped. The loop stays
-        `_LEAD_SECONDS` ahead of the speaker and no further.
+        so pushing a whole file at once has most of it dropped. The loop keeps
+        the speaker roughly `_LEAD_SECONDS` behind — between that and one chunk
+        more of it, since audio goes over a chunk at a time.
 
         The gain is read per chunk rather than once, which is what makes Home
         Assistant's volume control and the ducking the vendored layer performs
