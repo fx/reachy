@@ -1943,6 +1943,11 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
         handle: What the daemon hands a running application.
         stop: Set by the daemon's termination signal.
 
+    A stop requested before motor enable, between motor enable and controlled
+    wake, or after controlled wake prevents the next hardware or composition
+    boundary. The blocking SDK call already running on a worker thread is allowed
+    to finish; Python cannot safely cancel it in the middle.
+
     Raises:
         ConfigurationError: If the environment is not usable. Raised rather
             than reported, because the caller is what decides whether this is a
@@ -1952,10 +1957,19 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     resolution = load_settings(overrides=store.load())
     configure_logging(resolution.settings)
     log_resolved_configuration(resolution)
+    if stop.is_set():
+        _LOGGER.info("satellite.start skipped; stop already requested")
+        return
     _LOGGER.info("satellite.wake enabling_motors")
     await in_thread(handle.enable_motors)
+    if stop.is_set():
+        _LOGGER.info("satellite.wake skipped; stop requested after motor enable")
+        return
     _LOGGER.info("satellite.wake starting")
     await in_thread(handle.wake_up)
     _LOGGER.info("satellite.wake complete")
+    if stop.is_set():
+        _LOGGER.info("satellite.start skipped; stop requested during controlled wake")
+        return
     application = build_application(resolution, handle)
     await application.run(stop)

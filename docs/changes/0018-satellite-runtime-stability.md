@@ -61,9 +61,12 @@ requirements.
 ### Decisions
 
 - **Perform the SDK's full controlled wake before composing normal services.**
-  Startup offloads `enable_motors()` and then `wake_up()` in that order. A wake
-  failure aborts composition, so the application never advertises a normal
-  runtime while the approved wake sequence is incomplete.
+  Startup offloads `enable_motors()` and then `wake_up()` in that order. It checks
+  for stop before motor enable and between each completed blocking SDK call and
+  the next boundary; a call already running on a worker thread finishes, but no
+  later wake, composition or service start begins. A wake failure aborts
+  composition, so the application never advertises a normal runtime while the
+  approved wake sequence is incomplete.
 - **Treat authenticated Home Assistant protocols as a surviving set.** The
   newest authenticated protocol is active. Losing a non-active protocol changes
   nothing; losing the active protocol promotes a survivor; only losing the final
@@ -108,9 +111,10 @@ filesystem and do not sleep or wait on wall time.
 The focused suite covers:
 
 1. motor enablement followed by controlled wake before normal composition, with
-   wake failure preventing normal startup;
+   wake failure and stop requests at achievable SDK-call boundaries preventing
+   normal startup;
 2. active Home Assistant handoff across overlapping authenticated protocols,
-   including non-active and final loss;
+   including out-of-order authentication, non-active and final loss;
 3. microphone capture recovery after one transient failure;
 4. per-chunk conditioning and forwarding isolation, with local wake detection
    still receiving a chunk whose forwarding failed;

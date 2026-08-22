@@ -3212,7 +3212,14 @@ class TestStartingUpFromTheEnvironment:
         monkeypatch.setenv(f"{ENV_PREFIX}API_HOST", "127.0.0.1")
         monkeypatch.setenv(f"{ENV_PREFIX}API_PORT", str(_free_port()))
         stop = asyncio.Event()
-        stop.set()
+        start_esphome = EsphomeService.start
+
+        async def _start_esphome_then_stop(service: EsphomeService) -> None:
+            """Stop only after the real listener has successfully bound."""
+            await start_esphome(service)
+            stop.set()
+
+        monkeypatch.setattr(EsphomeService, "start", _start_esphome_then_stop)
 
         await run(FakeRobot(), stop)
 

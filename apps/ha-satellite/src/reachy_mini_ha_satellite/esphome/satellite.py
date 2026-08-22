@@ -1087,9 +1087,9 @@ class VoiceSatelliteProtocol(APIServer):
         if not was_authenticated:
             return
 
-        # Choose the newest authenticated survivor. Connections are appended in
-        # acceptance order, so walking from the end is the same policy
-        # authentication uses when an overlapping reconnect arrives.
+        # Choose the newest authenticated survivor. Authentication moves a
+        # protocol to the end, so walking from the end follows handshake order
+        # even when accepted transports authenticate out of order.
         survivors = [
             connection
             for connection in self.state.connections
@@ -1144,6 +1144,9 @@ class VoiceSatelliteProtocol(APIServer):
 
         if msg_type == PROTO_TO_MESSAGE_TYPE[AuthenticationRequest]:
             self._authenticated = True
+            if self in self.state.connections:
+                self.state.connections.remove(self)
+            self.state.connections.append(self)
             self.state.satellite = self
             self.state.connected = True
             self._claim_shared_state()
