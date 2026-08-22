@@ -7,7 +7,7 @@ playback ourselves and applying gain to the samples — and make Home Assistant'
 volume control do something, which today it does not.
 
 **Spec:** [ha-satellite](../specs/ha-satellite/)
-**Status:** in-progress
+**Status:** complete
 **Depends On:** 0013
 
 ## Motivation
@@ -130,6 +130,15 @@ enforces these as merge gates:
 - **R7 — The coarse control is driven too.** The daemon's own volume is set to
   its maximum once, at startup, so the software gain begins from the loudest
   signal the hardware will pass rather than from whatever the last operator left.
+  **This costs a chime at every start-up, and that is accepted rather than
+  overlooked**: the daemon's own handler plays a test sound after writing the
+  value, which is helpful when a person is dragging a slider and is a noise on a
+  robot that has just booted. It cannot be declined at the endpoint. The trade is
+  worth taking because the alternative is a coarse control sitting wherever it
+  was last left — it was found at 62 of 100, a third of the level thrown away
+  before the software boost is asked to make any of it back. An operator who
+  wants the silence more than the guarantee sets `daemon_api_url` to empty, which
+  turns the whole thing off.
 - **R8 — Completion is observed.** `done_callback` fires when the stream ends,
   is stopped, or is superseded — not when a timer sized from a header expires.
   `UNKNOWN_LENGTH_SECONDS` is removed.
@@ -165,13 +174,30 @@ so a slow fetch or a long file cannot stall the ESPHome protocol.
 ### Effective gain
 
 ```
-requested = (volume / 100.0) * boost * duck_factor
-effective = min(requested, headroom_of(source))
+boost     = min(boost_percent / 100.0, headroom_of(source))
+effective = (volume / 100.0) * boost * duck_factor
 ```
 
 `volume` is what Home Assistant set and `duck_factor` is 1.0 or the ducking
 factor. `headroom_of` is R5: the largest gain that keeps this particular source
 at or below full scale, never below 1.0, taken from its peak.
+
+**The cap is applied to the boost, not to the result, and the order is the whole
+of the argument.** An earlier draft of this document had
+`effective = min(requested, headroom_of(source))` — cap last — which satisfies
+R5 and makes R2 false. The wake chime this wheel ships peaks at −3.1 dBFS, so its
+headroom is 1.43×; at the default boost the request is 5.0× and the cap swallows
+it, and goes on swallowing it until the slider is below 29%, so three quarters of
+Home Assistant's volume control changes nothing audible. Ducking fails the same
+way and worse: the vendored layer ducks *music* so that a wake word can be heard
+over it, and music is exactly the hot material whose cap would discard the duck.
+
+Capping the boost keeps both. The boost is makeup gain for quiet text-to-speech,
+so it is what must not drive a cue into the limiter; the volume and the duck are
+the operator's and are applied afterwards, so they always do something. A source
+is still never amplified past full scale, because the boost cannot exceed the
+headroom and neither of the other two ever exceeds one. The robot confirmed it:
+see the measurements under [Outcome](#outcome).
 
 `boost` is expressed in percent, to match the control it replaces. **The
 predecessor's numbers are adopted rather than re-derived**, because they were
@@ -221,7 +247,51 @@ driven by the end of the push loop instead of by a timer.
 - [x] Declare the boost as configuration — a setting in percent, default 500,
       clamped to 100–800, resolved and logged like the rest, plus the daemon's
       coarse volume driven to maximum at startup (R3, R7).
-- [ ] Verify on the robot and record it — a conversation at a normal speaking
+- [x] Verify on the robot and record it — a conversation at a normal speaking
       distance, the volume entity audibly changing the level, and ducking audible
       during a wake word. Update `docs/tasks.md`, and update the runbook step
       that is currently marked pending hardware verification.
+
+## Outcome
+
+**Verified on the robot.** Four announcements were played through the real
+speaker at the 500% default and judged *"loud and clear"* at a normal speaking
+distance, which is the question this whole change exists to answer and the one
+nothing in this repository can answer for itself.
+
+The level meter R6 asks for is what made the rest checkable rather than a matter
+of opinion. Home Assistant's volume control, across its own slider:
+
+```
+HA volume 25%:   gain 0.95x  peak in -11.6dBFS  out -12.0dBFS  limited 0.0%
+                 gain 1.25x  peak in -18.4dBFS  out -16.4dBFS  limited 0.0%
+HA volume 100%:  gain 3.79x  peak in -11.6dBFS  out  -0.9dBFS  limited 0.3%
+                 gain 5.00x  peak in -16.1dBFS  out  -2.3dBFS  limited 0.2%
+```
+
+*These lines are transcribed from the robot with two things replaced: the
+`assist_satellite` entity identifier they were driven through, which embeds the
+robot's hardware address, and the text-to-speech URLs in the surrounding log
+lines, which carry the Home Assistant host. Neither belongs in a public
+repository, and the numbers are untouched.*
+
+Four things follow, and each is a requirement rather than an impression:
+
+- **R1 and R2.** An 11 to 14 decibel swing across the slider, and output landing
+  between −0.9 and −1.6 dBFS at the default with 0.1% to 0.3% of samples
+  limited — amplified hard and hardly compressed, which is what the knee is for.
+- **R2 again, for ducking.** `music: level is now 50%` while speech played, and
+  back afterwards, audibly.
+- **R5.** The announcement chime resolves to **3.79×** where speech in the same
+  session gets the full **5.00×**. That is the per-source cap doing exactly what
+  it was written for: the cue has less headroom, so it gets less gain.
+- **The gain formula above.** Under the cap-last order this document originally
+  specified, every gain above 29% of the slider would have been clamped to the
+  same value and that whole top three quarters of travel would have been
+  silent-running. The measured swing is what confirms the correction rather than
+  merely arguing for it.
+
+**What is still not evidence.** One robot, one room, one listener. The knee and
+the boost were adopted from the predecessor rather than tuned here, and nothing
+in this repository can tell whether they are right for a different room — only
+that they are audible in this one.
