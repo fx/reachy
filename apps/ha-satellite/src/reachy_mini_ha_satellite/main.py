@@ -350,11 +350,7 @@ def _install_cleanup_task_tracking(
                 context=derived_context,
             )
         else:
-            created = asyncio.Task(
-                coroutine,
-                loop=task_loop,
-                context=derived_context,
-            )
+            created = derived_context.run(previous, task_loop, coroutine)
         if inherited_owner is not None:
             inherited_owner.tasks.add(created)
         return created
