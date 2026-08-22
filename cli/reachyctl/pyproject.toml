@@ -1,6 +1,6 @@
 [project]
 name = "reachyctl"
-version = "0.1.0"
+version = "0.2.0"
 description = "Command-line tool for deploying, configuring and diagnosing a Reachy Mini"
 requires-python = ">=3.12"
 dependencies = [

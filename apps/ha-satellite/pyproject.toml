@@ -1,6 +1,6 @@
 [project]
 name = "reachy-mini-ha-satellite"
-version = "0.1.0"
+version = "0.2.0"
 description = "Robot-side ESPHome voice satellite for Home Assistant"
 requires-python = ">=3.12"
 # The ESPHome protocol layer in `src/reachy_mini_ha_satellite/esphome/` is
