@@ -192,6 +192,41 @@ inside the ESPHome protocol's message loop, where raising would drop the
 connection, and the entity's read-back then reports the value actually in effect
 rather than the one that was asked for.
 
+### Telling Home Assistant about a boost it did not choose
+
+The boost is the one of the two values that changes without Home Assistant
+having asked for it. An operator who moves it on the application's own settings
+page — which is where §4 of the runbook sends them — hears the change from the
+next pushed chunk, and a slider still showing the previous number until the next
+reconnect is R2 failing for exactly the client this control was added for.
+
+So `SpeakerBoostNumberEntity.publish` sends the value in effect through
+`ServerState.broadcast`, and `SatelliteApplication.apply_live` calls it once a
+change has been adopted. `apply_live` is the one funnel both surfaces pass
+through — the settings page's `save` and `reset`, and `build_boost_setter` — so
+a single call site covers both origins, and the composition root is where the
+two are tied to each other:
+`application.publish_live_changes(boost.publish)`.
+
+`broadcast` and not `self.server`, which is `None` for both of these entities by
+construction: an asynchronous state change has to reach every subscribed client
+rather than whichever connection an entity happens to hold, which is what the
+vendored `MediaPlayerEntity._broadcast_state` uses it for.
+
+Two consequences, both deliberate. A boost chosen *in* Home Assistant is pushed
+as well as answered, which repeats a value that client already has and keeps
+adoption at one call site instead of two. And **any** live setting being adopted
+publishes, not only a boost — the alternative is `SatelliteApplication` knowing
+which setting which entity reports, and the cost is a repeat of a number Home
+Assistant already has.
+
+**The volume control has no equivalent and needs none.** `ServerState.volume`
+moves only when the ESPHome protocol moves it, and the message that moves it is
+one this control is itself answering — the reply is already the push. The
+settings page does not set it, and the vendored peripheral API, which is the
+other writer of it upstream, is never started here: this application fills that
+slot with a `PipelineEventTap`.
+
 ### Registration and the key renumbering
 
 Both entities are appended to `ServerState.entities` in `build_application`,
@@ -285,6 +320,10 @@ beside that file with the rest of them.
 - [x] Registration in `build_application`, with `OverrideStore` hoisted out of
       the web branch, and `build_boost_setter` as the one path a chosen boost
       travels (R3, R4, R6).
+- [x] `SpeakerBoostNumberEntity.publish`, called from `apply_live` through
+      `SatelliteApplication.publish_live_changes`, so a boost chosen on the
+      settings page moves Home Assistant's slider rather than leaving it showing
+      the previous number until the next reconnect (R2).
 - [x] `scripts/vendored_provenance.py` — the new test file exempted, along with
       four pre-existing omissions that had left the guard exiting 1 on `main`.
 - [x] This document, its two index entries, and the operator-facing paragraphs in
@@ -306,8 +345,10 @@ Mini or a Home Assistant instance attached, so what is established here is what
 the test suite can establish: the messages the entities declare and answer, the
 level the two views agree on across a sweep of commands, what muting does along
 each of its paths — including the media-player `VOLUME_SET` that leaves the
-level non-zero while the mute flag is set — the clamping, the read-back, and the
-file the boost is written to.
+level non-zero while the mute flag is set — the clamping, the read-back, the
+file the boost is written to, and that a boost adopted through `apply_live`
+reaches every connected client as the same state message a subscription is
+answered with.
 
 Whether Home Assistant renders the two controls in the Configuration group where
 this document says it will is the one claim that needs the robot, and it is the

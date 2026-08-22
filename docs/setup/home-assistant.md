@@ -247,7 +247,9 @@ go looking for it:
 - **Speaker Boost** is written to the overrides file, `settings.json` in the
   same state directory, which is the same file the robot's own settings page
   writes. Because it is one file and not two, a boost set from Home Assistant is
-  the number the settings page shows afterwards.
+  the number the settings page shows afterwards — and the other way round, a
+  boost set on the settings page moves this slider while you watch it, rather
+  than when Home Assistant next reconnects.
 
 The boost reaches both outputs from the next pushed chunk onwards, so you can
 move the slider while the robot is talking and hear the result.
