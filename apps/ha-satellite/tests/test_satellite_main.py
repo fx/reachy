@@ -3940,57 +3940,95 @@ class TestShutdownFinishesWhateverRefuses:
         assert perception.closed == 1
 
 
-class TestASettingsInterfaceThatStopsOnItsOwn:
+class TestBackgroundServiceTaskReporting:
     """A task nobody awaits until shutdown is a failure nobody sees."""
 
     @pytest.mark.asyncio
-    async def test_a_server_failure_omits_exception_identifiers(
+    async def test_a_failed_named_task_reports_only_its_safe_reason(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Background failure is visible without carrying exception text.
+        """The task name and error type are useful; exception text is private.
 
         Args:
             caplog: Captures what the failure was reported as.
         """
+        loop = asyncio.get_running_loop()
+        unhandled: list[object] = []
+        previous_handler = loop.get_exception_handler()
 
-        async def _refuse() -> None:
-            """Fail to serve.
+        async def _fail() -> None:
+            """Fail with fake installation details in the exception text.
 
             Raises:
-                OSError: As binding a port in use does.
+                OSError: Always.
             """
             raise OSError(_EXCEPTION_DETAIL)
 
-        service = WebService(_nothing_asgi, host="127.0.0.1", port=8088, serve=_refuse)
-
-        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
-            await service.start()
+        async def _run() -> None:
+            task = asyncio.create_task(_fail(), name="satellite-settings")
+            task.add_done_callback(satellite_main._report_if_it_failed)
             # Two passes of the loop: one for the task to run and fail, one for
             # its done-callback. Both yield rather than sleeping, so nothing
             # waits for wall time.
             await asyncio.sleep(0)
             await asyncio.sleep(0)
-            reported = caplog.text
 
-        await service.aclose()
+        try:
+            loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+            with caplog.at_level(
+                logging.ERROR,
+                logger="reachy_mini_ha_satellite.main",
+            ):
+                await _run()
+                await asyncio.sleep(0)
+                reported = caplog.text
+        finally:
+            loop.set_exception_handler(previous_handler)
 
         assert "satellite-settings stopped unexpectedly" in reported
+        assert "OSError" in reported
         for identifier in _EXCEPTION_IDENTIFIERS:
             assert identifier not in reported
+        assert unhandled == []
 
     @pytest.mark.asyncio
-    async def test_a_server_cancelled_on_the_way_out_reports_nothing(self) -> None:
-        """Shutdown cancelling it is not a failure to tell anybody about."""
+    async def test_a_successful_named_task_reports_nothing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A normal background-service exit is not an error."""
+
+        async def _succeed() -> None:
+            """Return normally."""
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            task = asyncio.create_task(_succeed(), name="satellite-settings")
+            task.add_done_callback(satellite_main._report_if_it_failed)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        assert caplog.records == []
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_named_task_reports_nothing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Shutdown cancellation is not a failure to tell anybody about."""
         stopped = asyncio.Event()
 
         async def _serve() -> None:
             """Serve until cancelled."""
             await stopped.wait()
 
-        service = WebService(_nothing_asgi, host="127.0.0.1", port=8088, serve=_serve)
-        await service.start()
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            task = asyncio.create_task(_serve(), name="satellite-settings")
+            task.add_done_callback(satellite_main._report_if_it_failed)
+            await asyncio.sleep(0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
 
-        await service.aclose()
-
-        assert not stopped.is_set()
+        assert caplog.records == []
