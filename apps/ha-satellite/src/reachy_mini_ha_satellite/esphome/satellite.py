@@ -1096,7 +1096,7 @@ class VoiceSatelliteProtocol(APIServer):
             if connection._authenticated
         ]
         if survivors:
-            if self.state.satellite is self:
+            if self.state.satellite not in survivors:
                 successor = survivors[-1]
                 self.state.satellite = successor
                 successor._claim_shared_state()

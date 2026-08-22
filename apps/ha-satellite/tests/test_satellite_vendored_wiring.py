@@ -171,7 +171,7 @@ class TestOverlappingHomeAssistantConnections:
         newest = VoiceSatelliteProtocol(state)
         newest.connection_made(_ProtocolTransport())
         _authenticate(newest)
-        state.satellite = None
+        cast(Any, state).satellite = None
 
         newest.connection_lost(None)
 
