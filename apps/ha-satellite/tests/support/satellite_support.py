@@ -974,6 +974,16 @@ class FakeRobot:
         self.body_yaws: list[float] = []
         self.gaze: list[tuple[float, float, float]] = []
         self.durations: list[float] = []
+        self.motor_enables = 0
+        self.wake_ups = 0
+
+    def enable_motors(self) -> None:
+        """Record that startup enabled the motors."""
+        self.motor_enables += 1
+
+    def wake_up(self) -> None:
+        """Record the SDK-controlled wake sequence."""
+        self.wake_ups += 1
 
     @property
     def media(self) -> FakeMedia:
