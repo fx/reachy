@@ -160,6 +160,45 @@ class TestOverlappingHomeAssistantConnections:
         assert cast(Any, state.tts_player.stop).call_count == 0
         assert events.events == []
 
+    def test_losing_active_promotes_survivor_when_shared_owner_is_missing(
+        self,
+    ) -> None:
+        """A cleared active slot cannot strand an authenticated survivor."""
+        state = vendored_server_state()
+        older = VoiceSatelliteProtocol(state)
+        older.connection_made(_ProtocolTransport())
+        _authenticate(older)
+        newest = VoiceSatelliteProtocol(state)
+        newest.connection_made(_ProtocolTransport())
+        _authenticate(newest)
+        state.satellite = None
+
+        newest.connection_lost(None)
+
+        assert state.satellite is older
+        assert state.connected
+        assert all(entity.server is older for entity in state.entities)
+
+    def test_losing_active_replaces_stale_owner_with_authenticated_survivor(
+        self,
+    ) -> None:
+        """An owner outside the survivor set cannot keep the active slot."""
+        state = vendored_server_state()
+        older = VoiceSatelliteProtocol(state)
+        older.connection_made(_ProtocolTransport())
+        _authenticate(older)
+        newest = VoiceSatelliteProtocol(state)
+        newest.connection_made(_ProtocolTransport())
+        _authenticate(newest)
+        stale = VoiceSatelliteProtocol(state)
+        state.satellite = stale
+
+        newest.connection_lost(None)
+
+        assert state.satellite is older
+        assert state.connected
+        assert all(entity.server is older for entity in state.entities)
+
     def test_losing_a_non_active_protocol_leaves_the_active_one_unchanged(
         self,
     ) -> None:
