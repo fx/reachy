@@ -95,8 +95,15 @@ class VoiceSatelliteProtocol(APIServer):
         super().__init__(state.name)
 
         self.state = state
-        self.state.satellite = self
-        self.state.connected = False
+        # Constructing an overlapping connection must not displace the authenticated
+        # protocol that is still serving Home Assistant. The first protocol remains
+        # visible for the carried single-connection behaviour; authentication below
+        # makes each later protocol active only once it has actually authenticated.
+        if self.state.satellite is None:
+            self.state.satellite = self
+        if not self.state.connections:
+            self.state.connected = False
+        self._authenticated = False
 
         # Report capabilities appropriately
         if state.output_only:
@@ -1046,31 +1053,44 @@ class VoiceSatelliteProtocol(APIServer):
         self._continue_conversation = False
         self._timer_finished = False
         self._pipeline_active = False
+        self._authenticated = False
 
-        # Deregister this connection.
+        # Deregister this connection, then choose the newest authenticated survivor.
+        # Connections are appended in acceptance order, so walking from the end is
+        # the same policy authentication uses when an overlapping reconnect arrives.
         if self in self.state.connections:
             self.state.connections.remove(self)
+        survivors = [
+            connection
+            for connection in self.state.connections
+            if connection._authenticated
+        ]
+        if survivors:
+            if self.state.satellite is self:
+                successor = survivors[-1]
+                self.state.satellite = successor
+                for entity in self.state.entities:
+                    entity.server = successor
+                _LOGGER.info("Home Assistant connection promoted a survivor")
+            self.state.connected = True
+            return
 
-        # Only tear down shared playback/state when the LAST client disconnects.
-        # Otherwise a secondary client (a diagnostic tool, a second dashboard, or
-        # Home Assistant's own overlapping reconnect) dropping would stop audio
-        # that belongs to a client still connected.
-        if not self.state.connections:
-            # Stop any ongoing audio playback and wake/stop word processing.
-            try:
-                self.state.music_player.stop()
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Failed to stop music player during disconnect")
+        # Stop shared playback and wake/stop-word processing only when the final
+        # authenticated client has gone. An accepted but unauthenticated transport
+        # is not a Home Assistant connection and cannot keep shared state alive.
+        try:
+            self.state.music_player.stop()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Failed to stop music player during disconnect")
 
-            try:
-                self.state.tts_player.stop()
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Failed to stop TTS player during disconnect")
+        try:
+            self.state.tts_player.stop()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Failed to stop TTS player during disconnect")
 
-            self.state.stop_word.is_active = False  # type: ignore[attr-defined]
-            self.state.connected = False
-
-        if self.state.satellite is self:
+        self.state.stop_word.is_active = False  # type: ignore[attr-defined]
+        self.state.connected = False
+        if self.state.satellite is self or self.state.satellite not in survivors:
             self.state.satellite = None
 
         if self.state.mute_switch_entity is not None:
@@ -1085,16 +1105,27 @@ class VoiceSatelliteProtocol(APIServer):
         if self.state.mic_volume_entity is not None:
             self.state.mic_volume_entity.sync_with_state()
 
-        # Notify peripheral container that HA is no longer reachable
+        # Notify the peripheral container only for the shared final disconnect.
         self._emit(LVAEvent.DISCONNECTED)
 
         _LOGGER.info("Disconnected from Home Assistant; waiting for reconnection")
+
+    def close(self) -> None:
+        """Close this accepted protocol transport, once, during service shutdown."""
+        transport, self._transport = self._transport, None
+        self._writelines = None
+        if transport is not None:
+            transport.close()
 
     def process_packet(self, msg_type: int, packet_data: bytes) -> None:
         super().process_packet(msg_type, packet_data)
 
         if msg_type == PROTO_TO_MESSAGE_TYPE[AuthenticationRequest]:
+            self._authenticated = True
+            self.state.satellite = self
             self.state.connected = True
+            for entity in self.state.entities:
+                entity.server = self
             _LOGGER.debug("Authentication successful, connected to Home Assistant")
 
             # Send states after connect
