@@ -432,6 +432,42 @@ class TestControlledWakeBeforeStartup:
         assert events == ["enable_motors"]
 
     @pytest.mark.asyncio
+    async def test_stop_during_controlled_wake_skips_normal_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A completed wake observes stop before normal services are composed."""
+        events: list[str] = []
+        stop = asyncio.Event()
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+
+        def _wake_up() -> None:
+            events.append("wake_up")
+            stop.set()
+
+        monkeypatch.setattr(robot, "wake_up", _wake_up, raising=False)
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after stop")
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+        await run(robot, stop)
+
+        assert events == ["enable_motors", "wake_up"]
+
+    @pytest.mark.asyncio
     async def test_motors_and_wake_finish_before_application_composition(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1302,6 +1338,40 @@ class TestTheEsphomeService:
         assert bound[0].closed == 1
         assert bound[0].waited == 1
         assert bound[1].serving
+
+    @pytest.mark.asyncio
+    async def test_successful_listener_lifecycle_logs_no_configured_identity(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Initial bind and supervised rebind report only static event text."""
+        host = "192.0.2.44"
+        port = 46053
+        state = vendored_server_state()
+        state.name = "configured-device-name"
+        bound: list[_FakeServer] = []
+        service = _listener_service(
+            bound,
+            state=state,
+            host=host,
+            port=port,
+        )
+
+        with caplog.at_level(logging.INFO, logger="reachy_mini_ha_satellite.main"):
+            await service.start()
+            bound[0].serving = False
+            await service.check_listener()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages == [
+            "esphome.listening",
+            "esphome.listener stopped unexpectedly; rebinding",
+            "esphome.listening",
+        ]
+        emitted = "\n".join(messages)
+        assert host not in emitted
+        assert str(port) not in emitted
+        assert state.name not in emitted
 
     @pytest.mark.asyncio
     async def test_listener_bind_failures_use_a_capped_backoff(self) -> None:
@@ -3107,6 +3177,9 @@ class _AcceptedProtocol:
 def _listener_service(
     bound: list[_FakeServer],
     *,
+    state: ServerState | None = None,
+    host: str = "127.0.0.1",
+    port: int = 6053,
     listen: Callable[..., Awaitable[_FakeServer]] | None = None,
     sleep: Callable[[float], Awaitable[None]] | None = None,
     backoff: Backoff | None = None,
@@ -3115,6 +3188,9 @@ def _listener_service(
 
     Args:
         bound: Every successfully bound fake listener.
+        state: Shared protocol state, or a fresh fake.
+        host: Configured bind host.
+        port: Configured bind port.
         listen: A custom bind attempt, or one that always succeeds.
         sleep: The virtual retry wait.
         backoff: The retry policy under test.
@@ -3130,11 +3206,11 @@ def _listener_service(
         return server
 
     return EsphomeService(
-        vendored_server_state(),
+        state if state is not None else vendored_server_state(),
         FakeCapture([]),
         PipelineEventTap(lambda _: None),
-        host="127.0.0.1",
-        port=6053,
+        host=host,
+        port=port,
         listen=listen if listen is not None else _listen,
         start_thread=lambda _work: None,
         sleep=sleep if sleep is not None else asyncio.sleep,
