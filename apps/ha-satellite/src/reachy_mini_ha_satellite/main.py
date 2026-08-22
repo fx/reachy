@@ -1659,7 +1659,11 @@ def _report_if_it_failed(task: asyncio.Task[None]) -> None:
         return
     error = task.exception()
     if error is not None:
-        _LOGGER.error("%s stopped unexpectedly", task.get_name())
+        _LOGGER.error(
+            "%s stopped unexpectedly (%s)",
+            task.get_name(),
+            type(error).__name__,
+        )
 
 
 def _sound_paths() -> dict[str, str]:
