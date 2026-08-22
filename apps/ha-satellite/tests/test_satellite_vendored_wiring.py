@@ -160,6 +160,28 @@ class TestOverlappingHomeAssistantConnections:
         assert cast(Any, state.tts_player.stop).call_count == 0
         assert events.events == []
 
+    def test_losing_active_promotes_most_recently_authenticated_survivor(
+        self,
+    ) -> None:
+        """Handshake order, not transport acceptance, decides the successor."""
+        state = vendored_server_state()
+        first = VoiceSatelliteProtocol(state)
+        first.connection_made(_ProtocolTransport())
+        second = VoiceSatelliteProtocol(state)
+        second.connection_made(_ProtocolTransport())
+        third = VoiceSatelliteProtocol(state)
+        third.connection_made(_ProtocolTransport())
+        _authenticate(third)
+        _authenticate(second)
+        _authenticate(first)
+
+        first.connection_lost(None)
+
+        assert state.satellite is second
+        assert state.connections == [third, second]
+        assert state.connected
+        assert all(entity.server is second for entity in state.entities)
+
     def test_losing_active_promotes_survivor_when_shared_owner_is_missing(
         self,
     ) -> None:

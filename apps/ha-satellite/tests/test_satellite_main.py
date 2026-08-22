@@ -359,6 +359,79 @@ class TestControlledWakeBeforeStartup:
     """The approved SDK wake sequence is the first hardware lifecycle."""
 
     @pytest.mark.asyncio
+    async def test_a_pre_set_stop_skips_wake_and_normal_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stop already requested must leave sleeping hardware untouched."""
+        events: list[str] = []
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            robot,
+            "wake_up",
+            lambda: events.append("wake_up"),
+            raising=False,
+        )
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after stop")
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+        stop = asyncio.Event()
+        stop.set()
+
+        await run(robot, stop)
+
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_stop_after_motor_enable_skips_wake_and_normal_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The boundary after motor enable is checked before controlled wake."""
+        events: list[str] = []
+        stop = asyncio.Event()
+        robot = FakeRobot()
+
+        def _enable_motors() -> None:
+            events.append("enable_motors")
+            stop.set()
+
+        monkeypatch.setattr(robot, "enable_motors", _enable_motors, raising=False)
+        monkeypatch.setattr(
+            robot,
+            "wake_up",
+            lambda: events.append("wake_up"),
+            raising=False,
+        )
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after stop")
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+        await run(robot, stop)
+
+        assert events == ["enable_motors"]
+
+    @pytest.mark.asyncio
     async def test_motors_and_wake_finish_before_application_composition(
         self,
         monkeypatch: pytest.MonkeyPatch,
