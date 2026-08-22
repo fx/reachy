@@ -70,6 +70,10 @@ from reachy_mini_ha_satellite.adapters.perception_source import build_perception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
 from reachy_mini_ha_satellite.adapters.sounds import FileSoundSource
 from reachy_mini_ha_satellite.assets.registry import assets_dir
+from reachy_mini_ha_satellite.audio_entities import (
+    SpeakerBoostNumberEntity,
+    SpeakerVolumeNumberEntity,
+)
 from reachy_mini_ha_satellite.behaviour import (
     LookAhead,
     LookAt,
@@ -82,6 +86,8 @@ from reachy_mini_ha_satellite.config import (
     OverrideStore,
     Resolution,
     Settings,
+    apply_settings_change,
+    as_configured_string,
     load_settings,
     log_resolved_configuration,
     overrides_path,
@@ -108,7 +114,7 @@ from reachy_mini_ha_satellite.web import create_app
 from reachy_session_client import Credential, SessionClient
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from pymicro_wakeword import MicroWakeWord
     from pyopen_wakeword import OpenWakeWord
@@ -139,6 +145,7 @@ __all__ = [
     "WebService",
     "apply_intents",
     "build_application",
+    "build_boost_setter",
     "build_perception_source",
     "build_server_state",
     "configure_logging",
@@ -345,6 +352,22 @@ class SatelliteApplication:
         """
         return self._services
 
+    @property
+    def settings(self) -> Settings:
+        """The settings in effect right now.
+
+        Read-only, and it exists because an entity that reports a setting to
+        Home Assistant has to report what is in effect *now*. A snapshot taken
+        when that entity was constructed would go on reporting the value the
+        application started with, so a boost changed from the settings page
+        would leave Home Assistant's slider showing the old number for ever.
+
+        Returns:
+            What `apply_live` last adopted, or what the application was built
+            with.
+        """
+        return self._settings
+
     def status(self) -> dict[str, object]:
         """Say what the robot is doing, for the settings interface to report.
 
@@ -400,12 +423,19 @@ class SatelliteApplication:
         perception source that reports nothing, and the page would have said it
         applied.
 
+        `speaker_boost_percent` *is* among them: both outputs read it per
+        pushed chunk, so adopting it here is heard from the next chunk onwards
+        rather than at the next sound. That is what lets one path — this one —
+        serve both the settings page and the Home Assistant control, whichever
+        of the two chose the number.
+
         Args:
             settings: The newly resolved settings.
         """
         self._settings = settings
         self._tick_seconds = settings.behaviour_tick_seconds
         configure_logging(settings)
+        self._audio.set_boost(settings.speaker_boost_percent)
         self._behaviour.retune(
             deadzone=settings.gaze_deadzone,
             smoothing=settings.gaze_smoothing,
@@ -1404,6 +1434,70 @@ class _NoPerception:
         """Do nothing, successfully."""
 
 
+def build_boost_setter(
+    *,
+    store: OverrideStore,
+    apply_live: Callable[[Settings], None],
+    environ: Mapping[str, str] | None = None,
+) -> Callable[[float], None]:
+    """Build what the speaker-boost control writes a chosen value through.
+
+    A function of its own rather than a closure inside `build_application`, so
+    that what happens when the overrides file cannot be written is a thing a
+    test can stand in front of. Assembling the application is not: it reads the
+    wheel's own wake-word models and cues off a real disk, which a fake
+    filesystem cannot serve.
+
+    `apply_live` is what reaches the audio adapter, so the returned setter never
+    touches `ReachyAudio` and there is exactly one path from "a boost was
+    chosen" to "the outputs heard about it", whichever surface chose it.
+
+    **It always writes an override, even for a value equal to the environment's**
+    — unlike `web/app.py`'s `_overrides_from`, which drops one matching the layer
+    beneath. A reviewer will compare the two, so: a form renders every field and
+    submits values nobody touched, whereas a slider only moves when somebody
+    moves it, and there is no "revert to the environment" gesture on a slider to
+    undo a pin with.
+
+    Args:
+        store: Where the overrides are kept.
+        apply_live: What adopts the newly resolved settings.
+        environ: The environment to resolve against. Defaults to the process
+            environment, which is what `run` resolved the running configuration
+            from.
+
+    Returns:
+        A setter taking the boost in percent.
+    """
+
+    def _set_boost(percent: float) -> None:
+        """Persist a boost chosen from Home Assistant, and adopt it at once.
+
+        Args:
+            percent: The boost, already clamped by the entity that offers it.
+        """
+        wanted = {
+            **store.load(),
+            "speaker_boost_percent": as_configured_string(percent),
+        }
+        try:
+            apply_settings_change(
+                wanted,
+                store=store,
+                environ=environ,
+                apply_live=apply_live,
+            )
+        except ConfigurationError as error:
+            # Reported rather than raised: this runs inside the ESPHome
+            # protocol's message loop, and an unwritable overrides file must not
+            # drop the connection. The entity reads the boost back afterwards,
+            # so Home Assistant is told the value actually in effect rather than
+            # the one it asked for.
+            _LOGGER.error("the speaker boost could not be saved: %s", error)
+
+    return _set_boost
+
+
 def build_application(
     resolution: Resolution,
     handle: RobotHandle,
@@ -1465,6 +1559,35 @@ def build_application(
         behaviour=behaviour,
     )
 
+    # The same file `run` read the overrides out of, and the same by
+    # construction rather than by coincidence: `state_dir` is a bootstrap
+    # setting, so the overrides layer cannot move it and this path cannot drift
+    # from `config.overrides_path`. `test_satellite_main.py` pins the two
+    # together. Two things write through it now — the settings interface below,
+    # and the speaker-boost control — so it is built here rather than inside the
+    # branch that decides whether that interface is served at all.
+    store = OverrideStore(state_dir / OVERRIDES_FILENAME)
+
+    # Appended before any connection exists, which is safe because the vendored
+    # protocol layer's three de-duplication branches match its *own* classes by
+    # `isinstance` and never touch these. The keys stay unique because that layer
+    # numbers what it builds from `len(state.entities)`, so ours are 0 and 1 and
+    # the media player shifts up — invisible to Home Assistant, which keys an
+    # entity on `{mac}-{entity_type}-{object_id}` rather than on the key.
+    state.entities.append(
+        SpeakerVolumeNumberEntity(state=state, key=len(state.entities)),
+    )
+    state.entities.append(
+        SpeakerBoostNumberEntity(
+            key=len(state.entities),
+            get_percent=lambda: application.settings.speaker_boost_percent,
+            set_percent=build_boost_setter(
+                store=store,
+                apply_live=application.apply_live,
+            ),
+        ),
+    )
+
     tap = PipelineEventTap(application.deliver)
     state.peripheral_api = tap
 
@@ -1494,13 +1617,7 @@ def build_application(
             WebService(
                 create_app(
                     resolution=resolution,
-                    # The same file `run` read the overrides out of, and the
-                    # same by construction rather than by coincidence:
-                    # `state_dir` is a bootstrap setting, so the overrides layer
-                    # cannot move it and this path cannot drift from
-                    # `config.overrides_path`. `test_satellite_main.py` pins the
-                    # two together.
-                    store=OverrideStore(state_dir / OVERRIDES_FILENAME),
+                    store=store,
                     application=application,
                 ),
                 host=settings.web_host,

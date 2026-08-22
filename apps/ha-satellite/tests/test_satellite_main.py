@@ -66,6 +66,7 @@ from reachy_mini_ha_satellite.behaviour import (
 from reachy_mini_ha_satellite.config import (
     ENV_PREFIX,
     ConfigurationError,
+    OverrideStore,
     Settings,
     load_settings,
     overrides_path,
@@ -605,7 +606,7 @@ class TestAdoptingSettingsWithoutARestart:
         assert application.status()["pipeline"] == "processing"
 
     def test_it_installs_the_new_log_level(self) -> None:
-        """One of the six settings that can be swapped into a running process."""
+        """One of the settings that can be swapped into a running process."""
         application, _stop = _application(
             audio=FakeAudio(),
             motion=FakeMotion(),
@@ -615,6 +616,37 @@ class TestAdoptingSettingsWithoutARestart:
         application.apply_live(_settings(log_level="debug"))
 
         assert logging.getLogger().level == logging.DEBUG
+
+    def test_it_hands_the_new_boost_to_both_outputs(self) -> None:
+        """This is the one path from "a boost was chosen" to the speaker.
+
+        Both the settings page and the Home Assistant control write through
+        here, so a boost that stopped arriving would be silently inert on both.
+        """
+        audio = FakeAudio()
+        application, _stop = _application(
+            audio=audio,
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="640"))
+
+        assert audio.boosts == [pytest.approx(640.0)]
+        assert audio.music.boost == pytest.approx(640.0)
+        assert audio.speech.boost == pytest.approx(640.0)
+
+    def test_the_settings_it_adopted_are_what_it_reports(self) -> None:
+        """The boost entity reads this, so a stale answer is a stale slider."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        application.apply_live(_settings(speaker_boost_percent="220"))
+
+        assert application.settings.speaker_boost_percent == pytest.approx(220.0)
 
 
 class TestTheEsphomeService:
@@ -1584,6 +1616,92 @@ class TestLogging:
         configure_logging(_settings(log_level="warning"))
 
         assert logging.getLogger().level == logging.WARNING
+
+
+def _ignore_settings(settings: Settings) -> None:
+    """Adopt nothing, for a test that is about the store rather than the robot.
+
+    Args:
+        settings: What was resolved, and dropped.
+    """
+    del settings
+
+
+class TestWritingABoostChosenFromHomeAssistant:
+    """The setter the speaker-boost control is handed, over a real store."""
+
+    def test_it_persists_the_value_and_adopts_it_at_once(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Persisted, so a restart keeps it; adopted, so the answer changes now.
+
+        Args:
+            fs: An in-memory filesystem, so the overrides file is a real file
+                and nothing reaches a disk.
+        """
+        del fs
+        store = OverrideStore(Path("/reachy-satellite-boost/settings.json"))
+        adopted: list[Settings] = []
+
+        satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ=_ENVIRONMENT,
+        )(640.0)
+
+        assert store.load() == {"speaker_boost_percent": "640.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(640.0),
+        ]
+
+    def test_it_leaves_every_other_override_alone(self, fs: FakeFilesystem) -> None:
+        """A slider is not a form: it must not drop what somebody else wrote.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(Path("/reachy-satellite-boost/settings.json"))
+        store.save({"log_level": "debug"})
+
+        satellite_main.build_boost_setter(
+            store=store,
+            apply_live=_ignore_settings,
+            environ=_ENVIRONMENT,
+        )(300.0)
+
+        assert store.load() == {
+            "log_level": "debug",
+            "speaker_boost_percent": "300.0",
+        }
+
+    def test_a_store_that_cannot_be_written_is_reported_and_not_raised(
+        self,
+        fs: FakeFilesystem,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """It runs inside the protocol's loop, so raising would drop a client.
+
+        Args:
+            fs: An in-memory filesystem.
+            caplog: Where the refusal is looked for.
+        """
+        # A file where the store wants a directory, so the write cannot succeed
+        # and the failure is the store's own rather than a patched one.
+        fs.create_file("/reachy-satellite-boost")
+        store = OverrideStore(Path("/reachy-satellite-boost/settings.json"))
+        adopted: list[Settings] = []
+
+        with caplog.at_level(logging.ERROR):
+            satellite_main.build_boost_setter(
+                store=store,
+                apply_live=adopted.append,
+                environ=_ENVIRONMENT,
+            )(300.0)
+
+        assert adopted == []
+        assert "the speaker boost could not be saved" in caplog.text
 
 
 @pytest.mark.filesystem
