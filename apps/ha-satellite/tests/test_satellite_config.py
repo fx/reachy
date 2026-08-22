@@ -42,6 +42,7 @@ from reachy_mini_ha_satellite.config import (
     OverrideStore,
     Settings,
     SettingSource,
+    apply_settings_change,
     canonical_string,
     configuration_report,
     declared_elsewhere,
@@ -56,6 +57,8 @@ from reachy_mini_ha_satellite.config import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from pyfakefs.fake_filesystem import FakeFilesystem
 
 # A placeholder credential carrying every character that changes shape when
@@ -451,6 +454,15 @@ class TestWhatTheInterfaceCanChange:
         """The credential is read when a session is opened, which is at startup."""
         assert not (LIVE_SETTINGS & SECRET_SETTINGS)
 
+    def test_the_speaker_boost_applies_at_once(self) -> None:
+        """Both outputs read it per pushed chunk, so it needs no restart.
+
+        It is also what the Home Assistant control writes through, and a
+        control that reported "applied" while nothing adopted the value would
+        be worse than no control.
+        """
+        assert "speaker_boost_percent" in LIVE_SETTINGS
+
     def test_the_report_marks_each_setting_live_or_not(self) -> None:
         """Because the page tells an operator which changes need a restart."""
         report = {
@@ -465,6 +477,83 @@ class TestWhatTheInterfaceCanChange:
         report = configuration_report(load_settings(MINIMAL, {}))
 
         assert tuple(row.name for row in report) == setting_names()
+
+
+class _RecordingStore(OverrideStore):
+    """An overrides store that records what it was asked to write.
+
+    A real store over a fake filesystem would work too, and would test the
+    filesystem rather than the ordering these tests are about. Subclassed rather
+    than faked because the ordering is the whole subject: what must be shown is
+    that `save` was never *called*, not that no bytes reached a disk.
+    """
+
+    def __init__(self) -> None:
+        """Start having been asked to write nothing."""
+        OverrideStore.__init__(self, Path("/nowhere/settings.json"))
+        self.saved: list[dict[str, str]] = []
+        self.stored: dict[str, str] = {}
+
+    def load(self) -> dict[str, str]:
+        """Report what was last written.
+
+        Returns:
+            The overrides, which are empty until something saves.
+        """
+        return dict(self.stored)
+
+    def save(self, overrides: Mapping[str, str]) -> None:
+        """Record a write instead of performing one.
+
+        Args:
+            overrides: What was to be written.
+        """
+        self.saved.append(dict(overrides))
+        self.stored = dict(overrides)
+
+
+class TestApplyingASettingsChange:
+    """One definition of it, so two surfaces cannot do it in two orders."""
+
+    def test_it_resolves_before_it_writes(self) -> None:
+        """A submission that would not start the robot must not become the file."""
+        store = _RecordingStore()
+
+        with pytest.raises(ConfigurationError):
+            apply_settings_change(
+                {"api_port": "not a port"},
+                store=store,
+                environ=MINIMAL,
+            )
+
+        assert store.saved == []
+
+    def test_it_writes_and_then_adopts_what_can_be_adopted(self) -> None:
+        """The order the settings page has always used, now in one place."""
+        store = _RecordingStore()
+        adopted: list[Settings] = []
+
+        resolved = apply_settings_change(
+            {"speaker_boost_percent": "620.0"},
+            store=store,
+            environ=MINIMAL,
+            apply_live=adopted.append,
+        )
+
+        assert store.saved == [{"speaker_boost_percent": "620.0"}]
+        assert resolved.settings.speaker_boost_percent == pytest.approx(620.0)
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(620.0),
+        ]
+
+    def test_nothing_is_adopted_when_nothing_is_running(self) -> None:
+        """The settings interface can be served before the application exists."""
+        store = _RecordingStore()
+
+        resolved = apply_settings_change({}, store=store, environ=MINIMAL)
+
+        assert store.saved == [{}]
+        assert resolved.settings.device_name == "reachy-mini-1"
 
 
 class TestTheOverrideStore:

@@ -62,9 +62,9 @@ from reachy_mini_ha_satellite.config import (
     ConfigurationError,
     Resolution,
     Settings,
+    apply_settings_change,
     canonical_string,
     configuration_report,
-    load_settings,
     resolved_configuration,
     setting_names,
     variable_for,
@@ -323,8 +323,12 @@ def create_app(
         try:
             previous = store.load()
             wanted = _overrides_from(fields, base=base, previous=previous)
-            resolved = load_settings(source, wanted)
-            store.save(wanted)
+            resolved = apply_settings_change(
+                wanted,
+                store=store,
+                environ=source,
+                apply_live=None if application is None else application.apply_live,
+            )
         except ConfigurationError as error:
             # Every way this can refuse ends here, and every one of them ends
             # with the operator reading why rather than a traceback. A file that
@@ -341,8 +345,6 @@ def create_app(
             if previous.get(name, base[name]) != wanted.get(name, base[name])
         )
         current.resolution = resolved
-        if application is not None:
-            application.apply_live(resolved.settings)
 
         return _redirect_after(changed)
 
@@ -362,16 +364,18 @@ def create_app(
             return _refuse_cross_site()
         try:
             previous = store.load()
-            resolved = load_settings(source, {})
-            store.save({})
+            resolved = apply_settings_change(
+                {},
+                store=store,
+                environ=source,
+                apply_live=None if application is None else application.apply_live,
+            )
         except ConfigurationError as error:
             return HTMLResponse(
                 _page(current.resolution, store, application, error=str(error)),
                 status_code=400,
             )
         current.resolution = resolved
-        if application is not None:
-            application.apply_live(resolved.settings)
         return _redirect_after(tuple(sorted(previous)))
 
     async def stop(request: Request) -> Response:
