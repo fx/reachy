@@ -159,8 +159,9 @@ player, so a level set from the media-player card moves the slider without
 waiting for the next subscription. It derives that level **from the request**
 rather than reading it back from the media player, which is what makes the
 answer independent of whether the protocol's fan-out reached the media player
-first: nothing is read from post-command state except `previous_volume`, which
-neither MUTE nor UNMUTE modifies.
+first: the one thing read from post-command state is `previous_volume`, and only
+in the UNMUTE branch — which is the one command that does not itself change it,
+so that read gives the same answer whichever of the two entities ran first.
 
 ### Where a boost goes
 
