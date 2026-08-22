@@ -256,6 +256,28 @@ class AudioPort(Protocol):
         """Let go of the daemon's media interface. Idempotent."""
         ...
 
+    def set_boost(self, percent: float) -> None:
+        """Set the software boost both outputs amplify by.
+
+        **Here rather than on `PlaybackPort`, and deliberately.** That port is
+        congruent with `esphome.seams.MediaPlayback` — one object satisfies both
+        so that nothing translates between them — and the vendored protocol
+        layer never asks for a boost. Declaring it there would break a stated
+        constraint to gain nothing, since no vendored caller would ever reach
+        it.
+
+        The boost is set for the device rather than for one output: it is makeup
+        gain for how quietly Home Assistant's text-to-speech arrives, and both
+        outputs play through the same speaker. So this reaches music and speech
+        at once.
+
+        Args:
+            percent: The boost, in percent, where 100 is unity. Validated by
+                `Settings` and clamped again by the entity that offers it; an
+                adapter is not the place a second bound is invented.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class HeadPose:

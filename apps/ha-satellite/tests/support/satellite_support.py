@@ -405,6 +405,7 @@ class FakePlayback:
         self.paused = 0
         self.resumed = 0
         self.volume = 100.0
+        self.boost = 100.0
         self.duck_factor: float | None = None
         self._playing = False
         self._callback: Callable[[], None] | None = None
@@ -457,6 +458,14 @@ class FakePlayback:
             volume: The level in percent.
         """
         self.volume = volume
+
+    def set_boost(self, percent: float) -> None:
+        """Record a boost.
+
+        Args:
+            percent: The software boost, in percent.
+        """
+        self.boost = percent
 
     def duck(self, factor: float = 0.5) -> None:
         """Record a duck.
@@ -564,6 +573,7 @@ class FakeAudio:
         self._speech = speech if speech is not None else FakePlayback()
         self.started = 0
         self.stopped = 0
+        self.boosts: list[float] = []
 
     @property
     def capture(self) -> FakeCapture:
@@ -601,6 +611,16 @@ class FakeAudio:
         self.stopped += 1
         self._music.stop()
         self._speech.stop()
+
+    def set_boost(self, percent: float) -> None:
+        """Record a boost, and fan it out to both outputs as a real one does.
+
+        Args:
+            percent: The software boost, in percent.
+        """
+        self.boosts.append(percent)
+        self._music.set_boost(percent)
+        self._speech.set_boost(percent)
 
 
 # --- Motion ------------------------------------------------------------------
