@@ -1,9 +1,11 @@
 """The two speaker controls: what they declare, what they report, what they set.
 
-Every test here drives the real entity classes, and the ones about ordering drive
-them through the real `VoiceSatelliteProtocol` fan-out rather than by calling
-`handle_message` twice by hand — because what those tests are about is the
-fan-out, and a hand-rolled loop would be a test of the loop the test wrote.
+Every test here drives the real entity classes, and the ones about ordering and
+about muting drive them through the real `VoiceSatelliteProtocol.handle_message`
+rather than by looping over `state.entities` by hand — because what those tests
+are about is that fan-out, and a hand-rolled loop would be a test of the loop the
+test wrote. `handle_message` is a generator that yields the responses rather than
+writing them, so driving it opens nothing.
 
 Nothing sleeps and no socket is opened. Two tests do read a file: the volume
 control persists through the vendored `ServerState.persist_volume`, so what is on
@@ -12,11 +14,13 @@ description of it. That file is in the fake filesystem the `tmp_path` fixture
 installs, so no unit-test rule is bent.
 
 The state and the protocol are built with `vendored_server_state` and the real
-`VoiceSatelliteProtocol` rather than with `make_satellite`, which the carried
-tests use. `make_satellite` builds its own state, and half of the tests here need
-entities appended to a state *before* the protocol is constructed over it — which
-is what the composition root does. Constructing the protocol directly is the only
-way to stand at that point.
+`VoiceSatelliteProtocol` rather than with `vendored_satellite`, the carried
+`make_satellite` helper the other suites reach for. That helper builds its own
+state and constructs the protocol over it in one call, and half of the tests here
+need entities appended to a state *before* the protocol is constructed — which is
+what the composition root does. Constructing the protocol directly is the only
+way to stand at that point, and its mocked writer is not needed for anything
+here, because nothing below reaches the code that writes.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -417,20 +421,18 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
         """
         state = vendored_server_state(tmp_path=tmp_path)
         if ours_first:
-            state.entities.append(
-                SpeakerVolumeNumberEntity(state=state, key=len(state.entities)),
-            )
-            VoiceSatelliteProtocol(state)
+            ours = SpeakerVolumeNumberEntity(state=state, key=len(state.entities))
+            state.entities.append(ours)
+            satellite = VoiceSatelliteProtocol(state)
         else:
-            VoiceSatelliteProtocol(state)
-            state.entities.append(
-                SpeakerVolumeNumberEntity(state=state, key=len(state.entities)),
-            )
+            satellite = VoiceSatelliteProtocol(state)
+            ours = SpeakerVolumeNumberEntity(state=state, key=len(state.entities))
+            state.entities.append(ours)
         player = state.media_player_entity
         assert player is not None
 
         levels = [
-            _levels_from(state, command)
+            _levels_from(satellite, ours.key, command)
             for command in (
                 MediaPlayerCommandRequest(
                     key=player.key,
@@ -650,6 +652,8 @@ class _Control:
 
     Attributes:
         state: The vendored protocol layer's state.
+        satellite: The real protocol built over it, whose `handle_message` is
+            the fan-out a test sends a media-player command through.
         entity: The speaker-volume control.
         player: The media player the vendored layer built beside it.
         music: The output Home Assistant drives.
@@ -657,6 +661,7 @@ class _Control:
     """
 
     state: ServerState
+    satellite: VoiceSatelliteProtocol
     entity: SpeakerVolumeNumberEntity
     player: MediaPlayerEntity
     music: FakePlayback
@@ -679,7 +684,8 @@ def control(tmp_path: Path) -> _Control:
         tmp_path: Where preferences are written.
 
     Returns:
-        The state, the control, the media player, and the two outputs.
+        The state, the protocol, the control, the media player, and the two
+        outputs.
     """
     music, speech = FakePlayback(), FakePlayback()
     state = vendored_server_state(
@@ -689,11 +695,12 @@ def control(tmp_path: Path) -> _Control:
     )
     entity = SpeakerVolumeNumberEntity(state=state, key=len(state.entities))
     state.entities.append(entity)
-    VoiceSatelliteProtocol(state)
+    satellite = VoiceSatelliteProtocol(state)
     player = state.media_player_entity
     assert player is not None
     return _Control(
         state=state,
+        satellite=satellite,
         entity=entity,
         player=player,
         music=music,
@@ -709,7 +716,8 @@ def _send_command(control: _Control, command: MediaPlayerCommand) -> None:
         command: What Home Assistant sent the media player.
     """
     _fan_out(
-        control.state,
+        control.satellite,
+        control.entity.key,
         MediaPlayerCommandRequest(
             key=control.player.key,
             has_command=True,
@@ -718,38 +726,48 @@ def _send_command(control: _Control, command: MediaPlayerCommand) -> None:
     )
 
 
-def _fan_out(state: ServerState, msg: message.Message) -> list[message.Message]:
-    """Hand one message to every entity, as the vendored protocol layer does.
+def _fan_out(
+    satellite: VoiceSatelliteProtocol,
+    key: int,
+    msg: message.Message,
+) -> list[message.Message]:
+    """Send one message the way Home Assistant does, through the real protocol.
 
-    The one loop, because the ordering tests are *about* this loop: a second
-    copy of it that filtered one entity's replies would be the thing under test
-    written twice, and the two could then disagree about the order.
+    The vendored `VoiceSatelliteProtocol.handle_message` is the fan-out these
+    tests are about, so it is the thing driven rather than reproduced: a loop
+    over `state.entities` written here would be the code under test written
+    twice, and the two could then disagree about the order.
 
     Args:
-        state: The state holding the entities.
+        satellite: The protocol built over the state holding the entities.
+        key: The speaker-volume control's key.
         msg: What arrived.
 
     Returns:
-        What the speaker-volume control answered with. Every other entity is
-        handed the message and its replies are drained and dropped, which is
-        what the protocol layer does with the ones a test is not asking about.
+        What the speaker-volume control answered with, picked out by its key —
+        which is how Home Assistant itself tells one entity's state from
+        another's in a merged stream. Every other entity's replies are dropped.
     """
-    ours: list[message.Message] = []
-    for entity in list(state.entities):
-        answered = list(entity.handle_message(msg))
-        if isinstance(entity, SpeakerVolumeNumberEntity):
-            ours.extend(answered)
-    return ours
+    return [
+        answer
+        for answer in satellite.handle_message(msg)
+        if isinstance(answer, NumberStateResponse) and answer.key == key
+    ]
 
 
-def _levels_from(state: ServerState, msg: MediaPlayerCommandRequest) -> float:
+def _levels_from(
+    satellite: VoiceSatelliteProtocol,
+    key: int,
+    msg: MediaPlayerCommandRequest,
+) -> float:
     """Fan one command out and report what the speaker-volume control answered.
 
     Args:
-        state: The state holding the entities.
+        satellite: The protocol built over the state holding the entities.
+        key: The speaker-volume control's key.
         msg: The command Home Assistant sent.
 
     Returns:
         The level the control reported, in percent.
     """
-    return float(_only(_fan_out(state, msg), NumberStateResponse).state)
+    return float(_only(_fan_out(satellite, key, msg), NumberStateResponse).state)
