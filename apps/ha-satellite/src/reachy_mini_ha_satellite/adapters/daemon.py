@@ -182,10 +182,22 @@ class MediaInterface(Protocol):
 class RobotHandle(Protocol):
     """The handle the daemon hands a running application.
 
-    Deliberately three members. The SDK's own object has forty, and naming only
-    what the adapters call is what keeps "which parts of the SDK does this
-    application depend on?" a question with a short answer.
+    Deliberately five members. The SDK's own object has forty, and naming only
+    what startup and the adapters call is what keeps "which parts of the SDK does
+    this application depend on?" a question with a short answer.
     """
+
+    def enable_motors(self, ids: list[str] | None = None) -> None:
+        """Enable all motors, or only the SDK identifiers supplied.
+
+        Args:
+            ids: Motor identifiers, or `None` for every motor.
+        """
+        ...
+
+    def wake_up(self) -> None:
+        """Perform the SDK's controlled wake motion and sound."""
+        ...
 
     @property
     def media(self) -> MediaInterface:

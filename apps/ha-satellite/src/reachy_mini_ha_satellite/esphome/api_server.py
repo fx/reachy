@@ -82,10 +82,7 @@ class APIServer(asyncio.Protocol):
         elif isinstance(msg_inst, DisconnectRequest):
             self.send_messages([DisconnectResponse()])
             _LOGGER.debug("Disconnect requested")
-            if self._transport:
-                self._transport.close()
-                self._transport = None
-                self._writelines = None
+            self.close()
         elif isinstance(msg_inst, PingRequest):
             self.send_messages([PingResponse()])
         elif msgs := self.handle_message(msg_inst):
@@ -170,6 +167,13 @@ class APIServer(asyncio.Protocol):
         self._writelines = None
         self._loop = None
         self._loop_thread_id = None
+
+    def close(self) -> None:
+        """Close this accepted protocol transport, once."""
+        transport, self._transport = self._transport, None
+        self._writelines = None
+        if transport is not None:
+            transport.close()
 
     def _read_varuint(self) -> int:
         """Read a varuint from the buffer or -1 if the buffer runs out of bytes."""

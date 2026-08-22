@@ -38,11 +38,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import inspect
 import json
 import logging
 import math
 import threading
 import time
+from contextvars import Context, ContextVar
 from dataclasses import fields
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -111,7 +113,7 @@ from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
 from reachy_mini_ha_satellite.ports import Detections, SourceSelection
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 from reachy_mini_ha_satellite.web import create_app
-from reachy_session_client import Credential, SessionClient
+from reachy_session_client import DEFAULT_BACKOFF, Backoff, Credential, SessionClient
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -239,17 +241,312 @@ def _guard(what: str, release: Callable[[], None]) -> None:
         _LOGGER.exception("%s failed to stop cleanly", what)
 
 
-async def _aguard(what: str, release: Callable[[], Awaitable[None]]) -> None:
-    """The same, for a step that has to be awaited.
+_CLEANUP_TIMEOUT_SECONDS: Final = 5.0
+
+
+class _CleanupTaskScope:
+    """Tasks created from one cleanup coroutine and its descendants."""
+
+    def __init__(self, preexisting: set[asyncio.Task[Any]]) -> None:
+        """Start with no descendants and ordinary task creation enabled.
+
+        Args:
+            preexisting: Tasks already on the loop, which this scope never owns.
+        """
+        self.preexisting = preexisting
+        self.tasks: set[asyncio.Future[Any]] = set()
+        self.finalizing = False
+
+
+_CLEANUP_TASK_OWNER: Final[ContextVar[_CleanupTaskScope | None]] = ContextVar(
+    "satellite_cleanup_task_owner",
+    default=None,
+)
+
+
+def _consume_cleanup_result(
+    task: asyncio.Future[Any],
+    *,
+    what: str,
+    forced: bool = False,
+) -> None:
+    """Consume one cleanup task's result without leaking an exception.
+
+    Args:
+        task: The child whose result must be retrieved.
+        what: What the child was releasing, for the log line.
+        forced: Whether its coroutine was force-closed after ignoring cancel.
+    """
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except (Exception, asyncio.CancelledError):
+        if forced:
+            _LOGGER.error("%s was force-finalized after ignoring cancellation", what)
+        else:
+            _LOGGER.error("%s failed to stop cleanly", what)
+
+
+async def _cancelled_cleanup_child() -> None:
+    """Provide a never-started coroutine for a directly canceled task."""
+
+
+def _factory_accepts_context(
+    factory: Callable[..., asyncio.Future[Any]],
+) -> bool:
+    """Return whether a task factory declares the modern context keyword."""
+    try:
+        parameters = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "context" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _install_cleanup_task_tracking(
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[Callable[..., asyncio.Future[Any]] | None, _CleanupTaskScope]:
+    """Install scoped descendant tracking and return prior factory plus scope."""
+    previous = loop.get_task_factory()
+    scope = _CleanupTaskScope(asyncio.all_tasks(loop))
+
+    def _tracked(
+        task_loop: asyncio.AbstractEventLoop,
+        coroutine: Coroutine[Any, Any, Any],
+        context: Context | None = None,
+    ) -> asyncio.Future[Any]:
+        inherited_owner = _CLEANUP_TASK_OWNER.get()
+        if inherited_owner is not None and inherited_owner.finalizing:
+            # Do not delegate this branch: an eager factory would execute the
+            # submitted coroutine through its finalizer before it can be canceled,
+            # letting each finalizer spawn the next task forever.
+            coroutine.close()
+            canceled = asyncio.Task(_cancelled_cleanup_child(), loop=task_loop)
+            canceled.cancel()
+            inherited_owner.tasks.add(canceled)
+            return canceled
+
+        derived_context = context.copy() if context is not None else None
+        if inherited_owner is not None and derived_context is not None:
+            derived_context.run(_CLEANUP_TASK_OWNER.set, inherited_owner)
+
+        if previous is None:
+            created: asyncio.Future[Any] = asyncio.Task(
+                coroutine,
+                loop=task_loop,
+                context=derived_context,
+            )
+        elif derived_context is None:
+            # The task-factory protocol was two positional arguments before the
+            # context keyword existed; preserve that valid legacy surface.
+            created = previous(task_loop, coroutine)
+        elif _factory_accepts_context(previous):
+            created = cast("Any", previous)(
+                task_loop,
+                coroutine,
+                context=derived_context,
+            )
+        else:
+            created = derived_context.run(previous, task_loop, coroutine)
+        if inherited_owner is not None:
+            inherited_owner.tasks.add(created)
+        return created
+
+    loop.set_task_factory(_tracked)
+    return previous, scope
+
+
+def _restore_task_factory(
+    loop: asyncio.AbstractEventLoop,
+    previous: Callable[..., asyncio.Future[Any]] | None,
+) -> None:
+    """Restore the event loop's task factory after one cleanup step."""
+    loop.set_task_factory(previous)
+
+
+async def _finalization_turn() -> asyncio.CancelledError | None:
+    """Give finalization one loop turn while deferring owner cancellation.
+
+    Returns:
+        Cancellation delivered during the turn, for the caller to re-raise only
+        after the cleanup child has reached a terminal state.
+    """
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError as error:
+        return error
+    return None
+
+
+async def _stop_cleanup_descendants(
+    scope: _CleanupTaskScope,
+    *,
+    outer: asyncio.Task[None],
+    what: str,
+) -> asyncio.CancelledError | None:
+    """Force and consume cleanup-owned descendants to a fixed point.
+
+    Args:
+        scope: The task-creation scope installed before the cleanup started.
+        outer: The already-finalized top-level cleanup task.
+        what: What was being released, for static log text.
+
+    Returns:
+        Owner cancellation delivered during descendant finalization.
+    """
+    deferred: asyncio.CancelledError | None = None
+    consumed: set[asyncio.Future[Any]] = set()
+    scope.finalizing = True
+    while True:
+        candidates = scope.tasks - scope.preexisting - {outer} - consumed
+        if not candidates:
+            return deferred
+        for task in candidates:
+            if task.done():
+                _consume_cleanup_result(task, what=what, forced=True)
+                consumed.add(task)
+                continue
+            if isinstance(task, asyncio.Task):
+                coroutine = task.get_coro()
+                if coroutine is not None:
+                    try:
+                        coroutine.close()
+                    except (Exception, asyncio.CancelledError):
+                        _LOGGER.error(
+                            "%s descendant raised while being force-finalized", what
+                        )
+            task.cancel()
+        repeated = await _finalization_turn()
+        if deferred is None:
+            deferred = repeated
+        for task in candidates:
+            if task.done():
+                _consume_cleanup_result(task, what=what, forced=True)
+                consumed.add(task)
+
+
+async def _stop_cleanup_task(
+    cleanup: asyncio.Task[None],
+    *,
+    scope: _CleanupTaskScope,
+    what: str,
+) -> asyncio.CancelledError | None:
+    """Cancel and finalize a child without letting re-cancellation abandon it.
+
+    Args:
+        cleanup: The child to finish before application shutdown returns.
+        scope: Tasks created by this cleanup and no pre-existing loop task.
+        what: What the child was releasing, for the log line.
+
+    Returns:
+        Owner cancellation delivered during finalization, for re-raising after
+        the child is done.
+    """
+    cleanup.cancel()
+    deferred = await _finalization_turn()
+    if cleanup.done():
+        _consume_cleanup_result(cleanup, what=what)
+        descendant_cancel = await _stop_cleanup_descendants(
+            scope,
+            outer=cleanup,
+            what=what,
+        )
+        return deferred or descendant_cancel
+
+    coroutine = cleanup.get_coro()
+    if coroutine is not None:
+        try:
+            coroutine.close()
+        except (Exception, asyncio.CancelledError):
+            _LOGGER.error("%s raised while being force-finalized", what)
+    cleanup.cancel()
+    repeated = await _finalization_turn()
+    if deferred is None:
+        deferred = repeated
+    if cleanup.done():
+        _consume_cleanup_result(cleanup, what=what, forced=True)
+    else:
+        _LOGGER.error("%s remained pending after force-finalization", what)
+    descendant_cancel = await _stop_cleanup_descendants(
+        scope,
+        outer=cleanup,
+        what=what,
+    )
+    return deferred or descendant_cancel
+
+
+async def _aguard(
+    what: str,
+    release: Callable[[], Awaitable[None]],
+    timeout_seconds: float,
+) -> None:
+    """Bound and guard one asynchronous shutdown step.
+
+    The release runs in a child task so a coroutine that suppresses cancellation
+    cannot extend this caller's deadline. A child that ignores ordinary task
+    cancellation is force-closed and observed before this returns. Tasks spawned
+    inside that cleanup are tracked from creation and finalized to a fixed point,
+    while tasks that predate it are never touched, so the process-level runner
+    inherits no cleanup-owned task. Owner cancellation delivered during
+    finalization is retained for re-raising only after every owned task is
+    terminal.
 
     Args:
         what: What is being let go of, for the log line.
         release: How to let go of it.
+        timeout_seconds: The deadline for this step alone. Later cleanup still
+            runs if it expires.
     """
-    try:
+
+    async def _release() -> None:
         await release()
-    except Exception:
-        _LOGGER.exception("%s failed to stop cleanly", what)
+
+    loop = asyncio.get_running_loop()
+    previous_factory, scope = _install_cleanup_task_tracking(loop)
+    owner_token = _CLEANUP_TASK_OWNER.set(scope)
+    try:
+        try:
+            cleanup = asyncio.create_task(_release(), name="satellite-cleanup")
+        except Exception:
+            _LOGGER.error("%s failed to start cleanup", what)
+            return
+        scope.tasks.discard(cleanup)
+        try:
+            done, _pending = await asyncio.wait(
+                {cleanup},
+                timeout=timeout_seconds,
+            )
+        except asyncio.CancelledError as error:
+            repeated = await _stop_cleanup_task(
+                cleanup,
+                scope=scope,
+                what=what,
+            )
+            raise (repeated or error) from None
+        if cleanup not in done:
+            _LOGGER.error("%s timed out while stopping; continuing cleanup", what)
+            repeated = await _stop_cleanup_task(
+                cleanup,
+                scope=scope,
+                what=what,
+            )
+            if repeated is not None:
+                raise repeated
+            return
+        _consume_cleanup_result(cleanup, what=what)
+        repeated = await _stop_cleanup_descendants(
+            scope,
+            outer=cleanup,
+            what=what,
+        )
+        if repeated is not None:
+            raise repeated
+    finally:
+        _CLEANUP_TASK_OWNER.reset(owner_token)
+        _restore_task_factory(loop, previous_factory)
 
 
 def configure_logging(settings: Settings) -> None:
@@ -302,6 +599,7 @@ class SatelliteApplication:
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        cleanup_timeout_seconds: float = _CLEANUP_TIMEOUT_SECONDS,
     ) -> None:
         """Hold everything the application runs on.
 
@@ -316,6 +614,8 @@ class SatelliteApplication:
             clock: The monotonic source the behaviour layer is given.
             sleep: How the loop waits between ticks. Injected so the test suite
                 drives a hundred ticks without spending five seconds.
+            cleanup_timeout_seconds: The deadline for each asynchronous cleanup
+                step independently. Injected as zero by the non-returning test.
         """
         self._settings = settings
         self._audio = audio
@@ -326,6 +626,7 @@ class SatelliteApplication:
         self._clock = clock
         self._sleep = sleep
         self._tick_seconds = settings.behaviour_tick_seconds
+        self._cleanup_timeout_seconds = cleanup_timeout_seconds
         # What the perception source was built for. Held rather than re-read,
         # because it is decided once at startup — see `apply_live`.
         self._tracking_enabled = settings.face_tracking_enabled
@@ -519,11 +820,30 @@ class SatelliteApplication:
         _guard("motion", self._motion.release)
         _guard("the media interface", self._audio.stop)
 
+        cancelled: asyncio.CancelledError | None = None
         for service in reversed(self._services):
-            await _aguard("a service", service.aclose)
+            try:
+                await _aguard(
+                    "a service",
+                    service.aclose,
+                    self._cleanup_timeout_seconds,
+                )
+            except asyncio.CancelledError as error:
+                if cancelled is None:
+                    cancelled = error
 
-        await _aguard("the perception source", self._perception.aclose)
+        try:
+            await _aguard(
+                "the perception source",
+                self._perception.aclose,
+                self._cleanup_timeout_seconds,
+            )
+        except asyncio.CancelledError as error:
+            if cancelled is None:
+                cancelled = error
         _LOGGER.info("satellite.stopped")
+        if cancelled is not None:
+            raise cancelled
 
 
 # How long shutdown waits for either audio thread to notice. Both are already
@@ -542,10 +862,16 @@ _DETECTION_BACKLOG: Final = 50
 # then is a pump that has already been told to stop.
 _SENTINEL_ATTEMPTS_MARGIN: Final = 4
 
-# How often to say that detection is falling behind: once for the first drop,
-# and once per hundred after that. An overloaded robot must not spend what is
-# left of its processor writing about being overloaded.
+# How often to say that detection or a pump edge is failing: once for the first,
+# and once per hundred after that. A degraded robot must not spend what is left
+# of its processor repeatedly writing the same traceback.
 _DROP_REPORT_EVERY: Final = 100
+_CHUNK_FAILURE_REPORT_EVERY: Final = 100
+
+# A failed capture read is the only pump failure that happens before the capture
+# adapter's own poll wait. Give the daemon a short recovery window rather than
+# turning a persistent failure into a hot loop.
+_PUMP_RETRY_SECONDS: Final = 0.05
 
 # The sample format every chunk crossing the capture seam is in, spelled the way
 # numpy spells it. Derived from the seam's own constant rather than written out,
@@ -632,6 +958,9 @@ class EsphomeService:
         start_thread: Callable[[Callable[[], None]], Any] | None = None,
         build_webrtc: Callable[[int, int], WebRTCLike] = WebRTCProcessor,
         backlog: int = _DETECTION_BACKLOG,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        backoff: Backoff = DEFAULT_BACKOFF,
+        pump_sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         """Describe the server without binding anything.
 
@@ -649,7 +978,8 @@ class EsphomeService:
                 loop's `create_server`; injected so a test drives the pump and
                 the lifecycle without opening one.
             start_thread: How to run the two threads. Defaults to daemon
-                threads; injected so a test drives `pump` and `detect` itself.
+                threads; injected so a test drives `pump`, `detect` and listener
+                health checks itself rather than leaving autonomous work behind.
             build_webrtc: How to make the microphone conditioner, given the
                 gain and the noise-suppression level. Injected so a test can
                 prove the wiring without exercising the native library.
@@ -657,6 +987,11 @@ class EsphomeService:
                 audio: long enough to ride out a slow inference, short enough
                 that a detector which has fallen behind is answering about
                 something that was recently said.
+            sleep: How listener supervision waits between health checks and
+                retries. Injected so tests advance without wall time.
+            backoff: The increasing, capped delay after replacement binds fail.
+            pump_sleep: How a failed capture read avoids a hot retry loop.
+                Injected so tests perform no wall-time wait.
         """
         self._state = state
         self._capture = capture
@@ -667,10 +1002,16 @@ class EsphomeService:
         self._listen = listen
         self._start_thread = start_thread
         self._build_webrtc = build_webrtc
+        self._sleep = sleep
+        self._backoff = backoff
+        self._pump_sleep = pump_sleep
         self._server: Any = None
+        self._supervisor: asyncio.Task[None] | None = None
         self._threads: list[Any] = []
         self._running = False
+        self._closing = False
         self._webrtc: WebRTCLike | None = None
+        self._chunk_failures: dict[str, int] = {}
         # `None` is the sentinel that ends `detect`. Bounded, because an
         # unbounded queue in front of a detector that cannot keep up is a
         # memory leak ending in the daemon killing the application.
@@ -682,61 +1023,123 @@ class EsphomeService:
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
-        """Bind the port, then start feeding the microphone into the protocol."""
+        """Bind the port, supervise it, then feed audio into the protocol."""
         loop = asyncio.get_running_loop()
         self._loop = loop
         self._tap.bind(loop)
 
-        listen = self._listen
-        if listen is None:
-            listen = loop.create_server
-        self._server = await listen(
-            lambda: VoiceSatelliteProtocol(self._state),
-            self._host,
-            self._port,
-        )
-        _LOGGER.info(
-            "esphome.listening host=%s port=%s name=%s",
-            self._host,
-            self._port,
-            self._state.name,
-        )
-
+        # Initial binding stays startup-fatal. Retrying here would advertise an
+        # application whose protocol never started; supervision owns only a
+        # listener that was demonstrably serving and then stopped.
+        await self._bind_listener()
+        if self._closing:
+            return
         self._running = True
         start_thread = self._start_thread
         if start_thread is None:
+            self._supervisor = asyncio.create_task(
+                self._supervise_listener(),
+                name="satellite-esphome-listener",
+            )
+            self._supervisor.add_done_callback(_report_if_it_failed)
             start_thread = _daemon_thread
         self._threads = [start_thread(self.pump)]
         if self._detector is not None:
             self._threads.append(start_thread(self.detect))
 
+    async def _bind_listener(self) -> None:
+        """Perform one listener bind, propagating any refusal to its caller."""
+        listen = self._listen
+        if listen is None:
+            loop = self._loop
+            if loop is None:
+                message = "the ESPHome service has no event loop"
+                raise RuntimeError(message)
+            listen = loop.create_server
+        server = await listen(
+            lambda: VoiceSatelliteProtocol(self._state),
+            self._host,
+            self._port,
+        )
+        if self._closing:
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+            return
+        self._server = server
+        _LOGGER.info("esphome.listening")
+
+    async def check_listener(self) -> None:
+        """Rebind only a listener that demonstrably stopped while still owned."""
+        if not self._running:
+            return
+        server = self._server
+        if server is not None and server.is_serving():
+            return
+        if server is not None:
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+        self._server = None
+        _LOGGER.warning("esphome.listener stopped unexpectedly; rebinding")
+        await self._bind_listener()
+
+    async def _supervise_listener(self) -> None:
+        """Keep checking listener health and retry replacement binds with a cap."""
+        attempt = 0
+        while self._running:
+            try:
+                await self.check_listener()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                attempt += 1
+                delay = self._backoff.delay(attempt)
+                _LOGGER.error(
+                    "esphome.listener rebind failed; retrying in %.1f seconds",
+                    delay,
+                )
+                await self._sleep(delay)
+                continue
+            attempt = 0
+            await self._sleep(self._backoff.initial_seconds)
+
     def pump(self) -> None:
-        """Feed captured audio into whichever connection is live.
+        """Feed captured audio into the live connection, isolating each chunk.
 
         Public because it is the whole of what the thread does, and a test that
         drives it directly is testing the feed rather than the thread pool.
         """
         try:
             while self._running:
-                chunk = self._capture.read_chunk()
+                try:
+                    chunk = self._capture.read_chunk()
+                except Exception:
+                    self._chunk_failed("microphone capture")
+                    self._pump_sleep(_PUMP_RETRY_SECONDS)
+                    continue
                 if chunk is None:
                     # The capture source closed, which is what a released media
                     # interface looks like. There is nothing left to feed.
                     return
-                conditioned = self._condition(chunk)
+                try:
+                    conditioned = self._condition(chunk)
+                except Exception:
+                    self._chunk_failed("microphone conditioning")
+                    continue
                 if conditioned is None:
                     continue
                 primary, reference = conditioned
                 satellite = self._state.satellite
                 if satellite is not None:
-                    # Streaming first, always, and before anything that could be
-                    # slow. This is the half that carries a conversation already
-                    # in progress, and it must not wait on the half that starts
-                    # one. A chunk arriving while nobody is connected is dropped
-                    # rather than queued: Home Assistant transcribes live audio,
-                    # and a backlog replayed at connection time would be a
-                    # conversation that already happened.
-                    satellite.handle_audio(primary, reference)
+                    # Forwarding is not allowed to own local detection. A stale
+                    # Home Assistant transport may reject this chunk, but the
+                    # network-independent wake model still receives the same one
+                    # below and the pump continues with the next.
+                    try:
+                        satellite.handle_audio(primary, reference)
+                    except Exception:
+                        self._chunk_failed("Home Assistant audio forwarding")
                 # Detection runs whether or not Home Assistant is there, and
                 # that is REQ-044 rather than a nicety. `connection_lost` sets
                 # `state.satellite` to `None`, so a robot whose network has
@@ -753,6 +1156,17 @@ class EsphomeService:
             # However the pump ended, the detector is owed the news: `detect`
             # blocks on the queue and would otherwise never return.
             self._end_detection()
+
+    def _chunk_failed(self, edge: str) -> None:
+        """Rate-limit a failure to its static stage and aggregate count."""
+        failures = self._chunk_failures.get(edge, 0) + 1
+        self._chunk_failures[edge] = failures
+        if failures % _CHUNK_FAILURE_REPORT_EVERY == 1:
+            _LOGGER.error(
+                "%s failed for a chunk; continuing (%d failures)",
+                edge,
+                failures,
+            )
 
     def detect(self) -> None:
         """Run the wake-word models over the audio the pump has forwarded.
@@ -787,7 +1201,7 @@ class EsphomeService:
                 # it. The robot would go on streaming audio and never wake
                 # again — which is the failure this half of the service exists
                 # to fix, arrived at from the other direction.
-                _LOGGER.exception("wake-word detection failed on a chunk")
+                self._chunk_failed("wake-word detection")
                 continue
             if not activations.woken and not activations.stopped:
                 # Which is nearly every chunk. Nothing is handed to the loop for
@@ -948,13 +1362,38 @@ class EsphomeService:
         )
 
     async def aclose(self) -> None:
-        """Stop accepting connections and stop both threads."""
+        """Stop supervision, accepted protocols, the listener and both threads."""
+        self._closing = True
         self._running = False
+        supervisor, self._supervisor = self._supervisor, None
+        if supervisor is not None:
+            supervisor.cancel()
+
+        # Stop new accepts before snapshotting the accepted protocols. A listening
+        # server's close does not close those transports, so close each explicitly
+        # and complete its lifecycle while the authoritative list still contains
+        # every survivor. A real transport schedules connection_lost for later; by
+        # then this synchronous call has made that duplicate callback idempotent.
         server, self._server = self._server, None
         if server is not None:
             server.close()
+        connections = list(self._state.connections)
+        for connection in connections:
+            with contextlib.suppress(Exception):
+                connection.close()
+            with contextlib.suppress(Exception):
+                connection.connection_lost(None)
+        # Preserve the shutdown postcondition even for a malformed protocol whose
+        # lifecycle callback raised before deregistering itself.
+        self._state.connections.clear()
+        self._state.satellite = None
+        self._state.connected = False
+        if server is not None:
             with contextlib.suppress(Exception):
                 await server.wait_closed()
+        if supervisor is not None:
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await supervisor
         # The pump ends the detection thread on its way out, but only if it was
         # ever running. A service closed without having read a chunk has to end
         # it here instead, and a second sentinel is harmless.
@@ -1222,7 +1661,11 @@ def _report_if_it_failed(task: asyncio.Task[None]) -> None:
         return
     error = task.exception()
     if error is not None:
-        _LOGGER.error("the settings interface stopped: %s", error)
+        _LOGGER.error(
+            "%s stopped unexpectedly (%s)",
+            task.get_name(),
+            type(error).__name__,
+        )
 
 
 def _sound_paths() -> dict[str, str]:
@@ -1694,6 +2137,11 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
         handle: What the daemon hands a running application.
         stop: Set by the daemon's termination signal.
 
+    A stop requested before motor enable, between motor enable and controlled
+    wake, or after controlled wake prevents the next hardware or composition
+    boundary. The blocking SDK call already running on a worker thread is allowed
+    to finish; Python cannot safely cancel it in the middle.
+
     Raises:
         ConfigurationError: If the environment is not usable. Raised rather
             than reported, because the caller is what decides whether this is a
@@ -1703,5 +2151,19 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     resolution = load_settings(overrides=store.load())
     configure_logging(resolution.settings)
     log_resolved_configuration(resolution)
+    if stop.is_set():
+        _LOGGER.info("satellite.start skipped; stop already requested")
+        return
+    _LOGGER.info("satellite.wake enabling_motors")
+    await in_thread(handle.enable_motors)
+    if stop.is_set():
+        _LOGGER.info("satellite.wake skipped; stop requested after motor enable")
+        return
+    _LOGGER.info("satellite.wake starting")
+    await in_thread(handle.wake_up)
+    _LOGGER.info("satellite.wake complete")
+    if stop.is_set():
+        _LOGGER.info("satellite.start skipped; stop requested during controlled wake")
+        return
     application = build_application(resolution, handle)
     await application.run(stop)

@@ -99,14 +99,23 @@ enumerable. It is:
    extend to it: a suppression naming what it suppresses is the one rule worth
    keeping even here.
 
-Nothing else was touched. In particular the code is not reformatted, its
-docstrings are not rewritten, and its typing is not modernised — the shared ruff
-and mypy configuration names these files and stands down, which is why the
-diff above is the whole diff.
+8. `api_server.py` exposes an idempotent transport close for application
+   shutdown. `satellite.py` tracks every accepted protocol but gives the active
+   slot and shared entities only to an authenticated one, moving each successful
+   handshake to the end so survivor promotion follows authentication rather than
+   transport-acceptance order. An unauthenticated loss performs no shared
+   disconnect; an authenticated loss promotes the newest authenticated survivor,
+   and only the final authenticated loss disconnects. Player-stop failures on
+   that final transition log static stage text without exception payloads.
 
-Neither seam is implemented here. Change 0012 supplies the daemon-backed
-adapters; until then this package imports, and its carried tests pass, with both
-holes open.
+Nothing beyond the changes enumerated above was touched. In particular the code
+is not reformatted, its docstrings are not rewritten, and its typing is not
+modernised — the shared ruff and mypy configuration names these files and stands
+down, which is why the diff above is the whole diff.
+
+Neither seam is implemented here. The daemon-backed implementations live outside
+this directory, so the vendored package remains independent of Reachy-specific
+code.
 
 Assets
 ------

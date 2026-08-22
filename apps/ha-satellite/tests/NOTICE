@@ -73,6 +73,11 @@ What was changed
 5. Example addresses use the RFC 5737 documentation ranges. This repository is
    public and requires that of every tracked file.
 
-Nothing else was touched — in particular the test bodies are not reformatted and
-not annotated, and the suppressions they carry are upstream's own. The shared
-ruff and mypy configuration names these files and stands down.
+6. `test_satellite_esphome_protocol.py` requires construction to leave the shared
+   active-satellite slot empty until authentication and marks the disconnect cases
+   that exercise shared state as authenticated. This matches the authentication
+   ownership boundary carried in the derived protocol.
+
+Nothing beyond the changes above was touched — in particular the test bodies are
+not reformatted or annotated, and the suppressions they carry are upstream's own.
+The shared ruff and mypy configuration names these files and stands down.

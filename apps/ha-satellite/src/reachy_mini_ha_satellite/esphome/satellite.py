@@ -95,8 +95,12 @@ class VoiceSatelliteProtocol(APIServer):
         super().__init__(state.name)
 
         self.state = state
-        self.state.satellite = self
-        self.state.connected = False
+        self._authenticated = False
+        # Accepted transports are not shared Home Assistant state. Authentication
+        # below is the only boundary that claims the active slot and reattaches the
+        # shared entities; constructing an overlap must not displace either.
+        if self.state.satellite is None:
+            self.state.connected = False
 
         # Report capabilities appropriately
         if state.output_only:
@@ -139,10 +143,6 @@ class VoiceSatelliteProtocol(APIServer):
         elif self.state.media_player_entity not in self.state.entities:
             self.state.entities.append(self.state.media_player_entity)
 
-        self.state.media_player_entity.server = self
-        self.state.media_player_entity.volume = state.volume
-        self.state.media_player_entity.previous_volume = state.volume
-
         # Add/update mute switch entity (like ESPHome Voice PE)
         mute_switch = self.state.mute_switch_entity
         if mute_switch is None:
@@ -158,11 +158,6 @@ class VoiceSatelliteProtocol(APIServer):
             self.state.mute_switch_entity = mute_switch
         elif mute_switch not in self.state.entities:
             self.state.entities.append(mute_switch)
-
-        mute_switch.server = self
-        mute_switch.update_get_muted(lambda: self.state.muted)
-        mute_switch.update_set_muted(self._set_muted)
-        mute_switch.sync_with_state()
 
         existing_thinking_sound_switches = [entity for entity in self.state.entities if isinstance(entity, ThinkingSoundEntity)]
         if existing_thinking_sound_switches:
@@ -192,11 +187,6 @@ class VoiceSatelliteProtocol(APIServer):
         else:
             self.state.thinking_sound_enabled = False
 
-        thinking_sound_switch.server = self
-        thinking_sound_switch.update_get_thinking_sound_enabled(lambda: self.state.thinking_sound_enabled)
-        thinking_sound_switch.update_set_thinking_sound_enabled(self._set_thinking_sound_enabled)
-        thinking_sound_switch.sync_with_state()
-
         # Add/update Wake Word 1 sensitivity number entity
         sensitivity_1_entity = self.state.sensitivity_1_number_entity
         if sensitivity_1_entity is None:
@@ -214,11 +204,6 @@ class VoiceSatelliteProtocol(APIServer):
         elif sensitivity_1_entity not in self.state.entities:
             self.state.entities.append(sensitivity_1_entity)
 
-        sensitivity_1_entity.server = self
-        sensitivity_1_entity.update_get_sensitivity(lambda: self.state.wake_word_1_threshold)
-        sensitivity_1_entity.update_set_sensitivity(self._set_sensitivity_1)
-
-        sensitivity_1_entity.sync_with_state()
         _LOGGER.debug("INIT: Wake Word 1 entity initialized with value %.3f", sensitivity_1_entity.value)
 
         # Add/update Wake Word 2 sensitivity number entity
@@ -238,12 +223,6 @@ class VoiceSatelliteProtocol(APIServer):
         elif sensitivity_2_entity not in self.state.entities:
             self.state.entities.append(sensitivity_2_entity)
 
-        sensitivity_2_entity.server = self
-        sensitivity_2_entity.update_get_sensitivity(lambda: self.state.wake_word_2_threshold)
-        sensitivity_2_entity.update_set_sensitivity(self._set_sensitivity_2)
-
-        sensitivity_2_entity.sync_with_state()
-
         # Add/update Stop Word sensitivity number entity
         stop_sensitivity_entity = self.state.stop_sensitivity_number_entity
         if stop_sensitivity_entity is None:
@@ -261,12 +240,6 @@ class VoiceSatelliteProtocol(APIServer):
         elif stop_sensitivity_entity not in self.state.entities:
             self.state.entities.append(stop_sensitivity_entity)
 
-        stop_sensitivity_entity.server = self
-        stop_sensitivity_entity.update_get_sensitivity(lambda: self.state.stop_word_threshold)
-        stop_sensitivity_entity.update_set_sensitivity(self._set_stop_sensitivity)
-
-        stop_sensitivity_entity.sync_with_state()
-
         # Mic Gain
         if self.state.mic_gain_entity is None:
             self.state.mic_gain_entity = MicSettingEntity(
@@ -283,11 +256,6 @@ class VoiceSatelliteProtocol(APIServer):
             self.state.entities.append(self.state.mic_gain_entity)
         elif self.state.mic_gain_entity not in self.state.entities:
             self.state.entities.append(self.state.mic_gain_entity)
-
-        self.state.mic_gain_entity.server = self
-        self.state.mic_gain_entity.update_get_value(lambda: float(self.state.mic_auto_gain))
-        self.state.mic_gain_entity.update_set_value(lambda val: self.state.persist_mic_gain(float(val)))  # type: ignore[arg-type]
-        self.state.mic_gain_entity.sync_with_state()
 
         # Mic Noise Suppression
         _NOISE_OPTIONS = ["Off", "Low", "Medium", "High", "Max"]
@@ -314,11 +282,6 @@ class VoiceSatelliteProtocol(APIServer):
         elif self.state.mic_noise_suppression_entity not in self.state.entities:
             self.state.entities.append(self.state.mic_noise_suppression_entity)
 
-        self.state.mic_noise_suppression_entity.server = self
-        self.state.mic_noise_suppression_entity.update_get_value(_get_noise_label)
-        self.state.mic_noise_suppression_entity.update_set_value(_set_noise_label)
-        self.state.mic_noise_suppression_entity.sync_with_state()
-
         # Mic Volume
         if self.state.mic_volume_entity is None:
             self.state.mic_volume_entity = MicSettingEntity(
@@ -335,10 +298,6 @@ class VoiceSatelliteProtocol(APIServer):
             self.state.entities.append(self.state.mic_volume_entity)
         elif self.state.mic_volume_entity not in self.state.entities:
             self.state.entities.append(self.state.mic_volume_entity)
-
-        self.state.mic_volume_entity.server = self
-        self.state.mic_volume_entity.update_get_value(lambda: float(self.state.mic_volume))
-        self.state.mic_volume_entity.update_set_value(lambda val: self.state.persist_mic_volume(float(val)))
 
         # NOTE: ButtonEventSensorEntity is NOT created here unconditionally.
         # It is only materialised when a peripheral sends the register_button
@@ -365,6 +324,75 @@ class VoiceSatelliteProtocol(APIServer):
         self._pipeline_active = False
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._disconnect_event = asyncio.Event()
+
+    def _claim_shared_state(self) -> None:
+        """Make this authenticated protocol own the shared entities."""
+        for entity in self.state.entities:
+            entity.server = self
+
+        media_player = self.state.media_player_entity
+        if media_player is not None:
+            media_player.volume = self.state.volume
+            media_player.previous_volume = self.state.volume
+
+        mute_switch = self.state.mute_switch_entity
+        if mute_switch is not None:
+            mute_switch.update_get_muted(lambda: self.state.muted)
+            mute_switch.update_set_muted(self._set_muted)
+            mute_switch.sync_with_state()
+
+        thinking_sound_switch = self.state.thinking_sound_entity
+        if thinking_sound_switch is not None:
+            thinking_sound_switch.update_get_thinking_sound_enabled(lambda: self.state.thinking_sound_enabled)
+            thinking_sound_switch.update_set_thinking_sound_enabled(self._set_thinking_sound_enabled)
+            thinking_sound_switch.sync_with_state()
+
+        sensitivity_1_entity = self.state.sensitivity_1_number_entity
+        if sensitivity_1_entity is not None:
+            sensitivity_1_entity.update_get_sensitivity(lambda: self.state.wake_word_1_threshold)
+            sensitivity_1_entity.update_set_sensitivity(self._set_sensitivity_1)
+            sensitivity_1_entity.sync_with_state()
+
+        sensitivity_2_entity = self.state.sensitivity_2_number_entity
+        if sensitivity_2_entity is not None:
+            sensitivity_2_entity.update_get_sensitivity(lambda: self.state.wake_word_2_threshold)
+            sensitivity_2_entity.update_set_sensitivity(self._set_sensitivity_2)
+            sensitivity_2_entity.sync_with_state()
+
+        stop_sensitivity_entity = self.state.stop_sensitivity_number_entity
+        if stop_sensitivity_entity is not None:
+            stop_sensitivity_entity.update_get_sensitivity(lambda: self.state.stop_word_threshold)
+            stop_sensitivity_entity.update_set_sensitivity(self._set_stop_sensitivity)
+            stop_sensitivity_entity.sync_with_state()
+
+        mic_gain_entity = self.state.mic_gain_entity
+        if mic_gain_entity is not None:
+            mic_gain_entity.update_get_value(lambda: float(self.state.mic_auto_gain))
+            mic_gain_entity.update_set_value(lambda val: self.state.persist_mic_gain(float(val)))  # type: ignore[arg-type]
+            mic_gain_entity.sync_with_state()
+
+        noise_options = ["Off", "Low", "Medium", "High", "Max"]
+        noise_to_int = {label: i for i, label in enumerate(noise_options)}
+
+        def _get_noise_label() -> str:
+            return noise_options[max(0, min(4, self.state.mic_noise_suppression))]
+
+        def _set_noise_label(label: Union[float, str]) -> None:
+            self.state.persist_mic_noise(float(noise_to_int.get(str(label), 0)))
+
+        mic_noise_entity = self.state.mic_noise_suppression_entity
+        if mic_noise_entity is not None:
+            mic_noise_entity.update_get_value(_get_noise_label)
+            mic_noise_entity.update_set_value(_set_noise_label)
+            mic_noise_entity.sync_with_state()
+
+        mic_volume_entity = self.state.mic_volume_entity
+        if mic_volume_entity is not None:
+            mic_volume_entity.update_get_value(lambda: float(self.state.mic_volume))
+            mic_volume_entity.update_set_value(lambda val: self.state.persist_mic_volume(float(val)))
+
+        self.register_pending_lights()
+        self.register_pending_button()
 
     # ------------------------------------------------------------------
     # Peripheral API helper
@@ -395,11 +423,13 @@ class VoiceSatelliteProtocol(APIServer):
         """
         for spec in self.state.pending_lights:
             if spec.object_id in self.state.led_light_entities:
-                # Already materialised. Reattach the server in case the
-                # satellite has been reconstructed (HA reconnect).
-                self.state.led_light_entities[spec.object_id].server = self
-                if self.state.led_light_entities[spec.object_id] not in self.state.entities:
-                    self.state.entities.append(self.state.led_light_entities[spec.object_id])
+                # Already materialised. Only an authenticated protocol may
+                # reattach shared entities during an overlapping reconnect.
+                entity = self.state.led_light_entities[spec.object_id]
+                if self._authenticated:
+                    entity.server = self
+                if entity not in self.state.entities:
+                    self.state.entities.append(entity)
                 continue
 
             object_id = spec.object_id
@@ -431,9 +461,10 @@ class VoiceSatelliteProtocol(APIServer):
             return
 
         if self.state.button_event_sensor_entity is not None:
-            # Already materialised — reattach the server in case the satellite
-            # has been reconstructed for an HA reconnect.
-            self.state.button_event_sensor_entity.server = self
+            # Already materialised — only an authenticated reconnect may
+            # reattach it while another protocol is active.
+            if self._authenticated:
+                self.state.button_event_sensor_entity.server = self
             if self.state.button_event_sensor_entity not in self.state.entities:
                 self.state.entities.append(self.state.button_event_sensor_entity)
             return
@@ -1039,6 +1070,7 @@ class VoiceSatelliteProtocol(APIServer):
     def connection_lost(self, exc: Optional[Exception]) -> None:
         super().connection_lost(exc)
 
+        was_authenticated = self._authenticated
         self._disconnect_event.set()
         self._is_streaming_audio = False
         self._tts_url = None
@@ -1046,31 +1078,48 @@ class VoiceSatelliteProtocol(APIServer):
         self._continue_conversation = False
         self._timer_finished = False
         self._pipeline_active = False
+        self._authenticated = False
 
-        # Deregister this connection.
+        # Deregister this accepted transport first. An unauthenticated transport
+        # never owned shared state, so its loss has no Home Assistant transition.
         if self in self.state.connections:
             self.state.connections.remove(self)
+        if not was_authenticated:
+            return
 
-        # Only tear down shared playback/state when the LAST client disconnects.
-        # Otherwise a secondary client (a diagnostic tool, a second dashboard, or
-        # Home Assistant's own overlapping reconnect) dropping would stop audio
-        # that belongs to a client still connected.
-        if not self.state.connections:
-            # Stop any ongoing audio playback and wake/stop word processing.
-            try:
-                self.state.music_player.stop()
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Failed to stop music player during disconnect")
+        # Choose the newest authenticated survivor. Authentication moves a
+        # protocol to the end, so walking from the end follows handshake order
+        # even when accepted transports authenticate out of order.
+        survivors = [
+            connection
+            for connection in self.state.connections
+            if connection._authenticated
+        ]
+        if survivors:
+            if self.state.satellite not in survivors:
+                successor = survivors[-1]
+                self.state.satellite = successor
+                successor._claim_shared_state()
+                _LOGGER.info("Home Assistant connection promoted a survivor")
+            self.state.connected = True
+            return
 
-            try:
-                self.state.tts_player.stop()
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Failed to stop TTS player during disconnect")
+        # Stop shared playback and wake/stop-word processing only when the final
+        # authenticated client has gone. An accepted but unauthenticated transport
+        # is not a Home Assistant connection and cannot keep shared state alive.
+        try:
+            self.state.music_player.stop()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.error("Failed to stop music player during disconnect")
 
-            self.state.stop_word.is_active = False  # type: ignore[attr-defined]
-            self.state.connected = False
+        try:
+            self.state.tts_player.stop()
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.error("Failed to stop TTS player during disconnect")
 
-        if self.state.satellite is self:
+        self.state.stop_word.is_active = False  # type: ignore[attr-defined]
+        self.state.connected = False
+        if self.state.satellite is self or self.state.satellite not in survivors:
             self.state.satellite = None
 
         if self.state.mute_switch_entity is not None:
@@ -1085,7 +1134,7 @@ class VoiceSatelliteProtocol(APIServer):
         if self.state.mic_volume_entity is not None:
             self.state.mic_volume_entity.sync_with_state()
 
-        # Notify peripheral container that HA is no longer reachable
+        # Notify the peripheral container only for the shared final disconnect.
         self._emit(LVAEvent.DISCONNECTED)
 
         _LOGGER.info("Disconnected from Home Assistant; waiting for reconnection")
@@ -1094,7 +1143,13 @@ class VoiceSatelliteProtocol(APIServer):
         super().process_packet(msg_type, packet_data)
 
         if msg_type == PROTO_TO_MESSAGE_TYPE[AuthenticationRequest]:
+            self._authenticated = True
+            if self in self.state.connections:
+                self.state.connections.remove(self)
+            self.state.connections.append(self)
+            self.state.satellite = self
             self.state.connected = True
+            self._claim_shared_state()
             _LOGGER.debug("Authentication successful, connected to Home Assistant")
 
             # Send states after connect

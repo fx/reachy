@@ -155,3 +155,10 @@ changes:
     spec: ha-satellite
     status: complete
     depends_on: ["0016"]
+  - id: "0018"
+    name: satellite-runtime-stability
+    path: changes/0018-satellite-runtime-stability.md
+    description: Controlled wake, resilient connection and listener ownership, per-chunk audio recovery, and bounded shutdown
+    spec: ha-satellite
+    status: complete
+    depends_on: ["0013"]

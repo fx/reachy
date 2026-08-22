@@ -17,8 +17,12 @@ inverted to make it work.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
+# pylint: disable=no-name-in-module
+from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message class inside
+    AuthenticationRequest,
+)
 from satellite_support import (
     FakeDecoder,
     FakeMedia,
@@ -37,6 +41,11 @@ from reachy_mini_ha_satellite.adapters.audio_reachy import (
     ReachyPlayback,
 )
 from reachy_mini_ha_satellite.adapters.sounds import SoundSource
+from reachy_mini_ha_satellite.esphome.peripheral_api import LVAEvent
+from reachy_mini_ha_satellite.esphome.satellite import (
+    PROTO_TO_MESSAGE_TYPE,
+    VoiceSatelliteProtocol,
+)
 from reachy_mini_ha_satellite.esphome.seams import SAMPLE_WIDTH
 
 if TYPE_CHECKING:
@@ -78,6 +87,238 @@ class TestTheSeamsAreFilledRatherThanOpen:
         assert isinstance(state.music_player, ReachyPlayback)
         assert isinstance(state.tts_player, ReachyPlayback)
         assert state.music_player is not state.tts_player
+
+
+class TestOverlappingHomeAssistantConnections:
+    """Shared state follows the newest surviving authenticated protocol."""
+
+    def test_losing_an_unauthenticated_first_protocol_does_not_disconnect(
+        self,
+    ) -> None:
+        """An accepted transport is not a shared Home Assistant connection."""
+        state = vendored_server_state()
+        events = _PeripheralEvents()
+        state.peripheral_api = events
+        protocol = VoiceSatelliteProtocol(state)
+        protocol.connection_made(_ProtocolTransport())
+
+        protocol.connection_lost(None)
+
+        assert state.satellite is None
+        assert not state.connected
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
+        assert events.events == []
+
+    def test_unauthenticated_overlap_cannot_displace_authenticated_ownership(
+        self,
+    ) -> None:
+        """A handshake that never completes cannot redirect shared entities."""
+        state = vendored_server_state()
+        events = _PeripheralEvents()
+        state.peripheral_api = events
+        active = VoiceSatelliteProtocol(state)
+        active.connection_made(_ProtocolTransport())
+        _authenticate(active)
+        events.events.clear()
+
+        unauthenticated = VoiceSatelliteProtocol(state)
+        unauthenticated.connection_made(_ProtocolTransport())
+        unauthenticated.connection_lost(None)
+
+        assert state.satellite is active
+        assert state.connections == [active]
+        assert state.connected
+        assert all(entity.server is active for entity in state.entities)
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
+        assert events.events == []
+
+    def test_losing_the_active_protocol_promotes_an_authenticated_survivor(
+        self,
+    ) -> None:
+        """An overlapping reconnect must not turn a live device disconnected."""
+        state = vendored_server_state()
+        events = _PeripheralEvents()
+        state.peripheral_api = events
+        older = VoiceSatelliteProtocol(state)
+        older_transport = _ProtocolTransport()
+        older.connection_made(older_transport)
+        _authenticate(older)
+        newest = VoiceSatelliteProtocol(state)
+        newest_transport = _ProtocolTransport()
+        newest.connection_made(newest_transport)
+        _authenticate(newest)
+        events.events.clear()
+
+        newest.connection_lost(None)
+
+        assert state.satellite is older
+        assert state.connections == [older]
+        assert state.connected
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
+        assert events.events == []
+
+    def test_losing_active_promotes_most_recently_authenticated_survivor(
+        self,
+    ) -> None:
+        """Handshake order, not transport acceptance, decides the successor."""
+        state = vendored_server_state()
+        first = VoiceSatelliteProtocol(state)
+        first.connection_made(_ProtocolTransport())
+        second = VoiceSatelliteProtocol(state)
+        second.connection_made(_ProtocolTransport())
+        third = VoiceSatelliteProtocol(state)
+        third.connection_made(_ProtocolTransport())
+        _authenticate(third)
+        _authenticate(second)
+        _authenticate(first)
+
+        first.connection_lost(None)
+
+        assert state.satellite is second
+        assert state.connections == [third, second]
+        assert state.connected
+        assert all(entity.server is second for entity in state.entities)
+
+    def test_losing_active_promotes_survivor_when_shared_owner_is_missing(
+        self,
+    ) -> None:
+        """A cleared active slot cannot strand an authenticated survivor."""
+        state = vendored_server_state()
+        older = VoiceSatelliteProtocol(state)
+        older.connection_made(_ProtocolTransport())
+        _authenticate(older)
+        newest = VoiceSatelliteProtocol(state)
+        newest.connection_made(_ProtocolTransport())
+        _authenticate(newest)
+        cast(Any, state).satellite = None
+
+        newest.connection_lost(None)
+
+        assert state.satellite is older
+        assert state.connected
+        assert all(entity.server is older for entity in state.entities)
+
+    def test_losing_active_replaces_stale_owner_with_authenticated_survivor(
+        self,
+    ) -> None:
+        """An owner outside the survivor set cannot keep the active slot."""
+        state = vendored_server_state()
+        older = VoiceSatelliteProtocol(state)
+        older.connection_made(_ProtocolTransport())
+        _authenticate(older)
+        newest = VoiceSatelliteProtocol(state)
+        newest.connection_made(_ProtocolTransport())
+        _authenticate(newest)
+        stale = VoiceSatelliteProtocol(state)
+        state.satellite = stale
+
+        newest.connection_lost(None)
+
+        assert state.satellite is older
+        assert state.connected
+        assert all(entity.server is older for entity in state.entities)
+
+    def test_losing_a_non_active_protocol_leaves_the_active_one_unchanged(
+        self,
+    ) -> None:
+        """A diagnostic connection dropping cannot replace Home Assistant."""
+        state = vendored_server_state()
+        events = _PeripheralEvents()
+        state.peripheral_api = events
+        older = VoiceSatelliteProtocol(state)
+        older.connection_made(_ProtocolTransport())
+        _authenticate(older)
+        newest = VoiceSatelliteProtocol(state)
+        newest.connection_made(_ProtocolTransport())
+        _authenticate(newest)
+        events.events.clear()
+
+        older.connection_lost(None)
+
+        assert state.satellite is newest
+        assert state.connections == [newest]
+        assert state.connected
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
+        assert events.events == []
+
+    def test_losing_the_final_protocol_clears_and_disconnects_shared_state(
+        self,
+    ) -> None:
+        """Only the final loss performs shared disconnect behaviour."""
+        state = vendored_server_state()
+        events = _PeripheralEvents()
+        state.peripheral_api = events
+        protocol = VoiceSatelliteProtocol(state)
+        protocol.connection_made(_ProtocolTransport())
+        _authenticate(protocol)
+        events.events.clear()
+
+        protocol.connection_lost(None)
+
+        assert state.satellite is None
+        assert state.connections == []
+        assert not state.connected
+        cast(Any, state.music_player.stop).assert_called_once()
+        cast(Any, state.tts_player.stop).assert_called_once()
+        assert events.events == [LVAEvent.DISCONNECTED]
+
+    def test_protocol_close_closes_its_accepted_transport_once(self) -> None:
+        """Service shutdown needs an idempotent close on each protocol."""
+        state = vendored_server_state()
+        protocol = VoiceSatelliteProtocol(state)
+        transport = _ProtocolTransport()
+        protocol.connection_made(transport)
+
+        protocol.close()
+        protocol.close()
+
+        assert transport.closed == 1
+
+
+class _ProtocolTransport:
+    """The transport surface APIServer owns, without opening a socket."""
+
+    def __init__(self) -> None:
+        """Start open and with no writes."""
+        self.closed = 0
+        self.writes: list[object] = []
+
+    def writelines(self, packets: object) -> None:
+        """Record protocol writes without interpreting their bytes."""
+        self.writes.append(packets)
+
+    def close(self) -> None:
+        """Record an explicit transport close."""
+        self.closed += 1
+
+
+class _PeripheralEvents:
+    """Record only the connection lifecycle events the protocol emits."""
+
+    def __init__(self) -> None:
+        """Start empty."""
+        self.events: list[LVAEvent] = []
+
+    def emit_event_sync(
+        self,
+        event: LVAEvent,
+        data: dict[str, object] | None = None,
+    ) -> None:
+        """Record one event and ignore its non-identifying payload."""
+        del data
+        self.events.append(event)
+
+
+def _authenticate(protocol: VoiceSatelliteProtocol) -> None:
+    """Drive the real authentication packet path without serial transport input."""
+    protocol.process_packet(
+        PROTO_TO_MESSAGE_TYPE[AuthenticationRequest],
+        AuthenticationRequest().SerializeToString(),
+    )
 
 
 class TestTheVendoredCodeDrivesTheAdapters:

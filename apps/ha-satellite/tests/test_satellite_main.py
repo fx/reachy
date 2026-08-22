@@ -16,9 +16,9 @@ and each is that way because the alternative would be a test of a fake:
 * `TestStartingUpFromTheEnvironment` binds the real ESPHome port on the loopback
   interface — `@pytest.mark.enable_socket`, because a startup path that never
   bound anything would prove nothing about the one thing startup has to do;
-* `TestTheDefaultThreadStarter` starts a real daemon thread, which is what the
-  microphone pump runs on. It is the one thing in this module that is neither
-  faked nor injected, because what is under test *is* the thread.
+* the thread-boundary tests start real daemon threads for the default starter
+  and saturated-queue shutdown. They are not faked or injected because what is
+  under test is the thread's own start or exit behaviour.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -27,9 +27,11 @@ Test module names are globally unique across the workspace — see the root
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import socket
 import threading
+from contextvars import Context
 from pathlib import Path
 from queue import Empty, Full
 from typing import TYPE_CHECKING, Any, Final, cast
@@ -49,6 +51,7 @@ from satellite_support import (
     connected,
     face,
     inline,
+    no_sleep,
     pushed_numbers,
     vendored_server_state,
 )
@@ -76,6 +79,7 @@ from reachy_mini_ha_satellite.config import (
     overrides_path,
 )
 from reachy_mini_ha_satellite.esphome.models import Preferences, ServerState
+from reachy_mini_ha_satellite.esphome.peripheral_api import LVAEvent
 from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
 from reachy_mini_ha_satellite.main import (
     _THREAD_JOIN_SECONDS,
@@ -104,9 +108,10 @@ from reachy_mini_ha_satellite.ports import (
     SourceSelection,
 )
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
+from reachy_session_client import Backoff
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
     from queue import Queue
 
     from pyfakefs.fake_filesystem import FakeFilesystem
@@ -138,6 +143,15 @@ _ROBOT_ONLY: Final = SourceSelection.LOCAL  # leak-scan:allow
 # Where the daemon serves its own API, which is this setting's default. The
 # loopback literal rather than anybody's address.
 _DAEMON_API: Final = "http://127.0.0.1:8000"
+
+# Fake installation details used only to prove lifecycle exceptions are scrubbed.
+_EXCEPTION_IDENTIFIERS: Final = (
+    "192.0.2.44",
+    "46053",
+    "configured-device-name",
+    "/example/account-name",
+)
+_EXCEPTION_DETAIL: Final = ":".join(_EXCEPTION_IDENTIFIERS)
 
 # Where the boost setter's tests keep their overrides file, and the directory
 # holding it. Bound once rather than spelled at each of the four sites, so that
@@ -215,6 +229,219 @@ class RecordingService:
             raise RuntimeError(message)
 
 
+class NeverReturningService:
+    """A cleanup step that yields forever until its owner cancels it."""
+
+    def __init__(self) -> None:
+        """Start neither entered nor cancelled."""
+        self.entered = 0
+        self.entered_event = asyncio.Event()
+        self.cancelled = 0
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Wait forever, recording cancellation by a cleanup deadline."""
+        self.entered += 1
+        self.entered_event.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+
+
+class CancellationResistantService:
+    """A cleanup step that delays completion after suppressing cancellation."""
+
+    def __init__(self) -> None:
+        """Start unfinished and without a cancellation."""
+        self.cancelled = 0
+        self.resume = asyncio.Event()
+        self.finished = asyncio.Event()
+        self.finalized = False
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Suppress cancellation until the test permits late completion."""
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            await self.resume.wait()
+            self.finished.set()
+        finally:
+            self.finalized = True
+
+
+class ShieldSpawningCleanupService:
+    """A cleanup whose shield creates an inner task outside its outer task."""
+
+    def __init__(self) -> None:
+        """Start without a recorded outer task or finalization."""
+        self.task: asyncio.Task[None] | None = None
+        self.spawned: list[asyncio.Task[bool]] = []
+        self.entered = asyncio.Event()
+        self.finalized = False
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Keep shielding waits that spawn a descendant while finalizing."""
+        task = asyncio.current_task()
+        assert task is not None
+        self.task = task
+        self.entered.set()
+
+        async def _wait_and_spawn() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # A nested cleanup may allocate its own finalizer task. The
+                # production scope must discover this after its first snapshot.
+                self.spawned.append(asyncio.create_task(asyncio.Event().wait()))
+
+        try:
+            while True:
+                try:
+                    await asyncio.shield(_wait_and_spawn())
+                except asyncio.CancelledError:
+                    continue
+        finally:
+            self.finalized = True
+
+
+class SuccessfulDescendantCleanupService:
+    """A successful cleanup that starts work which remains pending."""
+
+    def __init__(self) -> None:
+        """Start without a descendant."""
+        self.descendant: asyncio.Task[bool] | None = None
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Spawn a pending descendant, then return normally."""
+        self.descendant = asyncio.create_task(asyncio.Event().wait())
+
+
+class ExplicitBlankContextCleanupService:
+    """A cleanup that deliberately replaces inherited context on its child."""
+
+    def __init__(self) -> None:
+        """Start without descendants."""
+        self.child: asyncio.Task[None] | None = None
+        self.grandchild: asyncio.Task[bool] | None = None
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Create a child in a blank context; it creates one more task."""
+
+        async def _child() -> None:
+            self.grandchild = asyncio.create_task(asyncio.Event().wait())
+            await asyncio.Event().wait()
+
+        self.child = asyncio.create_task(_child(), context=Context())
+        await asyncio.sleep(0)
+
+
+class EagerFinalizerCleanupService:
+    """A descendant that would spawn successors during eager finalization."""
+
+    def __init__(self) -> None:
+        """Start with no descendant and no successors."""
+        self.descendant: asyncio.Task[bool] | None = None
+        self.successors: list[asyncio.Task[None]] = []
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Spawn one pending descendant, then return successfully."""
+
+        async def _descendant() -> bool:
+            try:
+                return await asyncio.Event().wait()
+            finally:
+                self._spawn_successor()
+
+        self.descendant = asyncio.create_task(_descendant())
+
+    def _spawn_successor(self) -> None:
+        """Create a bounded chain that exposes eager finalization churn."""
+        if len(self.successors) >= _EAGER_SUCCESSOR_LIMIT:
+            return
+
+        async def _successor() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self._spawn_successor()
+
+        self.successors.append(asyncio.create_task(_successor()))
+
+
+_EAGER_SUCCESSOR_LIMIT: Final = 32
+
+
+class IndefinitelyCancellationResistantService:
+    """A cleanup step that suppresses every ordinary task cancellation."""
+
+    def __init__(self, on_cancel: Callable[[], None] | None = None) -> None:
+        """Start without a child task or finalization.
+
+        Args:
+            on_cancel: What to call after the first suppressed cancellation.
+        """
+        self.task: asyncio.Task[None] | None = None
+        self.entered = asyncio.Event()
+        self.cancelled = 0
+        self.finalized = False
+        self._on_cancel = on_cancel
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Keep waiting after every `CancelledError`, until forcibly finalized."""
+        task = asyncio.current_task()
+        assert task is not None
+        self.task = task
+        self.entered.set()
+        try:
+            while True:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled += 1
+                    if self.cancelled == 1 and self._on_cancel is not None:
+                        self._on_cancel()
+        finally:
+            self.finalized = True
+
+
+async def _finish_test_tasks(
+    before: set[asyncio.Task[Any]],
+    runner: asyncio.Task[Any],
+) -> None:
+    """Bound test teardown for tasks a failed regression may leave behind."""
+    for _ in range(_EAGER_SUCCESSOR_LIMIT + 4):
+        pending = asyncio.all_tasks() - before - {runner}
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    raise AssertionError("test cleanup task chain did not converge")
+
+
 def _application(
     *,
     audio: FakeAudio,
@@ -266,6 +493,246 @@ def _application(
         sleep=_wait,
     )
     return application, stop
+
+
+class TestControlledWakeBeforeStartup:
+    """The approved SDK wake sequence is the first hardware lifecycle."""
+
+    @pytest.mark.asyncio
+    async def test_a_pre_set_stop_skips_wake_and_normal_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stop already requested must leave sleeping hardware untouched."""
+        events: list[str] = []
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            robot,
+            "wake_up",
+            lambda: events.append("wake_up"),
+            raising=False,
+        )
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after stop")
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+        stop = asyncio.Event()
+        stop.set()
+
+        await run(robot, stop)
+
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_stop_after_motor_enable_skips_wake_and_normal_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The boundary after motor enable is checked before controlled wake."""
+        events: list[str] = []
+        stop = asyncio.Event()
+        robot = FakeRobot()
+
+        def _enable_motors() -> None:
+            events.append("enable_motors")
+            stop.set()
+
+        monkeypatch.setattr(robot, "enable_motors", _enable_motors, raising=False)
+        monkeypatch.setattr(
+            robot,
+            "wake_up",
+            lambda: events.append("wake_up"),
+            raising=False,
+        )
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after stop")
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+        await run(robot, stop)
+
+        assert events == ["enable_motors"]
+
+    @pytest.mark.asyncio
+    async def test_stop_during_controlled_wake_skips_normal_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A completed wake observes stop before normal services are composed."""
+        events: list[str] = []
+        stop = asyncio.Event()
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+
+        def _wake_up() -> None:
+            events.append("wake_up")
+            stop.set()
+
+        monkeypatch.setattr(robot, "wake_up", _wake_up, raising=False)
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after stop")
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+        await run(robot, stop)
+
+        assert events == ["enable_motors", "wake_up"]
+
+    @pytest.mark.asyncio
+    async def test_motors_and_wake_finish_before_application_composition(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Both blocking SDK calls are offloaded, ordered, and finish first.
+
+        Args:
+            monkeypatch: Replaces configuration and composition with inert fakes.
+        """
+        events: list[str] = []
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            robot,
+            "wake_up",
+            lambda: events.append("wake_up"),
+            raising=False,
+        )
+
+        async def _offload(work: Callable[[], object]) -> object:
+            """Record that a blocking SDK call left the event loop."""
+            events.append("offload")
+            return work()
+
+        class _Application:
+            async def run(self, stop: asyncio.Event) -> None:
+                """Record where normal application execution begins."""
+                del stop
+                events.append("application.run")
+
+        def _build(resolution: object, handle: object) -> _Application:
+            """Record composition without constructing any real service."""
+            del resolution
+            assert handle is robot
+            events.append("build_application")
+            return _Application()
+
+        _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+        await run(robot, asyncio.Event())
+
+        assert events == [
+            "offload",
+            "enable_motors",
+            "offload",
+            "wake_up",
+            "build_application",
+            "application.run",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_wake_failure_aborts_normal_application_startup(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed wake cannot leave a normally advertised half-started app.
+
+        Args:
+            monkeypatch: Replaces configuration, offload and composition.
+        """
+        events: list[str] = []
+        robot = FakeRobot()
+        monkeypatch.setattr(
+            robot,
+            "enable_motors",
+            lambda: events.append("enable_motors"),
+            raising=False,
+        )
+
+        def _fail_wake() -> None:
+            events.append("wake_up")
+            message = "controlled wake failed"
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(robot, "wake_up", _fail_wake, raising=False)
+
+        async def _offload(work: Callable[[], object]) -> object:
+            return work()
+
+        def _must_not_build(resolution: object, handle: object) -> SatelliteApplication:
+            del resolution, handle
+            events.append("build_application")
+            raise AssertionError("normal services were composed after wake failed")
+
+        _patch_startup(monkeypatch, build=_must_not_build, offload=_offload)
+
+        with pytest.raises(RuntimeError, match="controlled wake failed"):
+            await run(robot, asyncio.Event())
+
+        assert events == ["enable_motors", "wake_up"]
+
+
+def _patch_startup(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    build: Callable[..., object],
+    offload: Callable[[Callable[[], object]], Awaitable[object]],
+) -> None:
+    """Replace startup's configuration edges, leaving lifecycle order real.
+
+    Args:
+        monkeypatch: Installs the inert edges.
+        build: What stands in for normal application composition.
+        offload: What runs SDK calls without starting a worker thread.
+    """
+
+    class _Store:
+        def load(self) -> dict[str, str]:
+            """Return no persisted overrides without reading a file."""
+            return {}
+
+    resolution = load_settings(_ENVIRONMENT)
+    monkeypatch.setattr(satellite_main, "OverrideStore", lambda _path: _Store())
+    monkeypatch.setattr(satellite_main, "load_settings", lambda **_kwargs: resolution)
+    monkeypatch.setattr(satellite_main, "configure_logging", lambda _settings: None)
+    monkeypatch.setattr(
+        satellite_main, "log_resolved_configuration", lambda _resolution: None
+    )
+    monkeypatch.setattr(satellite_main, "build_application", build)
+    monkeypatch.setattr(satellite_main, "in_thread", offload)
 
 
 def _advancing() -> Callable[[], float]:
@@ -510,6 +977,379 @@ class TestShutdown:
         assert healthy.closed == 1
         assert perception.closed == 1
         assert motion.released
+
+    @pytest.mark.asyncio
+    async def test_a_non_returning_cleanup_is_bounded_and_later_cleanup_runs(
+        self,
+    ) -> None:
+        """One half-closed service cannot hold every later release hostage."""
+        stuck = NeverReturningService()
+        later = RecordingService()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(now=0.0),
+            services=[later, stuck],
+            cleanup_timeout_seconds=0.0,
+        )
+
+        await application.aclose()
+
+        assert stuck.entered == 1
+        assert stuck.cancelled == 1
+        assert later.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_cancellation_resistant_cleanup_does_not_extend_its_deadline(
+        self,
+    ) -> None:
+        """The owner moves on without waiting for a child that suppresses cancel."""
+        stuck = CancellationResistantService()
+        later = RecordingService()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(now=0.0),
+            services=[later, stuck],
+            cleanup_timeout_seconds=0.0,
+        )
+
+        await application.aclose()
+
+        assert stuck.cancelled == 1
+        assert later.closed == 1
+        assert not stuck.finished.is_set()
+        assert stuck.finalized
+
+    def test_indefinitely_resistant_cleanup_leaves_no_task_for_runner(
+        self,
+    ) -> None:
+        """Application shutdown must leave nothing for `asyncio.run` to await."""
+
+        async def _run_and_close() -> None:
+            stuck = IndefinitelyCancellationResistantService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, stuck],
+                cleanup_timeout_seconds=0.0,
+            )
+
+            await application.aclose()
+
+            task = stuck.task
+            assert task is not None
+            try:
+                assert task.done()
+                assert stuck.finalized
+                assert later.closed == 1
+            finally:
+                # This makes the RED test itself bounded: before the fix the
+                # assertion fails, then the test closes the leaked child so the
+                # process-level runner can return rather than hiding the failure.
+                if not task.done():
+                    coroutine = task.get_coro()
+                    assert coroutine is not None
+                    coroutine.close()
+                    task.cancel()
+                    await asyncio.sleep(0)
+
+        asyncio.run(_run_and_close())
+
+    def test_shield_spawned_cleanup_descendants_leave_no_tasks_for_runner(
+        self,
+    ) -> None:
+        """Forced outer finalization must also finish shield-created children."""
+
+        async def _run_and_close() -> None:
+            runner = asyncio.current_task()
+            assert runner is not None
+            unrelated = asyncio.create_task(asyncio.Event().wait())
+            await asyncio.sleep(0)
+            before = set(asyncio.all_tasks())
+            stuck = ShieldSpawningCleanupService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, stuck],
+                cleanup_timeout_seconds=0.0,
+            )
+
+            await application.aclose()
+
+            outer = stuck.task
+            assert outer is not None
+            leaked = asyncio.all_tasks() - before - {runner}
+            try:
+                assert outer.done()
+                assert stuck.finalized
+                assert later.closed == 1
+                assert not unrelated.done()
+                assert leaked == set()
+            finally:
+                # Bound the RED run itself without letting asyncio.run teardown
+                # conceal the descendant that production shutdown leaked.
+                pending = leaked
+                while pending:
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    pending = asyncio.all_tasks() - before - {runner}
+                unrelated.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await unrelated
+
+        asyncio.run(_run_and_close())
+
+    def test_successful_cleanup_drains_its_pending_descendant(self) -> None:
+        """A normal outer return cannot transfer child ownership to the runner."""
+
+        async def _run_and_close() -> None:
+            runner = asyncio.current_task()
+            assert runner is not None
+            before = set(asyncio.all_tasks())
+            service = SuccessfulDescendantCleanupService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, service],
+            )
+
+            try:
+                await application.aclose()
+
+                descendant = service.descendant
+                assert descendant is not None
+                assert descendant.done()
+                assert later.closed == 1
+                assert asyncio.all_tasks() - before - {runner} == set()
+            finally:
+                await _finish_test_tasks(before, runner)
+
+        asyncio.run(_run_and_close())
+
+    def test_legacy_two_argument_task_factory_remains_compatible(self) -> None:
+        """Absent context must not become an unsupported keyword argument."""
+
+        async def _run_and_close() -> None:
+            loop = asyncio.get_running_loop()
+            calls = 0
+
+            def _legacy_factory(
+                task_loop: asyncio.AbstractEventLoop,
+                coroutine: Coroutine[Any, Any, Any],
+            ) -> asyncio.Task[Any]:
+                nonlocal calls
+                calls += 1
+                return asyncio.Task(coroutine, loop=task_loop)
+
+            service = RecordingService()
+            loop.set_task_factory(_legacy_factory)
+            try:
+                application = SatelliteApplication(
+                    settings=_settings(),
+                    audio=FakeAudio(),
+                    motion=FakeMotion(),
+                    perception=FakePerception(),
+                    behaviour=SatelliteBehaviour(now=0.0),
+                    services=[service],
+                )
+                await application.aclose()
+            finally:
+                loop.set_task_factory(None)
+
+            assert calls >= 1
+            assert service.closed == 1
+
+        asyncio.run(_run_and_close())
+
+    def test_explicit_blank_context_still_owns_nested_cleanup_tasks(self) -> None:
+        """Replacing inherited context cannot detach a child from cleanup scope."""
+
+        async def _run_and_close() -> None:
+            loop = asyncio.get_running_loop()
+            runner = asyncio.current_task()
+            assert runner is not None
+            before = set(asyncio.all_tasks())
+            factory_calls: list[Coroutine[Any, Any, Any]] = []
+
+            def _legacy_factory(
+                task_loop: asyncio.AbstractEventLoop,
+                coroutine: Coroutine[Any, Any, Any],
+            ) -> asyncio.Task[Any]:
+                factory_calls.append(coroutine)
+                return asyncio.Task(coroutine, loop=task_loop)
+
+            service = ExplicitBlankContextCleanupService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, service],
+            )
+
+            loop.set_task_factory(_legacy_factory)
+            try:
+                await application.aclose()
+
+                child = service.child
+                grandchild = service.grandchild
+                assert child is not None
+                assert grandchild is not None
+                assert sum(call is child.get_coro() for call in factory_calls) == 1
+                assert child.done()
+                assert grandchild.done()
+                assert later.closed == 1
+                assert asyncio.all_tasks() - before - {runner} == set()
+                assert loop.get_task_factory() is _legacy_factory
+            finally:
+                loop.set_task_factory(None)
+                await _finish_test_tasks(before, runner)
+
+        asyncio.run(_run_and_close())
+
+    def test_eager_finalization_closes_successor_without_churn(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A finalizer-created successor is canceled before eager execution."""
+
+        async def _run_and_close() -> None:
+            loop = asyncio.get_running_loop()
+            runner = asyncio.current_task()
+            assert runner is not None
+            before = set(asyncio.all_tasks())
+            service = EagerFinalizerCleanupService()
+            later = RecordingService()
+            loop.set_task_factory(asyncio.eager_task_factory)
+            try:
+                application = SatelliteApplication(
+                    settings=_settings(),
+                    audio=FakeAudio(),
+                    motion=FakeMotion(),
+                    perception=FakePerception(),
+                    behaviour=SatelliteBehaviour(now=0.0),
+                    services=[later, service],
+                )
+                await application.aclose()
+
+                descendant = service.descendant
+                assert descendant is not None
+                assert descendant.done()
+                assert len(service.successors) == 1
+                assert service.successors[0].done()
+                assert later.closed == 1
+                assert asyncio.all_tasks() - before - {runner} == set()
+            finally:
+                loop.set_task_factory(None)
+                await _finish_test_tasks(before, runner)
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            asyncio.run(_run_and_close())
+        forced = [
+            record
+            for record in caplog.records
+            if "force-finalized" in record.getMessage()
+        ]
+        assert len(forced) <= 2
+
+    def test_repeated_owner_cancellation_cannot_abandon_cleanup_finalization(
+        self,
+    ) -> None:
+        """A second cancel cannot strand a child during the finalization turn."""
+
+        async def _run_and_close() -> None:
+            closing: asyncio.Task[None] | None = None
+
+            def _cancel_owner_again() -> None:
+                assert closing is not None
+                closing.cancel()
+
+            stuck = IndefinitelyCancellationResistantService(_cancel_owner_again)
+            later = RecordingService()
+            perception = FakePerception()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=perception,
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, stuck],
+            )
+            closing = asyncio.create_task(application.aclose())
+            await stuck.entered.wait()
+
+            closing.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            task = stuck.task
+            assert task is not None
+            try:
+                assert stuck.cancelled >= 1
+                assert task.done()
+                assert stuck.finalized
+                assert later.closed == 1
+                assert perception.closed == 1
+            finally:
+                # Bound the RED run itself while still asserting that production
+                # shutdown, rather than asyncio.run teardown, finished the child.
+                if not task.done():
+                    coroutine = task.get_coro()
+                    assert coroutine is not None
+                    coroutine.close()
+                    task.cancel()
+                    await asyncio.sleep(0)
+                if task.done():
+                    with contextlib.suppress(BaseException):
+                        task.result()
+
+        asyncio.run(_run_and_close())
+
+    @pytest.mark.asyncio
+    async def test_owner_cancellation_attempts_every_remaining_cleanup(self) -> None:
+        """Cancellation is re-raised only after later ownership is released."""
+        stuck = NeverReturningService()
+        later = RecordingService()
+        perception = FakePerception()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=perception,
+            behaviour=SatelliteBehaviour(now=0.0),
+            services=[later, stuck],
+        )
+        closing = asyncio.create_task(application.aclose())
+        await stuck.entered_event.wait()
+        assert stuck.entered == 1
+
+        closing.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert stuck.cancelled == 1
+        assert later.closed == 1
+        assert perception.closed == 1
 
     @pytest.mark.asyncio
     async def test_a_perception_source_that_fails_to_stop_is_survived(self) -> None:
@@ -820,6 +1660,446 @@ class TestTheEsphomeService:
 
         assert True  # as above: it returns rather than blocking on the queue
 
+    @pytest.mark.asyncio
+    async def test_a_healthy_listener_is_not_rebound(self) -> None:
+        """A health check must leave the listener that is still serving alone."""
+        bound: list[_FakeServer] = []
+        service = _listener_service(bound)
+        await service.start()
+
+        await service.check_listener()
+
+        assert len(bound) == 1
+        assert bound[0].closed == 0
+
+    @pytest.mark.asyncio
+    async def test_a_stopped_listener_is_rebound(self) -> None:
+        """A listener that died unexpectedly is replaced without a socket test."""
+        bound: list[_FakeServer] = []
+        service = _listener_service(bound)
+        await service.start()
+        bound[0].serving = False
+
+        await service.check_listener()
+
+        assert len(bound) == 2
+        assert bound[0].closed == 1
+        assert bound[0].waited == 1
+        assert bound[1].serving
+
+    @pytest.mark.asyncio
+    async def test_successful_listener_lifecycle_logs_no_configured_identity(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Initial bind and supervised rebind report only static event text."""
+        host = "192.0.2.44"
+        port = 46053
+        state = vendored_server_state()
+        state.name = "configured-device-name"
+        bound: list[_FakeServer] = []
+        service = _listener_service(
+            bound,
+            state=state,
+            host=host,
+            port=port,
+        )
+
+        with caplog.at_level(logging.INFO, logger="reachy_mini_ha_satellite.main"):
+            await service.start()
+            bound[0].serving = False
+            await service.check_listener()
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages == [
+            "esphome.listening",
+            "esphome.listener stopped unexpectedly; rebinding",
+            "esphome.listening",
+        ]
+        emitted = "\n".join(messages)
+        assert host not in emitted
+        assert str(port) not in emitted
+        assert state.name not in emitted
+
+    @pytest.mark.asyncio
+    async def test_listener_bind_failures_use_a_capped_backoff(self) -> None:
+        """Repeated bind refusal grows the delay only up to its declared cap."""
+        bound: list[_FakeServer] = []
+        delays: list[float] = []
+        attempts = 0
+        service: EsphomeService
+
+        async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+            """Succeed initially, then refuse every replacement bind."""
+            del factory, host, port
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                message = "address is unavailable"
+                raise OSError(message)
+            server = _FakeServer()
+            bound.append(server)
+            return server
+
+        async def _sleep(seconds: float) -> None:
+            """Record virtual delay and stop after the cap has repeated."""
+            delays.append(seconds)
+            if len(delays) == 4:
+                service._running = False
+
+        service = _listener_service(
+            bound,
+            listen=_listen,
+            sleep=_sleep,
+            backoff=Backoff(
+                initial_seconds=1.0,
+                multiplier=2.0,
+                maximum_seconds=4.0,
+            ),
+        )
+        await service.start()
+        bound[0].serving = False
+
+        await service._supervise_listener()
+
+        assert delays == [1.0, 2.0, 4.0, 4.0]
+
+    @pytest.mark.asyncio
+    async def test_listener_retry_log_omits_bind_exception_identifiers(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A failed replacement bind reports retry timing, not exception text."""
+        bound: list[_FakeServer] = []
+        attempts = 0
+        service: EsphomeService
+
+        async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+            del factory, host, port
+            nonlocal attempts
+            attempts += 1
+            if attempts > 1:
+                raise OSError(_EXCEPTION_DETAIL)
+            server = _FakeServer()
+            bound.append(server)
+            return server
+
+        async def _sleep(seconds: float) -> None:
+            del seconds
+            service._running = False
+
+        service = _listener_service(bound, listen=_listen, sleep=_sleep)
+        await service.start()
+        bound[0].serving = False
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            await service._supervise_listener()
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno >= logging.ERROR
+        ]
+        assert messages == [
+            "esphome.listener rebind failed; retrying in 0.5 seconds",
+        ]
+        for identifier in _EXCEPTION_IDENTIFIERS:
+            assert identifier not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_intentional_close_prevents_listener_rebind(self) -> None:
+        """Shutdown cannot race its own supervisor into opening a new listener."""
+        bound: list[_FakeServer] = []
+        service = _listener_service(bound)
+        await service.start()
+        bound[0].serving = False
+
+        await service.aclose()
+        await service.check_listener()
+
+        assert len(bound) == 1
+
+    @pytest.mark.asyncio
+    async def test_close_during_initial_bind_does_not_revive_background_work(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bind completing after shutdown cannot restart the closed service."""
+        bind_started = asyncio.Event()
+        finish_bind = asyncio.Event()
+        server = _FakeServer()
+        started_work: list[Callable[[], None]] = []
+
+        async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+            del factory, host, port
+            bind_started.set()
+            await finish_bind.wait()
+            return server
+
+        def _start_thread(work: Callable[[], None]) -> None:
+            started_work.append(work)
+
+        service = EsphomeService(
+            vendored_server_state(),
+            FakeCapture([]),
+            PipelineEventTap(lambda _: None),
+            host="127.0.0.1",
+            port=6053,
+            detector=cast("WakeWordDetector", object()),
+            listen=_listen,
+            pump_sleep=no_sleep,
+        )
+
+        async def _supervise_listener() -> None:
+            return
+
+        monkeypatch.setattr(satellite_main, "_daemon_thread", _start_thread)
+        monkeypatch.setattr(service, "_supervise_listener", _supervise_listener)
+        start = asyncio.create_task(service.start())
+        await bind_started.wait()
+        close = asyncio.create_task(service.aclose())
+
+        await close
+        finish_bind.set()
+        await start
+        running_after_start = service._running
+        supervisor_after_start = service._supervisor
+        threads_after_start = list(service._threads)
+        await service.aclose()
+
+        assert server.closed == 1
+        assert server.waited == 1
+        assert not running_after_start
+        assert supervisor_after_start is None
+        assert threads_after_start == []
+        assert started_work == []
+        assert start.done()
+        assert close.done()
+        assert service._supervisor is None
+        assert service._threads == []
+
+    @pytest.mark.asyncio
+    async def test_close_releases_all_accepted_protocols_and_disconnects_once(
+        self,
+    ) -> None:
+        """Transport callbacks own one final shared disconnect during shutdown."""
+        state = vendored_server_state()
+        events = _RecordingPeripheralEvents()
+        state.peripheral_api = events
+        accepted = [VoiceSatelliteProtocol(state), VoiceSatelliteProtocol(state)]
+        transports = [_DisconnectLifecycleTransport(protocol) for protocol in accepted]
+        for protocol, transport in zip(accepted, transports, strict=True):
+            protocol.connection_made(transport)
+            protocol._authenticated = True
+        state.satellite = accepted[-1]
+        state.connected = True
+        service, _state = _esphome_service([], state=state)
+        await service.start()
+
+        await service.aclose()
+        await asyncio.sleep(0)
+
+        assert [transport.closed for transport in transports] == [1, 1]
+        assert state.connections == []
+        assert cast("object | None", state.satellite) is None
+        assert not state.connected
+        assert (
+            cast(Any, state.music_player.stop).call_count,
+            cast(Any, state.tts_player.stop).call_count,
+            events.events,
+        ) == (1, 1, [LVAEvent.DISCONNECTED])
+
+
+class TestTheMicrophonePumpSurvivesTransientFailures:
+    """One bad chunk must not become a permanently deaf satellite."""
+
+    @pytest.mark.asyncio
+    async def test_a_capture_failure_does_not_discard_the_next_chunk(self) -> None:
+        """A transient daemon read error is isolated to that read."""
+        later = b"\x02" * 320
+        capture = _FlakyCapture([RuntimeError("capture failed"), [later]])
+        service, _state = _esphome_service([], capture=capture)
+        satellite = _RecordingSatellite()
+        _state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert satellite.chunks == [(later, None)]
+
+    @pytest.mark.asyncio
+    async def test_a_conditioning_failure_does_not_discard_the_next_chunk(
+        self,
+    ) -> None:
+        """Native conditioning may fail once without ending the pump."""
+        first, later = b"\x02" * 320, b"\x04" * 320
+        conditioner = _FailsOnceWebRTC()
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[first], [later]]),
+            build_webrtc=lambda _gain, _noise: conditioner,
+        )
+        state.preferences.mic_auto_gain = 1
+        satellite = _RecordingSatellite()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+
+        assert conditioner.inputs == [first, later]
+        assert satellite.chunks == [(later, None)]
+
+    @pytest.mark.asyncio
+    async def test_forwarding_failure_still_detects_that_chunk_and_continues(
+        self,
+    ) -> None:
+        """Local wake detection is independent of Home Assistant forwarding."""
+        first, later = b"\x02" * 320, b"\x04" * 320
+        model = FakeMicroWakeWord("okay_nabu")
+        state = vendored_server_state(
+            wake_words={model.id: model},
+            active_wake_words={model.id},
+            available_wake_words={model.id: available_wake_word(model.id)},
+            stop_word=FakeMicroWakeWord("stop"),
+        )
+        service, state = _esphome_service(
+            [],
+            capture=FakeCapture([[first], [later]]),
+            state=state,
+            detector=WakeWordDetector(
+                state,
+                micro_features=FakeWakeWordFeatures,
+                open_features=FakeWakeWordFeatures,
+            ),
+        )
+        satellite = _FailsOneForward()
+        state.satellite = cast("VoiceSatelliteProtocol", satellite)
+        await service.start()
+
+        service.pump()
+        service.detect()
+
+        assert satellite.attempted == [first, later]
+        assert [inputs.tobytes() for inputs in model.inputs] == [first, later]
+
+    @pytest.mark.asyncio
+    async def test_chunk_failure_logs_omit_exception_identifiers(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Capture, conditioning and forwarding identify only their static stage."""
+        chunk = b"\x02" * 320
+
+        capture_service, _state = _esphome_service(
+            [],
+            capture=_FlakyCapture([RuntimeError(_EXCEPTION_DETAIL)]),
+        )
+        await capture_service.start()
+
+        conditioner = _FailsOnceWebRTC(_EXCEPTION_DETAIL)
+        condition_service, condition_state = _esphome_service(
+            [],
+            capture=FakeCapture([[chunk]]),
+            build_webrtc=lambda _gain, _noise: conditioner,
+        )
+        condition_state.preferences.mic_auto_gain = 1
+        await condition_service.start()
+
+        forward_service, forward_state = _esphome_service(
+            [],
+            capture=FakeCapture([[chunk]]),
+        )
+        forward_state.satellite = cast(
+            "VoiceSatelliteProtocol",
+            _FailsOneForward(_EXCEPTION_DETAIL),
+        )
+        await forward_service.start()
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            capture_service.pump()
+            condition_service.pump()
+            forward_service.pump()
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno >= logging.ERROR
+        ]
+        assert messages == [
+            "microphone capture failed for a chunk; continuing (1 failures)",
+            "microphone conditioning failed for a chunk; continuing (1 failures)",
+            "Home Assistant audio forwarding failed for a chunk; continuing (1 failures)",
+        ]
+        for identifier in _EXCEPTION_IDENTIFIERS:
+            assert identifier not in caplog.text
+
+
+class _FlakyCapture(FakeCapture):
+    """A capture seam that can raise before producing later audio."""
+
+    def __init__(self, outcomes: Sequence[object]) -> None:
+        """Script exceptions and chunks in their exact read order."""
+        super().__init__()
+        self._outcomes = list(outcomes)
+
+    def read_chunk(self) -> Sequence[bytes] | None:
+        """Raise or return the next scripted outcome."""
+        if not self._outcomes:
+            return None
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return cast("Sequence[bytes]", outcome)
+
+
+class _FailsOnceWebRTC:
+    """A conditioner whose first chunk fails and whose second succeeds."""
+
+    def __init__(self, message: str = "conditioning failed") -> None:
+        """Start with no chunks seen.
+
+        Args:
+            message: Exception text for the first chunk.
+        """
+        self.inputs: list[bytes] = []
+        self._message = message
+
+    def update_settings(self, agc_level: int, ns_level: int) -> None:
+        """Accept unchanged settings without rebuilding anything."""
+        del agc_level, ns_level
+
+    def process(self, raw_bytes: bytes) -> bytes:
+        """Fail once, then pass subsequent chunks through."""
+        self.inputs.append(raw_bytes)
+        if len(self.inputs) == 1:
+            raise RuntimeError(self._message)
+        return raw_bytes
+
+
+class _FailsOneForward:
+    """A Home Assistant protocol that rejects only its first chunk."""
+
+    def __init__(self, message: str = "forwarding failed") -> None:
+        """Start having attempted no forwards.
+
+        Args:
+            message: Exception text for the first forwarding attempt.
+        """
+        self.attempted: list[bytes] = []
+        self.chunks: list[tuple[bytes, bytes | None]] = []
+        self._message = message
+
+    def handle_audio(
+        self,
+        audio_chunk: bytes,
+        audio_chunk_2: bytes | None = None,
+    ) -> None:
+        """Raise on the first call and record later audio normally."""
+        self.attempted.append(audio_chunk)
+        if len(self.attempted) == 1:
+            raise RuntimeError(self._message)
+        self.chunks.append((audio_chunk, audio_chunk_2))
+
 
 class TestTheWakeWordFeed:
     """The half of the feed that *starts* a conversation.
@@ -973,16 +2253,29 @@ class TestTheWakeWordFeed:
         assert satellite.stops == 1
 
     @pytest.mark.asyncio
-    async def test_a_model_that_raises_does_not_end_detection(self) -> None:
-        """A dead detection thread is this defect arrived at from the other side."""
+    async def test_a_model_that_raises_does_not_end_or_flood_detection(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A broken model stays isolated without logging every audio chunk.
+
+        Args:
+            caplog: Captures the rate-limited detector failures.
+        """
         broken = FakeMicroWakeWord("okay_nabu", fails=True)
-        service, _state, satellite = await self._feed(broken, chunks=2)
+        service, _state, satellite = await self._feed(
+            broken,
+            chunks=101,
+            backlog=102,
+        )
 
         service.pump()
-        service.detect()
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            service.detect()
 
-        assert len(satellite.chunks) == 2
-        assert len(broken.inputs) == 2
+        assert len(satellite.chunks) == 101
+        assert len(broken.inputs) == 101
+        assert caplog.text.count("wake-word detection failed for a chunk") == 2
 
     @pytest.mark.asyncio
     async def test_a_backlog_costs_detection_and_not_streaming(
@@ -2316,6 +3609,7 @@ def _esphome_service(
         start_thread=lambda _work: None,
         build_webrtc=build_webrtc if build_webrtc is not None else _RefusingWebRTC,
         backlog=backlog,
+        pump_sleep=no_sleep,
     )
     return service, state
 
@@ -2365,13 +3659,121 @@ class _RefusingWebRTC:
 
 
 class _FakeServer:
-    """An asyncio server that never listened."""
+    """An asyncio server whose serving state a test controls directly."""
+
+    def __init__(self) -> None:
+        """Start healthy and open."""
+        self.serving = True
+        self.closed = 0
+        self.waited = 0
+
+    def is_serving(self) -> bool:
+        """Report the scripted listener health."""
+        return self.serving
 
     def close(self) -> None:
-        """Record nothing."""
+        """Record closure and stop serving."""
+        self.closed += 1
+        self.serving = False
 
     async def wait_closed(self) -> None:
-        """Return at once."""
+        """Record that closure was awaited, without wall time."""
+        self.waited += 1
+
+
+class _DisconnectLifecycleTransport:
+    """An accepted transport that schedules the real lost-connection callback."""
+
+    def __init__(self, protocol: VoiceSatelliteProtocol) -> None:
+        """Remember the protocol and the event loop that owns its lifecycle.
+
+        Args:
+            protocol: The accepted protocol this transport serves.
+        """
+        self.closed = 0
+        self.writes: list[object] = []
+        self._protocol = protocol
+        self._loop = asyncio.get_running_loop()
+
+    def writelines(self, packets: object) -> None:
+        """Record protocol writes without opening a socket.
+
+        Args:
+            packets: Encoded packets written by the protocol.
+        """
+        self.writes.append(packets)
+
+    def close(self) -> None:
+        """Schedule connection loss as an asyncio transport does."""
+        self.closed += 1
+        self._loop.call_soon(self._protocol.connection_lost, None)
+
+
+class _RecordingPeripheralEvents:
+    """Record the shared connection-lifecycle events emitted during shutdown."""
+
+    def __init__(self) -> None:
+        """Start without an emitted event."""
+        self.events: list[LVAEvent] = []
+
+    def emit_event_sync(
+        self,
+        event: LVAEvent,
+        data: dict[str, object] | None = None,
+    ) -> None:
+        """Record one event and ignore its payload.
+
+        Args:
+            event: The lifecycle transition.
+            data: An optional transition payload.
+        """
+        del data
+        self.events.append(event)
+
+
+def _listener_service(
+    bound: list[_FakeServer],
+    *,
+    state: ServerState | None = None,
+    host: str = "127.0.0.1",
+    port: int = 6053,
+    listen: Callable[..., Awaitable[_FakeServer]] | None = None,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    backoff: Backoff | None = None,
+) -> EsphomeService:
+    """Build a listener service with every health/retry edge deterministic.
+
+    Args:
+        bound: Every successfully bound fake listener.
+        state: Shared protocol state, or a fresh fake.
+        host: Configured bind host.
+        port: Configured bind port.
+        listen: A custom bind attempt, or one that always succeeds.
+        sleep: The virtual retry wait.
+        backoff: The retry policy under test.
+
+    Returns:
+        The service, not yet started.
+    """
+
+    async def _listen(factory: object, host: str, port: int) -> _FakeServer:
+        del factory, host, port
+        server = _FakeServer()
+        bound.append(server)
+        return server
+
+    return EsphomeService(
+        state if state is not None else vendored_server_state(),
+        FakeCapture([]),
+        PipelineEventTap(lambda _: None),
+        host=host,
+        port=port,
+        listen=listen if listen is not None else _listen,
+        start_thread=lambda _work: None,
+        sleep=sleep if sleep is not None else asyncio.sleep,
+        backoff=backoff if backoff is not None else Backoff(),
+        pump_sleep=no_sleep,
+    )
 
 
 class TestTheDefaultThreadStarter:
@@ -2443,7 +3845,14 @@ class TestStartingUpFromTheEnvironment:
         monkeypatch.setenv(f"{ENV_PREFIX}API_HOST", "127.0.0.1")
         monkeypatch.setenv(f"{ENV_PREFIX}API_PORT", str(_free_port()))
         stop = asyncio.Event()
-        stop.set()
+        start_esphome = EsphomeService.start
+
+        async def _start_esphome_then_stop(service: EsphomeService) -> None:
+            """Stop only after the real listener has successfully bound."""
+            await start_esphome(service)
+            stop.set()
+
+        monkeypatch.setattr(EsphomeService, "start", _start_esphome_then_stop)
 
         await run(FakeRobot(), stop)
 
@@ -2590,56 +3999,95 @@ class TestShutdownFinishesWhateverRefuses:
         assert perception.closed == 1
 
 
-class TestASettingsInterfaceThatStopsOnItsOwn:
+class TestBackgroundServiceTaskReporting:
     """A task nobody awaits until shutdown is a failure nobody sees."""
 
     @pytest.mark.asyncio
-    async def test_a_server_that_will_not_start_says_why(
+    async def test_a_failed_named_task_reports_only_its_safe_reason(
         self,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Binding a port already in use is the ordinary way for this to fail.
+        """The task name and error type are useful; exception text is private.
 
         Args:
             caplog: Captures what the failure was reported as.
         """
+        loop = asyncio.get_running_loop()
+        unhandled: list[object] = []
+        previous_handler = loop.get_exception_handler()
 
-        async def _refuse() -> None:
-            """Fail to serve.
+        async def _fail() -> None:
+            """Fail with fake installation details in the exception text.
 
             Raises:
-                OSError: As binding a port in use does.
+                OSError: Always.
             """
-            message = "address already in use"
-            raise OSError(message)
+            raise OSError(_EXCEPTION_DETAIL)
 
-        service = WebService(_nothing_asgi, host="127.0.0.1", port=8088, serve=_refuse)
-
-        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
-            await service.start()
+        async def _run() -> None:
+            task = asyncio.create_task(_fail(), name="satellite-settings")
+            task.add_done_callback(satellite_main._report_if_it_failed)
             # Two passes of the loop: one for the task to run and fail, one for
             # its done-callback. Both yield rather than sleeping, so nothing
             # waits for wall time.
             await asyncio.sleep(0)
             await asyncio.sleep(0)
-            reported = caplog.text
 
-        await service.aclose()
+        try:
+            loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+            with caplog.at_level(
+                logging.ERROR,
+                logger="reachy_mini_ha_satellite.main",
+            ):
+                await _run()
+                await asyncio.sleep(0)
+                reported = caplog.text
+        finally:
+            loop.set_exception_handler(previous_handler)
 
-        assert "address already in use" in reported
+        assert "satellite-settings stopped unexpectedly" in reported
+        assert "OSError" in reported
+        for identifier in _EXCEPTION_IDENTIFIERS:
+            assert identifier not in reported
+        assert unhandled == []
 
     @pytest.mark.asyncio
-    async def test_a_server_cancelled_on_the_way_out_reports_nothing(self) -> None:
-        """Shutdown cancelling it is not a failure to tell anybody about."""
+    async def test_a_successful_named_task_reports_nothing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A normal background-service exit is not an error."""
+
+        async def _succeed() -> None:
+            """Return normally."""
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            task = asyncio.create_task(_succeed(), name="satellite-settings")
+            task.add_done_callback(satellite_main._report_if_it_failed)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+        assert caplog.records == []
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_named_task_reports_nothing(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Shutdown cancellation is not a failure to tell anybody about."""
         stopped = asyncio.Event()
 
         async def _serve() -> None:
             """Serve until cancelled."""
             await stopped.wait()
 
-        service = WebService(_nothing_asgi, host="127.0.0.1", port=8088, serve=_serve)
-        await service.start()
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            task = asyncio.create_task(_serve(), name="satellite-settings")
+            task.add_done_callback(satellite_main._report_if_it_failed)
+            await asyncio.sleep(0)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
 
-        await service.aclose()
-
-        assert not stopped.is_set()
+        assert caplog.records == []

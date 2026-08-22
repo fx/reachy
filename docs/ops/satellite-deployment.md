@@ -160,6 +160,13 @@ Three consequences follow, and each has cost time already.
 [Configuring](#configuring) — and anything the application writes is captured
 from that process rather than written to the daemon's own log.
 
+**Startup performs the SDK's full controlled wake before opening normal
+services.** It enables the motors, then asks the SDK to run its wake motion and
+sound. A failure in either step aborts startup rather than leaving a satellite
+advertised while its robot is still asleep. The movement and sound are therefore
+expected effects of starting the application, not evidence that Home Assistant
+has begun a voice pipeline.
+
 **⚠️ The daemon does not report why an application stopped.** It reports
 `state: done` with a **null error** whether the application ran and finished, or
 refused to start and exited non-zero, or raised. An exception the application
