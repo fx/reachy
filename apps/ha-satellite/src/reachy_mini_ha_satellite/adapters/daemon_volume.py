@@ -24,9 +24,9 @@ cannot be opted out of at the endpoint; an operator who does not want it sets
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
-import urllib.error
 import urllib.request
 from typing import Final
 from urllib.parse import urlsplit
@@ -86,10 +86,20 @@ def set_daemon_volume(base_url: str, level: int = MAX_DAEMON_VOLUME) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:  # noqa: S310  # as above
             ok = 200 <= int(response.status) < 300
-    except (OSError, urllib.error.HTTPError) as error:
+    except (OSError, http.client.HTTPException) as error:
         # Every way this fails is the same to the caller: the coarse control is
         # wherever it was, the software boost still applies, and the robot works
         # — more quietly than it could.
+        #
+        # **Both arms are needed and neither is `urllib.error.HTTPError`.** That
+        # one is already an `OSError`, so naming it would add nothing; what it
+        # would hide is the gap. `urlopen` can also raise `BadStatusLine`,
+        # `IncompleteRead` or `LineTooLong` from `http.client`, and those derive
+        # from `Exception` rather than from `OSError` — so a daemon that answered
+        # badly would escape this function, escape `VolumeService.start`, and
+        # take the whole application down through the service-startup loop.
+        # "Best-effort" would then be true of the sentence above and of nothing
+        # else.
         _LOGGER.warning("daemon volume: could not set it to %d: %s", level, error)
         return False
     if ok:

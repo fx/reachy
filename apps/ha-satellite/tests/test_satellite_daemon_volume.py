@@ -11,6 +11,7 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -259,6 +260,43 @@ class TestWhenItDoesNotWork:
             )
 
         monkeypatch.setattr(urllib.request, "urlopen", _error)
+
+        assert not set_daemon_volume(_DAEMON)
+
+    def test_a_malformed_answer_does_not_stop_the_application(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`BadStatusLine` and its siblings are not `OSError`s.
+
+        `urllib.error.HTTPError` is one, so catching `OSError` covers it — but
+        `http.client.BadStatusLine`, `IncompleteRead` and `LineTooLong` derive
+        from `Exception` instead. One of those escaping here would escape
+        `VolumeService.start` and take the application down through the
+        service-startup loop, over a volume this function is documented as
+        setting on a best-effort basis.
+
+        Args:
+            monkeypatch: Used to make the daemon answer badly.
+        """
+
+        def _garble(*args: object, **kwargs: object) -> _Response:
+            """Answer the way a daemon speaking nonsense does.
+
+            Args:
+                args: Ignored.
+                kwargs: Ignored.
+
+            Returns:
+                Nothing; this always raises.
+
+            Raises:
+                BadStatusLine: Always.
+            """
+            del args, kwargs
+            raise http.client.BadStatusLine("not a status line")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _garble)
 
         assert not set_daemon_volume(_DAEMON)
 

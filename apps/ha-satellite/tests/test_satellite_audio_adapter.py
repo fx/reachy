@@ -377,6 +377,29 @@ class TestPlaybackGoesThroughTheDaemon:
         # loop was abandoned before it pushed anything.
         assert _pushed(media).size == playable(1.0).size
 
+    def test_superseding_flushes_what_the_daemon_still_holds(self) -> None:
+        """Abandoning the push loop does not take back what it already pushed.
+
+        The loop stays `_LEAD_SECONDS` ahead of the speaker on purpose, so
+        without this the tail of the superseded sound plays underneath the
+        start of its replacement. The vendored layer supersedes without
+        `stop_first` on its ordinary path, so the player has to do it.
+        """
+        media = FakeMedia()
+        sounds = FakeSoundSource()
+        sounds.add("first", "/sounds/first.wav", 5.0)
+        sounds.add("second", "/sounds/second.wav", 5.0)
+        detach = ManualDetach()
+        player = _player(media, sounds, detach=detach)
+
+        player.play("first")
+        detach.run()
+        before = media.stop_playing_calls
+        player.play("second")
+        detach.run_all()
+
+        assert media.stop_playing_calls > before
+
     def test_an_unresolvable_sound_is_skipped_and_the_rest_still_play(
         self,
     ) -> None:
@@ -436,9 +459,10 @@ class TestPlaybackGoesThroughTheDaemon:
 
         player.play("music")
         detach.run()
+        before = media.stop_playing_calls
         player.pause()
 
-        assert media.stop_playing_calls == 1
+        assert media.stop_playing_calls == before + 1
         assert player.is_playing
 
     def test_resuming_restarts_the_item_because_there_is_no_seek(self) -> None:

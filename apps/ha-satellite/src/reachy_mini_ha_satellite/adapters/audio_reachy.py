@@ -780,6 +780,17 @@ class ReachyPlayback:
         # Moves the generation on, which is what makes a push loop still
         # running for the previous sound abandon itself.
         self._cancel_playback()
+        # Abandoning that loop is not enough. It stops *pushing*, but it cannot
+        # take back what the daemon already holds — and the loop deliberately
+        # stays `_LEAD_SECONDS` ahead of the speaker, so up to that much of the
+        # superseded sound would otherwise play underneath the start of its
+        # replacement. The vendored layer supersedes without `stop_first` on the
+        # ordinary path, so this cannot be left to the caller.
+        #
+        # It costs nothing between the items of a playlist: each one is followed
+        # by a drain of exactly that lead before completion, so by the time the
+        # next `_begin` runs there is nothing queued to discard.
+        self._media.stop_playing()
         self._detach(functools.partial(self._push, self._generation, samples))
 
     def _push(self, generation: int, samples: Samples) -> None:
