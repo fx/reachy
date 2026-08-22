@@ -1032,6 +1032,8 @@ class EsphomeService:
         # application whose protocol never started; supervision owns only a
         # listener that was demonstrably serving and then stopped.
         await self._bind_listener()
+        if self._closing:
+            return
         self._running = True
         start_thread = self._start_thread
         if start_thread is None:
