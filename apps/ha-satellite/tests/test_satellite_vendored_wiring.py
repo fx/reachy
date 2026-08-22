@@ -92,6 +92,48 @@ class TestTheSeamsAreFilledRatherThanOpen:
 class TestOverlappingHomeAssistantConnections:
     """Shared state follows the newest surviving authenticated protocol."""
 
+    def test_losing_an_unauthenticated_first_protocol_does_not_disconnect(
+        self,
+    ) -> None:
+        """An accepted transport is not a shared Home Assistant connection."""
+        state = vendored_server_state()
+        events = _PeripheralEvents()
+        state.peripheral_api = events
+        protocol = VoiceSatelliteProtocol(state)
+        protocol.connection_made(_ProtocolTransport())
+
+        protocol.connection_lost(None)
+
+        assert state.satellite is None
+        assert not state.connected
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
+        assert events.events == []
+
+    def test_unauthenticated_overlap_cannot_displace_authenticated_ownership(
+        self,
+    ) -> None:
+        """A handshake that never completes cannot redirect shared entities."""
+        state = vendored_server_state()
+        events = _PeripheralEvents()
+        state.peripheral_api = events
+        active = VoiceSatelliteProtocol(state)
+        active.connection_made(_ProtocolTransport())
+        _authenticate(active)
+        events.events.clear()
+
+        unauthenticated = VoiceSatelliteProtocol(state)
+        unauthenticated.connection_made(_ProtocolTransport())
+        unauthenticated.connection_lost(None)
+
+        assert state.satellite is active
+        assert state.connections == [active]
+        assert state.connected
+        assert all(entity.server is active for entity in state.entities)
+        assert cast(Any, state.music_player.stop).call_count == 0
+        assert cast(Any, state.tts_player.stop).call_count == 0
+        assert events.events == []
+
     def test_losing_the_active_protocol_promotes_an_authenticated_survivor(
         self,
     ) -> None:

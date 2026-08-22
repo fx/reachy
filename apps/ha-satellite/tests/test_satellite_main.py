@@ -238,6 +238,28 @@ class NeverReturningService:
             raise
 
 
+class CancellationResistantService:
+    """A cleanup step that delays completion after suppressing cancellation."""
+
+    def __init__(self) -> None:
+        """Start unfinished and without a cancellation."""
+        self.cancelled = 0
+        self.finished = asyncio.Event()
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Suppress cancellation briefly, as a third-party cleanup may do."""
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            for _ in range(3):
+                await asyncio.sleep(0)
+            self.finished.set()
+
+
 def _application(
     *,
     audio: FakeAudio,
@@ -687,6 +709,56 @@ class TestShutdown:
         assert stuck.entered == 1
         assert stuck.cancelled == 1
         assert later.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_cancellation_resistant_cleanup_does_not_extend_its_deadline(
+        self,
+    ) -> None:
+        """The owner moves on without waiting for a child that suppresses cancel."""
+        stuck = CancellationResistantService()
+        later = RecordingService()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(now=0.0),
+            services=[later, stuck],
+            cleanup_timeout_seconds=0.0,
+        )
+
+        await application.aclose()
+
+        assert stuck.cancelled == 1
+        assert later.closed == 1
+        assert not stuck.finished.is_set()
+        await stuck.finished.wait()
+
+    @pytest.mark.asyncio
+    async def test_owner_cancellation_attempts_every_remaining_cleanup(self) -> None:
+        """Cancellation is re-raised only after later ownership is released."""
+        stuck = NeverReturningService()
+        later = RecordingService()
+        perception = FakePerception()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=perception,
+            behaviour=SatelliteBehaviour(now=0.0),
+            services=[later, stuck],
+        )
+        closing = asyncio.create_task(application.aclose())
+        await asyncio.sleep(0)
+        assert stuck.entered == 1
+
+        closing.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        assert stuck.cancelled == 1
+        assert later.closed == 1
+        assert perception.closed == 1
 
     @pytest.mark.asyncio
     async def test_a_perception_source_that_fails_to_stop_is_survived(self) -> None:
