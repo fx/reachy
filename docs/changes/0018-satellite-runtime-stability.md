@@ -7,7 +7,7 @@ shutdown lifecycles explicitly, so transient failures cannot silently leave the
 robot asleep, disconnected, deaf or half-closed.
 
 **Spec:** [ha-satellite](../specs/ha-satellite/)
-**Status:** in-progress
+**Status:** complete
 **Depends On:** 0013
 
 ## Approval
@@ -165,7 +165,7 @@ did not directly verify supervised listener rebind on hardware.
 
 ## Tasks
 
-- [ ] Stabilize the HA satellite runtime lifecycle in one follow-up PR
+- [x] Stabilize the HA satellite runtime lifecycle in one follow-up PR (PR #22)
   - [x] Add deterministic failing regressions for all seven lifecycle defects
         before changing production code
   - [x] Perform the approved controlled wake before normal service composition
@@ -179,8 +179,8 @@ did not directly verify supervised listener rebind on hardware.
   - [x] Run the focused, member and repository-local automated verification
         required for the implementation phase
   - [x] Perform scrubbed live robot verification of wake and runtime recovery
-  - [ ] Complete the required review channels
-  - [ ] Pass the pull request's continuous-integration checks
+  - [x] Complete the required review channels
+  - [x] Pass the pull request's continuous-integration checks
 
 ## References
 
