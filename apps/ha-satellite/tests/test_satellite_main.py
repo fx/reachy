@@ -135,6 +135,13 @@ _ROBOT_ONLY: Final = SourceSelection.LOCAL  # leak-scan:allow
 # loopback literal rather than anybody's address.
 _DAEMON_API: Final = "http://127.0.0.1:8000"
 
+# Where the boost setter's tests keep their overrides file, and the directory
+# holding it. Bound once rather than spelled at each of the four sites, so that
+# a test standing a file where the directory should be cannot end up naming a
+# different path from the store it is meant to break.
+_BOOST_STATE_DIR: Final = Path("/reachy-satellite-boost")
+_BOOST_OVERRIDES: Final = _BOOST_STATE_DIR / "settings.json"
+
 
 def _recording(asked: list[str]) -> Callable[[str], bool]:
     """Build a volume setter that records the address it was given.
@@ -1618,15 +1625,6 @@ class TestLogging:
         assert logging.getLogger().level == logging.WARNING
 
 
-def _ignore_settings(settings: Settings) -> None:
-    """Adopt nothing, for a test that is about the store rather than the robot.
-
-    Args:
-        settings: What was resolved, and dropped.
-    """
-    del settings
-
-
 class TestWritingABoostChosenFromHomeAssistant:
     """The setter the speaker-boost control is handed, over a real store."""
 
@@ -1641,7 +1639,7 @@ class TestWritingABoostChosenFromHomeAssistant:
                 and nothing reaches a disk.
         """
         del fs
-        store = OverrideStore(Path("/reachy-satellite-boost/settings.json"))
+        store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
 
         satellite_main.build_boost_setter(
@@ -1662,12 +1660,13 @@ class TestWritingABoostChosenFromHomeAssistant:
             fs: An in-memory filesystem.
         """
         del fs
-        store = OverrideStore(Path("/reachy-satellite-boost/settings.json"))
+        store = OverrideStore(_BOOST_OVERRIDES)
         store.save({"log_level": "debug"})
+        adopted: list[Settings] = []
 
         satellite_main.build_boost_setter(
             store=store,
-            apply_live=_ignore_settings,
+            apply_live=adopted.append,
             environ=_ENVIRONMENT,
         )(300.0)
 
@@ -1675,6 +1674,94 @@ class TestWritingABoostChosenFromHomeAssistant:
             "log_level": "debug",
             "speaker_boost_percent": "300.0",
         }
+
+    def test_setting_the_value_already_in_the_file_writes_nothing(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """A scene re-sending what it sent last time must not cost an erase cycle.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+        setter = satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ=_ENVIRONMENT,
+        )
+        setter(640.0)
+        # The store renames a new file into place rather than writing in place,
+        # so a second save leaves a different inode behind. Nothing about the
+        # bytes could tell "written again identically" from "not written".
+        first = _BOOST_OVERRIDES.stat().st_ino
+
+        setter(640.0)
+
+        assert _BOOST_OVERRIDES.stat().st_ino == first
+        assert store.load() == {"speaker_boost_percent": "640.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(640.0),
+        ]
+
+    def test_a_change_after_a_repeat_is_still_written(self, fs: FakeFilesystem) -> None:
+        """The guard drops a repeat, never the next real move of the slider.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+        setter = satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ=_ENVIRONMENT,
+        )
+
+        setter(640.0)
+        setter(640.0)
+        setter(300.0)
+
+        assert store.load() == {"speaker_boost_percent": "300.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(640.0),
+            pytest.approx(300.0),
+        ]
+
+    def test_a_value_equal_to_the_environments_is_still_pinned(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The guard is about the file, not about the layer underneath it.
+
+        A slider has no "revert to the environment" gesture to undo a pin with,
+        so a first set is written even where the environment already says that —
+        which is what `build_boost_setter`'s own docstring promises, and what the
+        skip-an-identical-write guard must not quietly reverse.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+
+        satellite_main.build_boost_setter(
+            store=store,
+            apply_live=adopted.append,
+            environ={
+                **_ENVIRONMENT,
+                f"{ENV_PREFIX}SPEAKER_BOOST_PERCENT": "300.0",
+            },
+        )(300.0)
+
+        assert store.load() == {"speaker_boost_percent": "300.0"}
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(300.0),
+        ]
 
     def test_a_store_that_cannot_be_written_is_reported_and_not_raised(
         self,
@@ -1689,8 +1776,8 @@ class TestWritingABoostChosenFromHomeAssistant:
         """
         # A file where the store wants a directory, so the write cannot succeed
         # and the failure is the store's own rather than a patched one.
-        fs.create_file("/reachy-satellite-boost")
-        store = OverrideStore(Path("/reachy-satellite-boost/settings.json"))
+        fs.create_file(_BOOST_STATE_DIR)
+        store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
 
         with caplog.at_level(logging.ERROR):

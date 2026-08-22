@@ -11,7 +11,7 @@ disk afterwards is the assertion that the persistence happened rather than a
 description of it. That file is in the fake filesystem the `tmp_path` fixture
 installs, so no unit-test rule is bent.
 
-The state and the protocol are built with `make_state` and the real
+The state and the protocol are built with `vendored_server_state` and the real
 `VoiceSatelliteProtocol` rather than with `make_satellite`, which the carried
 tests use. `make_satellite` builds its own state, and half of the tests here need
 entities appended to a state *before* the protocol is constructed over it — which
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message classes inside
@@ -39,8 +39,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated p
     SubscribeHomeAssistantStatesRequest,
 )
 from aioesphomeapi.model import EntityCategory, MediaPlayerCommand, NumberMode
-from esphome_test_support import make_state
-from satellite_support import FakePlayback
+from satellite_support import FakePlayback, vendored_server_state
 
 from reachy_mini_ha_satellite.adapters.output_gain import (
     MAX_BOOST_PERCENT,
@@ -56,6 +55,7 @@ from reachy_mini_ha_satellite.esphome.entity import MediaPlayerEntity
 from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from google.protobuf import message
@@ -64,22 +64,6 @@ if TYPE_CHECKING:
 
 # What the boost setter is handed when a test does not care about the value.
 _A_BOOST: Final = 300.0
-
-
-def _state(tmp_path: Path | None = None, **overrides: Any) -> ServerState:  # noqa: ANN401  # `make_state` takes a `ServerState` field of any type by name
-    """Build a vendored protocol state with nothing in it yet.
-
-    Args:
-        tmp_path: Where preferences and downloads live.
-        overrides: Fields to set on the state, by name.
-
-    Returns:
-        The state.
-    """
-    # `esphome_test_support` is carried from upstream unannotated, so mypy sees
-    # an untyped call rather than a `ServerState`.
-    built: ServerState = make_state(tmp_path, **overrides)  # type: ignore[no-untyped-call]  # upstream's helper is unannotated; see the module docstring
-    return built
 
 
 def _handled(
@@ -145,7 +129,7 @@ class TestWhatTheControlsDeclareToHomeAssistant:
 
     def test_the_volume_declares_a_percentage_slider(self) -> None:
         """Beside `Mic Volume`, where an operator looks for a speaker volume."""
-        entity = SpeakerVolumeNumberEntity(state=_state(), key=3)
+        entity = SpeakerVolumeNumberEntity(state=vendored_server_state(), key=3)
 
         declared = _only(
             _handled(entity, ListEntitiesRequest()),
@@ -197,7 +181,7 @@ class TestWhatTheControlsReportOnSubscribing:
         Args:
             volume: The level in effect, from 0.0 to 1.0.
         """
-        state = _state(volume=volume)
+        state = vendored_server_state(volume=volume)
         entity = SpeakerVolumeNumberEntity(state=state, key=0)
 
         reported = _only(
@@ -225,15 +209,15 @@ class TestSettingTheVolumeFromTheControl:
 
     def test_it_sets_both_outputs_and_answers_with_both_states(
         self,
+        control: _Control,
         tmp_path: Path,
     ) -> None:
         """Home Assistant's two views of one level must not fall out of step.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
+            tmp_path: The directory the preferences file is written into.
         """
-        control = _volume_control(tmp_path)
-
         answered = _handled(
             control.entity,
             NumberCommandRequest(key=control.entity.key, state=40.0),
@@ -256,19 +240,17 @@ class TestSettingTheVolumeFromTheControl:
     )
     def test_a_level_outside_the_slider_is_brought_back_inside_it(
         self,
-        tmp_path: Path,
+        control: _Control,
         asked: float,
         expected: float,
     ) -> None:
         """A client is not the place a range is trusted from.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
             asked: What arrived.
             expected: What should be in effect afterwards, in percent.
         """
-        control = _volume_control(tmp_path)
-
         answered = _handled(
             control.entity,
             NumberCommandRequest(key=control.entity.key, state=asked),
@@ -279,15 +261,13 @@ class TestSettingTheVolumeFromTheControl:
 
     def test_a_command_for_another_entitys_key_is_ignored(
         self,
-        tmp_path: Path,
+        control: _Control,
     ) -> None:
         """Every entity is handed every command, so most of them are not ours.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
         """
-        control = _volume_control(tmp_path)
-
         assert _handled(control.entity, NumberCommandRequest(key=9, state=10.0)) == []
         assert control.state.volume == pytest.approx(1.0)
 
@@ -304,19 +284,17 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
     )
     def test_muting_and_unmuting_are_reported(
         self,
-        tmp_path: Path,
+        control: _Control,
         command: MediaPlayerCommand,
         expected: float,
     ) -> None:
         """Muted is a level of zero, and unmuting restores what was remembered.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
             command: What Home Assistant sent the media player.
             expected: The level the control should report, in percent.
         """
-        control = _volume_control(tmp_path)
-
         answered = _handled(
             control.entity,
             MediaPlayerCommandRequest(
@@ -330,15 +308,13 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
 
     def test_a_volume_set_on_the_media_player_is_reported(
         self,
-        tmp_path: Path,
+        control: _Control,
     ) -> None:
         """Derived from the request, which is what makes the order not matter.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
         """
-        control = _volume_control(tmp_path)
-
         answered = _handled(
             control.entity,
             MediaPlayerCommandRequest(
@@ -350,91 +326,49 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
 
         assert _only(answered, NumberStateResponse).state == pytest.approx(25.0)
 
-    def test_a_command_that_changes_no_level_is_answered_with_nothing(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """A pause is not a volume change, and reporting one would be noise.
-
-        Args:
-            tmp_path: An empty directory in a fake filesystem.
-        """
-        control = _volume_control(tmp_path)
-
-        answered = _handled(
-            control.entity,
-            MediaPlayerCommandRequest(
-                key=control.player.key,
+    @pytest.mark.parametrize(
+        "build",
+        [
+            # A pause is not a volume change, and reporting one would be noise.
+            lambda key: MediaPlayerCommandRequest(
+                key=key,
                 has_command=True,
                 command=MediaPlayerCommand.PAUSE,
             ),
-        )
-
-        assert answered == []
-
-    def test_starting_a_media_url_is_not_a_volume_change(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Playing something does not move the slider, so nothing is reported.
-
-        Args:
-            tmp_path: An empty directory in a fake filesystem.
-        """
-        control = _volume_control(tmp_path)
-
-        answered = _handled(
-            control.entity,
-            MediaPlayerCommandRequest(
-                key=control.player.key,
+            # Playing something does not move the slider, so nothing is
+            # reported.
+            lambda key: MediaPlayerCommandRequest(
+                key=key,
                 has_media_url=True,
                 media_url="http://192.0.2.10/tts.mp3",
             ),
-        )
-
-        assert answered == []
-
-    def test_a_command_carrying_nothing_at_all_is_answered_with_nothing(
+            # A client may send a command carrying nothing at all; guessing a
+            # level from it would be inventing one.
+            lambda key: MediaPlayerCommandRequest(key=key),
+            # Every entity is handed every command, most of them somebody
+            # else's — so one addressed to a different media player is not this
+            # control's business, even though it does carry a volume.
+            lambda key: MediaPlayerCommandRequest(
+                key=key + 10,
+                has_volume=True,
+                volume=0.5,
+            ),
+        ],
+        ids=("a pause", "a media url", "nothing at all", "another media player"),
+    )
+    def test_a_command_that_moves_no_level_is_answered_with_nothing(
         self,
-        tmp_path: Path,
+        control: _Control,
+        build: Callable[[int], MediaPlayerCommandRequest],
     ) -> None:
-        """A client may send one; guessing a level from it would be inventing one.
+        """Each of these reaches the control and none of them moves the slider.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
+            build: Makes the command, from the media player's own key — which
+                is not known until the protocol has built one.
         """
-        control = _volume_control(tmp_path)
-
-        assert (
-            _handled(
-                control.entity,
-                MediaPlayerCommandRequest(key=control.player.key),
-            )
-            == []
-        )
-
-    def test_a_command_for_another_media_player_is_ignored(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        """Every entity is handed every command, most of them somebody else's.
-
-        Args:
-            tmp_path: An empty directory in a fake filesystem.
-        """
-        control = _volume_control(tmp_path)
-
-        assert (
-            _handled(
-                control.entity,
-                MediaPlayerCommandRequest(
-                    key=control.player.key + 10,
-                    has_volume=True,
-                    volume=0.5,
-                ),
-            )
-            == []
-        )
+        assert _handled(control.entity, build(control.player.key)) == []
 
     @pytest.mark.parametrize(
         "msg",
@@ -456,7 +390,7 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
         Args:
             msg: A command addressed to this control's key.
         """
-        entity = SpeakerVolumeNumberEntity(state=_state(), key=0)
+        entity = SpeakerVolumeNumberEntity(state=vendored_server_state(), key=0)
 
         assert _handled(entity, msg) == []
 
@@ -473,12 +407,15 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
         reader should not have to work out whether that matters, so this drives
         the real fan-out both ways round and requires the same answer.
 
+        It builds its own state rather than taking the `control` fixture,
+        because the registration order is the thing under test.
+
         Args:
             tmp_path: An empty directory in a fake filesystem.
             ours_first: Whether the control is registered before the protocol
                 builds the media player, as the composition root does.
         """
-        state = _state(tmp_path)
+        state = vendored_server_state(tmp_path=tmp_path)
         if ours_first:
             state.entities.append(
                 SpeakerVolumeNumberEntity(state=state, key=len(state.entities)),
@@ -523,14 +460,13 @@ class TestTheMediaPlayersOwnCommandsMoveTheControl:
 class TestTheMutedRule:
     """Muted, the control reads zero and a set is remembered rather than applied."""
 
-    def test_it_reads_zero_while_muted(self, tmp_path: Path) -> None:
+    def test_it_reads_zero_while_muted(self, control: _Control) -> None:
         """Which is the level in effect: the device is silent.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
         """
-        control = _volume_control(tmp_path)
-        _mute(control)
+        _send_command(control, MediaPlayerCommand.MUTE)
 
         reported = _only(
             _handled(control.entity, SubscribeHomeAssistantStatesRequest()),
@@ -541,15 +477,16 @@ class TestTheMutedRule:
 
     def test_a_set_while_muted_is_remembered_and_not_persisted(
         self,
+        control: _Control,
         tmp_path: Path,
     ) -> None:
         """It lands in `previous_volume`, which is what unmuting restores.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
+            tmp_path: The directory the preferences file is written into.
         """
-        control = _volume_control(tmp_path)
-        _mute(control)
+        _send_command(control, MediaPlayerCommand.MUTE)
         written = json.loads(
             (tmp_path / "preferences.json").read_text(encoding="utf-8"),
         )
@@ -568,21 +505,20 @@ class TestTheMutedRule:
 
     def test_unmuting_restores_what_was_set_while_muted(
         self,
-        tmp_path: Path,
+        control: _Control,
     ) -> None:
         """Home Assistant's slider snapping back to zero is honest, not lost.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
         """
-        control = _volume_control(tmp_path)
-        _mute(control)
+        _send_command(control, MediaPlayerCommand.MUTE)
         _handled(
             control.entity,
             NumberCommandRequest(key=control.entity.key, state=30.0),
         )
 
-        _unmute(control)
+        _send_command(control, MediaPlayerCommand.UNMUTE)
 
         assert _only(
             _handled(control.entity, SubscribeHomeAssistantStatesRequest()),
@@ -591,21 +527,20 @@ class TestTheMutedRule:
 
     def test_the_two_controls_agree_after_every_step_of_a_sweep(
         self,
-        tmp_path: Path,
+        control: _Control,
     ) -> None:
         """One number underneath both, in every state including muted.
 
         Args:
-            tmp_path: An empty directory in a fake filesystem.
+            control: The control, wired as the robot wires it.
         """
-        control = _volume_control(tmp_path)
         steps: list[tuple[float, float]] = []
 
         for step in range(5):
             if step == 2:
-                _mute(control)
+                _send_command(control, MediaPlayerCommand.MUTE)
             elif step == 4:
-                _unmute(control)
+                _send_command(control, MediaPlayerCommand.UNMUTE)
             else:
                 _handled(
                     control.entity,
@@ -620,7 +555,7 @@ class TestTheMutedRule:
             )
             steps.append((reported.state, control.player.volume * 100.0))
 
-        assert all(control == pytest.approx(media) for control, media in steps), (
+        assert all(reported == pytest.approx(media) for reported, media in steps), (
             f"the two controls disagreed somewhere in {steps}"
         )
 
@@ -693,7 +628,7 @@ class TestRegisteringBothBeforeTheProtocolExists:
         Args:
             tmp_path: An empty directory in a fake filesystem.
         """
-        state = _state(tmp_path)
+        state = vendored_server_state(tmp_path=tmp_path)
         volume = SpeakerVolumeNumberEntity(state=state, key=len(state.entities))
         state.entities.append(volume)
         boost, _written = _boost(key=len(state.entities))
@@ -728,12 +663,17 @@ class _Control:
     speech: FakePlayback
 
 
-def _volume_control(tmp_path: Path) -> _Control:
+@pytest.fixture
+def control(tmp_path: Path) -> _Control:
     """Register the control and then build the protocol, as the robot does.
 
     The order is the composition root's: the control is appended to a state
     holding nothing, and the vendored protocol layer then appends its own media
     player after it.
+
+    A fixture rather than a helper each test calls, because every one of them
+    wants the same wiring and none of them wants `tmp_path` for anything else —
+    except the two that read `preferences.json`, which ask for both.
 
     Args:
         tmp_path: Where preferences are written.
@@ -742,7 +682,11 @@ def _volume_control(tmp_path: Path) -> _Control:
         The state, the control, the media player, and the two outputs.
     """
     music, speech = FakePlayback(), FakePlayback()
-    state = _state(tmp_path, music_player=music, tts_player=speech)
+    state = vendored_server_state(
+        tmp_path=tmp_path,
+        music_player=music,
+        tts_player=speech,
+    )
     entity = SpeakerVolumeNumberEntity(state=state, key=len(state.entities))
     state.entities.append(entity)
     VoiceSatelliteProtocol(state)
@@ -757,47 +701,45 @@ def _volume_control(tmp_path: Path) -> _Control:
     )
 
 
-def _mute(control: _Control) -> None:
-    """Mute the device the way Home Assistant does, through the fan-out.
+def _send_command(control: _Control, command: MediaPlayerCommand) -> None:
+    """Send one media-player command the way Home Assistant does: to everything.
 
     Args:
         control: What the test is driving.
+        command: What Home Assistant sent the media player.
     """
     _fan_out(
         control.state,
         MediaPlayerCommandRequest(
             key=control.player.key,
             has_command=True,
-            command=MediaPlayerCommand.MUTE,
+            command=command,
         ),
     )
 
 
-def _unmute(control: _Control) -> None:
-    """Unmute the device the way Home Assistant does, through the fan-out.
-
-    Args:
-        control: What the test is driving.
-    """
-    _fan_out(
-        control.state,
-        MediaPlayerCommandRequest(
-            key=control.player.key,
-            has_command=True,
-            command=MediaPlayerCommand.UNMUTE,
-        ),
-    )
-
-
-def _fan_out(state: ServerState, msg: message.Message) -> None:
+def _fan_out(state: ServerState, msg: message.Message) -> list[message.Message]:
     """Hand one message to every entity, as the vendored protocol layer does.
+
+    The one loop, because the ordering tests are *about* this loop: a second
+    copy of it that filtered one entity's replies would be the thing under test
+    written twice, and the two could then disagree about the order.
 
     Args:
         state: The state holding the entities.
         msg: What arrived.
+
+    Returns:
+        What the speaker-volume control answered with. Every other entity is
+        handed the message and its replies are drained and dropped, which is
+        what the protocol layer does with the ones a test is not asking about.
     """
+    ours: list[message.Message] = []
     for entity in list(state.entities):
-        list(entity.handle_message(msg))
+        answered = list(entity.handle_message(msg))
+        if isinstance(entity, SpeakerVolumeNumberEntity):
+            ours.extend(answered)
+    return ours
 
 
 def _levels_from(state: ServerState, msg: MediaPlayerCommandRequest) -> float:
@@ -810,10 +752,4 @@ def _levels_from(state: ServerState, msg: MediaPlayerCommandRequest) -> float:
     Returns:
         The level the control reported, in percent.
     """
-    answered: list[message.Message] = []
-    for entity in list(state.entities):
-        if isinstance(entity, SpeakerVolumeNumberEntity):
-            answered.extend(entity.handle_message(msg))
-        else:
-            list(entity.handle_message(msg))
-    return float(_only(answered, NumberStateResponse).state)
+    return float(_only(_fan_out(state, msg), NumberStateResponse).state)
