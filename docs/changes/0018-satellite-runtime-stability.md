@@ -105,8 +105,10 @@ requirements.
 - No vendoring or patching of the Reachy Mini SDK's stale `ready` or
   `last_alive` status fields.
 - No serial retry policy and no unrelated health-registry expansion.
-- No live robot interaction and no live identifier or credential in tracked
-  files.
+- Live robot interaction is not required and is not used to force failure
+  branches. Separately requested live observation is permitted only as a
+  scrubbed session; the performed session is recorded below without any live
+  identifier or credential in tracked files.
 
 ## Testing
 
