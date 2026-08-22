@@ -33,7 +33,6 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated p
     ListEntitiesNumberResponse,
     ListEntitiesRequest,
     MediaPlayerCommandRequest,
-    MediaPlayerStateResponse,
     NumberCommandRequest,
     NumberStateResponse,
     SubscribeHomeAssistantStatesRequest,
@@ -73,6 +72,13 @@ _BOOST_STEP: Final = 10.0
 
 _VOLUME_MINIMUM: Final = 0.0
 _VOLUME_MAXIMUM: Final = 100.0
+
+# What converts between the two units in play: the media player holds the level
+# as a fraction of full scale, and this control offers it in percent. It is the
+# same number as `_VOLUME_MAXIMUM` and it is not the same thing — that one is
+# where the slider stops, and a slider that stopped at 50 would not change how a
+# fraction becomes a percentage.
+_PERCENT_PER_UNIT: Final = 100.0
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -135,15 +141,6 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
         self.key = key
         self._state = state
 
-    def _media_player(self) -> MediaPlayerEntity | None:
-        """Find the media-player entity, if one has been built yet.
-
-        Returns:
-            The media player, or `None` before the first connection has built
-            one.
-        """
-        return self._state.media_player_entity
-
     def _level(self) -> float:
         """Say the level in effect, in the percent Home Assistant asked for.
 
@@ -151,7 +148,7 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
             `ServerState.volume` as a percentage — which is 0 while muted, and
             is the same number the media-player entity reports.
         """
-        return float(self._state.volume) * _VOLUME_MAXIMUM
+        return float(self._state.volume) * _PERCENT_PER_UNIT
 
     def _level_after(
         self,
@@ -183,10 +180,10 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
             if command == MediaPlayerCommand.MUTE:
                 return 0.0
             if command == MediaPlayerCommand.UNMUTE:
-                return float(player.previous_volume) * _VOLUME_MAXIMUM
+                return float(player.previous_volume) * _PERCENT_PER_UNIT
             return None
         if msg.has_volume:
-            return float(msg.volume) * _VOLUME_MAXIMUM
+            return float(msg.volume) * _PERCENT_PER_UNIT
         return None
 
     def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
@@ -219,30 +216,30 @@ class SpeakerVolumeNumberEntity(ESPHomeEntity):
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
             yield NumberStateResponse(key=self.key, state=self._level())
         elif isinstance(msg, NumberCommandRequest) and msg.key == self.key:
-            player = self._media_player()
+            player = self._state.media_player_entity
             if player is None:
                 return
-            level = _clamp(float(msg.state), _VOLUME_MINIMUM, _VOLUME_MAXIMUM)
-            level /= _VOLUME_MAXIMUM
-            player.apply_volume_from_state(level)
+            fraction = (
+                _clamp(float(msg.state), _VOLUME_MINIMUM, _VOLUME_MAXIMUM)
+                / _PERCENT_PER_UNIT
+            )
+            player.apply_volume_from_state(fraction)
             # Guarded, because while muted this level belongs in
             # `previous_volume` and nowhere else: persisting it would make
             # `ServerState.volume` non-zero while the device is silent, and the
             # two controls would then report different numbers.
             if not player.muted:
-                self._state.persist_volume(level)
+                self._state.persist_volume(fraction)
             yield NumberStateResponse(key=self.key, state=self._level())
             # The media player's own state, so Home Assistant's two views of one
             # level move together rather than one of them lagging until the next
-            # subscription.
-            yield MediaPlayerStateResponse(
-                key=player.key,
-                state=player.state,
-                volume=player.volume,
-                muted=player.muted,
-            )
+            # subscription — and asked *of* the media player rather than
+            # assembled on its behalf, so a field upstream adds to that message
+            # arrives here too. A subscription request is the one branch of its
+            # `handle_message` that yields its state message and nothing else.
+            yield from player.handle_message(SubscribeHomeAssistantStatesRequest())
         elif isinstance(msg, MediaPlayerCommandRequest):
-            player = self._media_player()
+            player = self._state.media_player_entity
             if player is None or msg.key != player.key:
                 return
             after = self._level_after(msg, player)

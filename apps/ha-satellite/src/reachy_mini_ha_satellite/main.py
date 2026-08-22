@@ -1476,10 +1476,22 @@ def build_boost_setter(
         Args:
             percent: The boost, already clamped by the entity that offers it.
         """
+        previous = store.load()
         wanted = {
-            **store.load(),
+            **previous,
             "speaker_boost_percent": as_configured_string(percent),
         }
+        # Equality with the *file*, which is a different question from the one
+        # `build_boost_setter`'s docstring declines to act on: that one is with
+        # the environment layer, and a first set equal to the environment's
+        # value still writes its pin. This only drops a write that would replace
+        # the file with itself — a scene or a scheduled automation re-sending
+        # the value already stored, which would otherwise re-resolve the
+        # settings and spend an erase cycle on the robot's card each time. The
+        # vendored `ServerState.persist_volume` declines the same write for the
+        # same reason.
+        if wanted == previous:
+            return
         try:
             apply_settings_change(
                 wanted,

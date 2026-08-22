@@ -280,6 +280,10 @@ def create_app(
         The application, ready to be served.
     """
     source: Mapping[str, str] = os.environ if environ is None else environ
+    # Resolved once rather than at each of the two writing paths: `application`
+    # is a parameter and cannot change, so the two would only ever be the same
+    # answer written twice.
+    adopt = None if application is None else application.apply_live
     current = _Current(resolution)
 
     async def index(request: Request) -> Response:
@@ -327,7 +331,7 @@ def create_app(
                 wanted,
                 store=store,
                 environ=source,
-                apply_live=None if application is None else application.apply_live,
+                apply_live=adopt,
             )
         except ConfigurationError as error:
             # Every way this can refuse ends here, and every one of them ends
@@ -368,7 +372,7 @@ def create_app(
                 {},
                 store=store,
                 environ=source,
-                apply_live=None if application is None else application.apply_live,
+                apply_live=adopt,
             )
         except ConfigurationError as error:
             return HTMLResponse(

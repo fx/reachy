@@ -757,10 +757,18 @@ def apply_settings_change(
     it owns. Both then hand the whole `wanted` mapping here, because the store
     holds a complete set rather than a patch.
 
-    `apply_live` is a callable rather than a `SettingsHost`. That protocol lives
-    in `web/app.py`, `web` imports this module, and importing it back would make
-    the two mutually importable — see `SettingsHost`'s own docstring on why it
-    exists at all.
+    `apply_live` is a callable rather than a `SettingsHost`, and the reason that
+    matters is **not** the import cycle. A cycle is avoidable — a one-method
+    protocol could be declared here or in `ports.py` and `web/app.py` could
+    import it — so it is a consequence rather than the argument. The argument is
+    that a callable is the narrower dependency: this function needs one thing
+    done with the resolved settings, and taking the whole host would let it
+    reach the running application's other methods and would oblige every future
+    caller to have a host to hand rather than a function. A Home Assistant
+    entity has no host. That said, the cycle is real and worth knowing about:
+    `SettingsHost` lives in `web/app.py`, `web` imports this module, and
+    importing it back would make the two mutually importable — see
+    `SettingsHost`'s own docstring on why it exists at all.
 
     Args:
         wanted: The complete set of overrides to store, by setting name.
