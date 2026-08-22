@@ -260,9 +260,113 @@ still the right place to set a fleet-wide default. Once the boost has been moved
 from either surface, the overrides file is what wins. The variable says nothing
 about Speaker Volume, which has no environment setting of its own.
 
+### What that looks like on a real robot
+
+**In every entity identifier below, `XXXXXX` is a placeholder.** The real suffix
+is derived from the robot's hardware address, so yours will carry its own —
+substitute it.
+
+The device announces the two controls ahead of everything the vendored layer
+brings:
+
 ```
-<!-- transcript to be captured on hardware before merge -->
+TYPE             KEY  OBJECT_ID                    NAME
+NumberInfo         0  speaker_volume               Speaker Volume
+NumberInfo         1  speaker_boost                Speaker Boost
+MediaPlayerInfo    2  linux_voice_assistant_media_player Media Player
+SwitchInfo         3  mute                         Mute
+SwitchInfo         4  thinking_sound               Thinking Sound
+NumberInfo         5  wake_word_1_sensitivity      Wake Word 1 Sensitivity
+NumberInfo         6  wake_word_2_sensitivity      Wake Word 2 Sensitivity
+NumberInfo         7  stop_word_sensitivity        Stop Word Sensitivity
+NumberInfo         8  mic_gain                     Mic Auto Gain
+SelectInfo         9  mic_noise                    Mic Noise Suppression
+NumberInfo        10  mic_volume                   Mic Volume
 ```
+
+The new controls take keys 0 and 1 and everything else shifts up by two.
+**Nothing you already have is disturbed by that.** Home Assistant keys an entity
+on `{mac}-{entity_type}-{object_id}`, which contains no numeric key, so identity,
+history and automations all survive the upgrade — confirmed on an installation
+that already carried every one of the entities above.
+
+The two controls as Home Assistant reads them:
+
+```
+number.reachy_mini_XXXXXX_speaker_volume = 100.0
+    min 0.0  max 100.0  step 1.0  mode slider  unit %  icon mdi:volume-high
+number.reachy_mini_XXXXXX_speaker_boost  = 500.0
+    min 100.0  max 800.0  step 10.0  mode slider  unit %  icon mdi:volume-vibrate
+```
+
+**Speaker Volume and the media-player card are the one level, in both
+directions.** Setting the slider moves the card and is persisted:
+
+```
+before                     speaker_volume 100.0   media_player idle 1.0
+number.set_value  40       speaker_volume  40.0   media_player idle 0.4
+~/.local/state/reachy-mini-ha-satellite/preferences.json   "volume": 0.4
+```
+
+and setting the card moves the slider, muting takes it to 0, and unmuting brings
+it back:
+
+```
+media_player.volume_set 0.75      number 75.0   media_player vol 0.75  muted False
+media_player.volume_mute true     number  0.0   media_player vol 0.0   muted True
+media_player.volume_mute false    number 75.0   media_player vol 0.75  muted False
+```
+
+Both report the same level at every step.
+
+**Speaker Boost writes the overrides file, and is adopted without a restart.**
+Before the slider was touched there was no overrides file at all:
+
+```
+$ cat ~/.local/state/reachy-mini-ha-satellite/settings.json
+cat: ...: No such file or directory
+
+  number.set_value speaker_boost = 250    ->  entity reads 250.0
+
+$ cat ~/.local/state/reachy-mini-ha-satellite/settings.json
+{
+  "speaker_boost_percent": "250.0"
+}
+
+$ ps -eo etime,cmd | grep reachy_mini_ha_satellite
+   05:59 ... -m reachy_mini_ha_satellite.daemon_app
+```
+
+The process uptime is unchanged across the change, so the boost was adopted by
+the running application rather than by a restart.
+
+**A pinned boost survives one.** With `settings.json` holding
+`"speaker_boost_percent": "500.0"`, the application was stopped and started
+again; Home Assistant then read
+`number.reachy_mini_XXXXXX_speaker_boost = 500.0`.
+
+**And a boost set on the robot's own settings page reaches Home Assistant
+without waiting for a reconnect:**
+
+```
+Home Assistant before   500.0   last_changed 05:54:16
+  settings page submitted with speaker_boost_percent = 320.0
+Home Assistant after    320.0   last_changed 05:56:13
+```
+
+No reconnection took place between those two readings.
+
+> **Verified on hardware**, against a real Reachy Mini and a real Home Assistant.
+> Two things are replaced above and nothing else is: the device suffix in every
+> entity identifier, which derives from the robot's hardware address, and the
+> state directory, whose real path carries an account name. Every value is as it
+> was read.
+>
+> **These are readings, not listening.** Every observation here came from the
+> API, so what it establishes is that the controls report and apply the right
+> numbers — not how the robot sounded. The audible question is the one
+> [change 0016](../changes/0016-audible-playback.md) answered, and the 500%
+> default is inherited from it unchanged.
 
 ## 5. Watch the robot, not the screen
 

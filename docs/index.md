@@ -33,4 +33,4 @@
 | 0014 | [benchmarks-and-gates](changes/0014-benchmarks-and-gates.md) | [benchmarks](specs/benchmarks/) | complete | 0006, 0009, 0013 |
 | 0015 | [docs-and-runbooks](changes/0015-docs-and-runbooks.md) | [architecture](specs/architecture/) | complete | 0013, 0014 |
 | 0016 | [audible-playback](changes/0016-audible-playback.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
-| 0017 | [speaker-controls-in-home-assistant](changes/0017-speaker-controls-in-home-assistant.md) | [ha-satellite](specs/ha-satellite/) | draft | 0016 |
+| 0017 | [speaker-controls-in-home-assistant](changes/0017-speaker-controls-in-home-assistant.md) | [ha-satellite](specs/ha-satellite/) | complete | 0016 |

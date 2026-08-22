@@ -7,7 +7,7 @@ Assistant, as controls in the Configuration group beside `Mic Volume`, kept in
 step with the media-player entity and persisted across restarts.
 
 **Spec:** [ha-satellite](../specs/ha-satellite/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0016
 
 ## Motivation
@@ -331,28 +331,54 @@ beside that file with the rest of them.
       to either writes, and that the environment variable is still how the
       starting value is set. No requirement is added and nothing under
       `docs/specs/` is edited.
-- [ ] Verify on the robot and in Home Assistant, and record it — both controls
+- [x] Verify on the robot and in Home Assistant, and record it — both controls
       present in the Configuration group, the volume slider moving with the
       media-player card in both directions, muting reading 0, and a boost set
       from Home Assistant surviving a restart. Capture the transcript into
-      `docs/setup/home-assistant.md` §4, where a marked placeholder is waiting
+      `docs/setup/home-assistant.md` §4, where a marked placeholder was waiting
       for it.
 
 ## Outcome
 
-⏳ **Pending hardware verification.** Nothing in this repository has a Reachy
-Mini or a Home Assistant instance attached, so what is established here is what
-the test suite can establish: the messages the entities declare and answer, the
-level the two views agree on across a sweep of commands, what muting does along
-each of its paths — including the media-player `VOLUME_SET` that leaves the
-level non-zero while the mute flag is set — the clamping, the read-back, the
-file the boost is written to, and that a boost adopted through `apply_live`
-reaches every connected client as the same state message a subscription is
-answered with.
+**Verified against a real Reachy Mini and a real Home Assistant.** The session is
+transcribed in
+[`docs/setup/home-assistant.md` §4](../setup/home-assistant.md#what-that-looks-like-on-a-real-robot),
+scrubbed the way the runbook convention requires; what follows is what it
+settles, requirement by requirement.
 
-Whether Home Assistant renders the two controls in the Configuration group where
-this document says it will is the one claim that needs the robot, and it is the
-last task above. `docs/setup/home-assistant.md` §4 carries a marked placeholder
-where the observed output belongs; the transcript replaces it before this change
-is complete, scrubbed the way the runbook convention requires. No output has been
-invented in the meantime.
+- **R1, R2 and the registration.** Home Assistant read both controls as `number`
+  entities with the declared bounds, step, mode, unit and icon — Speaker Volume
+  over 0–100% at step 1, Speaker Boost over 100–800% at step 10 — on a device
+  that already carried every vendored entity. The new pair took keys 0 and 1 and
+  the vendored entities shifted up by two, and **no existing entity changed
+  identity, lost history or dropped an automation**, which is the renumbering
+  argument under [Registration and the key
+  renumbering](#registration-and-the-key-renumbering) confirmed on an
+  installation rather than reasoned about. The Configuration group itself is
+  Home Assistant's rendering of the declared `entity_category=CONFIG` and was
+  not separately transcribed.
+- **R5.** Across the sweep the two views never differed: setting the Number moved
+  the media player, setting the media player moved the Number, and a mute took
+  both to 0 with an unmute restoring both to the level from before it.
+- **R3.** A boost chosen in Home Assistant created the overrides file — which had
+  not existed until then — with `speaker_boost_percent` in it, and a boost
+  standing in that file was what Home Assistant reported after the application
+  was stopped and started again. The write and the survival were observed as two
+  steps against the same file rather than as one continuous sequence.
+- **R4.** The daemon's uptime was unchanged across a boost change, so the new
+  value was adopted by the running application rather than by a restart. And a
+  boost submitted on the application's own settings page was what Home Assistant
+  read next, with no reconnection in between, which is
+  `publish` through `broadcast` doing what [Telling Home Assistant about a boost
+  it did not choose](#telling-home-assistant-about-a-boost-it-did-not-choose)
+  says it does.
+
+**What is still not evidence, and it is the obvious thing.** Nobody listened to
+the robot. Every observation above is an API reading, so this change is verified
+as *correct* — the right numbers reported, applied and persisted — and not as
+*audible*. The 500% default is inherited from
+[0016](0016-audible-playback.md), which is where the listening was done; it was
+neither re-tuned nor re-judged here, and the non-goal saying so still holds.
+R6's refused write was likewise not provoked on hardware: it stays established by
+the test suite, as do the messages the entities declare and answer, the clamping
+and the read-back.
