@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from contextvars import Context
 import socket
 import threading
 from pathlib import Path
@@ -313,6 +314,82 @@ class ShieldSpawningCleanupService:
             self.finalized = True
 
 
+class SuccessfulDescendantCleanupService:
+    """A successful cleanup that starts work which remains pending."""
+
+    def __init__(self) -> None:
+        """Start without a descendant."""
+        self.descendant: asyncio.Task[bool] | None = None
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Spawn a pending descendant, then return normally."""
+        self.descendant = asyncio.create_task(asyncio.Event().wait())
+
+
+class ExplicitBlankContextCleanupService:
+    """A cleanup that deliberately replaces inherited context on its child."""
+
+    def __init__(self) -> None:
+        """Start without descendants."""
+        self.child: asyncio.Task[None] | None = None
+        self.grandchild: asyncio.Task[bool] | None = None
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Create a child in a blank context; it creates one more task."""
+
+        async def _child() -> None:
+            self.grandchild = asyncio.create_task(asyncio.Event().wait())
+            await asyncio.Event().wait()
+
+        self.child = asyncio.create_task(_child(), context=Context())
+        await asyncio.sleep(0)
+
+
+class EagerFinalizerCleanupService:
+    """A descendant that would spawn successors during eager finalization."""
+
+    def __init__(self) -> None:
+        """Start with no descendant and no successors."""
+        self.descendant: asyncio.Task[bool] | None = None
+        self.successors: list[asyncio.Task[None]] = []
+
+    async def start(self) -> None:
+        """Do nothing."""
+
+    async def aclose(self) -> None:
+        """Spawn one pending descendant, then return successfully."""
+
+        async def _descendant() -> bool:
+            try:
+                return await asyncio.Event().wait()
+            finally:
+                self._spawn_successor()
+
+        self.descendant = asyncio.create_task(_descendant())
+
+    def _spawn_successor(self) -> None:
+        """Create a bounded chain that exposes eager finalization churn."""
+        if len(self.successors) >= _EAGER_SUCCESSOR_LIMIT:
+            return
+
+        async def _successor() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self._spawn_successor()
+
+        self.successors.append(asyncio.create_task(_successor()))
+
+
+_EAGER_SUCCESSOR_LIMIT: Final = 32
+
+
 class IndefinitelyCancellationResistantService:
     """A cleanup step that suppresses every ordinary task cancellation."""
 
@@ -347,6 +424,21 @@ class IndefinitelyCancellationResistantService:
                         self._on_cancel()
         finally:
             self.finalized = True
+
+
+async def _finish_test_tasks(
+    before: set[asyncio.Task[Any]],
+    runner: asyncio.Task[Any],
+) -> None:
+    """Bound test teardown for tasks a failed regression may leave behind."""
+    for _ in range(_EAGER_SUCCESSOR_LIMIT + 4):
+        pending = asyncio.all_tasks() - before - {runner}
+        if not pending:
+            return
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    raise AssertionError("test cleanup task chain did not converge")
 
 
 def _application(
@@ -1019,6 +1111,151 @@ class TestShutdown:
                     await unrelated
 
         asyncio.run(_run_and_close())
+
+    def test_successful_cleanup_drains_its_pending_descendant(self) -> None:
+        """A normal outer return cannot transfer child ownership to the runner."""
+
+        async def _run_and_close() -> None:
+            runner = asyncio.current_task()
+            assert runner is not None
+            before = set(asyncio.all_tasks())
+            service = SuccessfulDescendantCleanupService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, service],
+            )
+
+            try:
+                await application.aclose()
+
+                descendant = service.descendant
+                assert descendant is not None
+                assert descendant.done()
+                assert later.closed == 1
+                assert asyncio.all_tasks() - before - {runner} == set()
+            finally:
+                await _finish_test_tasks(before, runner)
+
+        asyncio.run(_run_and_close())
+
+    def test_legacy_two_argument_task_factory_remains_compatible(self) -> None:
+        """Absent context must not become an unsupported keyword argument."""
+
+        async def _run_and_close() -> None:
+            loop = asyncio.get_running_loop()
+            calls = 0
+
+            def _legacy_factory(
+                task_loop: asyncio.AbstractEventLoop,
+                coroutine: Coroutine[Any, Any, Any],
+            ) -> asyncio.Task[Any]:
+                nonlocal calls
+                calls += 1
+                return asyncio.Task(coroutine, loop=task_loop)
+
+            service = RecordingService()
+            loop.set_task_factory(_legacy_factory)
+            try:
+                application = SatelliteApplication(
+                    settings=_settings(),
+                    audio=FakeAudio(),
+                    motion=FakeMotion(),
+                    perception=FakePerception(),
+                    behaviour=SatelliteBehaviour(now=0.0),
+                    services=[service],
+                )
+                await application.aclose()
+            finally:
+                loop.set_task_factory(None)
+
+            assert calls >= 1
+            assert service.closed == 1
+
+        asyncio.run(_run_and_close())
+
+    def test_explicit_blank_context_still_owns_nested_cleanup_tasks(self) -> None:
+        """Replacing inherited context cannot detach a child from cleanup scope."""
+
+        async def _run_and_close() -> None:
+            runner = asyncio.current_task()
+            assert runner is not None
+            before = set(asyncio.all_tasks())
+            service = ExplicitBlankContextCleanupService()
+            later = RecordingService()
+            application = SatelliteApplication(
+                settings=_settings(),
+                audio=FakeAudio(),
+                motion=FakeMotion(),
+                perception=FakePerception(),
+                behaviour=SatelliteBehaviour(now=0.0),
+                services=[later, service],
+            )
+
+            try:
+                await application.aclose()
+
+                child = service.child
+                grandchild = service.grandchild
+                assert child is not None
+                assert grandchild is not None
+                assert child.done()
+                assert grandchild.done()
+                assert later.closed == 1
+                assert asyncio.all_tasks() - before - {runner} == set()
+            finally:
+                await _finish_test_tasks(before, runner)
+
+        asyncio.run(_run_and_close())
+
+    def test_eager_finalization_closes_successor_without_churn(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A finalizer-created successor is canceled before eager execution."""
+
+        async def _run_and_close() -> None:
+            loop = asyncio.get_running_loop()
+            runner = asyncio.current_task()
+            assert runner is not None
+            before = set(asyncio.all_tasks())
+            service = EagerFinalizerCleanupService()
+            later = RecordingService()
+            loop.set_task_factory(asyncio.eager_task_factory)
+            try:
+                application = SatelliteApplication(
+                    settings=_settings(),
+                    audio=FakeAudio(),
+                    motion=FakeMotion(),
+                    perception=FakePerception(),
+                    behaviour=SatelliteBehaviour(now=0.0),
+                    services=[later, service],
+                )
+                await application.aclose()
+
+                descendant = service.descendant
+                assert descendant is not None
+                assert descendant.done()
+                assert len(service.successors) == 1
+                assert service.successors[0].done()
+                assert later.closed == 1
+                assert asyncio.all_tasks() - before - {runner} == set()
+            finally:
+                loop.set_task_factory(None)
+                await _finish_test_tasks(before, runner)
+
+        with caplog.at_level(logging.ERROR, logger="reachy_mini_ha_satellite.main"):
+            asyncio.run(_run_and_close())
+        forced = [
+            record
+            for record in caplog.records
+            if "force-finalized" in record.getMessage()
+        ]
+        assert len(forced) <= 2
 
     def test_repeated_owner_cancellation_cannot_abandon_cleanup_finalization(
         self,
