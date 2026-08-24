@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final
 
+from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     ControllerConfig,
     ControllerMode,
@@ -35,8 +36,6 @@ __all__ = [
     "constant_target",
     "moving_target",
 ]
-
-_DEGREES: Final = math.pi / 180.0
 
 TargetPath = Callable[[float], tuple[float, float]]
 TimedInterval = Callable[[int, float], float]
@@ -169,12 +168,20 @@ class PlantSample:
     image_error: ImagePoint
     command: GazeSample
     state: ControllerState
-    mode: ControllerMode
     controller_tick: bool
     observation_consumed: bool
     observation_identity: tuple[str, int, int] | None
     prediction_horizon: float
-    deadband_active: bool
+
+    @property
+    def mode(self) -> ControllerMode:
+        """Return the controller mode carried by the immutable state."""
+        return self.state.mode
+
+    @property
+    def deadband_active(self) -> bool:
+        """Return whether the state carries an active deadband."""
+        return self.state.deadband.active
 
     @property
     def plant_world_yaw(self) -> float:
@@ -255,21 +262,12 @@ class GazePlant:
         last_consumed = False
         last_identity: tuple[str, int, int] | None = None
         last_horizon = 0.0
-        last_deadband = False
-        mode = state.mode
         trace: list[PlantSample] = []
         at = 0.0
 
         while at <= duration + 1e-12:
             target_yaw, target_elevation = target(at)
             plant_world_yaw = plant_head_yaw + plant_body_yaw
-            image = self._image_error(
-                plant_world_yaw,
-                plant_elevation,
-                target_yaw,
-                target_elevation,
-                observation_index,
-            )
 
             if at + 1e-12 >= next_observation:
                 interval = self._config.observation_interval(observation_index, at)
@@ -277,6 +275,13 @@ class GazePlant:
                 self._require_interval("observation interval", interval, positive=True)
                 self._require_interval("observation latency", latency, positive=False)
                 if not self._faults.drop_observation(observation_index, at):
+                    image = self._image_error(
+                        plant_world_yaw,
+                        plant_elevation,
+                        target_yaw,
+                        target_elevation,
+                        observation_index,
+                    )
                     observation = GazeObservation(
                         source="simulated-camera",
                         generation=0,
@@ -284,8 +289,10 @@ class GazePlant:
                         captured_at=at,
                         received_at=at + latency,
                         target_key=0,
-                        target=image,
-                        confidence=0.9,
+                        face=FaceDetection(
+                            centre=NormalisedPoint(x=image.x, y=image.y),
+                            confidence=0.9,
+                        ),
                         world_yaw=target_yaw,
                         world_elevation=target_elevation,
                     )
@@ -299,12 +306,13 @@ class GazePlant:
                 observation_index += 1
                 next_observation += interval
 
-            arrived = [item for item in observations if item.available_at <= at + 1e-12]
-            if arrived:
-                latest = arrived[-1].observation
-                observations = [
-                    item for item in observations if item.available_at > at + 1e-12
-                ]
+            pending: list[_PendingObservation] = []
+            for item in observations:
+                if item.available_at <= at + 1e-12:
+                    latest = item.observation
+                else:
+                    pending.append(item)
+            observations = pending
 
             controller_tick = at + 1e-12 >= next_controller
             if controller_tick:
@@ -328,7 +336,6 @@ class GazePlant:
                     workspace_ok=not rejected,
                 )
                 state = result.state
-                mode = result.mode
                 last_consumed = result.observation_consumed
                 last_identity = (
                     latest.identity
@@ -336,7 +343,6 @@ class GazePlant:
                     else None
                 )
                 last_horizon = result.prediction_horizon
-                last_deadband = result.deadband_active
                 commands.append(
                     _PendingCommand(at + self._config.command_delay, result.sample)
                 )
@@ -375,12 +381,10 @@ class GazePlant:
                     image_error=final_image,
                     command=command,
                     state=state,
-                    mode=mode,
                     controller_tick=controller_tick,
                     observation_consumed=last_consumed,
                     observation_identity=last_identity,
                     prediction_horizon=last_horizon,
-                    deadband_active=last_deadband,
                 )
             )
             at = round(at + self._config.plant_dt, 12)

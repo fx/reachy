@@ -13,6 +13,8 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final
 
+from reachy_contracts import FaceDetection
+
 __all__ = [
     "AxisLimits",
     "AxisState",
@@ -103,8 +105,7 @@ class GazeObservation:
     captured_at: float
     received_at: float
     target_key: int
-    target: ImagePoint | None
-    confidence: float | None
+    face: FaceDetection | None
     world_yaw: float | None = None
     world_elevation: float | None = None
 
@@ -123,17 +124,9 @@ class GazeObservation:
         if self.received_at < self.captured_at:
             message = "an observation cannot be received before capture"
             raise ValueError(message)
-        if (self.target is None) != (self.confidence is None):
-            message = "an observation target and confidence must be supplied together"
-            raise ValueError(message)
-        if self.target is not None:
-            if not -1.0 <= self.target.x <= 1.0 or not -1.0 <= self.target.y <= 1.0:
-                message = "an observation target must be inside normalized image bounds"
-                raise ValueError(message)
-            if self.confidence is None:
-                raise AssertionError("paired target confidence was checked above")
-            _unit("observation confidence", self.confidence)
-        elif self.world_yaw is not None or self.world_elevation is not None:
+        if self.face is None and (
+            self.world_yaw is not None or self.world_elevation is not None
+        ):
             message = "an empty observation cannot carry a world target"
             raise ValueError(message)
         if (self.world_yaw is None) != (self.world_elevation is None):
@@ -224,7 +217,6 @@ class EstimatorState:
     velocity: ImagePoint
     captured_at: float
     received_at: float
-    samples: int = 1
     world_position: ImagePoint | None = None
     world_velocity: ImagePoint = ImagePoint(0.0, 0.0)
 
@@ -419,17 +411,33 @@ class ControllerState:
 
 @dataclass(frozen=True, slots=True)
 class ControllerStep:
-    """One new immutable state, command sample and decision evidence."""
+    """One new immutable state and its transient decision evidence."""
 
     state: ControllerState
-    sample: GazeSample
-    mode: ControllerMode
     observation_consumed: bool
     estimator_reset: EstimatorReset
     prediction_horizon: float
     stale: bool
-    deadband_active: bool
-    workspace_accepted: bool
+
+    @property
+    def sample(self) -> GazeSample:
+        """Return the atomic command retained by the new state."""
+        return self.state.last_safe_sample
+
+    @property
+    def mode(self) -> ControllerMode:
+        """Return the new controller mode."""
+        return self.state.mode
+
+    @property
+    def deadband_active(self) -> bool:
+        """Return whether the new state's deadband is active."""
+        return self.state.deadband.active
+
+    @property
+    def workspace_accepted(self) -> bool:
+        """Return whether this step is outside workspace hold."""
+        return self.state.mode is not ControllerMode.WORKSPACE_HOLD
 
 
 def initial_controller_state(
@@ -479,10 +487,13 @@ def update_estimator(
     config: ControllerConfig,
 ) -> tuple[EstimatorState, EstimatorReset]:
     """Consume one new observation using independent alpha-beta axes."""
-    if observation.target is None:
+    if observation.face is None:
         message = "an empty result carries no target estimate"
         raise ValueError(message)
-    measured = observation.target
+    measured = ImagePoint(
+        observation.face.centre.x,
+        observation.face.centre.y,
+    )
     world_position = (
         ImagePoint(observation.world_yaw, observation.world_elevation)
         if observation.world_yaw is not None and observation.world_elevation is not None
@@ -564,7 +575,6 @@ def update_estimator(
             velocity=velocity,
             captured_at=observation.captured_at,
             received_at=observation.received_at,
-            samples=estimator.samples + 1,
             world_position=world_position,
             world_velocity=world_velocity,
         ),
@@ -841,9 +851,9 @@ def step_controller(
     consumed = False
     if observation is not None and observation.identity != last_identity:
         last_identity = observation.identity
-        target_visible = observation.target is not None
+        target_visible = observation.face is not None
         consumed = True
-        if observation.target is not None:
+        if observation.face is not None:
             estimator, reset = update_estimator(estimator, observation, config)
 
     stale = (
@@ -939,6 +949,38 @@ def step_controller(
             yaw_goal = _return_velocity(state.world_yaw, config.yaw_limits)
             elevation_goal = _return_velocity(state.elevation, config.elevation_limits)
 
+    recovering = state.mode is ControllerMode.WORKSPACE_HOLD
+    valid_streak = state.workspace_valid_streak
+    accepted = workspace_ok
+    if not workspace_ok:
+        valid_streak = 0
+    elif recovering:
+        valid_streak += 1
+        accepted = valid_streak >= config.workspace_recovery_samples
+
+    if not accepted:
+        world, elevation, body = _brake_hidden(state, dt, config)
+        held_state = replace(
+            state,
+            mode=ControllerMode.WORKSPACE_HOLD,
+            estimator=estimator,
+            deadband=deadband,
+            world_yaw=world,
+            elevation=elevation,
+            body_yaw=body,
+            last_observation_identity=last_identity,
+            target_visible=target_visible,
+            loss_started_at=loss_started,
+            workspace_valid_streak=valid_streak,
+        )
+        return ControllerStep(
+            state=held_state,
+            observation_consumed=consumed,
+            estimator_reset=reset,
+            prediction_horizon=horizon,
+            stale=stale,
+        )
+
     world = step_axis(
         state.world_yaw,
         yaw_goal,
@@ -974,42 +1016,6 @@ def step_controller(
     )
     candidate = _sample(world, elevation, body, config)
 
-    recovering = state.mode is ControllerMode.WORKSPACE_HOLD
-    valid_streak = state.workspace_valid_streak
-    accepted = workspace_ok
-    if not workspace_ok:
-        valid_streak = 0
-    elif recovering:
-        valid_streak += 1
-        accepted = valid_streak >= config.workspace_recovery_samples
-
-    if not accepted:
-        world, elevation, body = _brake_hidden(state, dt, config)
-        held_state = replace(
-            state,
-            mode=ControllerMode.WORKSPACE_HOLD,
-            estimator=estimator,
-            deadband=deadband,
-            world_yaw=world,
-            elevation=elevation,
-            body_yaw=body,
-            last_observation_identity=last_identity,
-            target_visible=target_visible,
-            loss_started_at=loss_started,
-            workspace_valid_streak=valid_streak,
-        )
-        return ControllerStep(
-            state=held_state,
-            sample=state.last_safe_sample,
-            mode=ControllerMode.WORKSPACE_HOLD,
-            observation_consumed=consumed,
-            estimator_reset=reset,
-            prediction_horizon=horizon,
-            stale=stale,
-            deadband_active=deadband.active,
-            workspace_accepted=False,
-        )
-
     candidate_state = replace(
         state,
         mode=mode,
@@ -1035,12 +1041,8 @@ def step_controller(
         )
     return ControllerStep(
         state=candidate_state,
-        sample=candidate,
-        mode=mode,
         observation_consumed=consumed,
         estimator_reset=reset,
         prediction_horizon=horizon,
         stale=stale,
-        deadband_active=deadband.active,
-        workspace_accepted=True,
     )

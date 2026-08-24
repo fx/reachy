@@ -204,19 +204,10 @@ class RemotePerception:
             # to do something odd and least likely to be watched.
             return Detections()
         age = self._clock() - self._received_at
-        if age >= self._staleness_seconds:
-            return Detections(
-                fresh=False,
-                source=DetectionSource.REMOTE,
-                age_seconds=age,
-                generation=self._generation,
-                sequence=self._sequence,
-                captured_at=self._captured_at,
-                received_at=self._received_at,
-            )
+        fresh = age < self._staleness_seconds
         return Detections(
-            faces=self._faces,
-            fresh=True,
+            faces=self._faces if fresh else (),
+            fresh=fresh,
             source=DetectionSource.REMOTE,
             age_seconds=age,
             generation=self._generation,

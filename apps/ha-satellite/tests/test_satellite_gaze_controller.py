@@ -13,6 +13,7 @@ from itertools import pairwise
 
 import pytest
 
+from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     AxisLimits,
     AxisState,
@@ -54,8 +55,10 @@ def _observation(
         captured_at=captured_at,
         received_at=received_at,
         target_key=target_key,
-        target=ImagePoint(x, y),
-        confidence=0.9,
+        face=FaceDetection(
+            centre=NormalisedPoint(x=x, y=y),
+            confidence=0.9,
+        ),
     )
 
 
@@ -117,22 +120,12 @@ class TestObservationValidation:
         with pytest.raises(ValueError, match="received before capture"):
             replace(_observation(), captured_at=0.2, received_at=0.1)
 
-    def test_target_and_confidence_are_atomic_and_bounded(self) -> None:
-        """No partial, out-of-frame or impossible-confidence face is accepted."""
-        with pytest.raises(ValueError, match="supplied together"):
-            replace(_observation(), confidence=None)
-        with pytest.raises(ValueError, match="normalized image bounds"):
-            replace(_observation(), target=ImagePoint(1.01, 0.0))
-        with pytest.raises(ValueError, match="between zero and one"):
-            replace(_observation(), confidence=1.01)
-
     def test_world_anchor_is_atomic_and_belongs_only_to_a_face(self) -> None:
         """An empty result or half an anchor cannot become a world target."""
         with pytest.raises(ValueError, match="empty observation"):
             replace(
                 _observation(),
-                target=None,
-                confidence=None,
+                face=None,
                 world_yaw=0.0,
                 world_elevation=0.0,
             )
@@ -175,8 +168,7 @@ class TestObservationIdentityAndEstimation:
         )
         empty = replace(
             _observation(sequence=1, captured_at=0.1, received_at=0.2),
-            target=None,
-            confidence=None,
+            face=None,
         )
         lost = step_controller(
             active.state,
@@ -262,7 +254,6 @@ class TestPredictionAndStaleness:
             velocity=ImagePoint(2.0, -2.0),
             captured_at=0.0,
             received_at=0.8,
-            samples=2,
         )
 
         predicted, horizon = predict_error(estimator, now=1.0, config=config)

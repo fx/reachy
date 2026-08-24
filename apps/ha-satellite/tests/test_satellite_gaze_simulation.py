@@ -219,12 +219,7 @@ class TestDelayDropoutCadenceAndFaults:
         faults = PlantFaults(
             reject_workspace=lambda _sample, tick, _at: 6 <= tick < 9,
             corrupt_observation=lambda observation, index: (
-                replace(
-                    observation,
-                    confidence=0.8,
-                )
-                if index == 2
-                else observation
+                replace(observation, target_key=1) if index == 2 else observation
             ),
         )
         plant = GazePlant(
