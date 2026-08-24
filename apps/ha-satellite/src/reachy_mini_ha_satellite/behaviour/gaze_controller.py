@@ -1072,7 +1072,6 @@ def step_controller(
     )
     if mode is ControllerMode.RETURNING and _idle(candidate_state, config):
         mode = ControllerMode.IDLE
-        neutral = AxisState()
         candidate_state = replace(
             candidate_state,
             mode=mode,
@@ -1080,10 +1079,6 @@ def step_controller(
             target_visible=None,
             loss_started_at=None,
             deadband=DeadbandState(),
-            world_yaw=neutral,
-            elevation=neutral,
-            body_yaw=neutral,
-            last_safe_sample=GazeSample(0.0, 0.0, 0.0, 0.0, config.body_enabled),
         )
     return ControllerStep(
         state=candidate_state,

@@ -331,6 +331,66 @@ class TestObservationIdentityAndEstimation:
         assert reacquired.state.estimator is not None
         assert reacquired.state.estimator.velocity == ImagePoint(0.0, 0.0)
 
+    @pytest.mark.parametrize(
+        ("dt", "before"),
+        [
+            (0.001, AxisState(position=0.24 * _DEGREES)),
+            (
+                0.02,
+                AxisState(
+                    position=0.1 * _DEGREES,
+                    velocity=0.3 * _DEGREES,
+                    acceleration=15.0 * _DEGREES,
+                ),
+            ),
+        ],
+    )
+    def test_idle_transition_preserves_near_threshold_trajectory_continuity(
+        self,
+        dt: float,
+        before: AxisState,
+    ) -> None:
+        """Settling to IDLE cannot snap bounded residual trajectory state to zero."""
+        config = ControllerConfig()
+        state = replace(
+            initial_controller_state(config),
+            mode=ControllerMode.RETURNING,
+            world_yaw=before,
+            target_visible=False,
+            loss_started_at=0.0,
+            last_safe_sample=GazeSample(
+                world_yaw=before.position,
+                elevation=0.0,
+                body_yaw=0.0,
+                head_yaw=before.position,
+                body_enabled=False,
+            ),
+        )
+
+        settled = step_controller(
+            state,
+            None,
+            now=1.0,
+            dt=dt,
+            config=config,
+        )
+        after = settled.state.world_yaw
+
+        assert settled.mode is ControllerMode.IDLE
+        assert (
+            abs(after.position - before.position) <= config.yaw_limits.max_velocity * dt
+        )
+        assert (
+            abs(after.velocity - before.velocity)
+            <= config.yaw_limits.max_acceleration * dt
+        )
+        assert (
+            abs(after.acceleration - before.acceleration)
+            <= config.yaw_limits.max_jerk * dt
+        )
+        assert after.position >= -1.0 * _DEGREES
+        assert settled.sample.world_yaw == after.position
+
     def test_settled_loss_remains_idle_without_new_observations(self) -> None:
         """Idle after empty-face return cannot restart its own loss lifecycle."""
         config = ControllerConfig(loss_hold_seconds=0.1)
@@ -386,27 +446,43 @@ class TestObservationIdentityAndEstimation:
             )
         assert result.mode is ControllerMode.IDLE
 
+        axes = (
+            ("world_yaw", config.yaw_limits),
+            ("elevation", config.elevation_limits),
+            ("body_yaw", config.body_limits),
+        )
         for _ in range(8):
+            before = result.state
             now += 0.05
             result = step_controller(
-                result.state,
+                before,
                 None,
                 now=now,
                 dt=0.05,
                 config=config,
             )
             assert result.mode is ControllerMode.IDLE
-            assert result.sample.world_yaw == 0.0
-            assert result.sample.elevation == 0.0
-            assert result.sample.body_yaw == 0.0
-            for axis in (
-                result.state.world_yaw,
-                result.state.elevation,
-                result.state.body_yaw,
-            ):
-                assert axis.position == 0.0
-                assert axis.velocity == 0.0
-                assert axis.acceleration == 0.0
+            for name, limits in axes:
+                previous_axis = getattr(before, name)
+                axis = getattr(result.state, name)
+                assert abs(axis.position) <= 1.0 * _DEGREES
+                assert abs(axis.velocity) <= limits.max_velocity
+                assert abs(axis.acceleration) <= limits.max_acceleration
+                assert (
+                    abs(axis.position - previous_axis.position)
+                    <= limits.max_velocity * 0.05
+                )
+                assert (
+                    abs(axis.velocity - previous_axis.velocity)
+                    <= limits.max_acceleration * 0.05
+                )
+                assert (
+                    abs(axis.acceleration - previous_axis.acceleration)
+                    <= limits.max_jerk * 0.05
+                )
+            assert result.sample.world_yaw == result.state.world_yaw.position
+            assert result.sample.elevation == result.state.elevation.position
+            assert result.sample.body_yaw == result.state.body_yaw.position
 
     @pytest.mark.parametrize(
         ("change", "expected"),
