@@ -1,0 +1,451 @@
+"""Pure predictive-gaze estimation, deadband, allocation and servo contracts.
+
+Every clock reading and observation is a value chosen here. The controller is
+synchronous and performs no input, output or sleeping.
+"""
+
+from __future__ import annotations
+
+import math
+from collections.abc import Callable
+from dataclasses import FrozenInstanceError, replace
+from itertools import pairwise
+
+import pytest
+
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    AxisLimits,
+    AxisState,
+    ControllerConfig,
+    ControllerMode,
+    DeadbandState,
+    EstimatorReset,
+    EstimatorState,
+    GazeObservation,
+    ImagePoint,
+    allocate_body,
+    apply_deadband,
+    initial_controller_state,
+    predict_error,
+    step_axis,
+    step_controller,
+    update_estimator,
+)
+
+_DEGREES = math.pi / 180.0
+
+
+def _observation(
+    *,
+    source: str = "remote",
+    generation: int = 0,
+    sequence: int = 0,
+    captured_at: float = 0.0,
+    received_at: float = 0.1,
+    target_key: int = 0,
+    x: float = 0.4,
+    y: float = 0.0,
+) -> GazeObservation:
+    """Build one complete face observation in the controller vocabulary."""
+    return GazeObservation(
+        source=source,
+        generation=generation,
+        sequence=sequence,
+        captured_at=captured_at,
+        received_at=received_at,
+        target_key=target_key,
+        target=ImagePoint(x, y),
+        confidence=0.9,
+    )
+
+
+def _change_source(observation: GazeObservation) -> GazeObservation:
+    """Start a local source stream at its first sequence."""
+    return replace(observation, source="local", sequence=0)
+
+
+def _change_generation(observation: GazeObservation) -> GazeObservation:
+    """Start a new generation at its first sequence."""
+    return replace(observation, generation=1, sequence=0)
+
+
+def _change_target(observation: GazeObservation) -> GazeObservation:
+    """Select a different associated target."""
+    return replace(observation, target_key=1)
+
+
+def _reverse_capture_time(observation: GazeObservation) -> GazeObservation:
+    """Move capture behind the preceding estimator sample."""
+    return replace(observation, captured_at=0.0, received_at=0.3)
+
+
+def _open_supported_gap(observation: GazeObservation) -> GazeObservation:
+    """Move capture beyond the estimator's supported gap."""
+    return replace(observation, captured_at=1.0, received_at=1.1)
+
+
+class TestImmutableValues:
+    """Configuration, state and samples are frozen values rather than owners."""
+
+    def test_config_state_and_observation_are_frozen_and_slotted(self) -> None:
+        """A caller advances by replacement, never hidden mutation."""
+        config = ControllerConfig()
+        state = initial_controller_state(config)
+        observation = _observation()
+
+        with pytest.raises(FrozenInstanceError):
+            state.mode = ControllerMode.ACTIVE  # type: ignore[misc]  # deliberately proves the public value is frozen
+        with pytest.raises(FrozenInstanceError):
+            config.feedback_gain = 99.0  # type: ignore[misc]  # deliberately proves the public value is frozen
+        with pytest.raises(FrozenInstanceError):
+            observation.sequence = 4  # type: ignore[misc]  # deliberately proves the public value is frozen
+        assert not hasattr(state, "__dict__")
+
+
+class TestObservationValidation:
+    """Malformed timed observations are refused before arithmetic can use them."""
+
+    def test_source_and_identity_parts_are_validated(self) -> None:
+        """An identity is non-empty and never runs backwards below zero."""
+        with pytest.raises(ValueError, match="source must not be empty"):
+            replace(_observation(), source="")
+        with pytest.raises(ValueError, match="must not be negative"):
+            replace(_observation(), generation=-1)
+
+    def test_receipt_cannot_precede_capture(self) -> None:
+        """Negative observation age is not a prediction input."""
+        with pytest.raises(ValueError, match="received before capture"):
+            replace(_observation(), captured_at=0.2, received_at=0.1)
+
+    def test_target_and_confidence_are_atomic_and_bounded(self) -> None:
+        """No partial, out-of-frame or impossible-confidence face is accepted."""
+        with pytest.raises(ValueError, match="supplied together"):
+            replace(_observation(), confidence=None)
+        with pytest.raises(ValueError, match="normalized image bounds"):
+            replace(_observation(), target=ImagePoint(1.01, 0.0))
+        with pytest.raises(ValueError, match="between zero and one"):
+            replace(_observation(), confidence=1.01)
+
+    def test_world_anchor_is_atomic_and_belongs_only_to_a_face(self) -> None:
+        """An empty result or half an anchor cannot become a world target."""
+        with pytest.raises(ValueError, match="empty observation"):
+            replace(
+                _observation(),
+                target=None,
+                confidence=None,
+                world_yaw=0.0,
+                world_elevation=0.0,
+            )
+        with pytest.raises(ValueError, match="supplied together"):
+            replace(_observation(), world_yaw=0.0)
+
+
+class TestObservationIdentityAndEstimation:
+    """One source-qualified result changes the estimator at most once."""
+
+    def test_replayed_identity_advances_only_the_existing_trajectory(self) -> None:
+        """Faster behavior polling cannot integrate one image result repeatedly."""
+        config = ControllerConfig()
+        observation = _observation()
+        first = step_controller(
+            initial_controller_state(config),
+            observation,
+            now=0.1,
+            dt=0.05,
+            config=config,
+        )
+        second = step_controller(
+            first.state, observation, now=0.15, dt=0.05, config=config
+        )
+
+        assert first.observation_consumed
+        assert not second.observation_consumed
+        assert second.state.estimator == first.state.estimator
+        assert second.state.world_yaw.position != first.state.world_yaw.position
+
+    def test_fresh_empty_result_is_consumed_once_as_explicit_loss(self) -> None:
+        """Nobody seen is an observation, not a missing or stale turn."""
+        config = ControllerConfig()
+        active = step_controller(
+            initial_controller_state(config),
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+        )
+        empty = replace(
+            _observation(sequence=1, captured_at=0.1, received_at=0.2),
+            target=None,
+            confidence=None,
+        )
+        lost = step_controller(
+            active.state,
+            empty,
+            now=0.2,
+            dt=0.05,
+            config=config,
+        )
+        replayed = step_controller(
+            lost.state,
+            empty,
+            now=0.25,
+            dt=0.05,
+            config=config,
+        )
+
+        assert lost.observation_consumed
+        assert lost.mode is ControllerMode.HOLD
+        assert not replayed.observation_consumed
+
+    @pytest.mark.parametrize(
+        ("change", "expected"),
+        [
+            (_change_source, EstimatorReset.SOURCE),
+            (_change_generation, EstimatorReset.GENERATION),
+            (_change_target, EstimatorReset.TARGET),
+            (_reverse_capture_time, EstimatorReset.TIME_ORDER),
+            (_open_supported_gap, EstimatorReset.GAP),
+        ],
+    )
+    def test_every_stream_discontinuity_resets_velocity(
+        self,
+        change: Callable[[GazeObservation], GazeObservation],
+        expected: EstimatorReset,
+    ) -> None:
+        """No old target velocity crosses a source, target or time boundary."""
+        config = ControllerConfig(estimator_gap=0.5)
+        first, _reset = update_estimator(None, _observation(), config)
+        moving, _reset = update_estimator(
+            first,
+            _observation(sequence=1, captured_at=0.1, received_at=0.2, x=0.6),
+            config,
+        )
+        assert moving.velocity.x != 0.0
+        next_observation = change(
+            _observation(sequence=2, captured_at=0.2, received_at=0.3, x=-0.4)
+        )
+
+        reset, reason = update_estimator(moving, next_observation, config)
+
+        assert reason is expected
+        assert reset.velocity == ImagePoint(0.0, 0.0)
+
+    def test_horizontal_and_vertical_velocity_are_estimated_independently(self) -> None:
+        """Pure motion on one image axis cannot borrow activity from the other."""
+        config = ControllerConfig()
+        first, _reset = update_estimator(None, _observation(x=0.1, y=0.2), config)
+        second, _reset = update_estimator(
+            first,
+            _observation(sequence=1, captured_at=0.1, received_at=0.2, x=0.4, y=0.2),
+            config,
+        )
+
+        assert second.velocity.x > 0.0
+        assert second.velocity.y == pytest.approx(0.0)
+
+
+class TestPredictionAndStaleness:
+    """Capture-age prediction and receipt freshness are separate decisions."""
+
+    def test_prediction_bounds_velocity_position_and_capture_horizon(self) -> None:
+        """A late fast estimate cannot extrapolate without limit."""
+        config = ControllerConfig(
+            prediction_horizon=0.35,
+            image_position_limit=1.5,
+            image_velocity_limit=2.0,
+        )
+        estimator = EstimatorState(
+            identity=("remote", 0, 2),
+            target_key=0,
+            measured=ImagePoint(1.0, -1.0),
+            position=ImagePoint(1.4, -1.4),
+            velocity=ImagePoint(2.0, -2.0),
+            captured_at=0.0,
+            received_at=0.8,
+            samples=2,
+        )
+
+        predicted, horizon = predict_error(estimator, now=1.0, config=config)
+
+        assert horizon == pytest.approx(0.35)
+        assert predicted == ImagePoint(1.5, -1.5)
+
+    def test_late_but_fresh_result_tracks_with_clamped_prediction(self) -> None:
+        """Capture age beyond the horizon is not receipt-time loss."""
+        config = ControllerConfig(prediction_horizon=0.2, staleness_seconds=2.0)
+        result = step_controller(
+            initial_controller_state(config),
+            _observation(captured_at=0.0, received_at=0.9, x=0.5),
+            now=1.0,
+            dt=0.05,
+            config=config,
+        )
+
+        assert result.mode is ControllerMode.ACTIVE
+        assert result.prediction_horizon == pytest.approx(0.2)
+        assert not result.stale
+
+    def test_receipt_age_enters_loss_even_when_capture_prediction_is_bounded(
+        self,
+    ) -> None:
+        """No extrapolation clamp can keep an old receipt live forever."""
+        config = ControllerConfig(staleness_seconds=0.5)
+        active = step_controller(
+            initial_controller_state(config),
+            _observation(captured_at=0.0, received_at=0.1),
+            now=0.1,
+            dt=0.05,
+            config=config,
+        )
+
+        stale = step_controller(active.state, None, now=0.6, dt=0.05, config=config)
+
+        assert stale.stale
+        assert stale.mode in {ControllerMode.HOLD, ControllerMode.RETURNING}
+
+
+class TestDeadbandAndServo:
+    """Raw-error hysteresis is continuous and every trajectory derivative is bounded."""
+
+    def test_raw_error_alone_controls_activation(self) -> None:
+        """Predicted velocity cannot activate centered detector noise."""
+        config = ControllerConfig()
+        predicted = ImagePoint(0.8, 0.0)
+        filtered, state = apply_deadband(
+            predicted,
+            activation=ImagePoint(0.0, 0.0),
+            state=DeadbandState(),
+            config=config,
+        )
+
+        assert not state.active
+        assert filtered == ImagePoint(0.0, 0.0)
+
+    def test_hysteresis_retains_mid_band_state_and_releases_continuously(self) -> None:
+        """The same raw radius differs before and after crossing the start edge."""
+        config = ControllerConfig(deadband_start=1.1, deadband_stop=0.7)
+        mid = ImagePoint(config.deadband_x * 0.9, 0.0)
+        _filtered, inactive = apply_deadband(
+            mid, activation=mid, state=DeadbandState(), config=config
+        )
+        _filtered, started = apply_deadband(
+            ImagePoint(config.deadband_x * 1.2, 0.0),
+            activation=ImagePoint(config.deadband_x * 1.2, 0.0),
+            state=inactive,
+            config=config,
+        )
+        retained, active = apply_deadband(
+            mid, activation=mid, state=started, config=config
+        )
+        edge = ImagePoint(config.deadband_x * config.deadband_stop, 0.0)
+        released_output, released = apply_deadband(
+            edge, activation=edge, state=active, config=config
+        )
+
+        assert not inactive.active
+        assert started.active
+        assert active.active
+        assert retained.x > 0.0
+        assert not released.active
+        assert released_output == ImagePoint(0.0, 0.0)
+
+    def test_reversal_respects_position_velocity_acceleration_and_jerk(self) -> None:
+        """A sign change crosses bounded derivatives without a position jump."""
+        limits = AxisLimits(
+            minimum=-1.0,
+            maximum=1.0,
+            max_velocity=0.8,
+            max_acceleration=1.5,
+            max_jerk=4.0,
+        )
+        state = AxisState()
+        states = [state]
+        for tick in range(120):
+            state = step_axis(state, 0.8 if tick < 50 else -0.8, 0.02, limits)
+            states.append(state)
+
+        assert all(limits.minimum <= item.position <= limits.maximum for item in states)
+        assert all(abs(item.velocity) <= limits.max_velocity for item in states)
+        assert all(abs(item.acceleration) <= limits.max_acceleration for item in states)
+        assert all(
+            abs(later.acceleration - earlier.acceleration) / 0.02
+            <= limits.max_jerk + 1e-12
+            for earlier, later in pairwise(states)
+        )
+
+
+class TestAllocationAndWorkspaceScaffolds:
+    """Body output stays off while its pure bounded allocation is exercised."""
+
+    def test_body_is_disabled_by_default(self) -> None:
+        """No foundation-only calculation can move the released runtime body."""
+        config = ControllerConfig()
+
+        assert not config.body_enabled
+        assert allocate_body(40.0 * _DEGREES, config) == 0.0
+
+    def test_enabled_allocation_is_continuous_odd_symmetric_and_monotonic(self) -> None:
+        """The scaffold has no threshold jump or directional bias."""
+        config = replace(ControllerConfig(), body_enabled=True)
+        magnitudes = [index * 0.1 * _DEGREES for index in range(701)]
+        positive = [allocate_body(value, config) for value in magnitudes]
+
+        assert all(later >= earlier for earlier, later in pairwise(positive))
+        for value, allocated in zip(magnitudes, positive, strict=True):
+            assert allocate_body(-value, config) == pytest.approx(-allocated)
+        for knot in (
+            config.body_noise_floor,
+            config.body_midpoint,
+            config.body_large_point,
+        ):
+            left = allocate_body(knot - 1e-9, config)
+            exact = allocate_body(knot, config)
+            right = allocate_body(knot + 1e-9, config)
+            assert left == pytest.approx(exact, abs=1e-8)
+            assert right == pytest.approx(exact, abs=1e-8)
+
+    def test_workspace_rejection_holds_sample_and_requires_recovery_evidence(
+        self,
+    ) -> None:
+        """A rejected target never leaks while hidden derivatives brake."""
+        config = ControllerConfig(workspace_recovery_samples=2)
+        first = step_controller(
+            initial_controller_state(config),
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+        )
+        rejected = step_controller(
+            first.state,
+            None,
+            now=0.15,
+            dt=0.05,
+            config=config,
+            workspace_ok=False,
+        )
+        recovering = step_controller(
+            rejected.state,
+            None,
+            now=0.20,
+            dt=0.05,
+            config=config,
+            workspace_ok=True,
+        )
+        recovered = step_controller(
+            recovering.state,
+            None,
+            now=0.25,
+            dt=0.05,
+            config=config,
+            workspace_ok=True,
+        )
+
+        assert rejected.mode is ControllerMode.WORKSPACE_HOLD
+        assert rejected.sample == first.sample
+        assert recovering.mode is ControllerMode.WORKSPACE_HOLD
+        assert recovering.sample == first.sample
+        assert recovered.mode is not ControllerMode.WORKSPACE_HOLD
+        assert recovered.sample.world_yaw == pytest.approx(
+            recovered.sample.body_yaw + recovered.sample.head_yaw
+        )

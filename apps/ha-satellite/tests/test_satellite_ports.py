@@ -175,6 +175,30 @@ class TestTheValueTypesThePortsSpeakIn:
         assert view.faces[0].centre.x == 0.5
         assert view.faces[0].centre.y == -0.25
 
+    def test_legacy_construction_leaves_observation_provenance_unknown(self) -> None:
+        """Existing callers can keep constructing the four-field vocabulary."""
+        view = Detections(faces=(face(0.0, 0.0),), fresh=True, source=_ROBOT)
+
+        assert view.generation is None
+        assert view.sequence is None
+        assert view.captured_at is None
+        assert view.received_at is None
+        assert view.identity is None
+
+    def test_complete_provenance_defines_source_qualified_identity(self) -> None:
+        """A sequence is meaningful only inside one source generation."""
+        view = Detections(
+            faces=(face(0.0, 0.0),),
+            fresh=True,
+            source=_ROBOT,
+            generation=3,
+            sequence=7,
+            captured_at=10.0,
+            received_at=10.2,
+        )
+
+        assert view.identity == (_ROBOT, 3, 7)
+
     def test_the_three_selectable_sources_are_the_three_the_spec_names(
         self,
     ) -> None:

@@ -138,6 +138,9 @@ class RemotePerception:
         self._offload = offload
 
         self._faces: tuple[FaceDetection, ...] = ()
+        self._generation = 0
+        self._sequence: int | None = None
+        self._captured_at: float | None = None
         self._received_at: float | None = None
         self._refused = False
         self._closed = False
@@ -206,12 +209,20 @@ class RemotePerception:
                 fresh=False,
                 source=DetectionSource.REMOTE,
                 age_seconds=age,
+                generation=self._generation,
+                sequence=self._sequence,
+                captured_at=self._captured_at,
+                received_at=self._received_at,
             )
         return Detections(
             faces=self._faces,
             fresh=True,
             source=DetectionSource.REMOTE,
             age_seconds=age,
+            generation=self._generation,
+            sequence=self._sequence,
+            captured_at=self._captured_at,
+            received_at=self._received_at,
         )
 
     async def aclose(self) -> None:
@@ -357,5 +368,16 @@ class RemotePerception:
                 type(payload).__name__,
             )
             return
+        if result.round_trip_seconds is None:
+            _LOGGER.warning("ignoring a face result without robot capture timing")
+            return
+        sequence = int(result.sequence)
+        # The shared client owns the session lifecycle and counts every session
+        # established after the first. Read that explicit boundary only when a
+        # result arrives: a reconnect must not relabel the cached result from the
+        # session that just ended while the new session has answered nothing.
+        self._generation = self._client.stats.reconnections
         self._faces = payload.faces
-        self._received_at = self._clock()
+        self._sequence = sequence
+        self._received_at = result.received_at
+        self._captured_at = result.received_at - result.round_trip_seconds

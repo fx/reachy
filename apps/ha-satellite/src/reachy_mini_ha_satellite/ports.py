@@ -17,12 +17,11 @@ what makes them useful.
 
 Two consequences are worth stating outright.
 
-**The perception port hides where a detection came from.** A caller asks what is
-in front of the robot and is answered; whether the answer came over a robot-link
-session or out of a model running on the robot's own cores is a property of the
-adapter, and so is falling back from one to the other. A branch on transport
-failure in the state machine would be the state machine having opinions about
-sockets.
+**The perception port hides how a detection was produced, not its provenance.**
+A caller receives the source-qualified identity and timing needed to consume an
+observation once, while session and fallback mechanics remain properties of the
+adapters. A branch on transport failure in the state machine would still be the
+state machine having opinions about sockets.
 
 **The gaze target is normalised, never pixels.** Robot-link REQ-021 fixes the
 coordinates a detection is reported in — origin at the image centre, both axes
@@ -456,17 +455,40 @@ class Detections:
     the ability to tell them apart.
 
     Attributes:
-        faces: Every face currently visible, possibly none.
+        faces: Every face currently visible, possibly none. Always empty when
+            the result is stale so stale targets remain unavailable.
         fresh: Whether a result arrived inside the staleness window.
         source: Which detector produced this, or `None` when nothing has.
-        age_seconds: How long ago it was produced, on the robot's own clock, or
-            `None` when nothing has been produced yet.
+        age_seconds: Receipt age on the robot's monotonic clock, or `None` when
+            nothing has been produced yet.
+        generation: Adapter-local source run or session generation.
+        sequence: Monotonic completed-result sequence inside the generation.
+        captured_at: When the source sampled the frame, on the robot's monotonic
+            clock.
+        received_at: When inference completed or the remote result arrived, on
+            the same robot clock.
     """
 
     faces: tuple[FaceDetection, ...] = ()
     fresh: bool = False
     source: DetectionSource | None = None
     age_seconds: float | None = None
+    generation: int | None = None
+    sequence: int | None = None
+    captured_at: float | None = None
+    received_at: float | None = None
+
+    @property
+    def identity(self) -> tuple[DetectionSource, int, int] | None:
+        """Return source-qualified identity when all three parts are known.
+
+        Returns:
+            Source, generation and sequence, or `None` for the never-observed or
+            backward-compatible metadata-free forms.
+        """
+        if self.source is None or self.generation is None or self.sequence is None:
+            return None
+        return self.source, self.generation, self.sequence
 
 
 #:= docs/specs/robot-link/index.md#req-017-stale-results-stop-being-acted-on
