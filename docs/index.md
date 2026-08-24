@@ -5,13 +5,14 @@
 | Spec | Description | Status |
 |------|-------------|--------|
 | [architecture](specs/architecture/) | Workspace layout, tooling, versioning, CI gates, testing conventions, repository hygiene and documentation conventions | active |
-| [robot-link](specs/robot-link/) | The wire contract between robot and groundstation — session, capability negotiation, framing, backpressure and reconnection | active |
-| [groundstation](specs/groundstation/) | The off-robot service hosting heavy computation as pluggable capabilities | active |
-| [perception](specs/perception/) | Face and gesture detection — model licensing, detection semantics and accuracy requirements | active |
-| [ha-satellite](specs/ha-satellite/) | The robot-side ESPHome voice satellite for Home Assistant | active |
-| [reachyctl](specs/reachyctl/) | The command-line tool for deploying, configuring and diagnosing a robot | active |
-| [provisioning](specs/provisioning/) | Idempotent Ansible provisioning from a stock robot image to a configured state | active |
 | [benchmarks](specs/benchmarks/) | The performance suite, its recorded baseline and the regression gates | active |
+| [gaze-control](specs/gaze-control/) | Predictive visual servoing and coordinated head-body motion for stable, natural face tracking | active |
+| [groundstation](specs/groundstation/) | The off-robot service hosting heavy computation as pluggable capabilities | active |
+| [ha-satellite](specs/ha-satellite/) | The robot-side ESPHome voice satellite for Home Assistant | active |
+| [perception](specs/perception/) | Face and gesture detection — model licensing, detection semantics and accuracy requirements | active |
+| [provisioning](specs/provisioning/) | Idempotent Ansible provisioning from a stock robot image to a configured state | active |
+| [reachyctl](specs/reachyctl/) | The command-line tool for deploying, configuring and diagnosing a robot | active |
+| [robot-link](specs/robot-link/) | The wire contract between robot and groundstation — session, capability negotiation, framing, backpressure and reconnection | active |
 
 ## Changes
 
@@ -35,3 +36,4 @@
 | 0016 | [audible-playback](changes/0016-audible-playback.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
 | 0017 | [speaker-controls-in-home-assistant](changes/0017-speaker-controls-in-home-assistant.md) | [ha-satellite](specs/ha-satellite/) | complete | 0016 |
 | 0018 | [satellite-runtime-stability](changes/0018-satellite-runtime-stability.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
+| 0019 | [predictive-gaze-and-coordinated-motion](changes/0019-predictive-gaze-and-coordinated-motion.md) | [gaze-control](specs/gaze-control/) | draft | 0018 |
