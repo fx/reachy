@@ -331,6 +331,83 @@ class TestObservationIdentityAndEstimation:
         assert reacquired.state.estimator is not None
         assert reacquired.state.estimator.velocity == ImagePoint(0.0, 0.0)
 
+    def test_settled_loss_remains_idle_without_new_observations(self) -> None:
+        """Idle after empty-face return cannot restart its own loss lifecycle."""
+        config = ControllerConfig(loss_hold_seconds=0.1)
+        observation = replace(
+            _observation(),
+            world_yaw=25.0 * _DEGREES,
+            world_elevation=10.0 * _DEGREES,
+        )
+        now = 0.1
+        result = step_controller(
+            initial_controller_state(config),
+            observation,
+            now=now,
+            dt=0.05,
+            config=config,
+        )
+        for _ in range(30):
+            now += 0.05
+            result = step_controller(
+                result.state,
+                observation,
+                now=now,
+                dt=0.05,
+                config=config,
+            )
+        assert result.sample.world_yaw != 0.0
+
+        now += 0.05
+        result = step_controller(
+            result.state,
+            replace(
+                _observation(
+                    sequence=1,
+                    captured_at=now - 0.05,
+                    received_at=now,
+                ),
+                face=None,
+            ),
+            now=now,
+            dt=0.05,
+            config=config,
+        )
+        for _ in range(400):
+            if result.mode is ControllerMode.IDLE:
+                break
+            now += 0.05
+            result = step_controller(
+                result.state,
+                None,
+                now=now,
+                dt=0.05,
+                config=config,
+            )
+        assert result.mode is ControllerMode.IDLE
+
+        for _ in range(8):
+            now += 0.05
+            result = step_controller(
+                result.state,
+                None,
+                now=now,
+                dt=0.05,
+                config=config,
+            )
+            assert result.mode is ControllerMode.IDLE
+            assert result.sample.world_yaw == 0.0
+            assert result.sample.elevation == 0.0
+            assert result.sample.body_yaw == 0.0
+            for axis in (
+                result.state.world_yaw,
+                result.state.elevation,
+                result.state.body_yaw,
+            ):
+                assert axis.position == 0.0
+                assert axis.velocity == 0.0
+                assert axis.acceleration == 0.0
+
     @pytest.mark.parametrize(
         ("change", "expected"),
         [
