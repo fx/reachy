@@ -458,7 +458,7 @@ and calibration evidence.
 - [Architecture](../architecture/) — hardware-free testing and quality gates
 - [Benchmarks](../benchmarks/) — structured performance evidence and hardware
   opt-in
-- Chaumette and Hutchinson, *Visual Servo Control I*: 
+- Chaumette and Hutchinson, *Visual Servo Control I*:
   https://doi.org/10.1109/MRA.2006.250573
 - ViSP image-based visual-servo tutorial:
   https://visp-doc.inria.fr/doxygen/visp-daily/tutorial-ibvs.html
