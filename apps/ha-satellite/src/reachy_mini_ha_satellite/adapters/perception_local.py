@@ -518,6 +518,9 @@ class LocalPerception:
         self._offload = offload
 
         self._faces: tuple[FaceDetection, ...] = ()
+        self._generation: int | None = None
+        self._sequence: int | None = None
+        self._captured_at: float | None = None
         self._received_at: float | None = None
         self._detector: FaceDetectorPort | None = None
         self._loop: asyncio.Task[None] | None = None
@@ -557,6 +560,11 @@ class LocalPerception:
         except asyncio.CancelledError:
             build.add_done_callback(_close_when_built)
             raise
+        self._generation = 0 if self._generation is None else self._generation + 1
+        self._sequence = None
+        self._captured_at = None
+        self._received_at = None
+        self._faces = ()
         self._detector = detector
         self._loop = asyncio.create_task(
             self._run(detector),
@@ -580,13 +588,16 @@ class LocalPerception:
             # keeps them apart by staying `None` here.
             return Detections()
         age = self._clock() - self._received_at
-        if age >= self._staleness_seconds:
-            return Detections(fresh=False, source=_SOURCE, age_seconds=age)
+        fresh = age < self._staleness_seconds
         return Detections(
-            faces=self._faces,
-            fresh=True,
+            faces=self._faces if fresh else (),
+            fresh=fresh,
             source=_SOURCE,
             age_seconds=age,
+            generation=self._generation,
+            sequence=self._sequence,
+            captured_at=self._captured_at,
+            received_at=self._received_at,
         )
 
     async def aclose(self) -> None:
@@ -608,6 +619,8 @@ class LocalPerception:
         detector, self._detector = self._detector, None
         if detector is not None:
             detector.close()
+        self._sequence = None
+        self._captured_at = None
         self._received_at = None
         self._faces = ()
 
@@ -637,6 +650,7 @@ class LocalPerception:
         Args:
             detector: The loaded detector.
         """
+        captured_at = self._clock()
         frame = await self._offload(self._media.get_frame)
         if frame is None:
             return
@@ -645,11 +659,15 @@ class LocalPerception:
         # to it, which is the next frame.
         found = await self._offload(functools.partial(detector.detect, frame))
         height, width = int(frame.shape[0]), int(frame.shape[1])
-        self._faces = tuple(
+        faces = tuple(
             FaceDetection(
                 centre=normalised_centre(*face.centre, width, height),
                 confidence=face.confidence,
             )
             for face in found
         )
-        self._received_at = self._clock()
+        received_at = self._clock()
+        self._faces = faces
+        self._sequence = 0 if self._sequence is None else self._sequence + 1
+        self._captured_at = captured_at
+        self._received_at = received_at

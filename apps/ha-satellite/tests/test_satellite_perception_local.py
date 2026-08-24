@@ -162,6 +162,11 @@ class TestDetectionsFromTheRobotsOwnCores:
         assert view.source is _ROBOT
         assert len(view.faces) == 1
         assert view.faces[0].confidence == pytest.approx(0.88)
+        assert view.generation == 0
+        assert view.sequence is not None
+        assert view.identity == (_ROBOT, 0, view.sequence)
+        assert view.captured_at == pytest.approx(1000.0)
+        assert view.received_at == pytest.approx(1000.0)
         await source.aclose()
 
     @pytest.mark.asyncio
@@ -217,6 +222,11 @@ class TestDetectionsFromTheRobotsOwnCores:
         view = source.latest()
         assert view.fresh
         assert view.faces == ()
+        assert view.generation == 0
+        assert view.sequence is not None
+        assert view.identity == (_ROBOT, 0, view.sequence)
+        assert view.captured_at == pytest.approx(1000.0)
+        assert view.received_at == pytest.approx(1000.0)
         await source.aclose()
 
     @pytest.mark.asyncio
@@ -230,10 +240,15 @@ class TestDetectionsFromTheRobotsOwnCores:
         )
         await source.start()
         await _settle()
-        assert source.latest().fresh
+        fresh = source.latest()
+        assert fresh.fresh
         clock.advance(5.0)
-        assert not source.latest().fresh
-        assert source.latest().faces == ()
+        stale = source.latest()
+        assert not stale.fresh
+        assert stale.faces == ()
+        assert stale.identity == fresh.identity
+        assert stale.captured_at == fresh.captured_at
+        assert stale.received_at == fresh.received_at
         await source.aclose()
 
     @pytest.mark.asyncio
@@ -300,6 +315,92 @@ class TestDetectionsFromTheRobotsOwnCores:
         assert detector.seen == []
         await source.aclose()
 
+    @pytest.mark.asyncio
+    async def test_each_completed_pass_advances_sequence_including_empty_passes(
+        self,
+    ) -> None:
+        """A fresh empty result is still one completed observation."""
+        clock = ManualClock()
+        source = _source(FakeMedia(image=frame()), FakeFaceDetector([]), clock)
+        await source.start()
+        await _settle()
+        first = source.latest()
+        await _settle()
+        second = source.latest()
+
+        assert first.sequence is not None
+        assert second.sequence is not None
+        assert second.sequence > first.sequence
+        assert second.faces == ()
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_restarting_the_source_begins_a_new_generation(self) -> None:
+        """A sequence restart cannot inherit velocity from an earlier run."""
+        clock = ManualClock()
+        source = _source(
+            FakeMedia(image=frame(480, 640)),
+            FakeFaceDetector([_AT_640]),
+            clock,
+        )
+        await source.start()
+        await _settle()
+        first = source.latest()
+        await source.aclose()
+        await source.start()
+        await _settle()
+        restarted = source.latest()
+
+        assert first.generation == 0
+        assert restarted.generation == 1
+        assert restarted.identity != first.identity
+        await source.aclose()
+
+    @pytest.mark.asyncio
+    async def test_capture_precedes_frame_read_and_receipt_follows_inference(
+        self,
+    ) -> None:
+        """Observation age includes camera-pull and inference time."""
+        clock = ManualClock()
+        calls = 0
+        blocked = asyncio.Event()
+
+        async def one_turn_sleep(seconds: float) -> None:
+            nonlocal calls
+            del seconds
+            calls += 1
+            if calls > 1:
+                await blocked.wait()
+
+        offload_calls = 0
+
+        async def advancing_offload[ResultT](
+            function: Callable[[], ResultT],
+        ) -> ResultT:
+            nonlocal offload_calls
+            offload_calls += 1
+            if offload_calls == 2:
+                clock.advance(0.1)
+            result = function()
+            if offload_calls == 3:
+                clock.advance(0.2)
+            return result
+
+        source = LocalPerception(
+            FakeMedia(image=frame(480, 640)),
+            detector=lambda: FakeFaceDetector([_AT_640]),
+            clock=clock,
+            sleep=one_turn_sleep,
+            offload=advancing_offload,
+        )
+        await source.start()
+        await _settle()
+        view = source.latest()
+
+        assert view.captured_at == pytest.approx(1000.0)
+        assert view.received_at == pytest.approx(1000.3)
+        await source.aclose()
+
 
 class TestFailuresDoNotTakeTheApplicationDown:
     """This source is often only ever the fallback; it must fail quietly."""
@@ -363,20 +464,32 @@ class TestFailuresDoNotTakeTheApplicationDown:
 
     @pytest.mark.asyncio
     async def test_a_detector_that_fails_on_a_frame_keeps_looking(self) -> None:
-        """One bad frame is not a reason to stop watching the room."""
+        """One bad frame is not a result and the next completed pass is sequence zero."""
         clock = ManualClock()
         detector = _FailsOnce([_AT_640])
+        turns = 0
+        blocked = asyncio.Event()
+
+        async def two_turns(seconds: float) -> None:
+            nonlocal turns
+            del seconds
+            turns += 1
+            if turns > 2:
+                await blocked.wait()
+
         source = LocalPerception(
             FakeMedia(image=frame()),
             detector=lambda: detector,
             clock=clock,
-            sleep=_immediately,
+            sleep=two_turns,
             offload=inline,
         )
         await source.start()
         await _settle()
-        assert detector.calls > 1
-        assert source.latest().fresh
+        view = source.latest()
+        assert detector.calls == 2
+        assert view.fresh
+        assert view.sequence == 0
         await source.aclose()
 
     @pytest.mark.asyncio

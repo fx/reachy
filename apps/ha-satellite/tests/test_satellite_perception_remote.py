@@ -96,6 +96,35 @@ class TestTheSessionIsHeldAndUsed:
         assert len(view.faces) == 2
         assert view.fresh
         assert view.source is DetectionSource.REMOTE
+        assert view.identity == (DetectionSource.REMOTE, 0, 0)
+        assert view.captured_at == pytest.approx(1000.0)
+        assert view.received_at == pytest.approx(1000.0)
+        await remote.aclose()
+
+    @pytest.mark.asyncio
+    async def test_provenance_and_freshness_use_the_adapter_clock_domain(self) -> None:
+        """Session round-trip age is rebased onto the adapter's monotonic clock."""
+        session_clock = ManualClock(start=1000.25)
+        adapter_clock = ManualClock(start=5000.0)
+        sleep = RecordedSleep()
+        transport = StubTransport()
+        transport.push(agreement(FACE), face_result(0, stamp="1000.000000"))
+        remote = RemotePerception(
+            FakeMedia(),
+            _client(ScriptedTransports(transport), session_clock, sleep),
+            clock=adapter_clock,
+            sleep=sleep,
+            offload=inline,
+        )
+        await remote.start()
+        await hand_control_to_the_event_loop()
+        view = remote.latest()
+
+        assert view.received_at == pytest.approx(5000.0)
+        assert view.captured_at == pytest.approx(4999.75)
+        assert view.age_seconds == pytest.approx(0.0)
+        adapter_clock.advance(0.4)
+        assert remote.latest().age_seconds == pytest.approx(0.4)
         await remote.aclose()
 
     @pytest.mark.asyncio
@@ -121,6 +150,55 @@ class TestTheSessionIsHeldAndUsed:
         view = remote.latest()
         assert view.faces == ()
         assert view.fresh
+        assert view.identity == (DetectionSource.REMOTE, 0, 0)
+        assert view.captured_at == pytest.approx(1000.0)
+        assert view.received_at == pytest.approx(1000.0)
+        await remote.aclose()
+
+    @pytest.mark.asyncio
+    async def test_a_result_without_robot_capture_time_is_not_an_observation(
+        self,
+    ) -> None:
+        """An opaque foreign token cannot be replaced with receipt time."""
+        clock = ManualClock()
+        sleep = RecordedSleep()
+        transport = StubTransport()
+        transport.push(agreement(FACE), face_result(0, stamp="foreign-clock"))
+        remote = RemotePerception(
+            FakeMedia(),
+            _client(ScriptedTransports(transport), clock, sleep),
+            clock=clock,
+            sleep=sleep,
+            offload=inline,
+        )
+        await remote.start()
+        await hand_control_to_the_event_loop()
+
+        assert remote.latest() == Detections()
+        await remote.aclose()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stamp", ["1001.000000", "nan", "inf"])
+    async def test_invalid_numeric_capture_time_is_not_published(
+        self,
+        stamp: str,
+    ) -> None:
+        """Future and non-finite capture tokens carry no usable provenance."""
+        clock = ManualClock()
+        sleep = RecordedSleep()
+        transport = StubTransport()
+        transport.push(agreement(FACE), face_result(0, stamp=stamp))
+        remote = RemotePerception(
+            FakeMedia(),
+            _client(ScriptedTransports(transport), clock, sleep),
+            clock=clock,
+            sleep=sleep,
+            offload=inline,
+        )
+        await remote.start()
+        await hand_control_to_the_event_loop()
+
+        assert remote.latest() == Detections()
         await remote.aclose()
 
     @pytest.mark.asyncio
@@ -219,6 +297,9 @@ class TestFreshness:
         assert not view.fresh
         assert view.faces == ()
         assert view.age_seconds == pytest.approx(2.5)
+        assert view.identity == (DetectionSource.REMOTE, 0, 0)
+        assert view.captured_at == pytest.approx(1000.0)
+        assert view.received_at == pytest.approx(1000.0)
         await remote.aclose()
 
     @pytest.mark.asyncio
@@ -359,9 +440,9 @@ class TestWhenTheLinkGoesAway:
         clock = ManualClock()
         sleep = RecordedSleep()
         first = StubTransport()
-        first.push(agreement(FACE))
+        first.push(agreement(FACE), face_result(0))
         second = StubTransport()
-        second.push(agreement(FACE), face_result(0))
+        second.push(agreement(FACE))
         client = _client(ScriptedTransports(first, second), clock, sleep)
         remote = RemotePerception(
             FakeMedia(),
@@ -372,11 +453,23 @@ class TestWhenTheLinkGoesAway:
         )
         await remote.start()
         await hand_control_to_the_event_loop()
+        before = remote.latest()
         first.drop()
         await hand_control_to_the_event_loop()
+        while_reconnected = remote.latest()
         assert client.stats.reconnections == 1
         assert remote.connected
-        assert remote.latest().fresh
+        assert before.identity == (DetectionSource.REMOTE, 0, 0)
+        assert while_reconnected.identity == before.identity
+
+        # A session can produce several capability results before the first face
+        # result, so generation comes from the session lifecycle rather than an
+        # assumption that the first face sequence is zero.
+        second.push(face_result(7))
+        await hand_control_to_the_event_loop()
+        after = remote.latest()
+        assert after.fresh
+        assert after.identity == (DetectionSource.REMOTE, 1, 7)
         await remote.aclose()
 
     @pytest.mark.asyncio

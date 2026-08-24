@@ -178,22 +178,22 @@ outcome is scrubbed prose and aggregate measurement.
 
 ## Tasks
 
-- [ ] Establish observation and predictive-servo foundations
-  - [ ] Inventory and preserve the proof-of-concept outside the repository, then
-        restore the satellite member to the clean dependency baseline
-  - [ ] Reconstruct only spec-backed behavior rather than merging the experimental
-        working tree wholesale
-  - [ ] Preserve source generation, sequence, capture time and receipt time in
+- [x] Establish observation and predictive-servo foundations (PR #24)
+  - [x] Inventory and preserve the proof-of-concept outside the repository, then
+        restore the satellite member to the clean dependency baseline (PR #24)
+  - [x] Reconstruct only spec-backed behavior rather than merging the experimental
+        working tree wholesale (PR #24)
+  - [x] Preserve source generation, sequence, capture time and receipt time in
         `apps/ha-satellite/src/reachy_mini_ha_satellite/ports.py`,
-        `adapters/groundstation.py` and `adapters/perception_local.py`
-  - [ ] Add the pure estimator, deadband, trajectory and allocation state in a
-        behavior-layer controller module
-  - [ ] Add deterministic nonlinear camera, latency, dropout, actuator and fault
-        fixtures under `apps/ha-satellite/tests/`
-  - [ ] Gate the step, sustained-motion, reversal, noise, late-observation,
-        cadence-stall, loss and workspace scenarios from the spec
-  - [ ] Keep the released runtime path available until the foundation passes
-        focused and HA-satellite member verification
+        `adapters/groundstation.py` and `adapters/perception_local.py` (PR #24)
+  - [x] Add the pure estimator, deadband, trajectory and allocation state in a
+        behavior-layer controller module (PR #24)
+  - [x] Add deterministic nonlinear camera, latency, dropout, actuator and fault
+        fixtures under `apps/ha-satellite/tests/` (PR #24)
+  - [x] Gate the step, sustained-motion, reversal, noise, late-observation,
+        cadence-stall, loss and workspace scenarios from the spec (PR #24)
+  - [x] Keep the released runtime path available until the foundation passes
+        focused and HA-satellite member verification (PR #24)
 
 - [ ] Integrate coordinated trajectory generation and head–body allocation
   - [ ] Replace legacy gaze intents with source-qualified observation and loss

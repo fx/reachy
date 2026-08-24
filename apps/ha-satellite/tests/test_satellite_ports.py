@@ -169,11 +169,53 @@ class TestTheValueTypesThePortsSpeakIn:
         assert not stale.fresh
         assert empty != stale
 
+    def test_stale_construction_hides_faces_but_preserves_provenance(self) -> None:
+        """A legacy caller cannot make a stale target available to behaviour."""
+        stale = Detections(
+            faces=(face(0.5, -0.25),),
+            fresh=False,
+            source=_ROBOT,
+            age_seconds=2.5,
+            generation=3,
+            sequence=7,
+            captured_at=10.0,
+            received_at=10.2,
+        )
+
+        assert stale.faces == ()
+        assert stale.identity == (_ROBOT, 3, 7)
+        assert stale.captured_at == 10.0
+        assert stale.received_at == 10.2
+
     def test_a_view_carries_the_faces_it_was_given(self) -> None:
         """The contract's own detection type, not a second copy of it."""
         view = Detections(faces=(face(0.5, -0.25),), fresh=True)
         assert view.faces[0].centre.x == 0.5
         assert view.faces[0].centre.y == -0.25
+
+    def test_legacy_construction_leaves_observation_provenance_unknown(self) -> None:
+        """Existing callers can keep constructing the four-field vocabulary."""
+        view = Detections(faces=(face(0.0, 0.0),), fresh=True, source=_ROBOT)
+
+        assert view.generation is None
+        assert view.sequence is None
+        assert view.captured_at is None
+        assert view.received_at is None
+        assert view.identity is None
+
+    def test_complete_provenance_defines_source_qualified_identity(self) -> None:
+        """A sequence is meaningful only inside one source generation."""
+        view = Detections(
+            faces=(face(0.0, 0.0),),
+            fresh=True,
+            source=_ROBOT,
+            generation=3,
+            sequence=7,
+            captured_at=10.0,
+            received_at=10.2,
+        )
+
+        assert view.identity == (_ROBOT, 3, 7)
 
     def test_the_three_selectable_sources_are_the_three_the_spec_names(
         self,
