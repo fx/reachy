@@ -196,6 +196,56 @@ class TestObservationIdentityAndEstimation:
         assert not resurfaced.observation_consumed
         assert resurfaced.state.estimator == fallback.state.estimator
 
+    def test_watermarks_stay_bounded_by_source_and_reject_old_generations(self) -> None:
+        """Reconnect history costs one fixed watermark per detection source."""
+        config = ControllerConfig()
+        state = initial_controller_state(config)
+        now = 0.1
+        for generation in range(100):
+            for source in ("remote", "local"):
+                result = step_controller(
+                    state,
+                    _observation(
+                        source=source,
+                        generation=generation,
+                        sequence=10,
+                        captured_at=now - 0.05,
+                        received_at=now,
+                    ),
+                    now=now,
+                    dt=0.05,
+                    config=config,
+                )
+                assert result.observation_consumed
+                state = result.state
+                now += 0.1
+
+        watermarks = state.consumption_watermarks
+        assert len(watermarks) == 2
+        assert set(watermarks) == {
+            ("remote", 99, 10),
+            ("local", 99, 10),
+        }
+
+        for source in ("remote", "local"):
+            replayed = step_controller(
+                state,
+                _observation(
+                    source=source,
+                    generation=50,
+                    sequence=999,
+                    captured_at=now - 0.05,
+                    received_at=now,
+                ),
+                now=now,
+                dt=0.05,
+                config=config,
+            )
+            assert not replayed.observation_consumed
+            assert replayed.state.consumption_watermarks == watermarks
+            state = replayed.state
+            now += 0.1
+
     def test_fresh_empty_result_is_consumed_once_as_explicit_loss(self) -> None:
         """Nobody seen is an observation, not a missing or stale turn."""
         config = ControllerConfig()

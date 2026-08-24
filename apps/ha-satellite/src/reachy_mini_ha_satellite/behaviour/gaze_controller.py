@@ -850,12 +850,14 @@ def _advance_watermark(
     watermarks: tuple[tuple[str, int, int], ...],
     observation: GazeObservation,
 ) -> tuple[tuple[tuple[str, int, int], ...], bool]:
-    """Advance one source-generation sequence watermark when the result is new."""
+    """Retain only the newest generation and sequence observed per source."""
     source, generation, sequence = observation.identity
     for index, (seen_source, seen_generation, seen_sequence) in enumerate(watermarks):
-        if source != seen_source or generation != seen_generation:
+        if source != seen_source:
             continue
-        if sequence <= seen_sequence:
+        if generation < seen_generation or (
+            generation == seen_generation and sequence <= seen_sequence
+        ):
             return watermarks, False
         updated = (*watermarks[:index], observation.identity, *watermarks[index + 1 :])
         return updated, True
