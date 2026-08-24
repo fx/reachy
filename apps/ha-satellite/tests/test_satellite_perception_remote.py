@@ -102,6 +102,32 @@ class TestTheSessionIsHeldAndUsed:
         await remote.aclose()
 
     @pytest.mark.asyncio
+    async def test_provenance_and_freshness_use_the_adapter_clock_domain(self) -> None:
+        """Session round-trip age is rebased onto the adapter's monotonic clock."""
+        session_clock = ManualClock(start=1000.25)
+        adapter_clock = ManualClock(start=5000.0)
+        sleep = RecordedSleep()
+        transport = StubTransport()
+        transport.push(agreement(FACE), face_result(0, stamp="1000.000000"))
+        remote = RemotePerception(
+            FakeMedia(),
+            _client(ScriptedTransports(transport), session_clock, sleep),
+            clock=adapter_clock,
+            sleep=sleep,
+            offload=inline,
+        )
+        await remote.start()
+        await hand_control_to_the_event_loop()
+        view = remote.latest()
+
+        assert view.received_at == pytest.approx(5000.0)
+        assert view.captured_at == pytest.approx(4999.75)
+        assert view.age_seconds == pytest.approx(0.0)
+        adapter_clock.advance(0.4)
+        assert remote.latest().age_seconds == pytest.approx(0.4)
+        await remote.aclose()
+
+    @pytest.mark.asyncio
     async def test_an_empty_result_is_a_successful_one(self) -> None:
         """Robot-link REQ-013 as the robot experiences it: nobody is there.
 

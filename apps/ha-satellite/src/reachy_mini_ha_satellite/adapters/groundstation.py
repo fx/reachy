@@ -369,9 +369,10 @@ class RemotePerception:
         ):
             _LOGGER.warning("ignoring a face result without valid robot capture timing")
             return
-        captured_at = result.received_at - round_trip
-        if not math.isfinite(captured_at):
-            _LOGGER.warning("ignoring a face result with non-finite capture time")
+        received_at = self._clock()
+        captured_at = received_at - round_trip
+        if not math.isfinite(received_at) or not math.isfinite(captured_at):
+            _LOGGER.warning("ignoring a face result with non-finite adapter timing")
             return
         sequence = int(result.sequence)
         # The shared client owns the session lifecycle and counts every session
@@ -381,5 +382,5 @@ class RemotePerception:
         self._generation = self._client.stats.reconnections
         self._faces = payload.faces
         self._sequence = sequence
-        self._received_at = result.received_at
+        self._received_at = received_at
         self._captured_at = captured_at
