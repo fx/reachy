@@ -23,6 +23,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     EstimatorReset,
     EstimatorState,
     GazeObservation,
+    GazeSample,
     ImagePoint,
     allocate_body,
     apply_deadband,
@@ -156,6 +157,45 @@ class TestObservationIdentityAndEstimation:
         assert second.state.estimator == first.state.estimator
         assert second.state.world_yaw.position != first.state.world_yaw.position
 
+    def test_cached_remote_result_is_not_reconsumed_after_local_fallback(self) -> None:
+        """Remote-to-local-to-cached-remote switching consumes each identity once."""
+        config = ControllerConfig()
+        remote = _observation(source="remote", generation=0, sequence=7)
+        local = _observation(
+            source="local",
+            generation=0,
+            sequence=3,
+            captured_at=0.1,
+            received_at=0.2,
+            x=-0.3,
+        )
+        first = step_controller(
+            initial_controller_state(config),
+            remote,
+            now=0.1,
+            dt=0.05,
+            config=config,
+        )
+        fallback = step_controller(
+            first.state,
+            local,
+            now=0.2,
+            dt=0.05,
+            config=config,
+        )
+        resurfaced = step_controller(
+            fallback.state,
+            remote,
+            now=0.25,
+            dt=0.05,
+            config=config,
+        )
+
+        assert first.observation_consumed
+        assert fallback.observation_consumed
+        assert not resurfaced.observation_consumed
+        assert resurfaced.state.estimator == fallback.state.estimator
+
     def test_fresh_empty_result_is_consumed_once_as_explicit_loss(self) -> None:
         """Nobody seen is an observation, not a missing or stale turn."""
         config = ControllerConfig()
@@ -188,6 +228,58 @@ class TestObservationIdentityAndEstimation:
         assert lost.observation_consumed
         assert lost.mode is ControllerMode.HOLD
         assert not replayed.observation_consumed
+
+    def test_reacquisition_after_fresh_empty_starts_with_zero_velocity(self) -> None:
+        """An association loss breaks estimator continuity even inside its gap."""
+        config = ControllerConfig(estimator_gap=0.5)
+        first = step_controller(
+            initial_controller_state(config),
+            _observation(x=0.1),
+            now=0.1,
+            dt=0.05,
+            config=config,
+        )
+        moving = step_controller(
+            first.state,
+            _observation(
+                sequence=1,
+                captured_at=0.1,
+                received_at=0.2,
+                x=0.5,
+            ),
+            now=0.2,
+            dt=0.05,
+            config=config,
+        )
+        assert moving.state.estimator is not None
+        assert moving.state.estimator.velocity.x != 0.0
+        empty = step_controller(
+            moving.state,
+            replace(
+                _observation(sequence=2, captured_at=0.2, received_at=0.3),
+                face=None,
+            ),
+            now=0.3,
+            dt=0.05,
+            config=config,
+        )
+        reacquired = step_controller(
+            empty.state,
+            _observation(
+                sequence=3,
+                captured_at=0.3,
+                received_at=0.4,
+                x=0.6,
+            ),
+            now=0.4,
+            dt=0.05,
+            config=config,
+        )
+
+        assert reacquired.observation_consumed
+        assert reacquired.estimator_reset is EstimatorReset.FIRST
+        assert reacquired.state.estimator is not None
+        assert reacquired.state.estimator.velocity == ImagePoint(0.0, 0.0)
 
     @pytest.mark.parametrize(
         ("change", "expected"),
@@ -364,6 +456,37 @@ class TestDeadbandAndServo:
             for earlier, later in pairwise(states)
         )
 
+    @pytest.mark.parametrize("acceleration", [-1.5, 1.5])
+    def test_crossing_stall_threshold_preserves_acceleration_jerk(
+        self,
+        acceleration: float,
+    ) -> None:
+        """A tiny threshold crossing cannot reset either acceleration sign."""
+        limits = AxisLimits(
+            minimum=-2.0,
+            maximum=2.0,
+            max_velocity=1.0,
+            max_acceleration=2.0,
+            max_jerk=4.0,
+        )
+        state = AxisState(
+            position=0.0,
+            velocity=math.copysign(0.4, acceleration),
+            acceleration=acceleration,
+        )
+        dt = 0.200001
+
+        advanced = step_axis(
+            state,
+            velocity_goal=0.0,
+            dt=dt,
+            limits=limits,
+            maximum_dt=0.2,
+            stall_dt=0.05,
+        )
+
+        assert abs(advanced.acceleration - state.acceleration) <= limits.max_jerk * dt
+
 
 class TestAllocationAndWorkspaceScaffolds:
     """Body output stays off while its pure bounded allocation is exercised."""
@@ -395,48 +518,61 @@ class TestAllocationAndWorkspaceScaffolds:
             assert left == pytest.approx(exact, abs=1e-8)
             assert right == pytest.approx(exact, abs=1e-8)
 
-    def test_workspace_rejection_holds_sample_and_requires_recovery_evidence(
-        self,
-    ) -> None:
-        """A rejected target never leaks while hidden derivatives brake."""
-        config = ControllerConfig(workspace_recovery_samples=2)
-        first = step_controller(
-            initial_controller_state(config),
+    def test_workspace_validates_candidate_before_accepting_it(self) -> None:
+        """An old valid sample cannot admit a newly unsafe candidate."""
+        config = ControllerConfig()
+        neutral = initial_controller_state(config)
+        checked: list[float] = []
+
+        def only_neutral(sample: GazeSample) -> bool:
+            checked.append(sample.world_yaw)
+            return math.isclose(sample.world_yaw, 0.0, abs_tol=1e-15)
+
+        rejected = step_controller(
+            neutral,
             _observation(),
             now=0.1,
             dt=0.05,
             config=config,
-        )
-        rejected = step_controller(
-            first.state,
-            None,
-            now=0.15,
-            dt=0.05,
-            config=config,
-            workspace_ok=False,
-        )
-        recovering = step_controller(
-            rejected.state,
-            None,
-            now=0.20,
-            dt=0.05,
-            config=config,
-            workspace_ok=True,
-        )
-        recovered = step_controller(
-            recovering.state,
-            None,
-            now=0.25,
-            dt=0.05,
-            config=config,
-            workspace_ok=True,
+            workspace_accepts=only_neutral,
         )
 
+        assert checked
+        assert checked[0] != 0.0
         assert rejected.mode is ControllerMode.WORKSPACE_HOLD
-        assert rejected.sample == first.sample
-        assert recovering.mode is ControllerMode.WORKSPACE_HOLD
-        assert recovering.sample == first.sample
-        assert recovered.mode is not ControllerMode.WORKSPACE_HOLD
-        assert recovered.sample.world_yaw == pytest.approx(
-            recovered.sample.body_yaw + recovered.sample.head_yaw
-        )
+        assert rejected.sample == neutral.last_safe_sample
+        assert rejected.state.last_safe_sample == neutral.last_safe_sample
+
+    def test_workspace_recovery_counts_each_validated_candidate(self) -> None:
+        """Only consecutive independently checked candidates satisfy recovery."""
+        config = ControllerConfig(workspace_recovery_samples=2)
+        verdicts = iter([False, True, False, True, True])
+        checked: list[float] = []
+
+        def scripted_workspace(sample: GazeSample) -> bool:
+            checked.append(sample.world_yaw)
+            return next(verdicts)
+
+        state = initial_controller_state(config)
+        results = []
+        for index in range(5):
+            result = step_controller(
+                state,
+                _observation() if index == 0 else None,
+                now=0.1 + index * 0.05,
+                dt=0.05,
+                config=config,
+                workspace_accepts=scripted_workspace,
+            )
+            results.append(result)
+            state = result.state
+
+        assert len(checked) == 5
+        assert [result.workspace_accepted for result in results] == [
+            False,
+            False,
+            False,
+            False,
+            True,
+        ]
+        assert results[-1].mode is not ControllerMode.WORKSPACE_HOLD

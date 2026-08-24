@@ -313,6 +313,45 @@ class TestFallbackHappensOnSessionLoss:
         await source.aclose()
 
     @pytest.mark.asyncio
+    async def test_recovery_can_resurface_the_same_cached_remote_identity(self) -> None:
+        """The composite exposes remote, local, then the cached remote result again."""
+        remote_view = Detections(
+            faces=(face(0.2, 0.1),),
+            fresh=True,
+            source=DetectionSource.REMOTE,
+            generation=0,
+            sequence=7,
+            captured_at=10.0,
+            received_at=10.1,
+        )
+        local_view = Detections(
+            faces=(face(-0.3, 0.0),),
+            fresh=True,
+            source=_ROBOT,
+            generation=0,
+            sequence=3,
+            captured_at=10.2,
+            received_at=10.3,
+        )
+        remote = FakePerception(remote_view)
+        local = FakePerception(local_view)
+        source = FallbackPerception(remote, local, sleep=_immediately)
+        await source.start()
+        first = source.latest()
+        remote.connected = False
+        await source.check()
+        fallback = source.latest()
+        remote.connected = True
+        resurfaced = source.latest()
+
+        assert [first.identity, fallback.identity, resurfaced.identity] == [
+            (DetectionSource.REMOTE, 0, 7),
+            (_ROBOT, 0, 3),
+            (DetectionSource.REMOTE, 0, 7),
+        ]
+        await source.aclose()
+
+    @pytest.mark.asyncio
     async def test_stale_results_on_a_live_session_do_not_start_it(
         self,
     ) -> None:

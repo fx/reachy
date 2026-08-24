@@ -9,6 +9,7 @@ has no robot, adapter or clock dependency.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Final
@@ -403,6 +404,7 @@ class ControllerState:
     elevation: AxisState
     body_yaw: AxisState
     last_observation_identity: tuple[str, int, int] | None
+    consumption_watermarks: tuple[tuple[str, int, int], ...]
     target_visible: bool | None
     loss_started_at: float | None
     last_safe_sample: GazeSample
@@ -453,6 +455,7 @@ def initial_controller_state(
         elevation=AxisState(),
         body_yaw=AxisState(),
         last_observation_identity=None,
+        consumption_watermarks=(),
         target_visible=None,
         loss_started_at=None,
         last_safe_sample=neutral,
@@ -668,7 +671,7 @@ def step_axis(
     _positive("stall axis dt", stall_dt)
     stalled = dt > maximum_dt
     used_dt = min(dt, stall_dt) if stalled else dt
-    initial = replace(state, acceleration=0.0) if stalled else state
+    initial = state
     requested = 0.0 if stalled else velocity_goal
     goal = _clamp(requested, -limits.max_velocity, limits.max_velocity)
     outward = (initial.position >= 0.0 and goal > 0.0) or (
@@ -764,8 +767,14 @@ def _velocity_to_position(
 
 
 def _return_velocity(state: AxisState, limits: AxisLimits) -> float:
-    """Choose one damped neutral-return velocity."""
-    return _velocity_to_position(state, 0.0, 2.0, limits)
+    """Choose one damped neutral-return velocity that settles without cycling."""
+    error = -state.position
+    if abs(error) <= _EPSILON:
+        return 0.0
+    stopping_speed = math.sqrt(2.0 * limits.max_acceleration * abs(error))
+    bound = min(limits.max_velocity, stopping_speed)
+    requested = 2.0 * error - 0.5 * state.velocity
+    return _clamp(requested, -bound, bound)
 
 
 def _sample(
@@ -832,6 +841,27 @@ def _brake_hidden(
     )
 
 
+def _accept_workspace(_sample: GazeSample) -> bool:
+    """Accept every finite coordinated sample when no workspace is supplied."""
+    return True
+
+
+def _advance_watermark(
+    watermarks: tuple[tuple[str, int, int], ...],
+    observation: GazeObservation,
+) -> tuple[tuple[tuple[str, int, int], ...], bool]:
+    """Advance one source-generation sequence watermark when the result is new."""
+    source, generation, sequence = observation.identity
+    for index, (seen_source, seen_generation, seen_sequence) in enumerate(watermarks):
+        if source != seen_source or generation != seen_generation:
+            continue
+        if sequence <= seen_sequence:
+            return watermarks, False
+        updated = (*watermarks[:index], observation.identity, *watermarks[index + 1 :])
+        return updated, True
+    return (*watermarks, observation.identity), True
+
+
 def step_controller(
     state: ControllerState,
     observation: GazeObservation | None,
@@ -839,22 +869,26 @@ def step_controller(
     now: float,
     dt: float,
     config: ControllerConfig = _DEFAULT_CONFIG,
-    workspace_ok: bool = True,
+    workspace_accepts: Callable[[GazeSample], bool] = _accept_workspace,
 ) -> ControllerStep:
     """Advance one pure controller tick with explicit time and timestep."""
     _finite("controller time", now)
     _non_negative("controller dt", dt)
     estimator = state.estimator
     last_identity = state.last_observation_identity
+    watermarks = state.consumption_watermarks
     target_visible = state.target_visible
     reset = EstimatorReset.NONE
     consumed = False
-    if observation is not None and observation.identity != last_identity:
+    if observation is not None:
+        watermarks, consumed = _advance_watermark(watermarks, observation)
+    if observation is not None and consumed:
         last_identity = observation.identity
         target_visible = observation.face is not None
-        consumed = True
         if observation.face is not None:
             estimator, reset = update_estimator(estimator, observation, config)
+        else:
+            estimator = None
 
     stale = (
         estimator is not None
@@ -949,38 +983,6 @@ def step_controller(
             yaw_goal = _return_velocity(state.world_yaw, config.yaw_limits)
             elevation_goal = _return_velocity(state.elevation, config.elevation_limits)
 
-    recovering = state.mode is ControllerMode.WORKSPACE_HOLD
-    valid_streak = state.workspace_valid_streak
-    accepted = workspace_ok
-    if not workspace_ok:
-        valid_streak = 0
-    elif recovering:
-        valid_streak += 1
-        accepted = valid_streak >= config.workspace_recovery_samples
-
-    if not accepted:
-        world, elevation, body = _brake_hidden(state, dt, config)
-        held_state = replace(
-            state,
-            mode=ControllerMode.WORKSPACE_HOLD,
-            estimator=estimator,
-            deadband=deadband,
-            world_yaw=world,
-            elevation=elevation,
-            body_yaw=body,
-            last_observation_identity=last_identity,
-            target_visible=target_visible,
-            loss_started_at=loss_started,
-            workspace_valid_streak=valid_streak,
-        )
-        return ControllerStep(
-            state=held_state,
-            observation_consumed=consumed,
-            estimator_reset=reset,
-            prediction_horizon=horizon,
-            stale=stale,
-        )
-
     world = step_axis(
         state.world_yaw,
         yaw_goal,
@@ -1016,6 +1018,41 @@ def step_controller(
     )
     candidate = _sample(world, elevation, body, config)
 
+    recovering = state.mode is ControllerMode.WORKSPACE_HOLD
+    valid_streak = state.workspace_valid_streak
+    candidate_accepted = workspace_accepts(candidate)
+    if not candidate_accepted:
+        valid_streak = 0
+    elif recovering:
+        valid_streak += 1
+    accepted = candidate_accepted and (
+        not recovering or valid_streak >= config.workspace_recovery_samples
+    )
+
+    if not accepted:
+        world, elevation, body = _brake_hidden(state, dt, config)
+        held_state = replace(
+            state,
+            mode=ControllerMode.WORKSPACE_HOLD,
+            estimator=estimator,
+            deadband=deadband,
+            world_yaw=world,
+            elevation=elevation,
+            body_yaw=body,
+            last_observation_identity=last_identity,
+            consumption_watermarks=watermarks,
+            target_visible=target_visible,
+            loss_started_at=loss_started,
+            workspace_valid_streak=valid_streak,
+        )
+        return ControllerStep(
+            state=held_state,
+            observation_consumed=consumed,
+            estimator_reset=reset,
+            prediction_horizon=horizon,
+            stale=stale,
+        )
+
     candidate_state = replace(
         state,
         mode=mode,
@@ -1025,6 +1062,7 @@ def step_controller(
         elevation=elevation,
         body_yaw=body,
         last_observation_identity=last_identity,
+        consumption_watermarks=watermarks,
         target_visible=target_visible,
         loss_started_at=loss_started,
         last_safe_sample=candidate,

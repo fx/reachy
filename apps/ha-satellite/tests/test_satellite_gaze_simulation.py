@@ -74,6 +74,41 @@ class TestAccuracyEnvelopes:
         ]
         assert len(consumed) == len(set(consumed))
 
+    def test_physical_camera_fov_is_independent_from_controller_tuning(self) -> None:
+        """A mismatched controller cannot silently reshape the simulated camera."""
+        camera = PlantConfig(
+            horizontal_camera_fov=87.0 * _DEGREES,
+            vertical_camera_fov=67.0 * _DEGREES,
+        )
+        uncalibrated = PlantFaults(
+            corrupt_observation=lambda observation, _index: replace(
+                observation,
+                world_yaw=None,
+                world_elevation=None,
+            )
+        )
+
+        def target(at: float) -> tuple[float, float]:
+            return (
+                0.0 if at < 0.5 else 35.0 * _DEGREES,
+                0.0,
+            )
+
+        matched = GazePlant(camera, faults=uncalibrated).run(4.0, target)
+        mismatched = GazePlant(
+            camera,
+            faults=uncalibrated,
+            controller=replace(
+                ControllerConfig(),
+                horizontal_fov=140.0 * _DEGREES,
+            ),
+        ).run(4.0, target)
+
+        matched_error = abs(_nearest(matched, 3.5).image_error.x)
+        mismatched_error = abs(_nearest(mismatched, 3.5).image_error.x)
+        assert mismatched_error > matched_error
+        assert mismatched_error > 0.025
+
     @pytest.mark.parametrize("axis", ["horizontal", "vertical"])
     def test_five_degree_per_second_motion_has_bounded_lag(self, axis: str) -> None:
         """Both independent axes meet acquisition, mean, max and stop envelopes."""
@@ -168,21 +203,93 @@ class TestDelayDropoutCadenceAndFaults:
         )
         assert all(sample.command.body_yaw == 0.0 for sample in ticks)
 
-    def test_cadence_change_and_stall_keep_derivatives_bounded(self) -> None:
-        """A long tick integrates only the configured safe stall interval."""
+    def test_persistent_loss_returns_every_axis_to_settled_idle(self) -> None:
+        """Loss hold and neutral return preserve every trajectory envelope."""
+        controller = replace(
+            ControllerConfig(),
+            staleness_seconds=0.5,
+            loss_hold_seconds=0.3,
+        )
+        faults = PlantFaults(drop_observation=lambda index, _at: index >= 20)
+        trace = GazePlant(faults=faults, controller=controller).run(
+            15.0,
+            constant_target(yaw=25.0 * _DEGREES, elevation=12.0 * _DEGREES),
+        )
+        ticks = _controller_samples(trace)
+        holds = [sample for sample in ticks if sample.mode is ControllerMode.HOLD]
+        returning = [
+            sample for sample in ticks if sample.mode is ControllerMode.RETURNING
+        ]
+        assert holds
+        assert returning
+        assert returning[0].at - holds[0].at >= controller.loss_hold_seconds
+
+        axes = (
+            ("world_yaw", controller.yaw_limits),
+            ("elevation", controller.elevation_limits),
+            ("body_yaw", controller.body_limits),
+        )
+        for name, limits in axes:
+            values = [getattr(sample.state, name) for sample in ticks]
+            assert all(
+                limits.minimum <= axis.position <= limits.maximum for axis in values
+            )
+            assert all(abs(axis.velocity) <= limits.max_velocity for axis in values)
+            assert all(
+                abs(axis.acceleration) <= limits.max_acceleration for axis in values
+            )
+            assert all(
+                abs(later.acceleration - earlier.acceleration)
+                <= limits.max_jerk * (later_sample.at - earlier_sample.at) + 1e-9
+                for (earlier_sample, later_sample), (earlier, later) in zip(
+                    pairwise(ticks),
+                    pairwise(values),
+                    strict=True,
+                )
+            )
+
+        after_return = [sample for sample in trace if sample.at >= returning[0].at]
+        assert (
+            min(sample.command.world_yaw for sample in after_return) >= -1.0 * _DEGREES
+        )
+        final = ticks[-1]
+        assert final.mode is ControllerMode.IDLE
+        assert abs(final.command.world_yaw) <= controller.idle_position_epsilon
+        assert abs(final.command.elevation) <= controller.idle_position_epsilon
+        assert abs(final.command.body_yaw) <= controller.idle_position_epsilon
+        for axis in (
+            final.state.world_yaw,
+            final.state.elevation,
+            final.state.body_yaw,
+        ):
+            assert abs(axis.position) <= controller.idle_position_epsilon
+            assert abs(axis.velocity) <= controller.idle_velocity_epsilon
+            assert abs(axis.acceleration) <= controller.idle_acceleration_epsilon
+
+    @pytest.mark.parametrize("target_yaw", [-30.0 * _DEGREES, 30.0 * _DEGREES])
+    def test_cadence_change_and_stall_keep_derivatives_bounded(
+        self,
+        target_yaw: float,
+    ) -> None:
+        """A threshold-crossing stall preserves either acceleration sign."""
+        controller = ControllerConfig()
 
         def cadence(index: int, _at: float) -> float:
             if index == 20:
-                return 0.30
+                return controller.maximum_tick_dt + 0.005
             return 0.02 if index < 20 else 0.10
 
-        trace = GazePlant(PlantConfig(controller_interval=cadence)).run(
-            4.0, constant_target(yaw=30.0 * _DEGREES)
-        )
+        trace = GazePlant(
+            PlantConfig(controller_interval=cadence),
+            controller=controller,
+        ).run(4.0, constant_target(yaw=target_yaw))
         ticks = _controller_samples(trace)
-        limits = ControllerConfig().yaw_limits
+        limits = controller.yaw_limits
 
-        assert any(later.at - earlier.at >= 0.299 for earlier, later in pairwise(ticks))
+        assert any(
+            later.at - earlier.at > controller.maximum_tick_dt
+            for earlier, later in pairwise(ticks)
+        )
         assert all(
             abs(sample.state.world_yaw.velocity) <= limits.max_velocity
             for sample in ticks

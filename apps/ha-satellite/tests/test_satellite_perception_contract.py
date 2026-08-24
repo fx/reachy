@@ -75,10 +75,14 @@ async def _deliver(fixture: str) -> tuple[Detections, RemotePerception]:
         What the perception port answered, and the adapter, so the caller can
         close it.
     """
-    clock = ManualClock()
+    result = load_fixture(fixture, _FaceResult)
+    clock = ManualClock(start=float(result.captured_at.root))
     sleep = RecordedSleep()
     transport = StubTransport()
-    transport.push(agreement(FACE), _as_control_message(fixture))
+    transport.push(
+        agreement(FACE),
+        encode_control(MessageKind.RESULT, result),
+    )
     remote = RemotePerception(
         FakeMedia(),
         SessionClient(

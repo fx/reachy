@@ -152,6 +152,30 @@ class TestTheSessionIsHeldAndUsed:
         await remote.aclose()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("stamp", ["1001.000000", "nan", "inf"])
+    async def test_invalid_numeric_capture_time_is_not_published(
+        self,
+        stamp: str,
+    ) -> None:
+        """Future and non-finite capture tokens carry no usable provenance."""
+        clock = ManualClock()
+        sleep = RecordedSleep()
+        transport = StubTransport()
+        transport.push(agreement(FACE), face_result(0, stamp=stamp))
+        remote = RemotePerception(
+            FakeMedia(),
+            _client(ScriptedTransports(transport), clock, sleep),
+            clock=clock,
+            sleep=sleep,
+            offload=inline,
+        )
+        await remote.start()
+        await hand_control_to_the_event_loop()
+
+        assert remote.latest() == Detections()
+        await remote.aclose()
+
+    @pytest.mark.asyncio
     async def test_frames_go_up_as_the_bytes_the_camera_produced(self) -> None:
         """Hardware-encoded JPEG, passed through and never re-encoded."""
         clock = ManualClock()

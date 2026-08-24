@@ -27,6 +27,9 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     step_controller,
 )
 
+_DEGREES: Final = math.pi / 180.0
+
+
 __all__ = [
     "DEFAULT_NOISE",
     "GazePlant",
@@ -111,6 +114,8 @@ class PlantConfig:
     command_delay: float = 0.08
     head_lag: float = 0.12
     body_lag: float = 0.30
+    horizontal_camera_fov: float = 87.0 * _DEGREES
+    vertical_camera_fov: float = 67.0 * _DEGREES
     projection: Projection = _projection
     distortion: Distortion = _distortion
     noise: tuple[tuple[float, float], ...] = ()
@@ -121,12 +126,17 @@ class PlantConfig:
             ("plant dt", self.plant_dt),
             ("head lag", self.head_lag),
             ("body lag", self.body_lag),
+            ("horizontal camera field of view", self.horizontal_camera_fov),
+            ("vertical camera field of view", self.vertical_camera_fov),
         ):
             if not math.isfinite(value) or value <= 0.0:
                 message = f"the {name} must be positive and finite"
                 raise ValueError(message)
         if not math.isfinite(self.command_delay) or self.command_delay < 0.0:
             message = "the command delay must be non-negative and finite"
+            raise ValueError(message)
+        if max(self.horizontal_camera_fov, self.vertical_camera_fov) >= math.pi:
+            message = "camera fields of view must be lower than pi radians"
             raise ValueError(message)
 
 
@@ -322,18 +332,22 @@ class GazePlant:
                     else at - last_controller
                 )
                 self._require_interval("controller dt", dt, positive=True)
-                rejected = self._faults.reject_workspace(
-                    state.last_safe_sample,
-                    controller_index,
-                    at,
-                )
+
+                def workspace_accepts(
+                    sample: GazeSample,
+                    *,
+                    tick: int = controller_index,
+                    checked_at: float = at,
+                ) -> bool:
+                    return not self._faults.reject_workspace(sample, tick, checked_at)
+
                 result = step_controller(
                     state,
                     latest,
                     now=at,
                     dt=dt,
                     config=self._controller,
-                    workspace_ok=not rejected,
+                    workspace_accepts=workspace_accepts,
                 )
                 state = result.state
                 last_consumed = result.observation_consumed
@@ -404,13 +418,13 @@ class GazePlant:
         x = self._config.distortion(
             self._config.projection(
                 plant_world_yaw - target_yaw,
-                self._controller.horizontal_fov,
+                self._config.horizontal_camera_fov,
             )
         )
         y = self._config.distortion(
             self._config.projection(
                 target_elevation - plant_elevation,
-                self._controller.vertical_fov,
+                self._config.vertical_camera_fov,
             )
         )
         if include_noise and self._config.noise:

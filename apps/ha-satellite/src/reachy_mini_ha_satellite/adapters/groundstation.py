@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Final
 
@@ -359,8 +360,18 @@ class RemotePerception:
                 type(payload).__name__,
             )
             return
-        if result.round_trip_seconds is None:
-            _LOGGER.warning("ignoring a face result without robot capture timing")
+        round_trip = result.round_trip_seconds
+        if (
+            round_trip is None
+            or not math.isfinite(round_trip)
+            or round_trip < 0.0
+            or not math.isfinite(result.received_at)
+        ):
+            _LOGGER.warning("ignoring a face result without valid robot capture timing")
+            return
+        captured_at = result.received_at - round_trip
+        if not math.isfinite(captured_at):
+            _LOGGER.warning("ignoring a face result with non-finite capture time")
             return
         sequence = int(result.sequence)
         # The shared client owns the session lifecycle and counts every session
@@ -371,4 +382,4 @@ class RemotePerception:
         self._faces = payload.faces
         self._sequence = sequence
         self._received_at = result.received_at
-        self._captured_at = result.received_at - result.round_trip_seconds
+        self._captured_at = captured_at
