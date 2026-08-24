@@ -88,6 +88,16 @@ def _open_supported_gap(observation: GazeObservation) -> GazeObservation:
     return replace(observation, captured_at=1.0, received_at=1.1)
 
 
+def _horizontal_fov(value: float) -> ControllerConfig:
+    """Build configuration with one horizontal field of view."""
+    return ControllerConfig(horizontal_fov=value)
+
+
+def _vertical_fov(value: float) -> ControllerConfig:
+    """Build configuration with one vertical field of view."""
+    return ControllerConfig(vertical_fov=value)
+
+
 class TestImmutableValues:
     """Configuration, state and samples are frozen values rather than owners."""
 
@@ -120,6 +130,31 @@ class TestObservationValidation:
         """Negative observation age is not a prediction input."""
         with pytest.raises(ValueError, match="received before capture"):
             replace(_observation(), captured_at=0.2, received_at=0.1)
+
+    @pytest.mark.parametrize(
+        "build",
+        [_horizontal_fov, _vertical_fov],
+        ids=["horizontal", "vertical"],
+    )
+    @pytest.mark.parametrize("value", [math.pi, math.pi + 0.1, math.inf, math.nan])
+    def test_camera_field_of_view_stays_below_pi(
+        self,
+        build: Callable[[float], ControllerConfig],
+        value: float,
+    ) -> None:
+        """Projection cannot accept singular or non-finite camera geometry."""
+        with pytest.raises(ValueError, match=r"fields? of view"):
+            build(value)
+
+    def test_camera_field_of_view_accepts_valid_values(self) -> None:
+        """Ordinary camera geometry remains configurable below the singularity."""
+        config = ControllerConfig(
+            horizontal_fov=math.pi - 0.1,
+            vertical_fov=math.pi - 0.2,
+        )
+
+        assert config.horizontal_fov == pytest.approx(math.pi - 0.1)
+        assert config.vertical_fov == pytest.approx(math.pi - 0.2)
 
     def test_world_anchor_is_atomic_and_belongs_only_to_a_face(self) -> None:
         """An empty result or half an anchor cannot become a world target."""

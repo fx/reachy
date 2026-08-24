@@ -169,6 +169,24 @@ class TestTheValueTypesThePortsSpeakIn:
         assert not stale.fresh
         assert empty != stale
 
+    def test_stale_construction_hides_faces_but_preserves_provenance(self) -> None:
+        """A legacy caller cannot make a stale target available to behaviour."""
+        stale = Detections(
+            faces=(face(0.5, -0.25),),
+            fresh=False,
+            source=_ROBOT,
+            age_seconds=2.5,
+            generation=3,
+            sequence=7,
+            captured_at=10.0,
+            received_at=10.2,
+        )
+
+        assert stale.faces == ()
+        assert stale.identity == (_ROBOT, 3, 7)
+        assert stale.captured_at == 10.0
+        assert stale.received_at == 10.2
+
     def test_a_view_carries_the_faces_it_was_given(self) -> None:
         """The contract's own detection type, not a second copy of it."""
         view = Detections(faces=(face(0.5, -0.25),), fresh=True)

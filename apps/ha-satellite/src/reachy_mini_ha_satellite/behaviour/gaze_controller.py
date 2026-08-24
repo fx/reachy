@@ -352,6 +352,9 @@ class ControllerConfig:
             ("body head comfort", self.body_head_comfort),
         ):
             _positive(name, value)
+        if self.horizontal_fov >= math.pi or self.vertical_fov >= math.pi:
+            message = "camera fields of view must be lower than pi radians"
+            raise ValueError(message)
         for name, value in (
             ("actuator delay", self.actuator_delay),
             ("feedforward gain", self.feedforward_gain),

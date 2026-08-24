@@ -478,6 +478,11 @@ class Detections:
     captured_at: float | None = None
     received_at: float | None = None
 
+    def __post_init__(self) -> None:
+        """Make stale targets unavailable while preserving legacy construction."""
+        if not self.fresh and self.faces:
+            object.__setattr__(self, "faces", ())
+
     @property
     def identity(self) -> tuple[DetectionSource, int, int] | None:
         """Return source-qualified identity when all three parts are known.
