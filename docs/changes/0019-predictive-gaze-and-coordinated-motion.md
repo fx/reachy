@@ -58,7 +58,7 @@ in the PR, not in the rule.
 
 ### Functional requirements
 
-The [gaze-control requirements](../specs/gaze-control/#requirements) own the
+The [gaze-control requirements](../specs/gaze-control/index.md#requirements) own
 observable modes, accuracy envelopes, head–body fixation, safety behavior,
 handoff and diagnostic scenarios. Those scenarios are this change's acceptance
 criteria and are not restated here. What implementation requires of this change:
