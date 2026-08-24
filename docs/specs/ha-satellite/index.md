@@ -13,7 +13,9 @@ which is how face tracking gets its detections without the robot paying for
 them.
 
 Distributed as a wheel on GitHub Releases and installed into the robot's shared
-application environment. Nothing is implemented yet.
+application environment. Detailed face-gaze and coordinated motion behavior is
+owned by the
+[Predictive Gaze and Coordinated Motion](../gaze-control/) specification.
 
 ## Background
 
@@ -234,12 +236,16 @@ model is a Home Assistant concern and never a robot deployment.
 ### Motion
 
 Motion intents are produced by the behaviour layer and applied by the motion
-adapter. Face tracking converts a normalised centre into a gaze target;
-conversation state produces the movements REQ-046 requires.
+adapter. Conversation state produces the movements REQ-046 requires. The
+[gaze-control specification](../gaze-control/) owns observation prediction,
+trajectory quality, calibrated fixation, coordinated head–body allocation,
+safety behavior and the handoff back to conversation or idle expression.
 
-The staleness behaviour in REQ-048 is deliberate. Holding the last pose looks
+The staleness behavior in REQ-048 is deliberate. Holding the last pose looks
 like successful tracking of a person who has left, which is worse than visibly
 giving up: a neutral head is an honest signal that something upstream stopped.
+The gaze-control contract defines the bounded hold and return that reaches that
+observable state.
 
 ### Home Assistant device identity
 
@@ -323,6 +329,7 @@ workflow.
 ## References
 
 - [architecture](../architecture/) — vendoring, configuration and testing rules
+- [gaze-control](../gaze-control/) — predictive fixation and coordinated motion
 - [robot-link](../robot-link/) — the session this application holds
 - [perception](../perception/) — what the detections mean
 - [reachyctl](../reachyctl/) — how this application is deployed and inspected
@@ -333,3 +340,4 @@ workflow.
 | Date | Change | Document |
 |------|--------|----------|
 | 2026-08-20 | Initial spec created | — |
+| 2026-08-24 | Delegated predictive gaze and coordinated motion details | [0019-predictive-gaze-and-coordinated-motion](../../changes/0019-predictive-gaze-and-coordinated-motion.md) |

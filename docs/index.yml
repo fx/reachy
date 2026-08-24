@@ -6,33 +6,37 @@ specs:
     path: specs/architecture/
     description: Workspace layout, tooling, versioning, CI gates, testing conventions, repository hygiene and documentation conventions
     status: active
-  - name: robot-link
-    path: specs/robot-link/
-    description: The wire contract between robot and groundstation — session, capability negotiation, framing, backpressure and reconnection
+  - name: benchmarks
+    path: specs/benchmarks/
+    description: The performance suite, its recorded baseline and the regression gates
+    status: active
+  - name: gaze-control
+    path: specs/gaze-control/
+    description: Predictive visual servoing and coordinated head-body motion for stable, natural face tracking
     status: active
   - name: groundstation
     path: specs/groundstation/
     description: The off-robot service hosting heavy computation as pluggable capabilities
     status: active
-  - name: perception
-    path: specs/perception/
-    description: Face and gesture detection — model licensing, detection semantics and accuracy requirements
-    status: active
   - name: ha-satellite
     path: specs/ha-satellite/
     description: The robot-side ESPHome voice satellite for Home Assistant
     status: active
-  - name: reachyctl
-    path: specs/reachyctl/
-    description: The command-line tool for deploying, configuring and diagnosing a robot
+  - name: perception
+    path: specs/perception/
+    description: Face and gesture detection — model licensing, detection semantics and accuracy requirements
     status: active
   - name: provisioning
     path: specs/provisioning/
     description: Idempotent Ansible provisioning from a stock robot image to a configured state
     status: active
-  - name: benchmarks
-    path: specs/benchmarks/
-    description: The performance suite, its recorded baseline and the regression gates
+  - name: reachyctl
+    path: specs/reachyctl/
+    description: The command-line tool for deploying, configuring and diagnosing a robot
+    status: active
+  - name: robot-link
+    path: specs/robot-link/
+    description: The wire contract between robot and groundstation — session, capability negotiation, framing, backpressure and reconnection
     status: active
 
 changes:
@@ -162,3 +166,10 @@ changes:
     spec: ha-satellite
     status: complete
     depends_on: ["0013"]
+  - id: "0019"
+    name: predictive-gaze-and-coordinated-motion
+    path: changes/0019-predictive-gaze-and-coordinated-motion.md
+    description: Timestamped face observations, predictive gaze control, jerk-limited trajectories, continuous head-body allocation, and safe staged rollout
+    spec: gaze-control
+    status: draft
+    depends_on: ["0018"]
