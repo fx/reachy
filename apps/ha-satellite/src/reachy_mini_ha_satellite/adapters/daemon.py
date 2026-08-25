@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AudioSamples",
+    "Camera",
     "ImageArray",
     "MediaInterface",
     "Offload",
@@ -65,6 +66,16 @@ type AudioSamples = npt.NDArray[np.float32]
 type PoseMatrix = npt.NDArray[np.float64]
 
 
+@runtime_checkable
+class Camera(Protocol):
+    """The initialized daemon camera needed for calibrated image gaze."""
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        """Return image width then height, matching the SDK surface."""
+        ...
+
+
 #:= docs/specs/ha-satellite/index.md#req-043-hardware-access-goes-through-the-daemon-s-media-layer
 #:% Microphone capture and audio playback MUST be performed through the robot
 #:% daemon's media interface rather than by opening audio devices directly.
@@ -77,6 +88,11 @@ class MediaInterface(Protocol):
     and the speaker open for its own purposes, so an application that opened
     either directly would be contending with it for hardware it does not own.
     """
+
+    @property
+    def camera(self) -> Camera | None:
+        """Return the initialized camera, or ``None`` when unavailable."""
+        ...
 
     def get_frame_jpeg(self) -> bytes | None:
         """Take the current camera frame, already compressed.
@@ -226,6 +242,28 @@ class RobotHandle(Protocol):
                 this protocol.
             body_yaw: The body's rotation in radians, or `None` to leave it.
         """
+        ...
+
+    def get_current_head_pose(self) -> PoseMatrix:
+        """Return the measured world-frame head pose, including body yaw."""
+        ...
+
+    def get_current_joint_positions(self) -> tuple[list[float], list[float]]:
+        """Return seven head joints and two antennas in radians."""
+        ...
+
+    def look_at_image(
+        self,
+        u: int,
+        v: int,
+        duration: float = 1.0,
+        perform_movement: bool = True,
+    ) -> PoseMatrix:
+        """Compute or perform calibrated gaze toward one image pixel."""
+        ...
+
+    def set_automatic_body_yaw(self, enabled: bool) -> None:
+        """Enable or disable the daemon's independent body-yaw modulation."""
         ...
 
     def look_at_world(
