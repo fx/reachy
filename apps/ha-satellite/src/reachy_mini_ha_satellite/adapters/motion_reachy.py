@@ -11,13 +11,24 @@ from __future__ import annotations
 import math
 from collections import deque
 from dataclasses import dataclass
-from enum import StrEnum
 from itertools import pairwise
 from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from reachy_mini_ha_satellite.ports import AntennaPose, HeadPose
+from reachy_mini_ha_satellite.ports import (
+    AntennaPose,
+    HeadPose,
+)
+from reachy_mini_ha_satellite.ports import (
+    CalibratedGaze as CalibratedTarget,
+)
+from reachy_mini_ha_satellite.ports import (
+    CalibrationStatus as CalibrationState,
+)
+from reachy_mini_ha_satellite.ports import (
+    GazeCalibration as CalibrationResult,
+)
 
 if TYPE_CHECKING:
     from reachy_contracts import NormalisedPoint
@@ -27,8 +38,6 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.ports import DetectionSource
 
 __all__ = [
-    "DEFAULT_HORIZONTAL_FOV",
-    "DEFAULT_VERTICAL_FOV",
     "CalibratedTarget",
     "CalibrationResult",
     "CalibrationState",
@@ -40,55 +49,11 @@ __all__ = [
     "rebase_calibrated_rotation",
 ]
 
-DEFAULT_HORIZONTAL_FOV: Final = math.radians(87.0)
-DEFAULT_VERTICAL_FOV: Final = math.radians(67.0)
-_TARGET_DISTANCE: Final = 1.0
 _POSE_HISTORY_SECONDS: Final = 3.0
 _POSE_HISTORY_COUNT: Final = 256
 _BRACKET_LIMIT: Final = math.radians(0.5)
 _MEASURED_ROTATION_RESIDUAL_LIMIT: Final = 1e-2
 _MEASURED_BOTTOM_ROW_LIMIT: Final = 1e-3
-
-
-class CalibrationState(StrEnum):
-    """The bounded outcome of calibrating one qualified observation."""
-
-    ACCEPTED = "accepted"
-    DEFERRED = "deferred"
-    REJECTED = "rejected"
-
-
-@dataclass(frozen=True, slots=True)
-class CalibratedTarget:
-    """One absolute world anchor preserving its selected observation facts."""
-
-    source: DetectionSource
-    generation: int
-    sequence: int
-    captured_at: float
-    received_at: float
-    target_epoch: int
-    world_yaw: float
-    world_elevation: float
-
-    @property
-    def identity(self) -> tuple[DetectionSource, int, int]:
-        """Return the qualified observation identity."""
-        return self.source, self.generation, self.sequence
-
-
-@dataclass(frozen=True, slots=True)
-class CalibrationResult:
-    """Accepted target or a bounded defer/reject decision."""
-
-    state: CalibrationState
-    target: CalibratedTarget | None = None
-
-    def __post_init__(self) -> None:
-        """Keep accepted and non-accepted shapes unambiguous."""
-        if (self.state is CalibrationState.ACCEPTED) != (self.target is not None):
-            message = "only accepted calibration may carry a target"
-            raise ValueError(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,21 +331,10 @@ class ReachyMotion:
         self,
         handle: RobotHandle,
         *,
-        horizontal_fov: float = DEFAULT_HORIZONTAL_FOV,
-        vertical_fov: float = DEFAULT_VERTICAL_FOV,
         body_enabled: bool = False,
     ) -> None:
         """Take the structural daemon handle without importing its SDK."""
-        for name, angle in (
-            ("horizontal_fov", horizontal_fov),
-            ("vertical_fov", vertical_fov),
-        ):
-            if not math.isfinite(angle) or not 0.0 < angle < math.pi:
-                message = f"{name} must be finite, positive and lower than pi"
-                raise ValueError(message)
         self._handle = handle
-        self._half_horizontal = math.tan(horizontal_fov / 2.0)
-        self._half_vertical = math.tan(vertical_fov / 2.0)
         self._body_enabled = body_enabled
         self._history = TimedPoseHistory()
         self._cache: dict[
@@ -527,22 +481,6 @@ class ReachyMotion:
             self._handle.set_target(head=pose, body_yaw=sample.body_yaw)
         else:
             self._handle.set_target(head=pose)
-
-    def look_at(self, target: NormalisedPoint) -> None:
-        """Retain the pre-integration direct gaze seam until runtime replacement."""
-        if self._released:
-            return
-        self._handle.look_at_world(
-            x=_TARGET_DISTANCE,
-            y=-target.x * self._half_horizontal * _TARGET_DISTANCE,
-            z=target.y * self._half_vertical * _TARGET_DISTANCE,
-            duration=0.0,
-            perform_movement=True,
-        )
-
-    def look_ahead(self) -> None:
-        """Retain the pre-integration direct neutral seam."""
-        self.move_head(HeadPose())
 
     def move_head(self, pose: HeadPose) -> None:
         """Command a pipeline head pose while the adapter remains live."""

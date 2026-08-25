@@ -43,8 +43,11 @@ from reachy_mini_ha_satellite.adapters.sounds import Sound
 from reachy_mini_ha_satellite.esphome.models import AvailableWakeWord, WakeWordType
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
+    CalibratedGaze,
+    CalibrationStatus,
     Detections,
     DetectionSource,
+    GazeCalibration,
     HeadPose,
 )
 
@@ -61,6 +64,8 @@ if TYPE_CHECKING:
     )
     from reachy_mini_ha_satellite.adapters.output_gain import Samples
     from reachy_mini_ha_satellite.adapters.perception_local import PixelFace
+    from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
+    from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective
     from reachy_mini_ha_satellite.esphome.models import ServerState
     from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
     from reachy_mini_ha_satellite.wake_word import ModelInput
@@ -643,9 +648,13 @@ class FakeMotion:
 
     def __init__(self) -> None:
         """Start at neutral, commanding nothing."""
-        self.gaze: list[NormalisedPoint] = []
+        self.coordinated_gaze: list[GazeSample] = []
         self.heads: list[HeadPose] = []
         self.antennas: list[AntennaPose] = []
+        self.acquired: list[float] = []
+        self.observed: list[float] = []
+        self.calibrated: list[tuple[GazeDirective, float]] = []
+        self.body_measurements: list[float | BaseException | None] = []
         self._released = False
 
     @property
@@ -657,19 +666,48 @@ class FakeMotion:
         """
         return self._released
 
-    def look_at(self, target: NormalisedPoint) -> None:
-        """Record a gaze target.
-
-        Args:
-            target: Where to look, in normalised image coordinates.
-        """
-        if self._released:
+    def acquire(self, now: float) -> None:
+        """Record idempotent predictive gaze acquisition."""
+        if self._released or self.acquired:
             return
-        self.gaze.append(target)
+        self.acquired.append(now)
 
-    def look_ahead(self) -> None:
-        """Record a return to neutral."""
-        self.move_head(HeadPose())
+    def observe(self, now: float) -> float | None:
+        """Return the next scripted measured body yaw."""
+        if self._released:
+            return None
+        self.observed.append(now)
+        scripted = self.body_measurements.pop(0) if self.body_measurements else None
+        if isinstance(scripted, BaseException):
+            raise scripted
+        return scripted
+
+    def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
+        """Return a deterministic world anchor for an actionable fake directive."""
+        if self._released or directive.identity is None or directive.face is None:
+            return GazeCalibration(CalibrationStatus.REJECTED)
+        self.calibrated.append((directive, now))
+        source, generation, sequence = directive.identity
+        assert directive.captured_at is not None
+        assert directive.received_at is not None
+        return GazeCalibration(
+            CalibrationStatus.ACCEPTED,
+            CalibratedGaze(
+                source=source,
+                generation=generation,
+                sequence=sequence,
+                captured_at=directive.captured_at,
+                received_at=directive.received_at,
+                target_epoch=directive.target_epoch,
+                world_yaw=-directive.face.centre.x * 0.5,
+                world_elevation=directive.face.centre.y * 0.5,
+            ),
+        )
+
+    def command_gaze(self, sample: GazeSample) -> None:
+        """Record one coordinated gaze sample unless terminally released."""
+        if not self._released:
+            self.coordinated_gaze.append(sample)
 
     def move_head(self, pose: HeadPose) -> None:
         """Record a head pose.
@@ -745,6 +783,7 @@ class FakePerception:
         self.connected = connected
         self.started = 0
         self.closed = 0
+        self._sequence = 0
 
     async def start(self) -> None:
         """Record a start."""
@@ -769,11 +808,17 @@ class FakePerception:
             faces: What is in front of the robot.
             source: Which detector is to have produced it.
         """
+        self._sequence += 1
+        completed_at = self._sequence * 0.1
         self.detections = Detections(
             faces=faces,
             fresh=True,
             source=source,
             age_seconds=0.0,
+            generation=0,
+            sequence=self._sequence,
+            captured_at=completed_at,
+            received_at=completed_at,
         )
 
     def go_stale(self) -> None:
@@ -782,6 +827,10 @@ class FakePerception:
             fresh=False,
             source=self.detections.source,
             age_seconds=99.0,
+            generation=self.detections.generation,
+            sequence=self.detections.sequence,
+            captured_at=self.detections.captured_at,
+            received_at=self.detections.received_at,
         )
 
 

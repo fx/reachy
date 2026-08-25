@@ -22,11 +22,10 @@ from typing import TYPE_CHECKING
 from reachy_mini_ha_satellite.ports import AntennaPose, HeadPose
 
 if TYPE_CHECKING:
-    from reachy_contracts import NormalisedPoint
+    from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
 
 __all__ = [
-    "LookAhead",
-    "LookAt",
+    "CommandGaze",
     "MotionIntent",
     "MoveAntennas",
     "MoveHead",
@@ -34,25 +33,10 @@ __all__ = [
 
 
 @dataclass(frozen=True, slots=True)
-class LookAt:
-    """Point the head at something seen in the frame.
+class CommandGaze:
+    """Command one canonical world-gaze and optional body sample."""
 
-    Attributes:
-        target: Where it is, in normalised image coordinates.
-    """
-
-    target: NormalisedPoint
-
-
-@dataclass(frozen=True, slots=True)
-class LookAhead:
-    """Return the head to neutral.
-
-    Distinct from `MoveHead(NEUTRAL_HEAD)`, and the distinction is the whole of
-    ha-satellite REQ-048: this is what the layer produces when results have
-    stopped arriving, and the port's own `look_ahead` is the method whose
-    docstring says why holding the last pose would be a lie.
-    """
+    sample: GazeSample
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,5 +61,5 @@ class MoveAntennas:
     pose: AntennaPose
 
 
-type MotionIntent = LookAt | LookAhead | MoveHead | MoveAntennas
+type MotionIntent = CommandGaze | MoveHead | MoveAntennas
 """Everything the behaviour layer can ask for."""

@@ -41,7 +41,6 @@ import functools
 import inspect
 import json
 import logging
-import math
 import threading
 import time
 from contextvars import Context, ContextVar
@@ -77,10 +76,13 @@ from reachy_mini_ha_satellite.audio_entities import (
     SpeakerVolumeNumberEntity,
 )
 from reachy_mini_ha_satellite.behaviour import (
-    LookAhead,
-    LookAt,
+    CommandGaze,
     MoveHead,
     SatelliteBehaviour,
+)
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    BodyMeasurement,
+    ControllerConfig,
 )
 from reachy_mini_ha_satellite.config import (
     OVERRIDES_FILENAME,
@@ -110,7 +112,11 @@ from reachy_mini_ha_satellite.esphome.wake_word import (
 )
 from reachy_mini_ha_satellite.esphome.webrtc import WebRTCProcessor
 from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
-from reachy_mini_ha_satellite.ports import Detections, SourceSelection
+from reachy_mini_ha_satellite.ports import (
+    CalibrationStatus,
+    Detections,
+    SourceSelection,
+)
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 from reachy_mini_ha_satellite.web import create_app
 from reachy_session_client import DEFAULT_BACKOFF, Backoff, Credential, SessionClient
@@ -218,10 +224,8 @@ def apply_intents(motion: MotionPort, intents: Sequence[MotionIntent]) -> None:
         intents: What the behaviour layer asked for, in order.
     """
     for intent in intents:
-        if isinstance(intent, LookAt):
-            motion.look_at(intent.target)
-        elif isinstance(intent, LookAhead):
-            motion.look_ahead()
+        if isinstance(intent, CommandGaze):
+            motion.command_gaze(intent.sample)
         elif isinstance(intent, MoveHead):
             motion.move_head(intent.pose)
         else:
@@ -635,6 +639,7 @@ class SatelliteApplication:
         # application built without the speaker-boost control stays at.
         self._publish: Callable[[], None] = _publish_nothing
         self._stop: asyncio.Event | None = None
+        self._last_tick_at: float | None = None
         self._closed = False
 
     def attach(self, services: Sequence[Service]) -> None:
@@ -720,9 +725,32 @@ class SatelliteApplication:
         apply_intents(self._motion, self._behaviour.handle(event, self._clock()))
 
     def tick(self) -> None:
-        """Ask the behaviour layer what to do now, and do it."""
+        """Sample, select, calibrate, finish and apply with one time reading."""
+        if self._motion.released:
+            return
         now = self._clock()
-        intents = self._behaviour.tick(self._perception.latest(), now)
+        previous = self._last_tick_at
+        dt = 0.0 if previous is None else max(0.0, now - previous)
+        self._last_tick_at = now
+        measured_yaw = self._motion.observe(now)
+        prepared = self._behaviour.prepare(self._perception.latest(), now)
+        calibration = self._motion.calibrate(prepared.directive, now)
+        calibrated = (
+            calibration.target
+            if calibration.state is CalibrationStatus.ACCEPTED
+            else None
+        )
+        body_measurement = (
+            None
+            if measured_yaw is None
+            else BodyMeasurement(yaw=measured_yaw, measured_at=now)
+        )
+        intents = self._behaviour.finish(
+            prepared,
+            calibrated=calibrated,
+            body_measurement=body_measurement,
+            dt=dt,
+        )
         apply_intents(self._motion, intents)
 
     def request_stop(self) -> None:
@@ -769,12 +797,7 @@ class SatelliteApplication:
         self._tick_seconds = settings.behaviour_tick_seconds
         configure_logging(settings)
         self._audio.set_boost(settings.speaker_boost_percent)
-        self._behaviour.retune(
-            deadzone=settings.gaze_deadzone,
-            smoothing=settings.gaze_smoothing,
-            idle_seconds=settings.idle_seconds,
-            tracking_enabled=self._tracking_enabled,
-        )
+        self._behaviour.retune(idle_seconds=settings.idle_seconds)
         # Last, so that what the publisher reads back is what was adopted rather
         # than what is halfway through being adopted.
         self._publish()
@@ -788,6 +811,9 @@ class SatelliteApplication:
         """
         self._stop = stop
         try:
+            acquired_at = self._clock()
+            self._motion.acquire(acquired_at)
+            self._last_tick_at = acquired_at
             self._audio.start()
             await self._perception.start()
             for service in self._services:
@@ -2023,19 +2049,16 @@ def build_application(
         samples_per_chunk=settings.samples_per_chunk,
         boost_percent=settings.speaker_boost_percent,
     )
-    motion = ReachyMotion(
-        handle,
-        horizontal_fov=math.radians(settings.camera_horizontal_fov_degrees),
-        vertical_fov=math.radians(settings.camera_vertical_fov_degrees),
-    )
+    motion = ReachyMotion(handle)
     perception: PerceptionPort = (
         build_perception_source(settings, handle.media) or _NoPerception()
     )
     behaviour = SatelliteBehaviour(
-        deadzone=settings.gaze_deadzone,
-        smoothing=settings.gaze_smoothing,
         idle_seconds=settings.idle_seconds,
         tracking_enabled=settings.face_tracking_enabled,
+        controller_config=ControllerConfig(
+            staleness_seconds=settings.staleness_seconds,
+        ),
         now=time.monotonic(),
     )
 

@@ -63,13 +63,13 @@ from reachy_mini_ha_satellite.adapters.perception_source import FallbackPercepti
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
 from reachy_mini_ha_satellite.audio_entities import SpeakerBoostNumberEntity
 from reachy_mini_ha_satellite.behaviour import (
-    LookAhead,
-    LookAt,
+    CommandGaze,
     MoveAntennas,
     MoveHead,
     PipelineEvent,
     SatelliteBehaviour,
 )
+from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
 from reachy_mini_ha_satellite.config import (
     ENV_PREFIX,
     ConfigurationError,
@@ -100,7 +100,6 @@ from reachy_mini_ha_satellite.main import (
     run,
 )
 from reachy_mini_ha_satellite.ports import (
-    NEUTRAL_HEAD,
     AntennaPose,
     Detections,
     DetectionSource,
@@ -755,21 +754,14 @@ def _advancing() -> Callable[[], float]:
 class TestApplyingIntents:
     """Four intents, four port methods, and nothing in between to get wrong."""
 
-    def test_a_gaze_target_reaches_look_at(self) -> None:
-        """The one intent that carries a value the adapter has to convert."""
+    def test_a_coordinated_gaze_sample_reaches_its_port_method(self) -> None:
+        """Predictive gaze is already canonical when intent application sees it."""
         motion = FakeMotion()
+        sample = GazeSample(0.3, 0.1, 0.0, 0.3, False)
 
-        apply_intents(motion, [LookAt(face(0.3, 0.1).centre)])
+        apply_intents(motion, [CommandGaze(sample)])
 
-        assert motion.gaze[-1].x == pytest.approx(0.3)
-
-    def test_returning_to_neutral_reaches_look_ahead(self) -> None:
-        """Distinct from commanding the neutral pose — REQ-048's own method."""
-        motion = FakeMotion()
-
-        apply_intents(motion, [LookAhead()])
-
-        assert motion.last_head == NEUTRAL_HEAD
+        assert motion.coordinated_gaze == [sample]
 
     def test_a_head_pose_reaches_move_head(self) -> None:
         """The pipeline's secondary channel."""
@@ -835,11 +827,11 @@ class TestTheLoop:
 
         await application.run(stop)
 
-        assert motion.gaze
+        assert motion.coordinated_gaze
 
     @pytest.mark.asyncio
     async def test_stale_results_return_the_head_to_neutral(self) -> None:
-        """REQ-048, through the loop rather than through the behaviour layer."""
+        """REQ-048 returns through predictive trajectory before pipeline handoff."""
         audio, motion = FakeAudio(), FakeMotion()
         perception = FakePerception()
         perception.see(face(0.4, 0.2), source=DetectionSource.REMOTE)
@@ -847,7 +839,7 @@ class TestTheLoop:
             audio=audio,
             motion=motion,
             perception=perception,
-            stop_after=4,
+            stop_after=200,
         )
 
         run = asyncio.create_task(application.run(stop))
@@ -858,7 +850,8 @@ class TestTheLoop:
         perception.go_stale()
         await run
 
-        assert motion.last_head == NEUTRAL_HEAD
+        assert motion.coordinated_gaze[-1].world_yaw == pytest.approx(0.0, abs=0.01)
+        assert motion.heads
 
     def test_a_pipeline_event_moves_the_robot_at_once(self) -> None:
         """`deliver` is what the tap calls, on the event loop's own thread."""

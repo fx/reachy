@@ -13,9 +13,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final
 
-from reachy_contracts import NormalisedPoint
-from reachy_mini_ha_satellite.behaviour.intents import LookAhead, LookAt
-
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -23,11 +20,9 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.ports import Detections, DetectionSource
 
 __all__ = [
-    "FaceTracker",
     "GazeDirective",
     "GazeOutcome",
     "GazeSelector",
-    "TrackingDecision",
     "choose_face",
 ]
 
@@ -239,115 +234,3 @@ class GazeSelector:
         if self._current is not None:
             return self._current
         return GazeDirective(GazeOutcome.UNKNOWN, target_epoch=self._epoch)
-
-
-@dataclass(frozen=True, slots=True)
-class TrackingDecision:
-    """Legacy runtime decision retained until the integration commit."""
-
-    outcome: GazeOutcome
-    intent: LookAt | LookAhead | None
-    idle_since: float | None
-
-
-class FaceTracker:
-    """Legacy runtime tracker retained only while directives are integrated."""
-
-    def __init__(
-        self,
-        *,
-        deadzone: float = 0.02,
-        smoothing: float = 0.35,
-        now: float = 0.0,
-    ) -> None:
-        """Create the compatibility tracker used by the pre-integration runtime."""
-        self._check_tuning(deadzone, smoothing)
-        self._deadzone = deadzone
-        self._smoothing = smoothing
-        self._committed: NormalisedPoint | None = None
-        self._idle_since: float | None = now
-
-    @staticmethod
-    def _check_tuning(deadzone: float, smoothing: float) -> None:
-        """Validate the temporary legacy tuning."""
-        if deadzone < 0.0:
-            message = f"the gaze deadzone must not be negative, not {deadzone}"
-            raise ValueError(message)
-        if not 0.0 < smoothing <= 1.0:
-            message = f"the gaze smoothing must be greater than zero and at most one, not {smoothing}"
-            raise ValueError(message)
-
-    @property
-    def committed(self) -> NormalisedPoint | None:
-        """Return the legacy aim while the old runtime remains wired."""
-        return self._committed
-
-    def retune(self, *, deadzone: float, smoothing: float) -> None:
-        """Retune the temporary legacy path."""
-        self._check_tuning(deadzone, smoothing)
-        self._deadzone = deadzone
-        self._smoothing = smoothing
-
-    def update(self, detections: Detections, now: float) -> TrackingDecision:
-        """Produce the old movement until the integration commit removes it."""
-        if not detections.fresh:
-            if detections.source is None:
-                return TrackingDecision(GazeOutcome.UNKNOWN, None, self._idle_since)
-            return self._give_up(GazeOutcome.STALE, now)
-        selected = choose_face(detections.faces)
-        if selected is None:
-            return self._give_up(GazeOutcome.NOBODY, now)
-        self._idle_since = None
-        return TrackingDecision(
-            GazeOutcome.TRACKING,
-            self._aim_at(selected.centre),
-            None,
-        )
-
-    def stand_down(self, now: float) -> TrackingDecision:
-        """Release the temporary legacy aim."""
-        return self._give_up(GazeOutcome.UNKNOWN, now)
-
-    def _give_up(self, outcome: GazeOutcome, now: float) -> TrackingDecision:
-        """Return the temporary path to neutral once."""
-        if self._idle_since is None:
-            self._idle_since = now
-        intent: LookAhead | None = None
-        if self._committed is not None:
-            self._committed = None
-            intent = LookAhead()
-        return TrackingDecision(outcome, intent, self._idle_since)
-
-    def _aim_at(self, target: NormalisedPoint) -> LookAt | None:
-        """Apply the old gain pending the integration commit."""
-        if self._committed is None:
-            self._committed = target
-            return LookAt(target)
-        aim = NormalisedPoint(
-            x=max(
-                -1.0,
-                min(
-                    1.0,
-                    self._committed.x
-                    + self._smoothing * (target.x - self._committed.x),
-                ),
-            ),
-            y=max(
-                -1.0,
-                min(
-                    1.0,
-                    self._committed.y
-                    + self._smoothing * (target.y - self._committed.y),
-                ),
-            ),
-        )
-        if (
-            math.hypot(
-                aim.x - self._committed.x,
-                aim.y - self._committed.y,
-            )
-            <= self._deadzone
-        ):
-            return None
-        self._committed = aim
-        return LookAt(aim)

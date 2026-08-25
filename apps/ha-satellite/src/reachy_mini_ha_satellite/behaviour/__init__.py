@@ -26,8 +26,7 @@ always something that can be carried out.
 """
 
 from reachy_mini_ha_satellite.behaviour.intents import (
-    LookAhead,
-    LookAt,
+    CommandGaze,
     MotionIntent,
     MoveAntennas,
     MoveHead,
@@ -42,35 +41,32 @@ from reachy_mini_ha_satellite.behaviour.pipeline import (
 )
 from reachy_mini_ha_satellite.behaviour.satellite import (
     BehaviourStatus,
+    PreparedGazeTick,
     SatelliteBehaviour,
 )
 from reachy_mini_ha_satellite.behaviour.tracking import (
-    FaceTracker,
     GazeDirective,
     GazeOutcome,
     GazeSelector,
-    TrackingDecision,
     choose_face,
 )
 
 __all__ = [
     "ERROR_SECONDS",
     "BehaviourStatus",
+    "CommandGaze",
     "Expression",
-    "FaceTracker",
     "GazeDirective",
     "GazeOutcome",
     "GazeSelector",
-    "LookAhead",
-    "LookAt",
     "MotionIntent",
     "MoveAntennas",
     "MoveHead",
     "PipelineEvent",
     "PipelineMachine",
     "PipelineState",
+    "PreparedGazeTick",
     "SatelliteBehaviour",
-    "TrackingDecision",
     "Transition",
     "choose_face",
     "expression",

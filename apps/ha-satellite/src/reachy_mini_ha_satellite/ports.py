@@ -48,16 +48,21 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from reachy_contracts import FaceDetection, NormalisedPoint
+    from reachy_contracts import FaceDetection
+    from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
+    from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective
 
 __all__ = [
     "NEUTRAL_ANTENNAS",
     "NEUTRAL_HEAD",
     "AntennaPose",
     "AudioPort",
+    "CalibratedGaze",
+    "CalibrationStatus",
     "CapturePort",
     "DetectionSource",
     "Detections",
+    "GazeCalibration",
     "HeadPose",
     "MotionPort",
     "PerceptionPort",
@@ -321,6 +326,42 @@ NEUTRAL_HEAD = HeadPose()
 NEUTRAL_ANTENNAS = AntennaPose()
 
 
+class CalibrationStatus(StrEnum):
+    """Whether a qualified directive was calibrated, deferred or rejected."""
+
+    ACCEPTED = "accepted"
+    DEFERRED = "deferred"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class CalibratedGaze:
+    """One absolute world target produced at the motion boundary."""
+
+    source: DetectionSource
+    generation: int
+    sequence: int
+    captured_at: float
+    received_at: float
+    target_epoch: int
+    world_yaw: float
+    world_elevation: float
+
+
+@dataclass(frozen=True, slots=True)
+class GazeCalibration:
+    """Accepted target or a bounded non-acceptance result."""
+
+    state: CalibrationStatus
+    target: CalibratedGaze | None = None
+
+    def __post_init__(self) -> None:
+        """Keep the status and optional target shape coherent."""
+        if (self.state is CalibrationStatus.ACCEPTED) != (self.target is not None):
+            message = "only accepted gaze calibration may carry a target"
+            raise ValueError(message)
+
+
 @runtime_checkable
 class MotionPort(Protocol):
     """Everything the application can move.
@@ -332,34 +373,20 @@ class MotionPort(Protocol):
     event loop for half a second.
     """
 
-    #:= docs/specs/robot-link/index.md#req-021-detection-geometry-is-resolution-independent
-    #:% Positions in results MUST be expressed in normalised image coordinates rather
-    #:% than pixels.
-    def look_at(self, target: NormalisedPoint) -> None:
-        """Point the head at something seen in the frame.
-
-        The target is in normalised image coordinates, never pixels, so the
-        same face at the same place in the scene produces the same movement
-        whatever resolution it was captured at. The adapter owns the conversion
-        because it is the only thing that knows the camera's geometry.
-
-        Args:
-            target: Where the thing is, with the origin at the image centre and
-                the vertical axis pointing up.
-        """
+    def acquire(self, now: float) -> None:
+        """Take gaze ownership and seed measured state idempotently."""
         ...
 
-    #:= docs/specs/ha-satellite/index.md#req-048-the-head-returns-to-neutral-when-tracking-data-goes-stale
-    #:% When results stop arriving within the staleness window, the application MUST
-    #:% return the head to its neutral position rather than holding its last commanded
-    #:% pose.
-    def look_ahead(self) -> None:
-        """Return the head to neutral.
+    def observe(self, now: float) -> float | None:
+        """Sample measured pose and return measured body yaw when enabled."""
+        ...
 
-        This is what a caller does when the detections go stale. Holding the
-        last commanded pose looks like successfully tracking somebody who has
-        left the room, which is worse than visibly giving up.
-        """
+    def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
+        """Calibrate one qualified directive without commanding motion."""
+        ...
+
+    def command_gaze(self, sample: GazeSample) -> None:
+        """Command one canonical coordinated world-gaze sample."""
         ...
 
     def move_head(self, pose: HeadPose) -> None:
