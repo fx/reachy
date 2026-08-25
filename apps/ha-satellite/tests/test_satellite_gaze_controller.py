@@ -20,6 +20,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyFeedbackState,
     BodyMeasurement,
     ControllerConfig,
+    ControllerFault,
     ControllerMode,
     DeadbandState,
     EstimatorReset,
@@ -864,8 +865,8 @@ class TestMeasuredBodyObserver:
             config=config,
         )
 
-        assert transient.mode is not ControllerMode.BODY_FEEDBACK_HOLD
-        assert faulted.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        assert transient.state.fault is not ControllerFault.BODY_FEEDBACK
+        assert faulted.state.fault is ControllerFault.BODY_FEEDBACK
         assert faulted.sample == transient.state.last_safe_sample
 
     def test_recovery_requires_strictly_new_feedback_samples(self) -> None:
@@ -879,7 +880,8 @@ class TestMeasuredBodyObserver:
         body = AxisState(position=0.1)
         state = replace(
             initial_controller_state(config),
-            mode=ControllerMode.BODY_FEEDBACK_HOLD,
+            mode=ControllerMode.ACTIVE,
+            fault=ControllerFault.BODY_FEEDBACK,
             body_yaw=body,
             body_feedback=BodyFeedbackState(
                 initialized=True,
@@ -907,13 +909,13 @@ class TestMeasuredBodyObserver:
         newer = step_controller(
             missing.state,
             None,
-            now=1.2,
+            now=1.25,
             dt=0.05,
             config=config,
-            body_measurement=BodyMeasurement(yaw=0.1, measured_at=1.2),
+            body_measurement=BodyMeasurement(yaw=0.1, measured_at=1.25),
         )
 
-        assert duplicate.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        assert duplicate.state.fault is ControllerFault.BODY_FEEDBACK
         assert duplicate.state.body_feedback.valid_streak == 0
         assert missing.state.body_feedback.valid_streak == 0
         assert newer.state.body_feedback.valid_streak == 1
@@ -966,8 +968,8 @@ class TestMeasuredBodyObserver:
             body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.65),
         )
 
-        assert transient.mode is not ControllerMode.BODY_FEEDBACK_HOLD
-        assert faulted.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        assert transient.state.fault is not ControllerFault.BODY_FEEDBACK
+        assert faulted.state.fault is ControllerFault.BODY_FEEDBACK
         assert faulted.state.body_yaw.position == pytest.approx(
             transient.state.body_yaw.position
         )
@@ -985,7 +987,7 @@ class TestMeasuredBodyObserver:
                     measured_at=measured_at,
                 ),
             )
-            assert recovery.mode is ControllerMode.BODY_FEEDBACK_HOLD
+            assert recovery.state.fault is ControllerFault.BODY_FEEDBACK
         recovered = step_controller(
             recovery.state,
             None,
@@ -998,7 +1000,7 @@ class TestMeasuredBodyObserver:
             ),
         )
 
-        assert recovered.mode is not ControllerMode.BODY_FEEDBACK_HOLD
+        assert recovered.state.fault is not ControllerFault.BODY_FEEDBACK
         assert recovered.state.body_feedback.valid_streak == 0
 
 
@@ -1053,7 +1055,7 @@ class TestAllocationAndWorkspaceScaffolds:
 
         assert checked
         assert checked[0] != 0.0
-        assert rejected.mode is ControllerMode.WORKSPACE_HOLD
+        assert rejected.state.fault is ControllerFault.WORKSPACE
         assert rejected.sample == neutral.last_safe_sample
         assert rejected.state.last_safe_sample == neutral.last_safe_sample
 
@@ -1089,4 +1091,4 @@ class TestAllocationAndWorkspaceScaffolds:
             False,
             True,
         ]
-        assert results[-1].mode is not ControllerMode.WORKSPACE_HOLD
+        assert results[-1].state.fault is not ControllerFault.WORKSPACE

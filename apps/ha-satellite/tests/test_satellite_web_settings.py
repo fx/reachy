@@ -72,6 +72,25 @@ class RecordingHost:
         """Start having been asked for nothing."""
         self.applied: list[Settings] = []
         self.stops = 0
+        self.events: tuple[dict[str, object], ...] = (
+            {
+                "at": 1.0,
+                "mode": "active",
+                "fault": "none",
+                "safe_hold": False,
+                "observation_age": 0.1,
+                "observation_consumed": True,
+                "estimator_reset": "first",
+                "prediction_horizon": 0.2,
+                "deadband_active": True,
+                "world_yaw": 0.1,
+                "elevation": 0.0,
+                "body_yaw": 0.0,
+                "emitted": True,
+                "command_accepted": True,
+            },
+        )
+        self.diagnostics_resets = 0
 
     def status(self) -> dict[str, object]:
         """Report a robot doing nothing in particular.
@@ -97,6 +116,15 @@ class RecordingHost:
     def request_stop(self) -> None:
         """Record a restart request."""
         self.stops += 1
+
+    def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
+        """Return fixed scalar evidence."""
+        return self.events
+
+    def reset_controller_diagnostics(self) -> None:
+        """Clear only the diagnostic fake state."""
+        self.events = ()
+        self.diagnostics_resets += 1
 
 
 def _store() -> OverrideStore:
@@ -691,6 +719,74 @@ class TestTheMachineReadableSurfaces:
         assert not status["running"]
 
     @pytest.mark.asyncio
+    async def test_controller_diagnostics_are_fixed_scalar_and_identifier_free(
+        self,
+    ) -> None:
+        """The detailed route cannot grow installation or image-shaped payloads."""
+        host = RecordingHost()
+
+        async with _client(_app(host)) as client:
+            response = await client.get("/diagnostics/controller")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["running"]
+        assert payload["events"] == list(host.events)
+        forbidden = {
+            "source",
+            "generation",
+            "sequence",
+            "identity",
+            "face",
+            "image",
+            "config",
+            "credential",
+            "network",
+            "path",
+            "exception",
+        }
+        for event in payload["events"]:
+            assert forbidden.isdisjoint(event)
+            assert all(
+                value is None or isinstance(value, str | float | bool)
+                for value in event.values()
+            )
+
+    @pytest.mark.asyncio
+    async def test_controller_reset_changes_diagnostics_only(self) -> None:
+        """Reset emits no stop, settings adoption or other application mutation."""
+        host = RecordingHost()
+        before = (tuple(host.applied), host.stops)
+
+        async with _client(_app(host)) as client:
+            response = await client.post("/diagnostics/controller/reset")
+
+        assert response.status_code == 200
+        assert response.json() == {"reset": True}
+        assert host.events == ()
+        assert host.diagnostics_resets == 1
+        assert (tuple(host.applied), host.stops) == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("post", "/diagnostics/controller"),
+            ("get", "/diagnostics/controller/reset"),
+        ],
+    )
+    async def test_controller_diagnostics_refuse_wrong_methods(
+        self,
+        method: str,
+        path: str,
+    ) -> None:
+        """Read and reset routes have one method each."""
+        async with _client(_app(RecordingHost())) as client:
+            response = await getattr(client, method)(path)
+
+        assert response.status_code == 405
+
+    @pytest.mark.asyncio
     async def test_the_interface_answers_that_it_is_up(self) -> None:
         """The cheapest question a deployment check can ask."""
         async with _client(_app()) as client:
@@ -881,7 +977,10 @@ class TestARequestFromSomewhereElse:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", ["/settings", "/reset", "/stop"])
+    @pytest.mark.parametrize(
+        "path",
+        ["/settings", "/reset", "/stop", "/diagnostics/controller/reset"],
+    )
     async def test_a_cross_site_submission_is_refused(self, path: str) -> None:
         """Every route that changes something, not just the form.
 
@@ -970,7 +1069,9 @@ class TestNothingIsCached:
     """A settings page in a shared browser's cache outlives the session."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", ["/", "/config", "/status", "/livez"])
+    @pytest.mark.parametrize(
+        "path", ["/", "/config", "/status", "/diagnostics/controller", "/livez"]
+    )
     async def test_every_response_says_not_to_keep_it(self, path: str) -> None:
         """A robot's address and identity are not things to leave lying about.
 

@@ -12,15 +12,18 @@ from __future__ import annotations
 import math
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    BodyMeasurement,
     ControllerConfig,
+    ControllerFault,
     ControllerMode,
     ControllerState,
     GazeObservation,
+    HeadMeasurement,
     ImagePoint,
     initial_controller_state,
     step_controller,
@@ -47,6 +50,10 @@ Distortion = Callable[[float], float]
 DropObservation = Callable[[int, float], bool]
 RejectWorkspace = Callable[[GazeSample, int, float], bool]
 CorruptObservation = Callable[[GazeObservation, int], GazeObservation]
+DropBodyMeasurement = Callable[[int, float], bool]
+BodyMeasurementOffset = Callable[[int, float], float]
+RejectCommand = Callable[[GazeSample, int, float], bool]
+MotionFaultAt = Callable[[int, float], bool]
 
 DEFAULT_NOISE: Final[tuple[tuple[float, float], ...]] = (
     (-0.018, 0.000),
@@ -103,6 +110,26 @@ def _keep_observation_value(
     return observation
 
 
+def _keep_body_measurement(_index: int, _at: float) -> bool:
+    """Default to complete measured body feedback."""
+    return False
+
+
+def _body_measurement_offset(_index: int, _at: float) -> float:
+    """Default to no injected body-feedback divergence."""
+    return 0.0
+
+
+def _accept_command(_sample: GazeSample, _index: int, _at: float) -> bool:
+    """Default to every valid simulated command succeeding."""
+    return False
+
+
+def _no_motion_fault(_index: int, _at: float) -> bool:
+    """Default to valid pose and calibration channels."""
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class PlantConfig:
     """Explicit deterministic camera, transport, loop and actuator values."""
@@ -114,6 +141,8 @@ class PlantConfig:
     command_delay: float = 0.08
     head_lag: float = 0.12
     body_lag: float = 0.30
+    body_measurement_interval: TimedInterval = _controller_interval
+    body_measurement_lag: float = 0.0
     horizontal_camera_fov: float = 87.0 * _DEGREES
     vertical_camera_fov: float = 67.0 * _DEGREES
     projection: Projection = _projection
@@ -132,8 +161,13 @@ class PlantConfig:
             if not math.isfinite(value) or value <= 0.0:
                 message = f"the {name} must be positive and finite"
                 raise ValueError(message)
-        if not math.isfinite(self.command_delay) or self.command_delay < 0.0:
-            message = "the command delay must be non-negative and finite"
+        if any(
+            not math.isfinite(value) or value < 0.0
+            for value in (self.command_delay, self.body_measurement_lag)
+        ):
+            message = (
+                "command and body measurement delays must be non-negative and finite"
+            )
             raise ValueError(message)
         if max(self.horizontal_camera_fov, self.vertical_camera_fov) >= math.pi:
             message = "camera fields of view must be lower than pi radians"
@@ -142,11 +176,16 @@ class PlantConfig:
 
 @dataclass(frozen=True, slots=True)
 class PlantFaults:
-    """Pure fault injections independent from the controller implementation."""
+    """Pure independent perception, feedback, calibration and command faults."""
 
     drop_observation: DropObservation = _keep_observation
     reject_workspace: RejectWorkspace = _accept_workspace
     corrupt_observation: CorruptObservation = _keep_observation_value
+    drop_body_measurement: DropBodyMeasurement = _keep_body_measurement
+    body_measurement_offset: BodyMeasurementOffset = _body_measurement_offset
+    reject_command: RejectCommand = _accept_command
+    pose_fault: MotionFaultAt = _no_motion_fault
+    calibration_fault: MotionFaultAt = _no_motion_fault
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +194,14 @@ class _PendingObservation:
 
     available_at: float
     observation: GazeObservation
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingBodyMeasurement:
+    """One measured body sample waiting out independent feedback lag."""
+
+    available_at: float
+    measurement: BodyMeasurement
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +229,9 @@ class PlantSample:
     observation_consumed: bool
     observation_identity: tuple[str, int, int] | None
     prediction_horizon: float
+    head_measurement: HeadMeasurement | None
+    body_measurement: BodyMeasurement | None
+    command_accepted: bool | None
 
     @property
     def mode(self) -> ControllerMode:
@@ -260,18 +310,25 @@ class GazePlant:
         command = state.last_safe_sample
         commands: deque[_PendingCommand] = deque()
         observations: list[_PendingObservation] = []
+        body_measurements: list[_PendingBodyMeasurement] = []
         latest: GazeObservation | None = None
+        latest_body_measurement: BodyMeasurement | None = None
         plant_head_yaw = 0.0
         plant_body_yaw = 0.0
         plant_elevation = 0.0
         observation_index = 0
+        body_measurement_index = 0
         controller_index = 0
+        command_call = 0
         next_observation = 0.0
+        next_body_measurement = 0.0
         next_controller = 0.0
         last_controller = 0.0
         last_consumed = False
         last_identity: tuple[str, int, int] | None = None
         last_horizon = 0.0
+        last_command_accepted: bool | None = None
+        last_head_measurement: HeadMeasurement | None = None
         trace: list[PlantSample] = []
         at = 0.0
 
@@ -324,6 +381,46 @@ class GazePlant:
                     pending.append(item)
             observations = pending
 
+            if at + 1e-12 >= next_body_measurement:
+                interval = self._config.body_measurement_interval(
+                    body_measurement_index,
+                    at,
+                )
+                self._require_interval(
+                    "body measurement interval",
+                    interval,
+                    positive=True,
+                )
+                if not self._faults.drop_body_measurement(
+                    body_measurement_index,
+                    at,
+                ):
+                    body_measurements.append(
+                        _PendingBodyMeasurement(
+                            at + self._config.body_measurement_lag,
+                            BodyMeasurement(
+                                yaw=(
+                                    plant_body_yaw
+                                    + self._faults.body_measurement_offset(
+                                        body_measurement_index,
+                                        at,
+                                    )
+                                ),
+                                measured_at=at,
+                            ),
+                        )
+                    )
+                body_measurement_index += 1
+                next_body_measurement += interval
+
+            pending_body: list[_PendingBodyMeasurement] = []
+            for body_item in body_measurements:
+                if body_item.available_at <= at + 1e-12:
+                    latest_body_measurement = body_item.measurement
+                else:
+                    pending_body.append(body_item)
+            body_measurements = pending_body
+
             controller_tick = at + 1e-12 >= next_controller
             if controller_tick:
                 dt = (
@@ -341,6 +438,23 @@ class GazePlant:
                 ) -> bool:
                     return not self._faults.reject_workspace(sample, tick, checked_at)
 
+                head_measurement = (
+                    None
+                    if self._faults.pose_fault(controller_index, at)
+                    else HeadMeasurement(plant_world_yaw, plant_elevation, at)
+                )
+                last_head_measurement = head_measurement
+                input_fault = ControllerFault.NONE
+                input_evidence: tuple[object, ...] | None = None
+                if head_measurement is None:
+                    input_fault = ControllerFault.POSE
+                elif self._faults.calibration_fault(controller_index, at):
+                    input_fault = ControllerFault.CALIBRATION
+                    input_evidence = (
+                        "calibration",
+                        None if latest is None else latest.identity,
+                    )
+                previous_state = state
                 result = step_controller(
                     state,
                     latest,
@@ -348,6 +462,14 @@ class GazePlant:
                     dt=dt,
                     config=self._controller,
                     workspace_accepts=workspace_accepts,
+                    head_measurement=head_measurement,
+                    body_measurement=(
+                        latest_body_measurement
+                        if self._controller.body_enabled
+                        else None
+                    ),
+                    input_fault=input_fault,
+                    input_evidence=input_evidence,
                 )
                 state = result.state
                 last_consumed = result.observation_consumed
@@ -357,9 +479,48 @@ class GazePlant:
                     else None
                 )
                 last_horizon = result.prediction_horizon
-                commands.append(
-                    _PendingCommand(at + self._config.command_delay, result.sample)
+                command_call += 1
+                rejected = self._faults.reject_command(
+                    result.sample,
+                    command_call,
+                    at,
                 )
+                last_command_accepted = not rejected
+                if rejected:
+                    state = replace(
+                        state,
+                        world_yaw=previous_state.world_yaw,
+                        elevation=previous_state.elevation,
+                        body_yaw=previous_state.body_yaw,
+                        last_safe_sample=previous_state.last_safe_sample,
+                        fault=ControllerFault.COMMAND,
+                        recovery_valid_streak=0,
+                        recovery_evidence=("command", command_call),
+                    )
+                else:
+                    if state.fault is ControllerFault.COMMAND:
+                        streak = state.recovery_valid_streak + 1
+                        recovered = (
+                            streak >= self._controller.workspace_recovery_samples
+                        )
+                        state = replace(
+                            state,
+                            fault=(
+                                ControllerFault.NONE
+                                if recovered
+                                else ControllerFault.COMMAND
+                            ),
+                            recovery_valid_streak=0 if recovered else streak,
+                            recovery_evidence=(
+                                None if recovered else ("command", command_call)
+                            ),
+                        )
+                    commands.append(
+                        _PendingCommand(
+                            at + self._config.command_delay,
+                            state.last_safe_sample,
+                        )
+                    )
                 interval = self._config.controller_interval(controller_index, at)
                 self._require_interval("controller interval", interval, positive=True)
                 controller_index += 1
@@ -368,6 +529,7 @@ class GazePlant:
             else:
                 last_consumed = False
                 last_identity = None
+                last_command_accepted = None
 
             while commands and commands[0].available_at <= at + 1e-12:
                 command = commands.popleft().sample
@@ -399,6 +561,9 @@ class GazePlant:
                     observation_consumed=last_consumed,
                     observation_identity=last_identity,
                     prediction_horizon=last_horizon,
+                    head_measurement=last_head_measurement,
+                    body_measurement=latest_body_measurement,
+                    command_accepted=last_command_accepted,
                 )
             )
             at = round(at + self._config.plant_dt, 12)

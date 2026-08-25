@@ -8,12 +8,17 @@ then ask the motion adapter to calibrate that directive and returns the result t
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
+from reachy_mini_ha_satellite.behaviour.controller_diagnostics import (
+    ControllerDiagnostics,
+    DiagnosticScalar,
+)
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyMeasurement,
     ControllerConfig,
+    ControllerFault,
     ControllerMode,
     ControllerState,
     GazeObservation,
@@ -39,6 +44,8 @@ from reachy_mini_ha_satellite.ports import (
     NEUTRAL_HEAD,
     GazeDirective,
     GazeOutcome,
+    MotionCommandResult,
+    MotionCommandStatus,
 )
 
 if TYPE_CHECKING:
@@ -57,8 +64,6 @@ _OWNED_MODES: Final = frozenset(
         ControllerMode.ACTIVE,
         ControllerMode.HOLD,
         ControllerMode.RETURNING,
-        ControllerMode.WORKSPACE_HOLD,
-        ControllerMode.BODY_FEEDBACK_HOLD,
     }
 )
 
@@ -112,6 +117,7 @@ class SatelliteBehaviour:
         idle_seconds: float = 6.0,
         tracking_enabled: bool = True,
         controller_config: ControllerConfig | None = None,
+        diagnostics: ControllerDiagnostics | None = None,
         now: float = 0.0,
     ) -> None:
         """Create pipeline, selector and predictive controller state."""
@@ -124,12 +130,14 @@ class SatelliteBehaviour:
         self._selector = GazeSelector()
         self._config = controller_config or ControllerConfig()
         self._controller = initial_controller_state(self._config)
+        self._diagnostics = diagnostics or ControllerDiagnostics()
         self._idle_seconds = idle_seconds
         self._tracking_enabled = tracking_enabled
         self._last_head: HeadPose | None = None
         self._last_antennas: AntennaPose | None = None
         self._outcome = GazeOutcome.UNKNOWN
         self._idle_since: float | None = now
+        self._pending_command_state: ControllerState | None = None
 
     @property
     def state(self) -> PipelineState:
@@ -140,6 +148,14 @@ class SatelliteBehaviour:
     def controller_state(self) -> ControllerState:
         """Return immutable predictive controller state for status and tests."""
         return self._controller
+
+    def controller_diagnostics(self) -> tuple[dict[str, DiagnosticScalar], ...]:
+        """Return a bounded identifier-free snapshot of controller evidence."""
+        return self._diagnostics.snapshot()
+
+    def reset_controller_diagnostics(self) -> None:
+        """Reset diagnostics without touching controller or expression state."""
+        self._diagnostics.reset()
 
     def retune(self, *, idle_seconds: float) -> None:
         """Adopt the only live behavior value without rebuilding state."""
@@ -196,19 +212,24 @@ class SatelliteBehaviour:
         head_measurement: HeadMeasurement | None = None,
         body_measurement: BodyMeasurement | None,
         dt: float,
+        input_fault: ControllerFault = ControllerFault.NONE,
+        input_evidence: tuple[object, ...] | None = None,
     ) -> tuple[MotionIntent, ...]:
         """Advance one controller tick and return ordered gaze/expression intents."""
         observation = self._observation(prepared.directive, calibrated)
         previously_owned = self._owns_head()
-        previous_sample = self._controller.last_safe_sample
+        previous_controller = self._controller
+        previous_sample = previous_controller.last_safe_sample
         result = step_controller(
-            self._controller,
+            previous_controller,
             observation,
             now=prepared.now,
             dt=dt,
             config=self._config,
             head_measurement=head_measurement,
             body_measurement=body_measurement,
+            input_fault=input_fault,
+            input_evidence=input_evidence,
         )
         self._controller = result.state
         now_owned = self._owns_head()
@@ -220,10 +241,12 @@ class SatelliteBehaviour:
         intents: list[MotionIntent] = []
         if command_ready and (
             settled_handoff
+            or result.state.fault is ControllerFault.COMMAND
             or (
                 now_owned and (not previously_owned or result.sample != previous_sample)
             )
         ):
+            self._pending_command_state = previous_controller
             intents.append(CommandGaze(result.sample))
         intents.extend(
             self._express(
@@ -233,7 +256,54 @@ class SatelliteBehaviour:
                 force_head=settled_handoff,
             )
         )
+        received_at = prepared.directive.received_at
+        self._diagnostics.record(
+            result,
+            at=prepared.now,
+            observation_age=(
+                None if received_at is None else max(0.0, prepared.now - received_at)
+            ),
+            emitted=any(isinstance(intent, CommandGaze) for intent in intents),
+        )
         return tuple(intents)
+
+    def complete_command(self, result: MotionCommandResult) -> None:
+        """Commit an accepted sample or restore the prior safe trajectory atomically."""
+        previous = self._pending_command_state
+        self._pending_command_state = None
+        if result.status is MotionCommandStatus.REJECTED:
+            if previous is None:
+                previous = self._controller
+            self._controller = replace(
+                self._controller,
+                world_yaw=previous.world_yaw,
+                elevation=previous.elevation,
+                body_yaw=previous.body_yaw,
+                last_safe_sample=previous.last_safe_sample,
+                fault=ControllerFault.COMMAND,
+                recovery_valid_streak=0,
+                recovery_evidence=("command", result.call),
+            )
+            return
+        if self._controller.fault is not ControllerFault.COMMAND:
+            return
+        evidence = ("command", result.call)
+        independent = evidence != self._controller.recovery_evidence
+        streak = self._controller.recovery_valid_streak + (1 if independent else 0)
+        self._controller = replace(
+            self._controller,
+            fault=(
+                ControllerFault.NONE
+                if streak >= self._config.workspace_recovery_samples
+                else ControllerFault.COMMAND
+            ),
+            recovery_valid_streak=(
+                0 if streak >= self._config.workspace_recovery_samples else streak
+            ),
+            recovery_evidence=(
+                None if streak >= self._config.workspace_recovery_samples else evidence
+            ),
+        )
 
     @staticmethod
     def _observation(
@@ -284,7 +354,7 @@ class SatelliteBehaviour:
 
     def _owns_head(self) -> bool:
         """Return whether predictive gaze has exclusive head ownership."""
-        return self._controller.mode in _OWNED_MODES
+        return self._controller.mode in _OWNED_MODES or self._controller.safe_hold
 
     def _is_idle(self, now: float) -> bool:
         """Return whether the room has been without a selected face long enough."""

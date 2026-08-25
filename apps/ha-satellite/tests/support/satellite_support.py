@@ -50,6 +50,9 @@ from reachy_mini_ha_satellite.ports import (
     GazeDirective,
     GazeSample,
     HeadPose,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
     MotionMeasurement,
 )
 
@@ -656,6 +659,8 @@ class FakeMotion:
         self.calibrated: list[tuple[GazeDirective, float]] = []
         self.world_measurements: list[tuple[float, float] | BaseException | None] = []
         self.body_measurements: list[float | BaseException | None] = []
+        self.command_results: list[MotionCommandResult] = []
+        self._command_calls = 0
         self._released = False
 
     @property
@@ -698,7 +703,10 @@ class FakeMotion:
     def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
         """Return a deterministic world anchor for an actionable fake directive."""
         if self._released or directive.identity is None or directive.face is None:
-            return GazeCalibration(CalibrationStatus.REJECTED)
+            return GazeCalibration(
+                CalibrationStatus.REJECTED,
+                fault=MotionFault.CALIBRATION,
+            )
         self.calibrated.append((directive, now))
         source, generation, sequence = directive.identity
         assert directive.captured_at is not None
@@ -717,10 +725,26 @@ class FakeMotion:
             ),
         )
 
-    def command_gaze(self, sample: GazeSample) -> None:
-        """Record one coordinated gaze sample unless terminally released."""
-        if not self._released:
+    def command_gaze(self, sample: GazeSample) -> MotionCommandResult:
+        """Record one coordinated sample only when its scripted call succeeds."""
+        self._command_calls += 1
+        if self._released:
+            return MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.RELEASED,
+                self._command_calls,
+            )
+        result = (
+            self.command_results.pop(0)
+            if self.command_results
+            else MotionCommandResult(
+                MotionCommandStatus.ACCEPTED,
+                call=self._command_calls,
+            )
+        )
+        if result.status is MotionCommandStatus.ACCEPTED:
             self.coordinated_gaze.append(sample)
+        return result
 
     def move_head(self, pose: HeadPose) -> None:
         """Record a head pose.

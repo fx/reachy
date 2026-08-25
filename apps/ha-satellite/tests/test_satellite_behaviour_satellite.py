@@ -451,7 +451,13 @@ class TestLossReturnAndHandoff:
 
     def test_stale_input_reports_stale_while_controller_returns(self) -> None:
         """Receipt staleness starts hold/return without replaying image data."""
-        config = ControllerConfig(staleness_seconds=0.2, loss_hold_seconds=0.0)
+        config = ControllerConfig(
+            staleness_seconds=0.2,
+            prediction_horizon=0.2,
+            head_measurement_max_age=0.2,
+            body_feedback_max_age=0.2,
+            loss_hold_seconds=0.0,
+        )
         behaviour = SatelliteBehaviour(controller_config=config, now=0.0)
         active = _seen(face(0.4, 0.0), received_at=0.1)
         _finish(behaviour, active, now=0.1)

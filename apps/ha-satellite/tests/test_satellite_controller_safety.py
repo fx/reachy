@@ -1,0 +1,211 @@
+"""Unified predictive-controller safety, recovery evidence and atomic validation."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import replace
+
+import pytest
+
+from reachy_contracts import FaceDetection, NormalisedPoint
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    ControllerConfig,
+    ControllerFault,
+    GazeObservation,
+    HeadMeasurement,
+    initial_controller_state,
+    step_controller,
+    validate_gaze_sample,
+)
+from reachy_mini_ha_satellite.ports import GazeSample
+
+
+def _observation(sequence: int, at: float, *, yaw: float = 0.3) -> GazeObservation:
+    """Build one source-qualified calibrated observation."""
+    return GazeObservation(
+        source="remote",
+        generation=0,
+        sequence=sequence,
+        captured_at=at - 0.05,
+        received_at=at,
+        target_key=0,
+        face=FaceDetection(
+            centre=NormalisedPoint(x=0.4, y=0.0),
+            confidence=0.9,
+        ),
+        world_yaw=yaw,
+        world_elevation=0.0,
+    )
+
+
+def test_fault_is_separate_from_mode_and_safe_hold_is_derived() -> None:
+    """Workspace rejection keeps active lifecycle while exposing one safety fault."""
+    config = ControllerConfig()
+    result = step_controller(
+        initial_controller_state(config),
+        _observation(0, 0.1),
+        now=0.1,
+        dt=0.05,
+        config=config,
+        workspace_accepts=lambda _sample: False,
+    )
+
+    assert result.mode.value == "active"
+    assert result.state.fault is ControllerFault.WORKSPACE
+    assert result.safe_hold
+    assert result.sample == initial_controller_state(config).last_safe_sample
+
+
+def test_timing_fault_brakes_and_requires_distinct_valid_ticks() -> None:
+    """Regressed or incoherent time cannot advance a candidate or duplicate recovery."""
+    config = ControllerConfig(workspace_recovery_samples=2)
+    active = step_controller(
+        initial_controller_state(config),
+        _observation(0, 0.1),
+        now=0.1,
+        dt=0.05,
+        config=config,
+    )
+    invalid = step_controller(active.state, None, now=0.1, dt=0.05, config=config)
+    first = step_controller(invalid.state, None, now=0.15, dt=0.05, config=config)
+    duplicate = step_controller(first.state, None, now=0.15, dt=0.0, config=config)
+    recovered = step_controller(
+        duplicate.state,
+        None,
+        now=0.2,
+        dt=0.05,
+        config=config,
+    )
+
+    assert invalid.state.fault is ControllerFault.TIMING
+    assert invalid.sample == active.sample
+    assert first.state.recovery_valid_streak == 1
+    assert duplicate.state.recovery_valid_streak == 1
+    assert recovered.state.fault is ControllerFault.NONE
+
+
+def test_pose_recovery_counts_new_measurement_timestamps_only() -> None:
+    """A cached valid pose cannot satisfy a consecutive independent evidence gate."""
+    config = ControllerConfig(
+        require_motion_measurements=True,
+        workspace_recovery_samples=2,
+    )
+    initial_measurement = HeadMeasurement(0.0, 0.0, 0.1)
+    active = step_controller(
+        initial_controller_state(config),
+        _observation(0, 0.1),
+        now=0.1,
+        dt=0.05,
+        config=config,
+        head_measurement=initial_measurement,
+    )
+    failed = step_controller(
+        active.state,
+        _observation(1, 0.15),
+        now=0.15,
+        dt=0.05,
+        config=config,
+        input_fault=ControllerFault.POSE,
+    )
+    first = step_controller(
+        failed.state,
+        _observation(2, 0.2),
+        now=0.2,
+        dt=0.05,
+        config=config,
+        head_measurement=HeadMeasurement(0.0, 0.0, 0.2),
+    )
+    duplicate = step_controller(
+        first.state,
+        _observation(2, 0.25),
+        now=0.25,
+        dt=0.05,
+        config=config,
+        head_measurement=HeadMeasurement(0.0, 0.0, 0.2),
+    )
+    recovered = step_controller(
+        duplicate.state,
+        _observation(3, 0.3),
+        now=0.3,
+        dt=0.05,
+        config=config,
+        head_measurement=HeadMeasurement(0.0, 0.0, 0.3),
+    )
+
+    assert failed.state.fault is ControllerFault.POSE
+    assert first.state.recovery_valid_streak == 1
+    assert duplicate.state.recovery_valid_streak == 1
+    assert recovered.state.fault is ControllerFault.NONE
+
+
+def test_calibration_recovery_counts_new_observation_identities_only() -> None:
+    """Failed calibration retains last safe and cannot recover by replaying one result."""
+    config = ControllerConfig(workspace_recovery_samples=2)
+    active = step_controller(
+        initial_controller_state(config),
+        _observation(0, 0.1),
+        now=0.1,
+        dt=0.05,
+        config=config,
+    )
+    failed = step_controller(
+        active.state,
+        _observation(1, 0.15),
+        now=0.15,
+        dt=0.05,
+        config=config,
+        input_fault=ControllerFault.CALIBRATION,
+        input_evidence=("calibration", ("remote", 0, 1)),
+    )
+    first = step_controller(
+        failed.state,
+        _observation(2, 0.2),
+        now=0.2,
+        dt=0.05,
+        config=config,
+    )
+    duplicate = step_controller(
+        first.state,
+        _observation(2, 0.2),
+        now=0.25,
+        dt=0.05,
+        config=config,
+    )
+    recovered = step_controller(
+        duplicate.state,
+        _observation(3, 0.3),
+        now=0.3,
+        dt=0.05,
+        config=config,
+    )
+
+    assert failed.sample == active.sample
+    assert failed.state.fault is ControllerFault.CALIBRATION
+    assert first.state.recovery_valid_streak == 1
+    assert duplicate.state.recovery_valid_streak == 1
+    assert recovered.state.fault is ControllerFault.NONE
+
+
+def test_shared_sample_validator_covers_derivatives_workspace_and_body_coherence() -> (
+    None
+):
+    """The pure validator used by controller and adapter checks the whole atomic sample."""
+    config = ControllerConfig()
+    derivative = replace(
+        initial_controller_state(config).last_safe_sample,
+        world_yaw_velocity=config.yaw_limits.max_velocity * 2.0,
+    )
+    workspace = GazeSample(
+        world_yaw=config.yaw_limits.maximum + 0.1,
+        elevation=0.0,
+        body_yaw=0.0,
+        head_yaw=config.yaw_limits.maximum + 0.1,
+        body_enabled=False,
+    )
+
+    assert validate_gaze_sample(derivative, config) is ControllerFault.DERIVATIVE
+    assert validate_gaze_sample(workspace, config) is ControllerFault.WORKSPACE
+    with pytest.raises(ValueError, match="body-disabled"):
+        GazeSample(0.1, 0.0, 0.1, 0.0, False)
+    with pytest.raises(ValueError, match="finite"):
+        GazeSample(math.nan, 0.0, 0.0, math.nan, False)

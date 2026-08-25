@@ -8,7 +8,6 @@ returns an absolute world-gaze anchor to the pure behavior layer.
 
 from __future__ import annotations
 
-import contextlib
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -17,6 +16,11 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    ControllerConfig,
+    ControllerFault,
+    validate_gaze_sample,
+)
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -26,6 +30,9 @@ from reachy_mini_ha_satellite.ports import (
     GazeDirective,
     GazeSample,
     HeadPose,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
     MotionMeasurement,
 )
 from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
@@ -334,14 +341,20 @@ class ReachyMotion:
         self,
         handle: RobotHandle,
         *,
+        controller_config: ControllerConfig | None = None,
         body_enabled: bool = False,
         staleness_seconds: float = _DEFAULT_STALENESS_SECONDS,
         tick_seconds: float = _DEFAULT_TICK_SECONDS,
     ) -> None:
-        """Take the daemon handle and derive bounded history from runtime timing."""
-        if not math.isfinite(staleness_seconds) or staleness_seconds <= 0.0:
-            message = "motion staleness seconds must be finite and positive"
-            raise ValueError(message)
+        """Take the daemon handle and one shared validated controller envelope."""
+        if controller_config is None:
+            controller_config = ControllerConfig(
+                body_enabled=body_enabled,
+                staleness_seconds=staleness_seconds,
+            )
+        else:
+            body_enabled = controller_config.body_enabled
+            staleness_seconds = controller_config.staleness_seconds
         if not math.isfinite(tick_seconds) or tick_seconds < MIN_BEHAVIOUR_TICK_SECONDS:
             message = (
                 "motion tick seconds must be finite and at least "
@@ -353,6 +366,7 @@ class ReachyMotion:
             + _HISTORY_ENDPOINT_SAMPLES
         )
         self._handle = handle
+        self._config = controller_config
         self._body_enabled = body_enabled
         self._history = TimedPoseHistory(
             maximum_age=staleness_seconds,
@@ -364,6 +378,9 @@ class ReachyMotion:
         self._released = False
         self._last_head_measurement: tuple[float, float, float] | None = None
         self._last_body_measurement: tuple[float, float] | None = None
+        self._head_fault = MotionFault.NONE
+        self._body_fault = MotionFault.NONE
+        self._command_calls = 0
 
     @property
     def released(self) -> bool:
@@ -383,66 +400,97 @@ class ReachyMotion:
         return self.observe(now) if not self._terminal() else self._measurement()
 
     def _measurement(self) -> MotionMeasurement:
-        """Return cached independent measurements without changing timestamps."""
-        head = self._last_head_measurement
-        body = self._last_body_measurement
+        """Return only currently valid typed measurements, retaining cache privately."""
+        head = (
+            self._last_head_measurement
+            if self._head_fault is MotionFault.NONE
+            else None
+        )
+        body = (
+            self._last_body_measurement
+            if self._body_fault is MotionFault.NONE
+            else None
+        )
         return MotionMeasurement(
             world_yaw=None if head is None else head[0],
             world_elevation=None if head is None else head[1],
             head_measured_at=None if head is None else head[2],
             body_yaw=None if body is None else body[0],
             body_measured_at=None if body is None else body[1],
+            head_fault=self._head_fault,
+            body_fault=self._body_fault,
         )
 
     def observe(self, now: float) -> MotionMeasurement:
         """Sample independent measured head direction and optional body yaw."""
         if self._released:
+            self._head_fault = MotionFault.RELEASED
+            self._body_fault = (
+                MotionFault.RELEASED if self._body_enabled else MotionFault.NONE
+            )
             return self._measurement()
-        with contextlib.suppress(
-            RuntimeError,
-            TypeError,
-            ValueError,
-            np.linalg.LinAlgError,
-        ):
+        try:
             pose = self._handle.get_current_head_pose()
             rotation = _pose_rotation(pose, measured=True)
             self._history.append(now, pose)
             world_yaw, world_elevation = _direction_angles(rotation)
             self._last_head_measurement = (world_yaw, world_elevation, now)
+            self._head_fault = MotionFault.NONE
+        except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
+            self._head_fault = MotionFault.POSE
         if self._body_enabled:
-            with contextlib.suppress(IndexError, RuntimeError, TypeError, ValueError):
+            try:
                 head_joints, _antennas = self._handle.get_current_joint_positions()
                 measured = float(head_joints[0]) if len(head_joints) == 7 else math.nan
-                if math.isfinite(measured):
-                    self._last_body_measurement = (measured, now)
+                if not math.isfinite(measured):
+                    raise ValueError("body measurement must be finite")
+                self._last_body_measurement = (measured, now)
+                self._body_fault = MotionFault.NONE
+            except (IndexError, RuntimeError, TypeError, ValueError):
+                self._body_fault = MotionFault.POSE
         return self._measurement()
 
     def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
         """Calibrate one new actionable face identity, with bounded retry/reject."""
         if self._released or not directive.actionable or directive.face is None:
-            return GazeCalibration(CalibrationStatus.REJECTED)
+            return GazeCalibration(
+                CalibrationStatus.REJECTED,
+                fault=MotionFault.CALIBRATION,
+            )
         identity = directive.identity
         if (
             identity is None
             or directive.captured_at is None
             or directive.received_at is None
         ):
-            return GazeCalibration(CalibrationStatus.REJECTED)
+            return GazeCalibration(
+                CalibrationStatus.REJECTED,
+                fault=MotionFault.CALIBRATION,
+            )
         source, generation, sequence = identity
         candidate = generation, sequence
         deferred = self._deferred.get(source)
         if deferred is not None and candidate < deferred:
-            return GazeCalibration(CalibrationStatus.REJECTED)
+            return GazeCalibration(
+                CalibrationStatus.REJECTED,
+                fault=MotionFault.CALIBRATION,
+            )
         cached = self._cache.get(source)
         if cached is not None:
             if cached[0] == candidate:
                 return cached[1]
             if candidate < cached[0]:
-                return GazeCalibration(CalibrationStatus.REJECTED)
+                return GazeCalibration(
+                    CalibrationStatus.REJECTED,
+                    fault=MotionFault.CALIBRATION,
+                )
         if not self._acquired:
             self.acquire(now)
         if self.released:
-            return GazeCalibration(CalibrationStatus.REJECTED)
+            return GazeCalibration(
+                CalibrationStatus.REJECTED,
+                fault=MotionFault.CALIBRATION,
+            )
 
         bounds = self._history.bounds
         if bounds is None:
@@ -467,11 +515,17 @@ class ReachyMotion:
             target_rotation: np.ndarray | None = None
             for _attempt in range(2):
                 if self._terminal():
-                    return GazeCalibration(CalibrationStatus.REJECTED)
+                    return GazeCalibration(
+                        CalibrationStatus.REJECTED,
+                        fault=MotionFault.CALIBRATION,
+                    )
                 pre_pose = self._handle.get_current_head_pose()
                 pre = _pose_rotation(pre_pose, measured=True)
                 if self._terminal():
-                    return GazeCalibration(CalibrationStatus.REJECTED)
+                    return GazeCalibration(
+                        CalibrationStatus.REJECTED,
+                        fault=MotionFault.CALIBRATION,
+                    )
                 target_pose = self._handle.look_at_image(
                     u,
                     v,
@@ -479,10 +533,16 @@ class ReachyMotion:
                     perform_movement=False,
                 )
                 if self._terminal():
-                    return GazeCalibration(CalibrationStatus.REJECTED)
+                    return GazeCalibration(
+                        CalibrationStatus.REJECTED,
+                        fault=MotionFault.CALIBRATION,
+                    )
                 post_pose = self._handle.get_current_head_pose()
                 if self._terminal():
-                    return GazeCalibration(CalibrationStatus.REJECTED)
+                    return GazeCalibration(
+                        CalibrationStatus.REJECTED,
+                        fault=MotionFault.CALIBRATION,
+                    )
                 post = _pose_rotation(post_pose, measured=True)
                 if _rotation_distance(pre, post) <= _BRACKET_LIMIT:
                     bracket = pre, post
@@ -514,22 +574,55 @@ class ReachyMotion:
         self._deferred.pop(source, None)
         return result
 
-    def command_gaze(self, sample: GazeSample) -> None:
-        """Send an absolute canonical world head pose and optional grouped body yaw."""
+    def command_gaze(self, sample: GazeSample) -> MotionCommandResult:
+        """Defend and transactionally send one canonical grouped daemon command."""
+        self._command_calls += 1
+        call = self._command_calls
         if self._released:
-            return
+            return MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.RELEASED,
+                call,
+            )
         if not self._acquired:
-            message = "gaze motion must be acquired before its first command"
-            raise RuntimeError(message)
-        if sample.body_enabled is not self._body_enabled:
-            return
+            return MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.COMMAND,
+                call,
+            )
+        if validate_gaze_sample(sample, self._config) is not ControllerFault.NONE:
+            return MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.COMMAND,
+                call,
+            )
         pose = head_pose_matrix(
             HeadPose(yaw=sample.world_yaw, pitch=sample.elevation, roll=0.0)
         )
-        if self._body_enabled:
-            self._handle.set_target(head=pose, body_yaw=sample.body_yaw)
-        else:
-            self._handle.set_target(head=pose)
+        try:
+            _pose_rotation(pose, measured=False)
+            if not np.allclose(pose[:3, 3], np.zeros(3), atol=1e-12):
+                raise ValueError("tracking pose translation must be canonical")
+            world_yaw, elevation = _direction_angles(pose[:3, :3])
+            if not math.isclose(
+                world_yaw, sample.world_yaw, abs_tol=1e-9
+            ) or not math.isclose(
+                elevation,
+                sample.elevation,
+                abs_tol=1e-9,
+            ):
+                raise ValueError("tracking pose direction must match the sample")
+            if self._body_enabled:
+                self._handle.set_target(head=pose, body_yaw=sample.body_yaw)
+            else:
+                self._handle.set_target(head=pose)
+        except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
+            return MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.COMMAND,
+                call,
+            )
+        return MotionCommandResult(MotionCommandStatus.ACCEPTED, call=call)
 
     def move_head(self, pose: HeadPose) -> None:
         """Command a pipeline head pose while the adapter remains live."""
@@ -558,7 +651,14 @@ class ReachyMotion:
     ) -> GazeCalibration:
         """Cache one terminal calibration decision per detection source."""
         source, generation, sequence = identity
-        result = GazeCalibration(state)
+        result = GazeCalibration(
+            state,
+            fault=(
+                MotionFault.CALIBRATION
+                if state is CalibrationStatus.REJECTED
+                else MotionFault.NONE
+            ),
+        )
         self._cache[source] = ((generation, sequence), result)
         self._deferred.pop(source, None)
         return result

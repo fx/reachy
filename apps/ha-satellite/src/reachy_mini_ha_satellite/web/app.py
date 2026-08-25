@@ -124,6 +124,14 @@ class SettingsHost(Protocol):
         """Ask the application to shut down. It is not started again from here."""
         ...
 
+    def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
+        """Return bounded identifier-free controller events."""
+        ...
+
+    def reset_controller_diagnostics(self) -> None:
+        """Clear controller events without changing robot state."""
+        ...
+
 
 def _default_string(name: str) -> str:
     """Render a setting's own default the way a form field would carry it.
@@ -448,6 +456,24 @@ def create_app(
             return JSONResponse({"running": False})
         return JSONResponse({"running": True, **application.status()})
 
+    async def controller_diagnostics(request: Request) -> Response:
+        """Return bounded scalar controller evidence and no installation identity."""
+        del request
+        if application is None:
+            return JSONResponse({"running": False, "events": []})
+        return JSONResponse(
+            {"running": True, "events": application.controller_diagnostics()}
+        )
+
+    async def reset_controller_diagnostics(request: Request) -> Response:
+        """Clear only controller diagnostics after same-origin validation."""
+        if not _from_this_page(request):
+            return _refuse_cross_site()
+        if application is None:
+            return JSONResponse({"reset": False}, status_code=503)
+        application.reset_controller_diagnostics()
+        return JSONResponse({"reset": True})
+
     async def livez(request: Request) -> Response:
         """Answer that the interface is up.
 
@@ -469,6 +495,12 @@ def create_app(
             Route("/stop", stop, methods=["POST"]),
             Route("/config", configuration),
             Route("/status", status),
+            Route("/diagnostics/controller", controller_diagnostics),
+            Route(
+                "/diagnostics/controller/reset",
+                reset_controller_diagnostics,
+                methods=["POST"],
+            ),
             Route("/livez", livez),
         ],
     )

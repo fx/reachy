@@ -83,6 +83,7 @@ from reachy_mini_ha_satellite.behaviour import (
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyMeasurement,
     ControllerConfig,
+    ControllerFault,
     HeadMeasurement,
 )
 from reachy_mini_ha_satellite.config import (
@@ -116,6 +117,8 @@ from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
 from reachy_mini_ha_satellite.ports import (
     CalibrationStatus,
     Detections,
+    MotionCommandResult,
+    MotionFault,
     SourceSelection,
 )
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
@@ -212,8 +215,11 @@ class Service(Protocol):
         ...
 
 
-def apply_intents(motion: MotionPort, intents: Sequence[MotionIntent]) -> None:
-    """Carry out what the behaviour layer decided.
+def apply_intents(
+    motion: MotionPort,
+    intents: Sequence[MotionIntent],
+) -> tuple[MotionCommandResult, ...]:
+    """Carry out decisions and return typed results for coordinated commands.
 
     The whole command half of the behavior boundary: each intent corresponds to
     exactly one port method, so there is no second gaze calculation here.
@@ -221,14 +227,19 @@ def apply_intents(motion: MotionPort, intents: Sequence[MotionIntent]) -> None:
     Args:
         motion: What to command.
         intents: What the behaviour layer asked for, in order.
+
+    Returns:
+        Transactional results in the same order as gaze-command intents.
     """
+    results: list[MotionCommandResult] = []
     for intent in intents:
         if isinstance(intent, CommandGaze):
-            motion.command_gaze(intent.sample)
+            results.append(motion.command_gaze(intent.sample))
         elif isinstance(intent, MoveHead):
             motion.move_head(intent.pose)
         else:
             motion.move_antennas(intent.pose)
+    return tuple(results)
 
 
 def _guard(what: str, release: Callable[[], None]) -> None:
@@ -704,12 +715,26 @@ class SatelliteApplication:
             robot has settled into idling.
         """
         report = self._behaviour.status(self._clock())
+        controller = self._behaviour.controller_state
         return {
             "pipeline": report.state.value,
             "gaze": report.outcome.value,
             "tracking": report.tracking,
             "idle": report.idle,
+            "controller": {
+                "mode": controller.mode.value,
+                "fault": controller.fault.value,
+                "safe_hold": controller.safe_hold,
+            },
         }
+
+    def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
+        """Return the behavior layer's bounded private controller evidence."""
+        return tuple(dict(event) for event in self._behaviour.controller_diagnostics())
+
+    def reset_controller_diagnostics(self) -> None:
+        """Clear controller diagnostics and no application or motion state."""
+        self._behaviour.reset_controller_diagnostics()
 
     def deliver(self, event: PipelineEvent) -> None:
         """Apply one voice-pipeline event.
@@ -764,14 +789,28 @@ class SatelliteApplication:
             and measurement.body_measured_at is not None
             else None
         )
+        input_fault = ControllerFault.NONE
+        input_evidence: tuple[object, ...] | None = None
+        if measurement is not None and measurement.head_fault is MotionFault.POSE:
+            input_fault = ControllerFault.POSE
+        elif (
+            prepared.directive.face is not None
+            and calibration is not None
+            and calibration.state is CalibrationStatus.REJECTED
+        ):
+            input_fault = ControllerFault.CALIBRATION
+            input_evidence = ("calibration", prepared.directive.identity)
         intents = self._behaviour.finish(
             prepared,
             calibrated=calibrated,
             head_measurement=head_measurement,
             body_measurement=body_measurement,
             dt=dt,
+            input_fault=input_fault,
+            input_evidence=input_evidence,
         )
-        apply_intents(self._motion, intents)
+        for result in apply_intents(self._motion, intents):
+            self._behaviour.complete_command(result)
 
     def request_stop(self) -> None:
         """Ask the application to shut down, as a termination signal would.
@@ -2068,10 +2107,14 @@ def build_application(
         samples_per_chunk=settings.samples_per_chunk,
         boost_percent=settings.speaker_boost_percent,
     )
+    controller_config = ControllerConfig(
+        staleness_seconds=settings.staleness_seconds,
+        body_enabled=settings.body_motion_enabled,
+        require_motion_measurements=True,
+    )
     motion = ReachyMotion(
         handle,
-        body_enabled=settings.body_motion_enabled,
-        staleness_seconds=settings.staleness_seconds,
+        controller_config=controller_config,
         tick_seconds=settings.behaviour_tick_seconds,
     )
     perception: PerceptionPort = (
@@ -2080,10 +2123,7 @@ def build_application(
     behaviour = SatelliteBehaviour(
         idle_seconds=settings.idle_seconds,
         tracking_enabled=settings.face_tracking_enabled,
-        controller_config=ControllerConfig(
-            staleness_seconds=settings.staleness_seconds,
-            body_enabled=settings.body_motion_enabled,
-        ),
+        controller_config=controller_config,
         now=time.monotonic(),
     )
 

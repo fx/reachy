@@ -25,6 +25,7 @@ from gaze_simulation import (
 
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     ControllerConfig,
+    ControllerFault,
     ControllerMode,
 )
 
@@ -338,7 +339,7 @@ class TestDelayDropoutCadenceAndFaults:
 
         assert projected
         assert distorted
-        assert any(sample.mode is ControllerMode.WORKSPACE_HOLD for sample in ticks)
+        assert any(sample.state.fault is ControllerFault.WORKSPACE for sample in ticks)
         assert any(
             sample.mode is ControllerMode.ACTIVE
             for sample in ticks
