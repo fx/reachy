@@ -91,6 +91,14 @@ def _antennas_changed(pose: AntennaPose, previous: AntennaPose | None) -> bool:
     )
 
 
+def _observation_age(directive: GazeDirective, now: float) -> float | None:
+    """Report capture age, falling back to receipt for compatible old metadata."""
+    observed_at = directive.captured_at
+    if observed_at is None:
+        observed_at = directive.received_at
+    return None if observed_at is None else max(0.0, now - observed_at)
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedGazeTick:
     """One pure selection awaiting optional adapter calibration."""
@@ -243,10 +251,7 @@ class SatelliteBehaviour:
         command_ready = result.state.head_initialized and (
             not self._config.body_enabled or result.state.body_feedback.initialized
         )
-        received_at = prepared.directive.received_at
-        observation_age = (
-            None if received_at is None else max(0.0, prepared.now - received_at)
-        )
+        observation_age = _observation_age(prepared.directive, prepared.now)
         intents: list[MotionIntent] = []
         emitted = command_ready and (
             settled_handoff

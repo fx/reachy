@@ -196,6 +196,52 @@ class TestTwoPhasePredictiveGaze:
         assert _antennas(intents) is not None
         assert behaviour.status(0.1).tracking
 
+    def test_diagnostics_observation_age_uses_capture_clock(self) -> None:
+        """Diagnostic age matches controller prediction when receipt is delayed."""
+        behaviour = SatelliteBehaviour(now=0.0)
+        captured_at = 1.0
+        received_at = 1.4
+        now = 2.0
+
+        intents = _finish(
+            behaviour,
+            _seen(
+                face(0.5, 0.0),
+                captured_at=captured_at,
+                received_at=received_at,
+            ),
+            now=now,
+        )
+        behaviour.complete_command(
+            MotionCommandResult(MotionCommandStatus.ACCEPTED, call=1)
+        )
+
+        assert _gaze(intents) is not None
+        event = behaviour.controller_diagnostics()[-1]
+        assert event["observation_age"] == pytest.approx(max(0.0, now - captured_at))
+
+    def test_diagnostics_observation_age_falls_back_to_receipt_without_capture(
+        self,
+    ) -> None:
+        """A metadata-compatible stale result reports receipt age when capture is absent."""
+        behaviour = SatelliteBehaviour(now=0.0)
+        received_at = 1.4
+        now = 2.0
+        stale = Detections(
+            fresh=False,
+            source=DetectionSource.REMOTE,
+            age_seconds=now - received_at,
+            generation=0,
+            sequence=1,
+            captured_at=None,
+            received_at=received_at,
+        )
+
+        _finish(behaviour, stale, now=now)
+
+        event = behaviour.controller_diagnostics()[-1]
+        assert event["observation_age"] == pytest.approx(max(0.0, now - received_at))
+
     def test_cached_observation_advances_trajectory_without_new_identity(self) -> None:
         """Repeated reads retain estimator identity while jerk-limited q advances."""
         behaviour = SatelliteBehaviour(now=0.0)
