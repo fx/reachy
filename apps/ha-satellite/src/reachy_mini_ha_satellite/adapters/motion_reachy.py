@@ -28,6 +28,7 @@ from reachy_mini_ha_satellite.ports import (
     HeadPose,
     MotionMeasurement,
 )
+from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
 
 if TYPE_CHECKING:
     from reachy_contracts import NormalisedPoint
@@ -46,7 +47,7 @@ _DEFAULT_STALENESS_SECONDS: Final = 2.0
 _DEFAULT_TICK_SECONDS: Final = 0.05
 _HISTORY_ENDPOINT_SAMPLES: Final = 2
 _DEFAULT_HISTORY_SAMPLES: Final = (
-    math.ceil(_DEFAULT_STALENESS_SECONDS / _DEFAULT_TICK_SECONDS)
+    math.ceil(_DEFAULT_STALENESS_SECONDS / MIN_BEHAVIOUR_TICK_SECONDS)
     + _HISTORY_ENDPOINT_SAMPLES
 )
 _BRACKET_LIMIT: Final = math.radians(0.5)
@@ -341,11 +342,15 @@ class ReachyMotion:
         if not math.isfinite(staleness_seconds) or staleness_seconds <= 0.0:
             message = "motion staleness seconds must be finite and positive"
             raise ValueError(message)
-        if not math.isfinite(tick_seconds) or tick_seconds <= 0.0:
-            message = "motion tick seconds must be finite and positive"
+        if not math.isfinite(tick_seconds) or tick_seconds < MIN_BEHAVIOUR_TICK_SECONDS:
+            message = (
+                "motion tick seconds must be finite and at least "
+                f"{MIN_BEHAVIOUR_TICK_SECONDS}"
+            )
             raise ValueError(message)
         history_samples = (
-            math.ceil(staleness_seconds / tick_seconds) + _HISTORY_ENDPOINT_SAMPLES
+            math.ceil(staleness_seconds / MIN_BEHAVIOUR_TICK_SECONDS)
+            + _HISTORY_ENDPOINT_SAMPLES
         )
         self._handle = handle
         self._body_enabled = body_enabled

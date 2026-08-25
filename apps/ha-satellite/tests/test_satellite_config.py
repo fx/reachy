@@ -56,6 +56,7 @@ from reachy_mini_ha_satellite.config import (
     unrecognised_variables,
     variable_for,
 )
+from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -118,6 +119,21 @@ class TestRefusingAnUnusableEnvironment:
             load_settings({**MINIMAL, f"{ENV_PREFIX}WEB_PORT": "not a port"}, {})
 
         assert variable_for("web_port") in str(raised.value)
+
+    def test_behaviour_tick_has_one_supported_runtime_minimum(self) -> None:
+        """Live cadence and fixed history capacity depend on the same floor."""
+        tick = variable_for("behaviour_tick_seconds")
+        accepted = load_settings(
+            {**MINIMAL, tick: str(MIN_BEHAVIOUR_TICK_SECONDS)},
+            {},
+        )
+
+        assert accepted.settings.behaviour_tick_seconds == MIN_BEHAVIOUR_TICK_SECONDS
+        with pytest.raises(ConfigurationError):
+            load_settings(
+                {**MINIMAL, tick: str(MIN_BEHAVIOUR_TICK_SECONDS / 2.0)},
+                {},
+            )
 
 
 class TestTheSharedVocabularyIsNotATypo:

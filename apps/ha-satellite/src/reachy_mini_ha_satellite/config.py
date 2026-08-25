@@ -87,6 +87,7 @@ from reachy_mini_ha_satellite.adapters.output_gain import (
     MIN_BOOST_PERCENT,
 )
 from reachy_mini_ha_satellite.ports import SourceSelection
+from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
 from reachy_session_client import validate_session_url
 
 if TYPE_CHECKING:
@@ -395,7 +396,11 @@ class Settings(BaseSettings):
     camera_horizontal_fov_degrees: float = Field(default=87.0, gt=0.0, lt=180.0)
     camera_vertical_fov_degrees: float = Field(default=67.0, gt=0.0, lt=180.0)
 
-    behaviour_tick_seconds: float = Field(default=0.05, gt=0.0, le=5.0)
+    behaviour_tick_seconds: float = Field(
+        default=0.05,
+        ge=MIN_BEHAVIOUR_TICK_SECONDS,
+        le=5.0,
+    )
     gaze_deadzone: float = Field(default=0.02, ge=0.0, le=1.0)
     gaze_smoothing: float = Field(default=0.35, gt=0.0, le=1.0)
     idle_seconds: float = Field(default=6.0, gt=0.0, le=3600.0)

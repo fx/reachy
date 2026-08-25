@@ -33,6 +33,7 @@ from reachy_mini_ha_satellite.ports import (
     GazeSample,
     HeadPose,
 )
+from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
 
 
 class TestTheHeadPose:
@@ -301,6 +302,33 @@ class TestCaptureTimeCalibration:
 
         assert result.state is CalibrationStatus.ACCEPTED
         assert len(robot.image_gaze) == 1
+
+    def test_live_faster_cadence_keeps_a_fresh_capture_calibratable(self) -> None:
+        """History capacity survives a live tick change without runtime resizing."""
+        robot = FakeRobot()
+        motion = ReachyMotion(
+            robot,
+            staleness_seconds=2.0,
+            tick_seconds=5.0,
+        )
+        motion.acquire(0.0)
+        live_tick_seconds = 0.05
+        for index in range(1, 41):
+            motion.observe(index * live_tick_seconds)
+        directive = _directive(captured_at=0.5, received_at=2.0)
+
+        result = motion.calibrate(directive, 2.0)
+
+        assert result.state is CalibrationStatus.ACCEPTED
+        assert len(robot.image_gaze) == 1
+
+    def test_tick_below_supported_live_minimum_is_rejected(self) -> None:
+        """The adapter and settings model share one supported cadence floor."""
+        with pytest.raises(ValueError, match="at least"):
+            ReachyMotion(
+                FakeRobot(),
+                tick_seconds=MIN_BEHAVIOUR_TICK_SECONDS / 2.0,
+            )
 
     def test_capture_after_newest_history_defers_once_then_rejects(self) -> None:
         """Future capture is bounded defer, not pose extrapolation or hot retry."""
