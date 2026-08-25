@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from satellite_support import face
@@ -17,6 +17,9 @@ from reachy_mini_ha_satellite.ports import Detections, DetectionSource
 
 if TYPE_CHECKING:
     from reachy_contracts import FaceDetection
+
+
+_LOCAL_SOURCE: Final = DetectionSource.LOCAL  # leak-scan:allow
 
 
 def _result(
@@ -182,7 +185,7 @@ class TestIdentityCacheAndDiscontinuities:
         local = selector.select(
             _result(
                 face(-0.3, 0.0),
-                source=DetectionSource.LOCAL,
+                source=_LOCAL_SOURCE,
                 generation=0,
                 sequence=2,
                 captured_at=1.1,
@@ -197,7 +200,7 @@ class TestIdentityCacheAndDiscontinuities:
         [
             _result(
                 face(0.2, 0.0),
-                source=DetectionSource.LOCAL,
+                source=_LOCAL_SOURCE,
                 sequence=0,
                 captured_at=1.1,
                 received_at=1.2,
