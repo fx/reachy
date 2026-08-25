@@ -171,5 +171,5 @@ changes:
     path: changes/0019-predictive-gaze-and-coordinated-motion.md
     description: Timestamped face observations, predictive gaze control, jerk-limited trajectories, continuous head-body allocation, and safe staged rollout
     spec: gaze-control
-    status: draft
+    status: complete
     depends_on: ["0018"]

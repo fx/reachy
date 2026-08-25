@@ -36,4 +36,4 @@
 | 0016 | [audible-playback](changes/0016-audible-playback.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
 | 0017 | [speaker-controls-in-home-assistant](changes/0017-speaker-controls-in-home-assistant.md) | [ha-satellite](specs/ha-satellite/) | complete | 0016 |
 | 0018 | [satellite-runtime-stability](changes/0018-satellite-runtime-stability.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
-| 0019 | [predictive-gaze-and-coordinated-motion](changes/0019-predictive-gaze-and-coordinated-motion.md) | [gaze-control](specs/gaze-control/) | draft | 0018 |
+| 0019 | [predictive-gaze-and-coordinated-motion](changes/0019-predictive-gaze-and-coordinated-motion.md) | [gaze-control](specs/gaze-control/) | complete | 0018 |
