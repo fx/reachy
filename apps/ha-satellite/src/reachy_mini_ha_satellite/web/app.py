@@ -1,9 +1,11 @@
-"""The settings interface: read every setting, change every setting, no shell.
+"""Read every setting and change every current operator-facing one, no shell.
 
 ha-satellite REQ-049 asks for two things that pull in opposite directions. Every
-operator-facing setting has to be changeable here, and a setting marked secret
-has to be *reportable* without being *readable* — so the page is usable for
-rotating a credential and useless for learning one.
+current operator-facing setting has to be changeable here, and a setting marked
+secret has to be *reportable* without being *readable* — so the page is usable
+for rotating a credential and useless for learning one. Bootstrap values remain
+environment-only because the page depends on them; retired gaze values remain
+visible, read-only compatibility inputs and are explicitly ignored.
 
 The resolution is the same one `config.py` uses everywhere else: a secret is
 turned into `<set>` or `<unset>` by `resolved_configuration` before it reaches
@@ -26,15 +28,16 @@ directory, which is outside the wheel — so reinstalling the application keeps
 it, and re-imaging the robot does not. Overrides sit *above* the environment
 rather than below it, and that is what makes REQ-049 true rather than
 approximately true: a layer the environment overrode would silently ignore a
-change to any setting anybody had ever exported. The page shows which layer each
-value came from, and saving a value back to what the environment says removes the
-override rather than pinning a duplicate of it.
+change to any writable setting anybody had ever exported. The page shows which
+layer each value came from, and saving a value back to what the environment says
+removes the override rather than pinning a duplicate of it.
 
 **What a change does.** The settings in `config.LIVE_SETTINGS` are swapped into
-the running application; the rest are read while something is being built — a
-socket bound, a session opened, a detector loaded, an identity announced — so
-they take effect at the next start. The page says which is which per setting,
-and offers to stop the application rather than pretending.
+the running application; writable restart-bound values are read while something
+is being built — a socket bound, a session opened, a detector loaded, an identity
+announced — so they take effect at the next start. Compatibility inputs are not
+writable and affect neither path. The page labels all three cases and offers to
+stop the application rather than pretending.
 
 **Stopping is not restarting, and the page says so.** The daemon marks a
 cleanly-exited application `done` and leaves it stopped; nothing relaunches it.
@@ -57,6 +60,7 @@ from starlette.routing import Route
 
 from reachy_mini_ha_satellite.config import (
     BOOTSTRAP_SETTINGS,
+    COMPATIBILITY_SETTINGS,
     LIVE_SETTINGS,
     SECRET_SETTINGS,
     ConfigurationError,
@@ -424,6 +428,7 @@ def create_app(
                 "live": sorted(LIVE_SETTINGS),
                 "secret": sorted(SECRET_SETTINGS),
                 "read_only": sorted(BOOTSTRAP_SETTINGS),
+                "compatibility_ignored": sorted(COMPATIBILITY_SETTINGS),
                 "ignored_overrides": list(resolved.ignored_overrides),
                 "declared_but_unread": list(resolved.declared_but_unread),
             },
@@ -546,12 +551,11 @@ def _overrides_from(
     """
     wanted: dict[str, str] = {}
     for name in setting_names():
-        if name in BOOTSTRAP_SETTINGS:
-            # Never written from here, however the form was submitted: these
-            # decide where the file being written lives and whether this page is
-            # served at all. A browser submits every field it rendered, so
-            # refusing them at the point of writing is what makes the
-            # rendering's `disabled` a statement rather than a suggestion.
+        if name in BOOTSTRAP_SETTINGS | COMPATIBILITY_SETTINGS:
+            # Never written from here, however the form was submitted. Bootstrap
+            # values decide whether the page is reachable; compatibility values
+            # are retired inputs predictive gaze ignores. A crafted submission
+            # cannot turn either read-only rendering into a write path.
             continue
         if name in SECRET_SETTINGS:
             if fields.get(f"{CLEAR_PREFIX}{name}"):

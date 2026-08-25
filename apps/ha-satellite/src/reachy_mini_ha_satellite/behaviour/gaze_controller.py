@@ -15,10 +15,13 @@ from enum import StrEnum
 from typing import Final
 
 from reachy_contracts import FaceDetection
+from reachy_mini_ha_satellite.ports import GazeSample
 
 __all__ = [
     "AxisLimits",
     "AxisState",
+    "BodyFeedbackState",
+    "BodyMeasurement",
     "ControllerConfig",
     "ControllerMode",
     "ControllerState",
@@ -27,7 +30,7 @@ __all__ = [
     "EstimatorReset",
     "EstimatorState",
     "GazeObservation",
-    "GazeSample",
+    "HeadMeasurement",
     "ImagePoint",
     "allocate_body",
     "apply_deadband",
@@ -189,6 +192,45 @@ class AxisState:
 
 
 @dataclass(frozen=True, slots=True)
+class HeadMeasurement:
+    """One measured world head direction in controller monotonic time."""
+
+    world_yaw: float
+    world_elevation: float
+    measured_at: float
+
+    def __post_init__(self) -> None:
+        """Reject malformed measured direction before trajectory seeding."""
+        _finite("measured world yaw", self.world_yaw)
+        _finite("measured world elevation", self.world_elevation)
+        _finite("head measurement time", self.measured_at)
+
+
+@dataclass(frozen=True, slots=True)
+class BodyMeasurement:
+    """One measured body-yaw sample in controller monotonic time."""
+
+    yaw: float
+    measured_at: float
+
+    def __post_init__(self) -> None:
+        """Reject malformed feedback before it reaches safety arithmetic."""
+        _finite("measured body yaw", self.yaw)
+        _finite("body measurement time", self.measured_at)
+
+
+@dataclass(frozen=True, slots=True)
+class BodyFeedbackState:
+    """Independent feedback fault timing and bounded recovery evidence."""
+
+    initialized: bool = False
+    last_measurement: BodyMeasurement | None = None
+    fault_started_at: float | None = None
+    faulted: bool = False
+    valid_streak: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class DeadbandState:
     """Whether the smooth elliptical Schmitt region is active."""
 
@@ -231,37 +273,7 @@ class ControllerMode(StrEnum):
     RETURNING = "returning"
     IDLE = "idle"
     WORKSPACE_HOLD = "workspace_hold"
-
-
-@dataclass(frozen=True, slots=True)
-class GazeSample:
-    """One atomic world-yaw, elevation and optional body allocation sample."""
-
-    world_yaw: float
-    elevation: float
-    body_yaw: float
-    head_yaw: float
-    body_enabled: bool
-
-    def __post_init__(self) -> None:
-        """Keep every command scalar finite and coordinated."""
-        for name, value in (
-            ("world yaw", self.world_yaw),
-            ("elevation", self.elevation),
-            ("body yaw", self.body_yaw),
-            ("head yaw", self.head_yaw),
-        ):
-            _finite(name, value)
-        if not math.isclose(
-            self.world_yaw,
-            self.body_yaw + self.head_yaw,
-            abs_tol=1e-12,
-        ):
-            message = "world yaw must equal body yaw plus head yaw"
-            raise ValueError(message)
-        if not self.body_enabled and self.body_yaw != 0.0:
-            message = "a body-disabled sample cannot carry body motion"
-            raise ValueError(message)
+    BODY_FEEDBACK_HOLD = "body_feedback_hold"
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +321,11 @@ class ControllerConfig:
         max_jerk=500.0 * _DEGREES,
     )
     body_enabled: bool = False
+    head_measurement_max_age: float = 0.25
+    body_feedback_max_age: float = 0.25
+    body_feedback_divergence: float = 8.0 * _DEGREES
+    body_feedback_persistence: float = 0.50
+    body_feedback_recovery_samples: int = 3
     body_limits: AxisLimits = AxisLimits(
         minimum=-70.0 * _DEGREES,
         maximum=70.0 * _DEGREES,
@@ -347,6 +364,10 @@ class ControllerConfig:
             ("staleness seconds", self.staleness_seconds),
             ("maximum tick dt", self.maximum_tick_dt),
             ("stall integration dt", self.stall_integration_dt),
+            ("head measurement maximum age", self.head_measurement_max_age),
+            ("body feedback maximum age", self.body_feedback_max_age),
+            ("body feedback divergence", self.body_feedback_divergence),
+            ("body feedback persistence", self.body_feedback_persistence),
             ("body midpoint", self.body_midpoint),
             ("body large point", self.body_large_point),
             ("body head comfort", self.body_head_comfort),
@@ -391,6 +412,9 @@ class ControllerConfig:
         if self.workspace_recovery_samples < 1:
             message = "workspace recovery requires at least one sample"
             raise ValueError(message)
+        if self.body_feedback_recovery_samples < 1:
+            message = "body feedback recovery requires at least one sample"
+            raise ValueError(message)
 
 
 _DEFAULT_CONFIG: Final = ControllerConfig()
@@ -405,7 +429,9 @@ class ControllerState:
     deadband: DeadbandState
     world_yaw: AxisState
     elevation: AxisState
+    head_initialized: bool
     body_yaw: AxisState
+    body_feedback: BodyFeedbackState
     last_observation_identity: tuple[str, int, int] | None
     consumption_watermarks: tuple[tuple[str, int, int], ...]
     target_visible: bool | None
@@ -456,7 +482,9 @@ def initial_controller_state(
         deadband=DeadbandState(),
         world_yaw=AxisState(),
         elevation=AxisState(),
+        head_initialized=False,
         body_yaw=AxisState(),
+        body_feedback=BodyFeedbackState(),
         last_observation_identity=None,
         consumption_watermarks=(),
         target_visible=None,
@@ -867,6 +895,101 @@ def _advance_watermark(
     return (*watermarks, observation.identity), True
 
 
+def _observe_body_feedback(
+    state: ControllerState,
+    measurement: BodyMeasurement | None,
+    *,
+    now: float,
+    config: ControllerConfig,
+    monitor: bool,
+) -> tuple[BodyFeedbackState, AxisState | None, bool]:
+    """Update independent body feedback and decide whether commands stay held."""
+    if not config.body_enabled:
+        return BodyFeedbackState(), None, False
+
+    feedback = state.body_feedback
+    previous_measurement = feedback.last_measurement
+    newer_measurement = measurement is not None and (
+        previous_measurement is None
+        or measurement.measured_at > previous_measurement.measured_at
+    )
+    latest = measurement if newer_measurement else previous_measurement
+    age_valid = (
+        latest is not None
+        and 0.0 <= now - latest.measured_at <= config.body_feedback_max_age
+    )
+    seed = (
+        AxisState(position=latest.yaw)
+        if not feedback.initialized and age_valid and latest is not None
+        else None
+    )
+    if not monitor:
+        return (
+            BodyFeedbackState(
+                initialized=feedback.initialized or seed is not None,
+                last_measurement=latest,
+            ),
+            seed,
+            False,
+        )
+    commanded_position = seed.position if seed is not None else state.body_yaw.position
+    divergent = (
+        age_valid
+        and latest is not None
+        and abs(commanded_position - latest.yaw) > config.body_feedback_divergence
+    )
+    invalid = not age_valid or divergent
+
+    if feedback.faulted:
+        if invalid:
+            return (
+                BodyFeedbackState(
+                    initialized=feedback.initialized or seed is not None,
+                    last_measurement=latest,
+                    fault_started_at=feedback.fault_started_at,
+                    faulted=True,
+                ),
+                seed,
+                True,
+            )
+        if not newer_measurement:
+            return (
+                replace(feedback, last_measurement=latest),
+                seed,
+                True,
+            )
+        streak = feedback.valid_streak + 1
+        if streak < config.body_feedback_recovery_samples:
+            return (
+                BodyFeedbackState(
+                    initialized=True,
+                    last_measurement=latest,
+                    faulted=True,
+                    valid_streak=streak,
+                ),
+                seed,
+                True,
+            )
+        return BodyFeedbackState(initialized=True, last_measurement=latest), seed, False
+
+    if invalid:
+        started = feedback.fault_started_at
+        if started is None:
+            started = now
+        faulted = now - started + _EPSILON >= config.body_feedback_persistence
+        return (
+            BodyFeedbackState(
+                initialized=feedback.initialized or seed is not None,
+                last_measurement=latest,
+                fault_started_at=started,
+                faulted=faulted,
+            ),
+            seed,
+            faulted,
+        )
+    return BodyFeedbackState(initialized=True, last_measurement=latest), seed, False
+
+
 def step_controller(
     state: ControllerState,
     observation: GazeObservation | None,
@@ -875,10 +998,53 @@ def step_controller(
     dt: float,
     config: ControllerConfig = _DEFAULT_CONFIG,
     workspace_accepts: Callable[[GazeSample], bool] = _accept_workspace,
+    head_measurement: HeadMeasurement | None = None,
+    body_measurement: BodyMeasurement | None = None,
 ) -> ControllerStep:
     """Advance one pure controller tick with explicit time and timestep."""
     _finite("controller time", now)
     _non_negative("controller dt", dt)
+    if (
+        not state.head_initialized
+        and head_measurement is not None
+        and 0.0 <= now - head_measurement.measured_at <= config.head_measurement_max_age
+    ):
+        world_yaw = AxisState(position=head_measurement.world_yaw)
+        elevation = AxisState(position=head_measurement.world_elevation)
+        body_yaw = state.body_yaw.position if config.body_enabled else 0.0
+        state = replace(
+            state,
+            world_yaw=world_yaw,
+            elevation=elevation,
+            head_initialized=True,
+            last_safe_sample=GazeSample(
+                world_yaw=world_yaw.position,
+                elevation=elevation.position,
+                body_yaw=body_yaw,
+                head_yaw=world_yaw.position - body_yaw,
+                body_enabled=config.body_enabled,
+            ),
+        )
+    body_feedback, body_seed, body_feedback_hold = _observe_body_feedback(
+        state,
+        body_measurement,
+        now=now,
+        config=config,
+        monitor=state.mode not in {ControllerMode.UNKNOWN, ControllerMode.IDLE},
+    )
+    if body_seed is not None:
+        state = replace(
+            state,
+            body_yaw=body_seed,
+            body_feedback=body_feedback,
+            last_safe_sample=GazeSample(
+                world_yaw=state.world_yaw.position,
+                elevation=state.elevation.position,
+                body_yaw=body_seed.position,
+                head_yaw=state.world_yaw.position - body_seed.position,
+                body_enabled=True,
+            ),
+        )
     estimator = state.estimator
     last_identity = state.last_observation_identity
     watermarks = state.consumption_watermarks
@@ -965,13 +1131,17 @@ def step_controller(
             )
         loss_started = None
         mode = ControllerMode.ACTIVE
-    elif estimator is None and target_visible is not False:
+    elif estimator is None and (
+        target_visible is not False
+        or state.mode in {ControllerMode.UNKNOWN, ControllerMode.IDLE}
+    ):
         deadband = DeadbandState()
         mode = (
             ControllerMode.UNKNOWN
             if state.mode is ControllerMode.UNKNOWN
             else ControllerMode.IDLE
         )
+        loss_started = None
     else:
         deadband = DeadbandState()
         if loss_started is None:
@@ -987,6 +1157,42 @@ def step_controller(
             mode = ControllerMode.RETURNING
             yaw_goal = _return_velocity(state.world_yaw, config.yaw_limits)
             elevation_goal = _return_velocity(state.elevation, config.elevation_limits)
+
+    body_cold = (
+        config.body_enabled
+        and not body_feedback.initialized
+        and mode
+        in {
+            ControllerMode.ACTIVE,
+            ControllerMode.HOLD,
+            ControllerMode.RETURNING,
+            ControllerMode.WORKSPACE_HOLD,
+            ControllerMode.BODY_FEEDBACK_HOLD,
+        }
+    )
+    if body_feedback_hold or body_cold:
+        world, elevation, body = _brake_hidden(state, dt, config)
+        held_state = replace(
+            state,
+            mode=ControllerMode.BODY_FEEDBACK_HOLD,
+            estimator=estimator,
+            deadband=deadband,
+            world_yaw=world,
+            elevation=elevation,
+            body_yaw=body,
+            body_feedback=body_feedback,
+            last_observation_identity=last_identity,
+            consumption_watermarks=watermarks,
+            target_visible=target_visible,
+            loss_started_at=loss_started,
+        )
+        return ControllerStep(
+            state=held_state,
+            observation_consumed=consumed,
+            estimator_reset=reset,
+            prediction_horizon=horizon,
+            stale=stale,
+        )
 
     world = step_axis(
         state.world_yaw,
@@ -1044,6 +1250,7 @@ def step_controller(
             world_yaw=world,
             elevation=elevation,
             body_yaw=body,
+            body_feedback=body_feedback,
             last_observation_identity=last_identity,
             consumption_watermarks=watermarks,
             target_visible=target_visible,
@@ -1066,6 +1273,7 @@ def step_controller(
         world_yaw=world,
         elevation=elevation,
         body_yaw=body,
+        body_feedback=body_feedback,
         last_observation_identity=last_identity,
         consumption_watermarks=watermarks,
         target_visible=target_visible,

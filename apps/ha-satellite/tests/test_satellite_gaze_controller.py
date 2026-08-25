@@ -17,13 +17,14 @@ from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     AxisLimits,
     AxisState,
+    BodyFeedbackState,
+    BodyMeasurement,
     ControllerConfig,
     ControllerMode,
     DeadbandState,
     EstimatorReset,
     EstimatorState,
     GazeObservation,
-    GazeSample,
     ImagePoint,
     allocate_body,
     apply_deadband,
@@ -33,6 +34,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     step_controller,
     update_estimator,
 )
+from reachy_mini_ha_satellite.ports import GazeSample
 
 _DEGREES = math.pi / 180.0
 
@@ -724,6 +726,280 @@ class TestDeadbandAndServo:
         )
 
         assert abs(advanced.acceleration - state.acceleration) <= limits.max_jerk * dt
+
+
+class TestMeasuredBodyObserver:
+    """Body feedback guards commands without becoming commanded trajectory state."""
+
+    def test_body_command_is_initialized_from_first_valid_measurement_once(
+        self,
+    ) -> None:
+        """Seed measured index zero, then never teleport commanded q, v or a."""
+        config = replace(ControllerConfig(), body_enabled=True)
+        initial = step_controller(
+            initial_controller_state(config),
+            None,
+            now=0.0,
+            dt=0.0,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.2, measured_at=0.0),
+        )
+        seeded = initial.state.body_yaw
+
+        later = step_controller(
+            initial.state,
+            None,
+            now=0.05,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.4, measured_at=0.05),
+        )
+
+        assert seeded == AxisState(position=0.2)
+        assert later.state.body_yaw.position != pytest.approx(0.4)
+        assert abs(later.state.body_yaw.position - seeded.position) <= (
+            config.body_limits.max_velocity * 0.05
+        )
+
+    def test_body_disabled_ignores_measurement_entirely(self) -> None:
+        """Head-only tracking has no body feedback prerequisite or observer state."""
+        config = ControllerConfig(body_enabled=False)
+
+        result = step_controller(
+            initial_controller_state(config),
+            None,
+            now=2.0,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=1.0, measured_at=-100.0),
+        )
+
+        assert result.mode is ControllerMode.UNKNOWN
+        assert result.state.body_feedback == BodyFeedbackState()
+        assert result.state.body_yaw == AxisState()
+
+    def test_valid_active_feedback_remains_an_independent_observation(self) -> None:
+        """A current matching sample neither faults nor rewrites commanded state."""
+        config = replace(ControllerConfig(), body_enabled=True)
+        active = step_controller(
+            initial_controller_state(config),
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.2, measured_at=0.1),
+        )
+        commanded = active.state.body_yaw
+
+        valid = step_controller(
+            active.state,
+            None,
+            now=0.15,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(
+                yaw=commanded.position,
+                measured_at=0.15,
+            ),
+        )
+
+        assert valid.mode is ControllerMode.ACTIVE
+        assert not valid.state.body_feedback.faulted
+        assert valid.state.body_yaw.position != pytest.approx(0.0)
+
+    def test_missing_feedback_does_not_claim_an_idle_body(self) -> None:
+        """Feedback is a guard only while predictive gaze controls body output."""
+        config = replace(ControllerConfig(), body_enabled=True)
+        state = initial_controller_state(config)
+
+        for now in (0.0, 1.0, 2.0):
+            result = step_controller(
+                state,
+                None,
+                now=now,
+                dt=0.05,
+                config=config,
+            )
+            state = result.state
+
+        assert result.mode is ControllerMode.UNKNOWN
+        assert not result.state.body_feedback.faulted
+
+    def test_persistent_missing_feedback_holds_last_safe_sample(self) -> None:
+        """Only missing feedback older than the persistence window faults."""
+        config = replace(
+            ControllerConfig(),
+            body_enabled=True,
+            body_feedback_max_age=0.1,
+            body_feedback_persistence=0.5,
+        )
+        seeded = step_controller(
+            initial_controller_state(config),
+            None,
+            now=0.0,
+            dt=0.0,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.0),
+        )
+        active = step_controller(
+            seeded.state,
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.1),
+        )
+        transient = step_controller(
+            active.state,
+            None,
+            now=0.3,
+            dt=0.05,
+            config=config,
+        )
+        faulted = step_controller(
+            transient.state,
+            None,
+            now=0.8,
+            dt=0.05,
+            config=config,
+        )
+
+        assert transient.mode is not ControllerMode.BODY_FEEDBACK_HOLD
+        assert faulted.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        assert faulted.sample == transient.state.last_safe_sample
+
+    def test_recovery_requires_strictly_new_feedback_samples(self) -> None:
+        """Duplicate timestamps and missing reads cannot satisfy recovery cadence."""
+        config = replace(
+            ControllerConfig(),
+            body_enabled=True,
+            body_feedback_recovery_samples=3,
+        )
+        measurement = BodyMeasurement(yaw=0.1, measured_at=1.0)
+        body = AxisState(position=0.1)
+        state = replace(
+            initial_controller_state(config),
+            mode=ControllerMode.BODY_FEEDBACK_HOLD,
+            body_yaw=body,
+            body_feedback=BodyFeedbackState(
+                initialized=True,
+                last_measurement=measurement,
+                faulted=True,
+            ),
+            last_safe_sample=GazeSample(0.1, 0.0, 0.1, 0.0, True),
+        )
+
+        duplicate = step_controller(
+            state,
+            None,
+            now=1.1,
+            dt=0.05,
+            config=config,
+            body_measurement=measurement,
+        )
+        missing = step_controller(
+            duplicate.state,
+            None,
+            now=1.2,
+            dt=0.05,
+            config=config,
+        )
+        newer = step_controller(
+            missing.state,
+            None,
+            now=1.2,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.1, measured_at=1.2),
+        )
+
+        assert duplicate.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        assert duplicate.state.body_feedback.valid_streak == 0
+        assert missing.state.body_feedback.valid_streak == 0
+        assert newer.state.body_feedback.valid_streak == 1
+
+    def test_persistent_divergence_holds_and_three_valid_samples_recover(self) -> None:
+        """Ordinary lag passes; persistent error brakes until bounded valid evidence."""
+        config = replace(
+            ControllerConfig(),
+            body_enabled=True,
+            body_feedback_divergence=0.1,
+            body_feedback_persistence=0.5,
+            body_feedback_recovery_samples=3,
+        )
+        seeded = step_controller(
+            initial_controller_state(config),
+            None,
+            now=0.0,
+            dt=0.0,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.0),
+        )
+        active = step_controller(
+            seeded.state,
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.1),
+        )
+        command = AxisState(position=0.3, velocity=0.1, acceleration=0.1)
+        commanded = replace(
+            active.state,
+            body_yaw=command,
+            last_safe_sample=GazeSample(0.3, 0.0, 0.3, 0.0, True),
+        )
+        transient = step_controller(
+            commanded,
+            None,
+            now=0.15,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.15),
+        )
+        faulted = step_controller(
+            transient.state,
+            None,
+            now=0.65,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.65),
+        )
+
+        assert transient.mode is not ControllerMode.BODY_FEEDBACK_HOLD
+        assert faulted.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        assert faulted.state.body_yaw.position == pytest.approx(
+            transient.state.body_yaw.position
+        )
+        recovery = faulted
+        for index in range(2):
+            measured_at = 0.70 + index * 0.05
+            recovery = step_controller(
+                recovery.state,
+                None,
+                now=measured_at,
+                dt=0.05,
+                config=config,
+                body_measurement=BodyMeasurement(
+                    yaw=recovery.state.body_yaw.position,
+                    measured_at=measured_at,
+                ),
+            )
+            assert recovery.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        recovered = step_controller(
+            recovery.state,
+            None,
+            now=0.80,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(
+                yaw=recovery.state.body_yaw.position,
+                measured_at=0.80,
+            ),
+        )
+
+        assert recovered.mode is not ControllerMode.BODY_FEEDBACK_HOLD
+        assert recovered.state.body_feedback.valid_streak == 0
 
 
 class TestAllocationAndWorkspaceScaffolds:

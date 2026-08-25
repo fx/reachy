@@ -33,6 +33,7 @@ import pytest
 
 from reachy_mini_ha_satellite.config import (
     BOOTSTRAP_SETTINGS,
+    COMPATIBILITY_SETTINGS,
     ENV_PREFIX,
     IDENTITY_SETTING,
     LIVE_SETTINGS,
@@ -55,6 +56,7 @@ from reachy_mini_ha_satellite.config import (
     unrecognised_variables,
     variable_for,
 )
+from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -117,6 +119,21 @@ class TestRefusingAnUnusableEnvironment:
             load_settings({**MINIMAL, f"{ENV_PREFIX}WEB_PORT": "not a port"}, {})
 
         assert variable_for("web_port") in str(raised.value)
+
+    def test_behaviour_tick_has_one_supported_runtime_minimum(self) -> None:
+        """Live cadence and fixed history capacity depend on the same floor."""
+        tick = variable_for("behaviour_tick_seconds")
+        accepted = load_settings(
+            {**MINIMAL, tick: str(MIN_BEHAVIOUR_TICK_SECONDS)},
+            {},
+        )
+
+        assert accepted.settings.behaviour_tick_seconds == MIN_BEHAVIOUR_TICK_SECONDS
+        with pytest.raises(ConfigurationError):
+            load_settings(
+                {**MINIMAL, tick: str(MIN_BEHAVIOUR_TICK_SECONDS / 2.0)},
+                {},
+            )
 
 
 class TestTheSharedVocabularyIsNotATypo:
@@ -799,8 +816,10 @@ class TestTheBootstrapSetting:
 
         assert resolution.sources["state_dir"] is SettingSource.ENVIRONMENT
 
-    def test_the_report_marks_it_unwritable_and_everything_else_writable(self) -> None:
-        """Which is what the page renders from."""
+    def test_the_report_marks_bootstrap_unwritable_and_current_values_writable(
+        self,
+    ) -> None:
+        """Compatibility rows are covered separately as ignored and read-only."""
         report = {
             row.name: row for row in configuration_report(load_settings(MINIMAL, {}))
         }
@@ -826,6 +845,69 @@ class TestTheBootstrapSetting:
         assert state_directory(
             resolution.settings
         ) / OVERRIDES_FILENAME == overrides_path(environ)
+
+
+class TestPredictiveGazeMigration:
+    """Legacy gaze inputs remain valid but are explicitly ignored and unwritable."""
+
+    def test_the_compatibility_set_is_exact(self) -> None:
+        """Only released legacy gain and projection names receive migration handling."""
+        assert (
+            frozenset(
+                {
+                    "gaze_deadzone",
+                    "gaze_smoothing",
+                    "camera_horizontal_fov_degrees",
+                    "camera_vertical_fov_degrees",
+                }
+            )
+            == COMPATIBILITY_SETTINGS
+        )
+
+    @pytest.mark.parametrize("name", sorted(COMPATIBILITY_SETTINGS))
+    def test_legacy_environment_values_are_accepted_validated_and_reported(
+        self,
+        name: str,
+    ) -> None:
+        """An existing daemon environment keeps starting during migration."""
+        value = "0.2" if name.startswith("gaze_") else "90.0"
+
+        resolution = load_settings(
+            {**MINIMAL, variable_for(name): value},
+            {},
+        )
+        row = {item.name: item for item in configuration_report(resolution)}[name]
+
+        assert resolution.sources[name] is SettingSource.ENVIRONMENT
+        assert row.compatibility
+        assert not row.live
+        assert not row.writable
+
+    @pytest.mark.parametrize("name", sorted(COMPATIBILITY_SETTINGS))
+    def test_stale_legacy_overrides_are_ignored_and_reported(self, name: str) -> None:
+        """An old settings file cannot pin a value the new form no longer owns."""
+        value = "0.2" if name.startswith("gaze_") else "90.0"
+
+        resolution = load_settings(MINIMAL, {name: value})
+
+        assert resolution.ignored_overrides == (name,)
+        assert resolution.sources[name] is SettingSource.DEFAULT
+
+    def test_body_motion_is_restart_bound_and_disabled_by_default(self) -> None:
+        """Coordinated body output remains an explicit restart-only opt in."""
+        default = load_settings(MINIMAL, {})
+        enabled = load_settings(
+            {**MINIMAL, variable_for("body_motion_enabled"): "true"},
+            {},
+        )
+
+        assert not default.settings.body_motion_enabled
+        assert enabled.settings.body_motion_enabled
+        assert "body_motion_enabled" not in LIVE_SETTINGS
+
+    def test_legacy_gains_are_not_live_settings(self) -> None:
+        """Predictive control has no active smoothing or deadzone side loop."""
+        assert not (COMPATIBILITY_SETTINGS & LIVE_SETTINGS)
 
 
 class TestTheGroundstationAddressCarriesNoCredential:

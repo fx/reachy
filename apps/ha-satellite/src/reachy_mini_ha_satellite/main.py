@@ -41,7 +41,6 @@ import functools
 import inspect
 import json
 import logging
-import math
 import threading
 import time
 from contextvars import Context, ContextVar
@@ -77,10 +76,14 @@ from reachy_mini_ha_satellite.audio_entities import (
     SpeakerVolumeNumberEntity,
 )
 from reachy_mini_ha_satellite.behaviour import (
-    LookAhead,
-    LookAt,
+    CommandGaze,
     MoveHead,
     SatelliteBehaviour,
+)
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    BodyMeasurement,
+    ControllerConfig,
+    HeadMeasurement,
 )
 from reachy_mini_ha_satellite.config import (
     OVERRIDES_FILENAME,
@@ -110,7 +113,11 @@ from reachy_mini_ha_satellite.esphome.wake_word import (
 )
 from reachy_mini_ha_satellite.esphome.webrtc import WebRTCProcessor
 from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
-from reachy_mini_ha_satellite.ports import Detections, SourceSelection
+from reachy_mini_ha_satellite.ports import (
+    CalibrationStatus,
+    Detections,
+    SourceSelection,
+)
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 from reachy_mini_ha_satellite.web import create_app
 from reachy_session_client import DEFAULT_BACKOFF, Backoff, Credential, SessionClient
@@ -208,20 +215,16 @@ class Service(Protocol):
 def apply_intents(motion: MotionPort, intents: Sequence[MotionIntent]) -> None:
     """Carry out what the behaviour layer decided.
 
-    The whole of the impure half of the behaviour layer, and it is four lines
-    long by design: an intent corresponds to exactly one port method, so there
-    is no translation here to get wrong and nothing to test beyond that the
-    four cases reach the four methods.
+    The whole command half of the behavior boundary: each intent corresponds to
+    exactly one port method, so there is no second gaze calculation here.
 
     Args:
         motion: What to command.
         intents: What the behaviour layer asked for, in order.
     """
     for intent in intents:
-        if isinstance(intent, LookAt):
-            motion.look_at(intent.target)
-        elif isinstance(intent, LookAhead):
-            motion.look_ahead()
+        if isinstance(intent, CommandGaze):
+            motion.command_gaze(intent.sample)
         elif isinstance(intent, MoveHead):
             motion.move_head(intent.pose)
         else:
@@ -627,14 +630,13 @@ class SatelliteApplication:
         self._sleep = sleep
         self._tick_seconds = settings.behaviour_tick_seconds
         self._cleanup_timeout_seconds = cleanup_timeout_seconds
-        # What the perception source was built for. Held rather than re-read,
-        # because it is decided once at startup — see `apply_live`.
-        self._tracking_enabled = settings.face_tracking_enabled
+        self._gaze_enabled = settings.face_tracking_enabled
         # What tells Home Assistant about a setting this application adopted.
         # Nothing until `publish_live_changes` is called, which is what an
         # application built without the speaker-boost control stays at.
         self._publish: Callable[[], None] = _publish_nothing
         self._stop: asyncio.Event | None = None
+        self._last_tick_at: float | None = None
         self._closed = False
 
     def attach(self, services: Sequence[Service]) -> None:
@@ -720,9 +722,55 @@ class SatelliteApplication:
         apply_intents(self._motion, self._behaviour.handle(event, self._clock()))
 
     def tick(self) -> None:
-        """Ask the behaviour layer what to do now, and do it."""
+        """Sample, select, calibrate, finish and apply with one time reading."""
+        if self._motion.released:
+            return
         now = self._clock()
-        intents = self._behaviour.tick(self._perception.latest(), now)
+        previous = self._last_tick_at
+        dt = 0.0 if previous is None else now - previous
+        self._last_tick_at = now
+        measurement = self._motion.observe(now) if self._gaze_enabled else None
+        prepared = self._behaviour.prepare(self._perception.latest(), now)
+        calibration = (
+            self._motion.calibrate(prepared.directive, now)
+            if prepared.directive.face is not None
+            else None
+        )
+        calibrated = (
+            calibration.target
+            if calibration is not None
+            and calibration.state is CalibrationStatus.ACCEPTED
+            else None
+        )
+        head_measurement = (
+            HeadMeasurement(
+                world_yaw=measurement.world_yaw,
+                world_elevation=measurement.world_elevation,
+                measured_at=measurement.head_measured_at,
+            )
+            if measurement is not None
+            and measurement.world_yaw is not None
+            and measurement.world_elevation is not None
+            and measurement.head_measured_at is not None
+            else None
+        )
+        body_measurement = (
+            BodyMeasurement(
+                yaw=measurement.body_yaw,
+                measured_at=measurement.body_measured_at,
+            )
+            if measurement is not None
+            and measurement.body_yaw is not None
+            and measurement.body_measured_at is not None
+            else None
+        )
+        intents = self._behaviour.finish(
+            prepared,
+            calibrated=calibrated,
+            head_measurement=head_measurement,
+            body_measurement=body_measurement,
+            dt=dt,
+        )
         apply_intents(self._motion, intents)
 
     def request_stop(self) -> None:
@@ -741,13 +789,11 @@ class SatelliteApplication:
     def apply_live(self, settings: Settings) -> None:
         """Adopt the settings that can be changed without a restart.
 
-        Only the ones in `config.LIVE_SETTINGS` are read here, and
-        `face_tracking_enabled` is deliberately not among them even though the
-        behaviour layer could adopt it: switching it on means *building* a
-        detector, which happens once in `build_application`. Taking it from
-        `settings` here would switch the behaviour layer's tracking on against a
-        perception source that reports nothing, and the page would have said it
-        applied.
+        Only the names in `config.LIVE_SETTINGS` are read here.
+        `face_tracking_enabled` builds a detector and `body_motion_enabled`
+        changes controller and daemon ownership, so both remain restart-bound.
+        Legacy gaze gains and camera fields of view are compatibility inputs and
+        are intentionally read nowhere in predictive control.
 
         `speaker_boost_percent` *is* among them: both outputs read it per
         pushed chunk, so adopting it here is heard from the next chunk onwards
@@ -769,12 +815,7 @@ class SatelliteApplication:
         self._tick_seconds = settings.behaviour_tick_seconds
         configure_logging(settings)
         self._audio.set_boost(settings.speaker_boost_percent)
-        self._behaviour.retune(
-            deadzone=settings.gaze_deadzone,
-            smoothing=settings.gaze_smoothing,
-            idle_seconds=settings.idle_seconds,
-            tracking_enabled=self._tracking_enabled,
-        )
+        self._behaviour.retune(idle_seconds=settings.idle_seconds)
         # Last, so that what the publisher reads back is what was adopted rather
         # than what is halfway through being adopted.
         self._publish()
@@ -788,6 +829,10 @@ class SatelliteApplication:
         """
         self._stop = stop
         try:
+            if self._gaze_enabled:
+                acquired_at = self._clock()
+                self._motion.acquire(acquired_at)
+                self._last_tick_at = acquired_at
             self._audio.start()
             await self._perception.start()
             for service in self._services:
@@ -2025,17 +2070,20 @@ def build_application(
     )
     motion = ReachyMotion(
         handle,
-        horizontal_fov=math.radians(settings.camera_horizontal_fov_degrees),
-        vertical_fov=math.radians(settings.camera_vertical_fov_degrees),
+        body_enabled=settings.body_motion_enabled,
+        staleness_seconds=settings.staleness_seconds,
+        tick_seconds=settings.behaviour_tick_seconds,
     )
     perception: PerceptionPort = (
         build_perception_source(settings, handle.media) or _NoPerception()
     )
     behaviour = SatelliteBehaviour(
-        deadzone=settings.gaze_deadzone,
-        smoothing=settings.gaze_smoothing,
         idle_seconds=settings.idle_seconds,
         tracking_enabled=settings.face_tracking_enabled,
+        controller_config=ControllerConfig(
+            staleness_seconds=settings.staleness_seconds,
+            body_enabled=settings.body_motion_enabled,
+        ),
         now=time.monotonic(),
     )
 

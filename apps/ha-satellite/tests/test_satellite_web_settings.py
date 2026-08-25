@@ -1,4 +1,4 @@
-"""The settings interface: every setting changeable, and one of them unreadable.
+"""Every current operator setting changeable; compatibility values read-only.
 
 These drive the real application over `httpx.ASGITransport`, which speaks HTTP to
 the ASGI app in memory. The routes, the form handling and the responses are the
@@ -6,10 +6,12 @@ real ones; no socket is opened, so these stay unit tests. The overrides file is 
 real file in an in-memory filesystem, which is what lets the write-through be
 tested rather than described.
 
-ha-satellite REQ-049 is two claims and both are here: every operator-facing
-setting can be changed from this page, and the one marked secret is reported as
-set or unset and never by value — so the page is usable for rotating a credential
-and useless for learning one. The credential used throughout carries a tab, a
+ha-satellite REQ-049 is two claims and both are here: every current
+operator-facing setting can be changed from this page, and the one marked secret
+is reported as set or unset and never by value — so the page is usable for
+rotating a credential and useless for learning one. Bootstrap settings stay
+environment-only; retired gaze inputs stay visible but ignored and cannot be
+persisted even by a crafted form. The credential used throughout carries a tab, a
 newline and a backslash, because a value that reaches a renderer before a
 redactor leaks in a form no plain-string search would find.
 
@@ -29,6 +31,7 @@ import httpx
 import pytest
 
 from reachy_mini_ha_satellite.config import (
+    COMPATIBILITY_SETTINGS,
     ENV_PREFIX,
     SECRET_SETTINGS,
     OverrideStore,
@@ -230,6 +233,60 @@ class TestThePageReadsEverySetting:
 
         assert 'action="stop"' in page
         assert ">Restart<" not in page
+
+
+class TestLegacyGazeCompatibility:
+    """The form reports but cannot write migration-only gaze values."""
+
+    @pytest.mark.asyncio
+    async def test_page_labels_every_legacy_value_as_ignored(self) -> None:
+        """Operators see why familiar values no longer change movement."""
+        async with _client(_app()) as client:
+            response = await client.get("/")
+
+        for name in COMPATIBILITY_SETTINGS:
+            assert name in response.text
+        assert response.text.count("legacy compatibility; ignored") >= len(
+            COMPATIBILITY_SETTINGS
+        )
+
+    @pytest.mark.asyncio
+    async def test_crafted_submission_cannot_persist_compatibility_fields(self) -> None:
+        """Read-only rendering is backed by server-side refusal, not browser trust."""
+        settings = load_settings(ENVIRONMENT, {}).settings
+        fields = {
+            "gaze_deadzone": "0.9",
+            "gaze_smoothing": "0.9",
+            "camera_horizontal_fov_degrees": "100.0",
+            "camera_vertical_fov_degrees": "80.0",
+        }
+
+        async with _client(_app()) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, **fields),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 303
+        assert not (set(_store().load()) & COMPATIBILITY_SETTINGS)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", sorted(COMPATIBILITY_SETTINGS))
+    async def test_ordinary_save_drops_a_stale_legacy_override(self, name: str) -> None:
+        """A normal save migrates stale form-owned copies out of the store."""
+        _store().save({name: "0.2"})
+        settings = load_settings(ENVIRONMENT, _store().load()).settings
+
+        async with _client(_app()) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, api_port="9100"),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 303
+        assert _store().load() == {"api_port": "9100"}
 
 
 class TestTheSecretIsReportedAndNeverRevealed:
@@ -587,6 +644,16 @@ class TestTheMachineReadableSurfaces:
             configuration = (await client.get("/config")).json()
 
         assert set(configuration["settings"]) == set(setting_names())
+
+    @pytest.mark.asyncio
+    async def test_it_reports_legacy_compatibility_settings_as_ignored(self) -> None:
+        """Machine-readable consumers receive the same migration status as the page."""
+        async with _client(_app()) as client:
+            configuration = (await client.get("/config")).json()
+
+        assert set(configuration["compatibility_ignored"]) == set(
+            COMPATIBILITY_SETTINGS
+        )
 
     @pytest.mark.asyncio
     async def test_it_says_which_settings_are_secret(self) -> None:

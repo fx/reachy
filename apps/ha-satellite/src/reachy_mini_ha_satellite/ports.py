@@ -6,14 +6,11 @@ performs input or output. That division is the whole reason this file exists,
 because the robot is one device on a desk and anything only testable on it is
 effectively untested.
 
-**These are written in the behaviour layer's vocabulary, not the SDK's.** The
-question asked of every method below was "would the state machine phrase it this
-way?", and where the answer was "no, that is how the Reachy Mini SDK phrases it"
-the method was rewritten. The SDK wants a four-by-four pose matrix and a pixel
-pair; the behaviour layer wants "look at that face" and "tilt the head up". A
-port shaped like the SDK would carry every SDK change through to the state
-machine and would turn the fakes into SDK emulators, which is the opposite of
-what makes them useful.
+**These are written in application vocabulary, not the SDK's.** Behavior
+prepares a source-qualified directive and consumes an absolute calibrated world
+target; the motion adapter alone turns normalized geometry into the daemon's
+pixel query and canonical pose matrix. The port exposes that two-phase boundary
+without exposing SDK matrices to behavior.
 
 Two consequences are worth stating outright.
 
@@ -23,42 +20,45 @@ observation once, while session and fallback mechanics remain properties of the
 adapters. A branch on transport failure in the state machine would still be the
 state machine having opinions about sockets.
 
-**The gaze target is normalised, never pixels.** Robot-link REQ-021 fixes the
-coordinates a detection is reported in — origin at the image centre, both axes
-running to plus or minus one, vertical axis pointing up — and the port carries
-them through unchanged so that changing the capture resolution changes nothing
-the behaviour layer sees. Converting to something the robot's motion layer can
-be commanded with is the motion adapter's job, because that conversion needs the
-camera's geometry and the behaviour layer has no business knowing it.
+**Image observations remain normalized, never pixels.** Robot-link REQ-021 fixes
+the coordinates a detection reports. The calibration call receives the selected
+directive intact; only the adapter reads camera resolution, clamps an interior
+pixel, brackets the daemon query with measured poses and returns an absolute
+world target.
 
-`FaceDetection` and `NormalisedPoint` are imported from `reachy_contracts`
-rather than restated. They are the shared vocabulary for "a face's centre and
-how much the detector believes itself", which is exactly what the behaviour
-layer wants to hear; declaring a second pair of types here would put a copy of a
-shape that already exists one import away, free to drift from it — see the root
-`AGENTS.md` on wire types being declared once.
+`FaceDetection` is imported from `reachy_contracts` rather than restated. It is
+the shared vocabulary for a face's centre and confidence; declaring a copy here
+would leave a wire shape free to drift.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from reachy_contracts import FaceDetection
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-
-    from reachy_contracts import FaceDetection, NormalisedPoint
 
 __all__ = [
     "NEUTRAL_ANTENNAS",
     "NEUTRAL_HEAD",
     "AntennaPose",
     "AudioPort",
+    "CalibratedGaze",
+    "CalibrationStatus",
     "CapturePort",
     "DetectionSource",
     "Detections",
+    "GazeCalibration",
+    "GazeDirective",
+    "GazeOutcome",
+    "GazeSample",
     "HeadPose",
+    "MotionMeasurement",
     "MotionPort",
     "PerceptionPort",
     "PlaybackPort",
@@ -321,6 +321,141 @@ NEUTRAL_HEAD = HeadPose()
 NEUTRAL_ANTENNAS = AntennaPose()
 
 
+class GazeOutcome(StrEnum):
+    """What the latest perception result says about predictive gaze."""
+
+    TRACKING = "tracking"
+    NOBODY = "nobody"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class GazeDirective:
+    """One selected completed result, explicit loss, or unknown input."""
+
+    outcome: GazeOutcome
+    source: DetectionSource | None = None
+    generation: int | None = None
+    sequence: int | None = None
+    captured_at: float | None = None
+    received_at: float | None = None
+    face: FaceDetection | None = None
+    target_epoch: int = 0
+
+    @property
+    def identity(self) -> tuple[DetectionSource, int, int] | None:
+        """Return the source-qualified result identity when complete."""
+        if self.source is None or self.generation is None or self.sequence is None:
+            return None
+        return self.source, self.generation, self.sequence
+
+    @property
+    def actionable(self) -> bool:
+        """Whether this is a qualified result the controller may consume."""
+        return self.identity is not None and self.outcome in {
+            GazeOutcome.TRACKING,
+            GazeOutcome.NOBODY,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GazeSample:
+    """One atomic world-yaw, elevation and optional body allocation sample."""
+
+    world_yaw: float
+    elevation: float
+    body_yaw: float
+    head_yaw: float
+    body_enabled: bool
+
+    def __post_init__(self) -> None:
+        """Keep every command scalar finite and coordinated."""
+        values = (self.world_yaw, self.elevation, self.body_yaw, self.head_yaw)
+        if not all(math.isfinite(value) for value in values):
+            message = "gaze sample must contain only finite values"
+            raise ValueError(message)
+        if not math.isclose(
+            self.world_yaw,
+            self.body_yaw + self.head_yaw,
+            abs_tol=1e-12,
+        ):
+            message = "world yaw must equal body yaw plus head yaw"
+            raise ValueError(message)
+        if not self.body_enabled and self.body_yaw != 0.0:
+            message = "a body-disabled sample cannot carry body motion"
+            raise ValueError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class MotionMeasurement:
+    """Latest independent measured head direction and body yaw."""
+
+    world_yaw: float | None
+    world_elevation: float | None
+    head_measured_at: float | None
+    body_yaw: float | None
+    body_measured_at: float | None
+
+    def __post_init__(self) -> None:
+        """Keep optional measured values finite, timestamped and atomic."""
+        head_present = self.world_yaw is not None
+        if head_present != (self.world_elevation is not None) or head_present != (
+            self.head_measured_at is not None
+        ):
+            message = "measured head direction and timestamp must be supplied together"
+            raise ValueError(message)
+        if (self.body_yaw is None) != (self.body_measured_at is None):
+            message = "measured body yaw and timestamp must be supplied together"
+            raise ValueError(message)
+        for value in (
+            self.world_yaw,
+            self.world_elevation,
+            self.head_measured_at,
+            self.body_yaw,
+            self.body_measured_at,
+        ):
+            if value is not None and not math.isfinite(value):
+                message = "motion measurement values must be finite"
+                raise ValueError(message)
+
+
+class CalibrationStatus(StrEnum):
+    """Whether a qualified directive was calibrated, deferred or rejected."""
+
+    ACCEPTED = "accepted"
+    DEFERRED = "deferred"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class CalibratedGaze:
+    """One absolute world target produced at the motion boundary."""
+
+    source: DetectionSource
+    generation: int
+    sequence: int
+    captured_at: float
+    received_at: float
+    target_epoch: int
+    world_yaw: float
+    world_elevation: float
+
+
+@dataclass(frozen=True, slots=True)
+class GazeCalibration:
+    """Accepted target or a bounded non-acceptance result."""
+
+    state: CalibrationStatus
+    target: CalibratedGaze | None = None
+
+    def __post_init__(self) -> None:
+        """Keep the status and optional target shape coherent."""
+        if (self.state is CalibrationStatus.ACCEPTED) != (self.target is not None):
+            message = "only accepted gaze calibration may carry a target"
+            raise ValueError(message)
+
+
 @runtime_checkable
 class MotionPort(Protocol):
     """Everything the application can move.
@@ -332,34 +467,20 @@ class MotionPort(Protocol):
     event loop for half a second.
     """
 
-    #:= docs/specs/robot-link/index.md#req-021-detection-geometry-is-resolution-independent
-    #:% Positions in results MUST be expressed in normalised image coordinates rather
-    #:% than pixels.
-    def look_at(self, target: NormalisedPoint) -> None:
-        """Point the head at something seen in the frame.
-
-        The target is in normalised image coordinates, never pixels, so the
-        same face at the same place in the scene produces the same movement
-        whatever resolution it was captured at. The adapter owns the conversion
-        because it is the only thing that knows the camera's geometry.
-
-        Args:
-            target: Where the thing is, with the origin at the image centre and
-                the vertical axis pointing up.
-        """
+    def acquire(self, now: float) -> MotionMeasurement:
+        """Take gaze ownership and return initial measured state idempotently."""
         ...
 
-    #:= docs/specs/ha-satellite/index.md#req-048-the-head-returns-to-neutral-when-tracking-data-goes-stale
-    #:% When results stop arriving within the staleness window, the application MUST
-    #:% return the head to its neutral position rather than holding its last commanded
-    #:% pose.
-    def look_ahead(self) -> None:
-        """Return the head to neutral.
+    def observe(self, now: float) -> MotionMeasurement:
+        """Sample measured world head direction and optional body yaw."""
+        ...
 
-        This is what a caller does when the detections go stale. Holding the
-        last commanded pose looks like successfully tracking somebody who has
-        left the room, which is worse than visibly giving up.
-        """
+    def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
+        """Calibrate one qualified directive without commanding motion."""
+        ...
+
+    def command_gaze(self, sample: GazeSample) -> None:
+        """Command one canonical coordinated world-gaze sample."""
         ...
 
     def move_head(self, pose: HeadPose) -> None:

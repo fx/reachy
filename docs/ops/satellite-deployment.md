@@ -214,8 +214,10 @@ the environment. The page reports the layer for exactly this reason: a value
 showing `override` is one `reachyctl` can no longer change, until the page is
 used to save it back to what the environment says.
 
-**Four settings are readable on the page and not writable there**, because they
-decide whether the page can be reached at all. An override sits *above* the
+**Four bootstrap settings are readable on the page and not writable there**,
+because they decide whether the page can be reached at all. This is separate
+from the four retired gaze compatibility inputs, which are also read-only but
+because predictive gaze ignores them. An override sits *above* the
 environment, so an override can only be undone by writing another one — and a
 page that had written one of these wrongly would be the page you could no longer
 open to undo it. Set them in the environment:
@@ -268,7 +270,8 @@ never by value.
 | `REACHY_SATELLITE_STATE_DIR` | `~/.local/state/reachy-mini-ha-satellite` | Preferences, downloaded media, and the overrides the settings page writes. **Environment only** — see below. |
 | `REACHY_SATELLITE_ACTIVE_WAKE_WORD` | `okay_nabu` | Which shipped wake word listens. Home Assistant can add more at run time. |
 | `REACHY_SATELLITE_SAMPLES_PER_CHUNK` | `160` | Samples per channel in one capture chunk. |
-| `REACHY_SATELLITE_FACE_TRACKING_ENABLED` | `true` | Whether the head follows a face at all. |
+| `REACHY_SATELLITE_FACE_TRACKING_ENABLED` | `true` | Whether predictive gaze follows a face at all. **Needs a restart.** |
+| `REACHY_SATELLITE_BODY_MOTION_ENABLED` | `false` | Whether predictive gaze coordinates body yaw with its world head target. Provisional, explicit opt-in, and **needs a restart**. |
 | `REACHY_SATELLITE_DETECTION_SOURCE` | `remote` | `remote`, `local`, or `remote_with_local_fallback`. |
 | `REACHY_SATELLITE_GROUNDSTATION_URL` | none | Where the groundstation serves its session endpoint. `ws://` or `wss://`, with no user information, query or fragment. Required unless the source is `local`. |
 | `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL` | none | **Secret.** The shared secret presented to open a session. Required whenever a session is opened. |
@@ -278,17 +281,38 @@ never by value.
 | `REACHY_SATELLITE_LOCAL_SCORE_THRESHOLD` | `0.6` | Confidence a locally-detected face must reach. |
 | `REACHY_SATELLITE_LOCAL_NMS_THRESHOLD` | `0.3` | Overlap at which the lower-scoring local box is suppressed. |
 | `REACHY_SATELLITE_LOCAL_DETECTION_INTERVAL_SECONDS` | `0.2` | How often the local detector looks. |
-| `REACHY_SATELLITE_CAMERA_HORIZONTAL_FOV_DEGREES` | `87.0` | How much of the scene the camera sees across. |
-| `REACHY_SATELLITE_CAMERA_VERTICAL_FOV_DEGREES` | `67.0` | The same, vertically. |
-| `REACHY_SATELLITE_BEHAVIOUR_TICK_SECONDS` | `0.05` | How often the behaviour layer is asked what to do. |
-| `REACHY_SATELLITE_GAZE_DEADZONE` | `0.02` | How far a face must move before the head follows. |
-| `REACHY_SATELLITE_GAZE_SMOOTHING` | `0.35` | How much of the way to a new target one tick moves. |
+| `REACHY_SATELLITE_CAMERA_HORIZONTAL_FOV_DEGREES` | `87.0` | Legacy compatibility; accepted and validated but ignored by daemon-calibrated predictive gaze. |
+| `REACHY_SATELLITE_CAMERA_VERTICAL_FOV_DEGREES` | `67.0` | Legacy compatibility; accepted and validated but ignored. |
+| `REACHY_SATELLITE_BEHAVIOUR_TICK_SECONDS` | `0.05` | How often the predictive trajectory advances. |
+| `REACHY_SATELLITE_GAZE_DEADZONE` | `0.02` | Legacy compatibility; accepted and validated but ignored by predictive control. |
+| `REACHY_SATELLITE_GAZE_SMOOTHING` | `0.35` | Legacy compatibility; accepted and validated but ignored. |
 | `REACHY_SATELLITE_IDLE_SECONDS` | `6.0` | How long without a face before the idle behaviour starts. |
 | `REACHY_SATELLITE_LOG_LEVEL` | `info` | `debug`, `info`, `warning` or `error`. |
 
 **One setting is secret**: `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL`. It is
 reported as set or unset everywhere it is reported, and its value appears in no
 log line, no page and no error message.
+
+Predictive gaze consumes each source-qualified detection once, calibrates its
+image point against measured capture and query poses without moving, and then
+advances one jerk-limited world-yaw/elevation trajectory at the behavior cadence.
+Measured-pose history derives its retention age from the configured staleness
+window and sizes its capacity for that window at the minimum supported behavior
+tick, so any supported fresh capture can be rebased without extrapolation. The first hardware sample is seeded from measured world
+head pose; body-enabled motion additionally waits for valid measured body yaw.
+It owns the head through active tracking, loss hold and neutral return; antennas
+continue expressing pipeline state, and the current pipeline head pose receives
+one handoff only after the return settles. The daemon's automatic body yaw is
+disabled before either head-only or coordinated gaze takes ownership and restored
+once during terminal shutdown. With face tracking disabled at startup, none of
+those acquisition, feedback or automatic-yaw calls are made.
+
+The four legacy field-of-view, deadzone and smoothing variables remain valid only
+so existing environments keep starting. The startup report and settings page mark
+them `legacy compatibility; ignored`; the form renders them read-only, and an
+ordinary save removes stale copies from the overrides file. They do not enter the
+predictive controller. Body motion is separately restart-bound, disabled by
+default and provisional pending live calibration evidence.
 
 ### Detection source
 
@@ -344,7 +368,7 @@ credential and useless for learning one. A separate control unsets it.
 | Path | What it is |
 |---|---|
 | `/` | The settings form and the resolved configuration |
-| `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once and which are read-only |
+| `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once, which bootstrap values are read-only and which compatibility inputs are ignored |
 | `/status` | What the robot is doing: pipeline state, why the head is where it is |
 | `/stop` | `POST` — stops the application so a restart-required change can take effect |
 | `/livez` | Whether the interface is up |
@@ -455,6 +479,17 @@ face tracking is switched off. `stale` means results were arriving and stopped.
 *needs a restart*, and it is one of the settings that genuinely does: switching
 it on means building a detector — opening a session, or loading a model — which
 happens once at startup. Stop the application and start it again.
+
+**A gaze deadzone, smoothing or camera FOV value does not take effect.** Those
+four names are migration-only inputs. The page marks each `legacy compatibility;
+ignored`; predictive gaze uses the daemon's calibrated image query and its own
+controller configuration instead. Save any ordinary setting to remove a stale
+copy from the overrides file.
+
+**Body motion stayed off after enabling it.**
+`REACHY_SATELLITE_BODY_MOTION_ENABLED` is restart-bound. Stop the application and
+start it again from the robot dashboard. It remains false by default; enabling it
+is an explicit provisional opt-in, not a live tuning change.
 
 **A setting on the page does not take effect.** The page marks it *needs a
 restart*. Press **Stop**, then start the application again from the robot

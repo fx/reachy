@@ -1,9 +1,9 @@
 """The robot's decisions, taken without touching the robot.
 
-Events and detections in, motion intents out. Nothing here imports an adapter,
-reads a clock or sleeps: time arrives as a parameter to every method that needs
-it, which is what makes staleness, animation and pipeline timing testable
-without a suite that waits for any of them.
+Events, source-qualified detections and calibrated world targets in; motion
+intents out. Nothing here imports an adapter, reads a clock or sleeps: time and
+calibration arrive as values, which makes staleness, animation and trajectory
+timing testable without a suite that waits for any of them.
 
 The import restriction is a build failure rather than a convention. `just
 lint-behaviour-boundary` bans `reachy_mini_ha_satellite.adapters` inside this
@@ -17,17 +17,16 @@ Four modules, and the split follows what each of them can be asked:
 |---|---|
 | `pipeline` | where the voice pipeline is, given what it did |
 | `movement` | what a pipeline state looks like from across the room |
-| `tracking` | where the head should point, given what is in front of it |
-| `satellite` | which of the two owns the head, and what to command |
+| `tracking` | source-qualified face selection and estimator discontinuities |
+| `gaze_controller` | prediction, deadband, coordinated trajectories, loss and holds |
+| `satellite` | two-phase calibration join, head ownership and pipeline handoff |
 
-`intents` is the vocabulary all four speak: a movement described rather than
-performed, mirroring `ports.MotionPort` method for method so that a decision is
-always something that can be carried out.
+`intents` is the movement vocabulary: coordinated gaze, pipeline head and
+independent antennas, each backed by a `ports.MotionPort` method.
 """
 
 from reachy_mini_ha_satellite.behaviour.intents import (
-    LookAhead,
-    LookAt,
+    CommandGaze,
     MotionIntent,
     MoveAntennas,
     MoveHead,
@@ -42,31 +41,28 @@ from reachy_mini_ha_satellite.behaviour.pipeline import (
 )
 from reachy_mini_ha_satellite.behaviour.satellite import (
     BehaviourStatus,
+    PreparedGazeTick,
     SatelliteBehaviour,
 )
-from reachy_mini_ha_satellite.behaviour.tracking import (
-    FaceTracker,
-    GazeOutcome,
-    TrackingDecision,
-    choose_face,
-)
+from reachy_mini_ha_satellite.behaviour.tracking import GazeSelector, choose_face
+from reachy_mini_ha_satellite.ports import GazeDirective, GazeOutcome
 
 __all__ = [
     "ERROR_SECONDS",
     "BehaviourStatus",
+    "CommandGaze",
     "Expression",
-    "FaceTracker",
+    "GazeDirective",
     "GazeOutcome",
-    "LookAhead",
-    "LookAt",
+    "GazeSelector",
     "MotionIntent",
     "MoveAntennas",
     "MoveHead",
     "PipelineEvent",
     "PipelineMachine",
     "PipelineState",
+    "PreparedGazeTick",
     "SatelliteBehaviour",
-    "TrackingDecision",
     "Transition",
     "choose_face",
     "expression",

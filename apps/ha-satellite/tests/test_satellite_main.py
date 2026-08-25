@@ -58,18 +58,25 @@ from satellite_support import (
 
 from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
+from reachy_mini_ha_satellite.adapters.motion_reachy import ReachyMotion
 from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
 from reachy_mini_ha_satellite.audio_entities import SpeakerBoostNumberEntity
 from reachy_mini_ha_satellite.behaviour import (
-    LookAhead,
-    LookAt,
+    CommandGaze,
     MoveAntennas,
     MoveHead,
     PipelineEvent,
+    PreparedGazeTick,
     SatelliteBehaviour,
 )
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    BodyMeasurement,
+    ControllerConfig,
+    HeadMeasurement,
+)
+from reachy_mini_ha_satellite.behaviour.intents import MotionIntent
 from reachy_mini_ha_satellite.config import (
     ENV_PREFIX,
     ConfigurationError,
@@ -100,11 +107,13 @@ from reachy_mini_ha_satellite.main import (
     run,
 )
 from reachy_mini_ha_satellite.ports import (
-    NEUTRAL_HEAD,
     AntennaPose,
+    CalibratedGaze,
     Detections,
     DetectionSource,
+    GazeSample,
     HeadPose,
+    MotionMeasurement,
     SourceSelection,
 )
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
@@ -755,21 +764,14 @@ def _advancing() -> Callable[[], float]:
 class TestApplyingIntents:
     """Four intents, four port methods, and nothing in between to get wrong."""
 
-    def test_a_gaze_target_reaches_look_at(self) -> None:
-        """The one intent that carries a value the adapter has to convert."""
+    def test_a_coordinated_gaze_sample_reaches_its_port_method(self) -> None:
+        """Predictive gaze is already canonical when intent application sees it."""
         motion = FakeMotion()
+        sample = GazeSample(0.3, 0.1, 0.0, 0.3, False)
 
-        apply_intents(motion, [LookAt(face(0.3, 0.1).centre)])
+        apply_intents(motion, [CommandGaze(sample)])
 
-        assert motion.gaze[-1].x == pytest.approx(0.3)
-
-    def test_returning_to_neutral_reaches_look_ahead(self) -> None:
-        """Distinct from commanding the neutral pose — REQ-048's own method."""
-        motion = FakeMotion()
-
-        apply_intents(motion, [LookAhead()])
-
-        assert motion.last_head == NEUTRAL_HEAD
+        assert motion.coordinated_gaze == [sample]
 
     def test_a_head_pose_reaches_move_head(self) -> None:
         """The pipeline's secondary channel."""
@@ -835,11 +837,11 @@ class TestTheLoop:
 
         await application.run(stop)
 
-        assert motion.gaze
+        assert motion.coordinated_gaze
 
     @pytest.mark.asyncio
     async def test_stale_results_return_the_head_to_neutral(self) -> None:
-        """REQ-048, through the loop rather than through the behaviour layer."""
+        """REQ-048 returns through predictive trajectory before pipeline handoff."""
         audio, motion = FakeAudio(), FakeMotion()
         perception = FakePerception()
         perception.see(face(0.4, 0.2), source=DetectionSource.REMOTE)
@@ -847,7 +849,7 @@ class TestTheLoop:
             audio=audio,
             motion=motion,
             perception=perception,
-            stop_after=4,
+            stop_after=200,
         )
 
         run = asyncio.create_task(application.run(stop))
@@ -858,7 +860,8 @@ class TestTheLoop:
         perception.go_stale()
         await run
 
-        assert motion.last_head == NEUTRAL_HEAD
+        assert motion.coordinated_gaze[-1].world_yaw == pytest.approx(0.0, abs=0.01)
+        assert motion.heads
 
     def test_a_pipeline_event_moves_the_robot_at_once(self) -> None:
         """`deliver` is what the tap calls, on the event loop's own thread."""
@@ -905,8 +908,244 @@ class TestTheLoop:
         assert application.status()["pipeline"] == "idle"
 
 
+class TestDisabledGazeStartup:
+    """Restart-bound disabled tracking never takes daemon gaze ownership."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_startup_does_not_touch_motion_feedback_or_auto_yaw(
+        self,
+    ) -> None:
+        """Pipeline-only behavior leaves all gaze acquisition edges untouched."""
+        events: list[str] = []
+        robot = FakeRobot(events=events)
+        motion = ReachyMotion(robot)
+        stop = asyncio.Event()
+
+        async def _stop_after_first_tick(_seconds: float) -> None:
+            stop.set()
+
+        application = SatelliteApplication(
+            settings=_settings(face_tracking_enabled="false"),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(tracking_enabled=False, now=0.0),
+            clock=lambda: 1.0,
+            sleep=_stop_after_first_tick,
+        )
+
+        await application.run(stop)
+
+        assert not any(event.startswith("motion.auto_yaw") for event in events)
+        assert "motion.pose" not in events
+        assert "motion.joints" not in events
+
+
+class TestBodyColdStart:
+    """Coordinated motion waits for measured body position before hardware output."""
+
+    def test_missing_first_joint_feedback_emits_no_body_target(self) -> None:
+        """A configured body cannot cold-start from an internal zero assumption."""
+        robot = FakeRobot(
+            measured_joints=(
+                RuntimeError("joint feedback unavailable"),
+                RuntimeError("joint feedback unavailable"),
+            )
+        )
+        motion = ReachyMotion(robot, body_enabled=True)
+        motion.acquire(0.0)
+        perception = FakePerception()
+        perception.see(face(0.5, 0.0), source=DetectionSource.REMOTE)
+        application = SatelliteApplication(
+            settings=_settings(body_motion_enabled="true"),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=perception,
+            behaviour=SatelliteBehaviour(
+                controller_config=ControllerConfig(body_enabled=True),
+                now=0.0,
+            ),
+            clock=lambda: 0.1,
+        )
+
+        application.tick()
+
+        assert robot.body_yaws == []
+        assert not any(
+            head is not None and body is not None for head, _a, body in robot.targets
+        )
+
+
+class TestPredictiveTickTiming:
+    """One injected clock read supplies both calibration time and exact controller dt."""
+
+    def test_disabled_gaze_skips_measurement_and_calibration(self) -> None:
+        """Restart-bound disable leaves only pure pipeline expression on each tick."""
+        motion = FakeMotion()
+        application = SatelliteApplication(
+            settings=_settings(face_tracking_enabled="false"),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(tracking_enabled=False, now=0.0),
+            clock=lambda: 1.0,
+        )
+
+        application.tick()
+
+        assert motion.observed == []
+        assert motion.calibrated == []
+
+    def test_each_tick_reads_time_once_and_uses_exact_difference(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No nominal cadence or second clock read may replace measured elapsed time."""
+        readings = iter((1.0, 1.125))
+        clock_reads: list[float] = []
+
+        def _clock() -> float:
+            value = next(readings)
+            clock_reads.append(value)
+            return value
+
+        behaviour = SatelliteBehaviour(now=0.0)
+        original_finish = behaviour.finish
+        dts: list[float] = []
+
+        def _finish(
+            prepared: PreparedGazeTick,
+            *,
+            calibrated: CalibratedGaze | None,
+            head_measurement: HeadMeasurement | None,
+            body_measurement: BodyMeasurement | None,
+            dt: float,
+        ) -> tuple[MotionIntent, ...]:
+            dts.append(dt)
+            return original_finish(
+                prepared,
+                calibrated=calibrated,
+                head_measurement=head_measurement,
+                body_measurement=body_measurement,
+                dt=dt,
+            )
+
+        monkeypatch.setattr(behaviour, "finish", _finish)
+        motion = FakeMotion()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+            behaviour=behaviour,
+            clock=_clock,
+        )
+
+        application.tick()
+        application.tick()
+
+        assert clock_reads == [1.0, 1.125]
+        assert motion.observed == clock_reads
+        assert dts == [0.0, 0.125]
+
+
 class TestShutdown:
     """ha-satellite REQ-050, in the order the requirement states it."""
+
+    @pytest.mark.asyncio
+    async def test_start_and_cleanup_order_is_deterministic(self) -> None:
+        """Acquire first; release motion/media, reverse services, then perception."""
+        events: list[str] = []
+
+        class OrderedMotion(FakeMotion):
+            """Record motion lifecycle around the ordinary fake."""
+
+            def acquire(self, now: float) -> MotionMeasurement:
+                events.append("motion.acquire")
+                return super().acquire(now)
+
+            def release(self) -> None:
+                events.append("motion.release")
+                super().release()
+
+        class OrderedAudio(FakeAudio):
+            """Record media lifecycle around the ordinary fake."""
+
+            def start(self) -> None:
+                events.append("audio.start")
+                super().start()
+
+            def stop(self) -> None:
+                events.append("audio.stop")
+                super().stop()
+
+        class OrderedPerception(FakePerception):
+            """Record perception lifecycle around the ordinary fake."""
+
+            async def start(self) -> None:
+                events.append("perception.start")
+                await super().start()
+
+            async def aclose(self) -> None:
+                events.append("perception.close")
+                await super().aclose()
+
+        class OrderedService:
+            """Record one service name at both lifecycle edges."""
+
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            async def start(self) -> None:
+                events.append(f"{self.name}.start")
+
+            async def aclose(self) -> None:
+                events.append(f"{self.name}.close")
+
+        application, stop = _application(
+            audio=OrderedAudio(),
+            motion=OrderedMotion(),
+            perception=OrderedPerception(),
+            services=[OrderedService("first"), OrderedService("second")],
+            stop_after=1,
+        )
+
+        await application.run(stop)
+
+        assert events == [
+            "motion.acquire",
+            "audio.start",
+            "perception.start",
+            "first.start",
+            "second.start",
+            "motion.release",
+            "audio.stop",
+            "second.close",
+            "first.close",
+            "perception.close",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_repeated_close_is_idempotent(self) -> None:
+        """A signal and run-finally cleanup release every owner only once."""
+        audio = FakeAudio()
+        motion = FakeMotion()
+        perception = FakePerception()
+        service = RecordingService()
+        application, _stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=perception,
+            services=[service],
+        )
+
+        await application.aclose()
+        await application.aclose()
+
+        assert audio.stopped == 1
+        assert perception.closed == 1
+        assert service.closed == 1
+        assert motion.released
 
     @pytest.mark.asyncio
     async def test_it_stops_motion_and_releases_the_media_interface(self) -> None:

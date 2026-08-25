@@ -42,9 +42,15 @@ from reachy_mini_ha_satellite.adapters.sounds import Sound
 from reachy_mini_ha_satellite.esphome.models import AvailableWakeWord, WakeWordType
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
+    CalibratedGaze,
+    CalibrationStatus,
     Detections,
     DetectionSource,
+    GazeCalibration,
+    GazeDirective,
+    GazeSample,
     HeadPose,
+    MotionMeasurement,
 )
 
 if TYPE_CHECKING:
@@ -67,6 +73,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CREDENTIAL",
     "FakeAudio",
+    "FakeCamera",
     "FakeCapture",
     "FakeConnection",
     "FakeDecoder",
@@ -641,9 +648,14 @@ class FakeMotion:
 
     def __init__(self) -> None:
         """Start at neutral, commanding nothing."""
-        self.gaze: list[NormalisedPoint] = []
+        self.coordinated_gaze: list[GazeSample] = []
         self.heads: list[HeadPose] = []
         self.antennas: list[AntennaPose] = []
+        self.acquired: list[float] = []
+        self.observed: list[float] = []
+        self.calibrated: list[tuple[GazeDirective, float]] = []
+        self.world_measurements: list[tuple[float, float] | BaseException | None] = []
+        self.body_measurements: list[float | BaseException | None] = []
         self._released = False
 
     @property
@@ -655,19 +667,60 @@ class FakeMotion:
         """
         return self._released
 
-    def look_at(self, target: NormalisedPoint) -> None:
-        """Record a gaze target.
+    def acquire(self, now: float) -> MotionMeasurement:
+        """Record idempotent predictive gaze acquisition."""
+        if not self._released and not self.acquired:
+            self.acquired.append(now)
+        return MotionMeasurement(None, None, None, None, None)
 
-        Args:
-            target: Where to look, in normalised image coordinates.
-        """
+    def observe(self, now: float) -> MotionMeasurement:
+        """Return the next scripted measured world direction and body yaw."""
         if self._released:
-            return
-        self.gaze.append(target)
+            return MotionMeasurement(None, None, None, None, None)
+        self.observed.append(now)
+        world = (
+            self.world_measurements.pop(0) if self.world_measurements else (0.0, 0.0)
+        )
+        body = self.body_measurements.pop(0) if self.body_measurements else None
+        if isinstance(world, BaseException):
+            raise world
+        if isinstance(body, BaseException):
+            raise body
+        world_yaw, world_elevation = (None, None) if world is None else world
+        return MotionMeasurement(
+            world_yaw=world_yaw,
+            world_elevation=world_elevation,
+            head_measured_at=now,
+            body_yaw=body,
+            body_measured_at=now if body is not None else None,
+        )
 
-    def look_ahead(self) -> None:
-        """Record a return to neutral."""
-        self.move_head(HeadPose())
+    def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
+        """Return a deterministic world anchor for an actionable fake directive."""
+        if self._released or directive.identity is None or directive.face is None:
+            return GazeCalibration(CalibrationStatus.REJECTED)
+        self.calibrated.append((directive, now))
+        source, generation, sequence = directive.identity
+        assert directive.captured_at is not None
+        assert directive.received_at is not None
+        return GazeCalibration(
+            CalibrationStatus.ACCEPTED,
+            CalibratedGaze(
+                source=source,
+                generation=generation,
+                sequence=sequence,
+                captured_at=directive.captured_at,
+                received_at=directive.received_at,
+                target_epoch=directive.target_epoch,
+                world_yaw=-directive.face.centre.x * 0.5,
+                world_elevation=directive.face.centre.y * 0.5,
+            ),
+        )
+
+    def command_gaze(self, sample: GazeSample) -> None:
+        """Record one coordinated gaze sample unless terminally released."""
+        if not self._released:
+            self.coordinated_gaze.append(sample)
 
     def move_head(self, pose: HeadPose) -> None:
         """Record a head pose.
@@ -743,6 +796,7 @@ class FakePerception:
         self.connected = connected
         self.started = 0
         self.closed = 0
+        self._sequence = 0
 
     async def start(self) -> None:
         """Record a start."""
@@ -767,11 +821,17 @@ class FakePerception:
             faces: What is in front of the robot.
             source: Which detector is to have produced it.
         """
+        self._sequence += 1
+        completed_at = self._sequence * 0.1
         self.detections = Detections(
             faces=faces,
             fresh=True,
             source=source,
             age_seconds=0.0,
+            generation=0,
+            sequence=self._sequence,
+            captured_at=completed_at,
+            received_at=completed_at,
         )
 
     def go_stale(self) -> None:
@@ -780,6 +840,10 @@ class FakePerception:
             fresh=False,
             source=self.detections.source,
             age_seconds=99.0,
+            generation=self.detections.generation,
+            sequence=self.detections.sequence,
+            captured_at=self.detections.captured_at,
+            received_at=self.detections.received_at,
         )
 
 
@@ -833,6 +897,14 @@ def frame(height: int = 480, width: int = 640, fill: int = 128) -> ImageArray:
     return image
 
 
+class FakeCamera:
+    """An initialized camera exposing only its width-first resolution."""
+
+    def __init__(self, resolution: tuple[int, int] = (640, 480)) -> None:
+        """Store a scripted width and height."""
+        self.resolution = resolution
+
+
 class FakeMedia:
     """The daemon's media layer, recording what it was asked for.
 
@@ -850,6 +922,8 @@ class FakeMedia:
         sample_rate: int = 16000,
         channels: int = 2,
         output_rate: int = 48000,
+        camera: FakeCamera | None = None,
+        camera_available: bool = True,
     ) -> None:
         """Script what the daemon will produce.
 
@@ -864,7 +938,14 @@ class FakeMedia:
             channels: How many channels it says it captures.
             output_rate: What the daemon says it plays back at, which is the
                 rate playback is decoded and resampled to.
+            camera: The initialized camera, or a default camera.
+            camera_available: Whether the daemon reports any camera.
         """
+        self.camera = (
+            (camera if camera is not None else FakeCamera())
+            if camera_available
+            else None
+        )
         self.jpeg = jpeg
         self.image = image
         self.audio = list(audio)
@@ -960,43 +1041,58 @@ class FakeMedia:
 
 
 class FakeRobot:
-    """The handle the daemon hands an application, recording every command."""
+    """The daemon handle with scripted measured and calibrated motion feedback."""
 
-    def __init__(self, media: FakeMedia | None = None) -> None:
-        """Wrap a media layer.
+    def __init__(
+        self,
+        media: FakeMedia | None = None,
+        *,
+        measured_head_poses: Iterable[PoseMatrix | BaseException] = (),
+        measured_joints: Iterable[tuple[list[float], list[float]] | BaseException] = (),
+        image_gaze_poses: Iterable[PoseMatrix | BaseException] = (),
+        events: list[str] | None = None,
+    ) -> None:
+        """Wrap media and load deterministic feedback scripts.
 
         Args:
-            media: The daemon's media layer, or a fresh fake one.
+            media: The daemon media layer, or a fresh fake one.
+            measured_head_poses: Values or failures returned by measured-pose reads.
+            measured_joints: Values or failures returned by measured-joint reads.
+            image_gaze_poses: Values or failures returned by calibration queries.
+            events: Optional shared lifecycle event record.
         """
         self._media = media if media is not None else FakeMedia()
+        self.measured_head_pose: PoseMatrix = np.eye(4, dtype=np.float64)
+        self.measured_body_yaw = 0.0
+        self.measured_head_poses = list(measured_head_poses)
+        self.measured_joints = list(measured_joints)
+        self.image_gaze_poses = list(image_gaze_poses)
+        self.events = events if events is not None else []
         self.heads: list[PoseMatrix] = []
         self.antennas: list[list[float]] = []
         self.body_yaws: list[float] = []
-        self.gaze: list[tuple[float, float, float]] = []
-        self.durations: list[float] = []
+        self.targets: list[
+            tuple[PoseMatrix | None, list[float] | None, float | None]
+        ] = []
+        self.image_gaze: list[tuple[int, int, float, bool]] = []
+        self.automatic_body_yaw: list[bool] = []
         self.motor_enables = 0
         self.wake_ups = 0
 
     def enable_motors(self, ids: list[str] | None = None) -> None:
-        """Record that startup enabled the requested motors.
-
-        Args:
-            ids: Motor identifiers, or `None` for every motor.
-        """
+        """Record that startup enabled the requested motors."""
         del ids
         self.motor_enables += 1
+        self.events.append("motors.enable")
 
     def wake_up(self) -> None:
         """Record the SDK-controlled wake sequence."""
         self.wake_ups += 1
+        self.events.append("robot.wake")
 
     @property
     def media(self) -> FakeMedia:
-        """The daemon's media layer.
-
-        Returns:
-            The fake.
-        """
+        """Return the fake daemon media layer."""
         return self._media
 
     def set_target(
@@ -1005,45 +1101,67 @@ class FakeRobot:
         antennas: list[float] | None = None,
         body_yaw: float | None = None,
     ) -> None:
-        """Record a commanded pose.
-
-        Args:
-            head: The head pose, or `None`.
-            antennas: The two antenna angles, right then left, or `None`.
-            body_yaw: The body rotation, or `None`.
-        """
-        if head is not None:
-            self.heads.append(head)
-        if antennas is not None:
-            self.antennas.append(list(antennas))
+        """Record one grouped SDK command without implying linearizability."""
+        copied_head = None if head is None else np.array(head, copy=True)
+        copied_antennas = None if antennas is None else list(antennas)
+        self.targets.append((copied_head, copied_antennas, body_yaw))
+        self.events.append("motion.command")
+        if copied_head is not None:
+            self.heads.append(copied_head)
+        if copied_antennas is not None:
+            self.antennas.append(copied_antennas)
         if body_yaw is not None:
             self.body_yaws.append(body_yaw)
 
-    def look_at_world(
+    def get_current_head_pose(self) -> PoseMatrix:
+        """Return the next scripted world pose or the current fallback pose."""
+        self.events.append("motion.pose")
+        scripted = (
+            self.measured_head_poses.pop(0)
+            if self.measured_head_poses
+            else self.measured_head_pose
+        )
+        if isinstance(scripted, BaseException):
+            raise scripted
+        self.measured_head_pose = np.array(scripted, dtype=np.float64, copy=True)
+        return np.array(self.measured_head_pose, copy=True)
+
+    def get_current_joint_positions(self) -> tuple[list[float], list[float]]:
+        """Return scripted head-chain and antenna joint values in radians.
+
+        The first of seven head-chain values is body yaw; the remaining six are
+        head/Stewart joints. The second list contains the two antenna joints.
+        """
+        self.events.append("motion.joints")
+        scripted = self.measured_joints.pop(0) if self.measured_joints else None
+        if isinstance(scripted, BaseException):
+            raise scripted
+        if scripted is not None:
+            return list(scripted[0]), list(scripted[1])
+        return [self.measured_body_yaw, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0]
+
+    def look_at_image(
         self,
-        x: float,
-        y: float,
-        z: float,
+        u: int,
+        v: int,
         duration: float = 1.0,
         perform_movement: bool = True,
     ) -> PoseMatrix:
-        """Record a gaze target and hand back an identity pose.
+        """Record a non-moving image query and return its scripted world pose."""
+        self.image_gaze.append((u, v, duration, perform_movement))
+        self.events.append("motion.calibrate")
+        scripted = self.image_gaze_poses.pop(0) if self.image_gaze_poses else None
+        if isinstance(scripted, BaseException):
+            raise scripted
+        return np.array(
+            np.eye(4, dtype=np.float64) if scripted is None else scripted,
+            copy=True,
+        )
 
-        Args:
-            x: Forward, in metres.
-            y: To the robot's left, in metres.
-            z: Upwards, in metres.
-            duration: Recorded via `durations`.
-            perform_movement: Ignored.
-
-        Returns:
-            An identity transformation, which is what a target dead ahead works
-            out to.
-        """
-        del perform_movement
-        self.gaze.append((x, y, z))
-        self.durations.append(duration)
-        return np.eye(4, dtype=np.float64)
+    def set_automatic_body_yaw(self, enabled: bool) -> None:
+        """Record daemon automatic-body-yaw ownership changes."""
+        self.automatic_body_yaw.append(enabled)
+        self.events.append(f"motion.auto_yaw.{str(enabled).lower()}")
 
 
 # --- Wake words ---------------------------------------------------------------

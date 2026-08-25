@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AudioSamples",
+    "Camera",
     "ImageArray",
     "MediaInterface",
     "Offload",
@@ -65,6 +66,16 @@ type AudioSamples = npt.NDArray[np.float32]
 type PoseMatrix = npt.NDArray[np.float64]
 
 
+@runtime_checkable
+class Camera(Protocol):
+    """The initialized daemon camera needed for calibrated image gaze."""
+
+    @property
+    def resolution(self) -> tuple[int, int]:
+        """Return image width then height, matching the SDK surface."""
+        ...
+
+
 #:= docs/specs/ha-satellite/index.md#req-043-hardware-access-goes-through-the-daemon-s-media-layer
 #:% Microphone capture and audio playback MUST be performed through the robot
 #:% daemon's media interface rather than by opening audio devices directly.
@@ -77,6 +88,11 @@ class MediaInterface(Protocol):
     and the speaker open for its own purposes, so an application that opened
     either directly would be contending with it for hardware it does not own.
     """
+
+    @property
+    def camera(self) -> Camera | None:
+        """Return the initialized camera, or ``None`` when unavailable."""
+        ...
 
     def get_frame_jpeg(self) -> bytes | None:
         """Take the current camera frame, already compressed.
@@ -182,9 +198,8 @@ class MediaInterface(Protocol):
 class RobotHandle(Protocol):
     """The handle the daemon hands a running application.
 
-    Deliberately five members. The SDK's own object has forty, and naming only
-    what startup and the adapters call is what keeps "which parts of the SDK does
-    this application depend on?" a question with a short answer.
+    It names only what startup and the active adapters call, keeping "which parts
+    of the SDK does this application depend on?" a question with a short answer.
     """
 
     def enable_motors(self, ids: list[str] | None = None) -> None:
@@ -228,33 +243,30 @@ class RobotHandle(Protocol):
         """
         ...
 
-    def look_at_world(
+    def get_current_head_pose(self) -> PoseMatrix:
+        """Return the measured world-frame head pose, including body yaw."""
+        ...
+
+    def get_current_joint_positions(self) -> tuple[list[float], list[float]]:
+        """Return seven head-chain values and two antenna joints in radians.
+
+        The first of the seven head-chain values is body yaw; the remaining six
+        are head/Stewart joints.
+        """
+        ...
+
+    def look_at_image(
         self,
-        x: float,
-        y: float,
-        z: float,
+        u: int,
+        v: int,
         duration: float = 1.0,
         perform_movement: bool = True,
     ) -> PoseMatrix:
-        """Aim the head at a point in the robot's own frame.
+        """Compute or perform calibrated gaze toward one image pixel."""
+        ...
 
-        The frame's origin is the neutral head position, with x forward, y to
-        the robot's left and z up. Only the direction matters: the SDK
-        normalises the vector, so a target twice as far away in the same
-        direction is the same movement.
-
-        Args:
-            x: Forward, in metres.
-            y: To the robot's left, in metres.
-            z: Upwards, in metres.
-            duration: How long to take. Zero commands the pose immediately and
-                returns without waiting, which is the only value the motion
-                adapter uses — see `motion_reachy.py`.
-            perform_movement: Whether to move, or only to compute the pose.
-
-        Returns:
-            The head pose the target works out to.
-        """
+    def set_automatic_body_yaw(self, enabled: bool) -> None:
+        """Enable or disable the daemon's independent body-yaw modulation."""
         ...
 
 

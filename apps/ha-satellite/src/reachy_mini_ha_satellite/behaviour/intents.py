@@ -6,27 +6,20 @@ description, and `main.py` is what applies it. That separation is ha-satellite
 REQ-042, and it is why the whole of this package can be exercised on a machine
 with no robot attached.
 
-The four kinds are the four movements `ports.MotionPort` accepts — one each for
-`look_at`, `look_ahead`, `move_head` and `move_antennas` — and that
-correspondence is deliberate: an intent with no port method behind it would be a
-decision nobody could carry out. The port's other two members, `release` and
-`released`, are lifecycle rather than movement and have no intent, because
-letting go of the robot is not something the behaviour layer decides.
+The three kinds are the three commands behavior arbitrates: canonical
+coordinated gaze, a pipeline head pose, and independent antennas. Each has one
+`ports.MotionPort` method behind it. Measurement, calibration, acquisition and
+release are composition-root lifecycle rather than movements and have no intent.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-from reachy_mini_ha_satellite.ports import AntennaPose, HeadPose
-
-if TYPE_CHECKING:
-    from reachy_contracts import NormalisedPoint
+from reachy_mini_ha_satellite.ports import AntennaPose, GazeSample, HeadPose
 
 __all__ = [
-    "LookAhead",
-    "LookAt",
+    "CommandGaze",
     "MotionIntent",
     "MoveAntennas",
     "MoveHead",
@@ -34,25 +27,10 @@ __all__ = [
 
 
 @dataclass(frozen=True, slots=True)
-class LookAt:
-    """Point the head at something seen in the frame.
+class CommandGaze:
+    """Command one canonical world-gaze and optional body sample."""
 
-    Attributes:
-        target: Where it is, in normalised image coordinates.
-    """
-
-    target: NormalisedPoint
-
-
-@dataclass(frozen=True, slots=True)
-class LookAhead:
-    """Return the head to neutral.
-
-    Distinct from `MoveHead(NEUTRAL_HEAD)`, and the distinction is the whole of
-    ha-satellite REQ-048: this is what the layer produces when results have
-    stopped arriving, and the port's own `look_ahead` is the method whose
-    docstring says why holding the last pose would be a lie.
-    """
+    sample: GazeSample
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,5 +55,5 @@ class MoveAntennas:
     pose: AntennaPose
 
 
-type MotionIntent = LookAt | LookAhead | MoveHead | MoveAntennas
+type MotionIntent = CommandGaze | MoveHead | MoveAntennas
 """Everything the behaviour layer can ask for."""

@@ -144,9 +144,9 @@ def _field(report: SettingReport, settings: Settings) -> str:
     choices = field_choices(report.name)
     if not report.writable:
         # Readable, which is what REQ-049 asks of a setting that is not secret,
-        # and deliberately not writable: these decide where this form's own file
-        # lives and whether this page is served at all, so the page cannot be
-        # what changes them. See `config.BOOTSTRAP_SETTINGS`.
+        # and deliberately not writable: bootstrap values decide whether this
+        # form is reachable, while compatibility values are accepted only so an
+        # existing environment keeps starting. The tags below distinguish them.
         control = (
             f'<input type="text" id="{field}" disabled '
             f'value="{_escape(form_value(settings, report.name))}">'
@@ -173,7 +173,9 @@ def _field(report: SettingReport, settings: Settings) -> str:
         )
 
     tags = [f'<span class="tag">{_escape(report.source.value)}</span>']
-    if not report.writable:
+    if report.compatibility:
+        tags.append('<span class="tag">legacy compatibility; ignored</span>')
+    elif not report.writable:
         tags.append(
             '<span class="tag">set in the environment: this page depends on it</span>',
         )
