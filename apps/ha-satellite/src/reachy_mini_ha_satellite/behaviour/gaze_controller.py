@@ -102,6 +102,41 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return min(upper, max(lower, value))
 
 
+def _smoothstep(value: float) -> float:
+    """Return cubic smoothstep on a clamped unit interval."""
+    phase = _clamp(value, 0.0, 1.0)
+    return phase * phase * (3.0 - 2.0 * phase)
+
+
+def _unclamped_body_allocation(
+    world_yaw: float,
+    *,
+    noise_floor: float,
+    midpoint: float,
+    mid_share: float,
+    large_point: float,
+    large_share: float,
+    head_comfort: float,
+) -> float:
+    """Calculate signed body allocation before a workspace could clip it."""
+    magnitude = abs(world_yaw)
+    if magnitude <= noise_floor:
+        return 0.0
+    if magnitude <= midpoint:
+        phase = (magnitude - noise_floor) / (midpoint - noise_floor)
+        allocated = mid_share * _smoothstep(phase) * magnitude
+    elif magnitude <= large_point:
+        phase = (magnitude - midpoint) / (large_point - midpoint)
+        share = mid_share + (large_share - mid_share) * _smoothstep(phase)
+        allocated = share * magnitude
+    else:
+        head_at_large = large_point * (1.0 - large_share)
+        comfort_gap = head_comfort - head_at_large
+        head_residual = head_comfort - comfort_gap * large_point / magnitude
+        allocated = magnitude - head_residual
+    return math.copysign(allocated, world_yaw)
+
+
 @dataclass(frozen=True, slots=True)
 class ImagePoint:
     """Two independent normalized image coordinates or rates."""
@@ -500,6 +535,28 @@ class ControllerConfig:
         ):
             message = "large allocation must leave the head inside comfort"
             raise ValueError(message)
+        for endpoint in (self.yaw_limits.minimum, self.yaw_limits.maximum):
+            allocated = _unclamped_body_allocation(
+                endpoint,
+                noise_floor=self.body_noise_floor,
+                midpoint=self.body_midpoint,
+                mid_share=self.body_mid_share,
+                large_point=self.body_large_point,
+                large_share=self.body_large_share,
+                head_comfort=self.body_head_comfort,
+            )
+            clamped = _clamp(
+                allocated,
+                self.body_limits.minimum,
+                self.body_limits.maximum,
+            )
+            residual_head = endpoint - clamped
+            if allocated != clamped or abs(residual_head) > self.body_head_comfort:
+                message = (
+                    "body allocation must fit each signed body range and keep "
+                    "residual gaze inside signed head comfort"
+                )
+                raise ValueError(message)
         if self.idle_position_epsilon > min(
             min(abs(limits.minimum), limits.maximum)
             for limits in (self.yaw_limits, self.elevation_limits, self.body_limits)
@@ -628,11 +685,19 @@ def reduce_command_result(
     """Commit one daemon result or atomically restore the prior safe trajectory."""
     evidence = ("command", result.call)
     if result.status is MotionCommandStatus.REJECTED:
+        retrying_safe_hold = candidate.fault is ControllerFault.COMMAND
         return replace(
             candidate,
-            world_yaw=prior_safe.world_yaw,
-            elevation=prior_safe.elevation,
-            body_yaw=prior_safe.body_yaw,
+            mode=candidate.mode if retrying_safe_hold else prior_safe.mode,
+            world_yaw=(
+                candidate.world_yaw if retrying_safe_hold else prior_safe.world_yaw
+            ),
+            elevation=(
+                candidate.elevation if retrying_safe_hold else prior_safe.elevation
+            ),
+            body_yaw=(
+                candidate.body_yaw if retrying_safe_hold else prior_safe.body_yaw
+            ),
             last_safe_sample=prior_safe.last_safe_sample,
             fault=ControllerFault.COMMAND,
             recovery_valid_streak=0,
@@ -897,43 +962,22 @@ def step_axis(
     return AxisState(proposed, velocity, acceleration)
 
 
-def _smoothstep(value: float) -> float:
-    """Return cubic smoothstep on a clamped unit interval."""
-    phase = _clamp(value, 0.0, 1.0)
-    return phase * phase * (3.0 - 2.0 * phase)
-
-
 def allocate_body(world_yaw: float, config: ControllerConfig) -> float:
     """Return continuous odd-symmetric monotonic body-yaw allocation."""
     _finite("world yaw allocation input", world_yaw)
     if not config.body_enabled:
         return 0.0
-    magnitude = abs(world_yaw)
-    if magnitude <= config.body_noise_floor:
-        return 0.0
-    if magnitude <= config.body_midpoint:
-        phase = (magnitude - config.body_noise_floor) / (
-            config.body_midpoint - config.body_noise_floor
-        )
-        share = config.body_mid_share * _smoothstep(phase)
-        allocated = share * magnitude
-    elif magnitude <= config.body_large_point:
-        phase = (magnitude - config.body_midpoint) / (
-            config.body_large_point - config.body_midpoint
-        )
-        share = config.body_mid_share + (
-            config.body_large_share - config.body_mid_share
-        ) * _smoothstep(phase)
-        allocated = share * magnitude
-    else:
-        head_at_large = config.body_large_point * (1.0 - config.body_large_share)
-        comfort_gap = config.body_head_comfort - head_at_large
-        head_residual = config.body_head_comfort - (
-            comfort_gap * config.body_large_point / magnitude
-        )
-        allocated = magnitude - head_residual
+    allocated = _unclamped_body_allocation(
+        world_yaw,
+        noise_floor=config.body_noise_floor,
+        midpoint=config.body_midpoint,
+        mid_share=config.body_mid_share,
+        large_point=config.body_large_point,
+        large_share=config.body_large_share,
+        head_comfort=config.body_head_comfort,
+    )
     return _clamp(
-        math.copysign(allocated, world_yaw),
+        allocated,
         config.body_limits.minimum,
         config.body_limits.maximum,
     )

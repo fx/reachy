@@ -287,10 +287,18 @@ def test_repeated_command_rejection_preserves_monotonic_hidden_braking() -> None
 
     assert all(
         later_velocity <= earlier_velocity
-        and later_acceleration <= earlier_acceleration
-        for (earlier_velocity, earlier_acceleration), (
+        for (earlier_velocity, _earlier_acceleration), (
             later_velocity,
+            _later_acceleration,
+        ) in pairwise(derivatives)
+    )
+    assert derivatives[-1][0] < derivatives[0][0]
+    assert len({acceleration for _velocity, acceleration in derivatives}) > 1
+    assert all(
+        abs(later_acceleration - earlier_acceleration)
+        <= config.yaw_limits.max_jerk * 0.05 + 1e-12
+        for (_earlier_velocity, earlier_acceleration), (
+            _later_velocity,
             later_acceleration,
         ) in pairwise(derivatives)
     )
-    assert derivatives[-1] < derivatives[0]

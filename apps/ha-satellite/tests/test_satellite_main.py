@@ -831,8 +831,12 @@ class TestTheLoop:
         def finish(*_args: object, **_kwargs: object) -> tuple[MotionIntent, ...]:
             return CommandGaze(sample), MoveHead(HeadPose(pitch=0.1))
 
+        def complete(result: MotionCommandResult) -> tuple[MotionIntent, ...]:
+            completed.append(result)
+            return ()
+
         monkeypatch.setattr(behaviour, "finish", finish)
-        monkeypatch.setattr(behaviour, "complete_command", completed.append)
+        monkeypatch.setattr(behaviour, "complete_command", complete)
         application = SatelliteApplication(
             settings=_settings(),
             audio=FakeAudio(),

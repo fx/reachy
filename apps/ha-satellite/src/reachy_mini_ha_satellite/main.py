@@ -812,8 +812,13 @@ class SatelliteApplication:
             input_fault=input_fault,
             input_evidence=input_evidence,
         )
-        for result in apply_intents(self._motion, intents):
-            self._behaviour.complete_command(result)
+        for intent in intents:
+            if isinstance(intent, CommandGaze):
+                result = self._motion.command_gaze(intent.sample)
+                deferred = self._behaviour.complete_command(result)
+                apply_intents(self._motion, deferred)
+            else:
+                apply_intents(self._motion, (intent,))
 
     def request_stop(self) -> None:
         """Ask the application to shut down, as a termination signal would.
@@ -2110,8 +2115,22 @@ def build_application(
         samples_per_chunk=settings.samples_per_chunk,
         boost_percent=settings.speaker_boost_percent,
     )
+    controller_defaults = ControllerConfig()
+    staleness = settings.staleness_seconds
+    prediction_horizon = min(controller_defaults.prediction_horizon, staleness)
     controller_config = ControllerConfig(
-        staleness_seconds=settings.staleness_seconds,
+        staleness_seconds=staleness,
+        actuator_delay=min(controller_defaults.actuator_delay, prediction_horizon),
+        prediction_horizon=prediction_horizon,
+        loss_hold_seconds=min(controller_defaults.loss_hold_seconds, staleness),
+        head_measurement_max_age=min(
+            controller_defaults.head_measurement_max_age,
+            staleness,
+        ),
+        body_feedback_max_age=min(
+            controller_defaults.body_feedback_max_age,
+            staleness,
+        ),
         body_enabled=settings.body_motion_enabled,
         require_motion_measurements=True,
     )

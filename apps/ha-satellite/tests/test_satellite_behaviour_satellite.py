@@ -411,9 +411,10 @@ class TestLossReturnAndHandoff:
                 break
             now += 0.05
 
-        assert behaviour.controller_state.mode is ControllerMode.IDLE
-        assert len(settled) == 1
-        assert isinstance(settled[0], CommandGaze)
+        settled_state = behaviour.controller_state
+        assert settled_state.mode is ControllerMode.IDLE
+        assert sum(isinstance(item, CommandGaze) for item in settled) == 1
+        assert not any(isinstance(item, MoveHead) for item in settled)
         assert handoffs == 0
 
         deferred = behaviour.complete_command(
@@ -424,11 +425,31 @@ class TestLossReturnAndHandoff:
             )
         )
         assert deferred == ()
-        assert behaviour.controller_state.mode is ControllerMode.RETURNING
+        rejected_state = behaviour.controller_state
+        assert rejected_state.mode is ControllerMode.RETURNING
         assert behaviour._owns_head()
         diagnostic = behaviour.controller_diagnostics()[-1]
         assert diagnostic["command_accepted"] is False
         assert diagnostic["fault"] == "command"
+
+        deferred_handoff: tuple[MotionIntent, ...] = ()
+        call = 2
+        cursor = now + 0.05
+        for _ in range(500):
+            intents = _finish(behaviour, empty, now=cursor)
+            assert not any(isinstance(item, MoveHead) for item in intents)
+            if _gaze(intents) is not None:
+                deferred_handoff = behaviour.complete_command(
+                    MotionCommandResult(MotionCommandStatus.ACCEPTED, call=call)
+                )
+                call += 1
+                if deferred_handoff:
+                    break
+            cursor += 0.05
+
+        assert behaviour.controller_state.mode is ControllerMode.IDLE
+        assert len(deferred_handoff) == 1
+        assert isinstance(deferred_handoff[0], MoveHead)
 
     def test_reacquisition_during_return_cancels_handoff(self) -> None:
         """A new calibrated face keeps ownership before pipeline head can resume."""

@@ -142,6 +142,7 @@ class SatelliteBehaviour:
         self._pending_prior_state: ControllerState | None = None
         self._pending_command_step: ControllerStep | None = None
         self._pending_observation_age: float | None = None
+        self._pending_handoff = False
 
     @property
     def state(self) -> PipelineState:
@@ -258,34 +259,41 @@ class SatelliteBehaviour:
             self._pending_prior_state = previous_controller
             self._pending_command_step = result
             self._pending_observation_age = observation_age
+            self._pending_handoff = settled_handoff
             intents.append(CommandGaze(result.sample))
         intents.extend(
             self._express(
                 prepared.now,
                 forced=prepared.pipeline_expired or settled_handoff,
-                allow_head=not now_owned,
+                allow_head=not now_owned and not self._pending_handoff,
                 force_head=settled_handoff,
             )
         )
         if not emitted:
             self._diagnostics.record(
                 result,
+                config=self._config,
                 at=prepared.now,
                 observation_age=observation_age,
                 emitted=False,
             )
         return tuple(intents)
 
-    def complete_command(self, result: MotionCommandResult) -> None:
-        """Reduce one command transaction and then record its completed evidence."""
+    def complete_command(
+        self,
+        result: MotionCommandResult,
+    ) -> tuple[MotionIntent, ...]:
+        """Reduce one command, record it, then release a committed handoff barrier."""
         previous = self._pending_prior_state
         pending = self._pending_command_step
         observation_age = self._pending_observation_age
+        pending_handoff = self._pending_handoff
         self._pending_prior_state = None
         self._pending_command_step = None
         self._pending_observation_age = None
+        self._pending_handoff = False
         if previous is None or pending is None:
-            return
+            return ()
         self._controller = reduce_command_result(
             pending.state,
             previous,
@@ -299,13 +307,25 @@ class SatelliteBehaviour:
             pending,
             state=replace(pending.state, fault=self._controller.fault),
         )
+        accepted = result.status is MotionCommandStatus.ACCEPTED
         self._diagnostics.record(
             diagnostic_step,
+            config=self._config,
             at=at,
             observation_age=observation_age,
             emitted=True,
-            command_accepted=result.status is MotionCommandStatus.ACCEPTED,
+            command_accepted=accepted,
         )
+        if (
+            not pending_handoff
+            or not accepted
+            or self._controller.fault is not ControllerFault.NONE
+            or self._controller.mode is not ControllerMode.IDLE
+        ):
+            return ()
+        wanted = self._expression(at).head
+        self._last_head = wanted
+        return (MoveHead(wanted),)
 
     @staticmethod
     def _observation(
@@ -356,7 +376,11 @@ class SatelliteBehaviour:
 
     def _owns_head(self) -> bool:
         """Return whether predictive gaze has exclusive head ownership."""
-        return self._controller.mode in _OWNED_MODES or self._controller.safe_hold
+        return (
+            self._pending_handoff
+            or self._controller.mode in _OWNED_MODES
+            or self._controller.safe_hold
+        )
 
     def _is_idle(self, now: float) -> bool:
         """Return whether the room has been without a selected face long enough."""
