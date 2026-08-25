@@ -251,6 +251,38 @@ class TestCaptureTimeCalibration:
         assert result.target.world_yaw == pytest.approx(math.radians(35.0))
         assert robot.image_gaze[0][2:] == (0.0, False)
 
+    def test_query_midpoint_never_replaces_measured_pose_history(self) -> None:
+        """Later capture interpolation uses observations, not calibration brackets."""
+        capture = head_pose_matrix(HeadPose(yaw=math.radians(10.0)))
+        measured = head_pose_matrix(HeadPose(yaw=math.radians(20.0)))
+        query = head_pose_matrix(HeadPose(yaw=math.radians(30.0)))
+        later = head_pose_matrix(HeadPose(yaw=math.radians(40.0)))
+        robot = FakeRobot(
+            measured_head_poses=(capture, measured, query, query, later, later, later),
+            image_gaze_poses=(
+                head_pose_matrix(HeadPose(yaw=math.radians(35.0))),
+                head_pose_matrix(HeadPose(yaw=math.radians(50.0))),
+            ),
+        )
+        motion = ReachyMotion(robot)
+        motion.acquire(0.0)
+        motion.observe(1.0)
+
+        first = motion.calibrate(
+            _directive(sequence=1, captured_at=0.0, received_at=0.5),
+            1.0,
+        )
+        motion.observe(2.0)
+        interpolated = motion.calibrate(
+            _directive(sequence=2, captured_at=1.5, received_at=1.8),
+            2.0,
+        )
+
+        assert first.state is CalibrationStatus.ACCEPTED
+        assert interpolated.state is CalibrationStatus.ACCEPTED
+        assert interpolated.target is not None
+        assert interpolated.target.world_yaw == pytest.approx(math.radians(40.0))
+
     def test_cached_identity_never_requeries_the_daemon(self) -> None:
         """Faster behavior ticks consume no second cached calibration."""
         robot = FakeRobot(measured_head_poses=(np.eye(4), np.eye(4), np.eye(4)))

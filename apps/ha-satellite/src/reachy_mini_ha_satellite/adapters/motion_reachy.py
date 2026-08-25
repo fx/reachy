@@ -491,9 +491,6 @@ class ReachyMotion:
             if bracket is None or target_rotation is None:
                 return self._cache_result(identity, CalibrationStatus.REJECTED)
             query_rotation = _slerp(bracket[0], bracket[1], 0.5)
-            query_pose = np.eye(4, dtype=np.float64)
-            query_pose[:3, :3] = query_rotation
-            self._history.append(now, query_pose)
             rebased = rebase_calibrated_rotation(
                 capture_rotation,
                 query_rotation,
