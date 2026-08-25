@@ -248,7 +248,11 @@ class RobotHandle(Protocol):
         ...
 
     def get_current_joint_positions(self) -> tuple[list[float], list[float]]:
-        """Return seven head joints and two antennas in radians."""
+        """Return seven head-chain values and two antenna joints in radians.
+
+        The first of the seven head-chain values is body yaw; the remaining six
+        are head/Stewart joints.
+        """
         ...
 
     def look_at_image(

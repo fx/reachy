@@ -1127,7 +1127,11 @@ class FakeRobot:
         return np.array(self.measured_head_pose, copy=True)
 
     def get_current_joint_positions(self) -> tuple[list[float], list[float]]:
-        """Return seven scripted head joints and two antenna joints."""
+        """Return scripted head-chain and antenna joint values in radians.
+
+        The first of seven head-chain values is body yaw; the remaining six are
+        head/Stewart joints. The second list contains the two antenna joints.
+        """
         self.events.append("motion.joints")
         scripted = self.measured_joints.pop(0) if self.measured_joints else None
         if isinstance(scripted, BaseException):
