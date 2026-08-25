@@ -778,6 +778,35 @@ class TestMeasuredBodyObserver:
         assert result.state.body_feedback == BodyFeedbackState()
         assert result.state.body_yaw == AxisState()
 
+    def test_valid_active_feedback_remains_an_independent_observation(self) -> None:
+        """A current matching sample neither faults nor rewrites commanded state."""
+        config = replace(ControllerConfig(), body_enabled=True)
+        active = step_controller(
+            initial_controller_state(config),
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.2, measured_at=0.1),
+        )
+        commanded = active.state.body_yaw
+
+        valid = step_controller(
+            active.state,
+            None,
+            now=0.15,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(
+                yaw=commanded.position,
+                measured_at=0.15,
+            ),
+        )
+
+        assert valid.mode is ControllerMode.ACTIVE
+        assert not valid.state.body_feedback.faulted
+        assert valid.state.body_yaw.position != pytest.approx(0.0)
+
     def test_missing_feedback_does_not_claim_an_idle_body(self) -> None:
         """Feedback is a guard only while predictive gaze controls body output."""
         config = replace(ControllerConfig(), body_enabled=True)
