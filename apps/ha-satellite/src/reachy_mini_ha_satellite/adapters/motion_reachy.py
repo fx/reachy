@@ -350,7 +350,6 @@ class ReachyMotion:
                 staleness_seconds=staleness_seconds,
             )
         else:
-            body_enabled = controller_config.body_enabled
             staleness_seconds = controller_config.staleness_seconds
         if not math.isfinite(tick_seconds) or tick_seconds < MIN_BEHAVIOUR_TICK_SECONDS:
             message = (
@@ -364,7 +363,6 @@ class ReachyMotion:
         )
         self._handle = handle
         self._config = controller_config
-        self._body_enabled = body_enabled
         self._history = TimedPoseHistory(
             maximum_age=staleness_seconds,
             maximum_samples=history_samples,
@@ -423,7 +421,7 @@ class ReachyMotion:
         if self._released:
             self._head_fault = MotionFault.RELEASED
             self._body_fault = (
-                MotionFault.RELEASED if self._body_enabled else MotionFault.NONE
+                MotionFault.RELEASED if self._config.body_enabled else MotionFault.NONE
             )
             return self._measurement()
         try:
@@ -435,7 +433,7 @@ class ReachyMotion:
             self._head_fault = MotionFault.NONE
         except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
             self._head_fault = MotionFault.POSE
-        if self._body_enabled:
+        if self._config.body_enabled:
             try:
                 head_joints, _antennas = self._handle.get_current_joint_positions()
                 measured = float(head_joints[0]) if len(head_joints) == 7 else math.nan
@@ -609,7 +607,7 @@ class ReachyMotion:
                 abs_tol=1e-9,
             ):
                 raise ValueError("tracking pose direction must match the sample")
-            if self._body_enabled:
+            if self._config.body_enabled:
                 self._handle.set_target(head=pose, body_yaw=sample.body_yaw)
             else:
                 self._handle.set_target(head=pose)

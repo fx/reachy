@@ -16,7 +16,11 @@ from typing import Final
 
 from reachy_contracts import FaceDetection
 from reachy_mini_ha_satellite.motion_validation import validate_gaze_sample
-from reachy_mini_ha_satellite.ports import GazeSample
+from reachy_mini_ha_satellite.ports import (
+    GazeSample,
+    MotionCommandResult,
+    MotionCommandStatus,
+)
 
 __all__ = [
     "AxisLimits",
@@ -38,6 +42,7 @@ __all__ = [
     "apply_deadband",
     "initial_controller_state",
     "predict_error",
+    "reduce_command_result",
     "step_axis",
     "step_controller",
     "update_estimator",
@@ -611,6 +616,38 @@ def initial_controller_state(
         target_visible=None,
         loss_started_at=None,
         last_safe_sample=neutral,
+    )
+
+
+def reduce_command_result(
+    candidate: ControllerState,
+    prior_safe: ControllerState,
+    result: MotionCommandResult,
+    config: ControllerConfig,
+) -> ControllerState:
+    """Commit one daemon result or atomically restore the prior safe trajectory."""
+    evidence = ("command", result.call)
+    if result.status is MotionCommandStatus.REJECTED:
+        return replace(
+            candidate,
+            world_yaw=prior_safe.world_yaw,
+            elevation=prior_safe.elevation,
+            body_yaw=prior_safe.body_yaw,
+            last_safe_sample=prior_safe.last_safe_sample,
+            fault=ControllerFault.COMMAND,
+            recovery_valid_streak=0,
+            recovery_evidence=evidence,
+        )
+    if candidate.fault is not ControllerFault.COMMAND:
+        return candidate
+    independent = evidence != candidate.recovery_evidence
+    streak = candidate.recovery_valid_streak + (1 if independent else 0)
+    recovered = streak >= config.workspace_recovery_samples
+    return replace(
+        candidate,
+        fault=ControllerFault.NONE if recovered else ControllerFault.COMMAND,
+        recovery_valid_streak=0 if recovered else streak,
+        recovery_evidence=None if recovered else evidence,
     )
 
 

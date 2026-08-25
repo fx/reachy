@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Final
 
 from reachy_contracts import FaceDetection, NormalisedPoint
@@ -26,9 +26,15 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     HeadMeasurement,
     ImagePoint,
     initial_controller_state,
+    reduce_command_result,
     step_controller,
 )
-from reachy_mini_ha_satellite.ports import GazeSample
+from reachy_mini_ha_satellite.ports import (
+    GazeSample,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
+)
 
 _DEGREES: Final = math.pi / 180.0
 
@@ -486,35 +492,22 @@ class GazePlant:
                     at,
                 )
                 last_command_accepted = not rejected
-                if rejected:
-                    state = replace(
-                        state,
-                        world_yaw=previous_state.world_yaw,
-                        elevation=previous_state.elevation,
-                        body_yaw=previous_state.body_yaw,
-                        last_safe_sample=previous_state.last_safe_sample,
-                        fault=ControllerFault.COMMAND,
-                        recovery_valid_streak=0,
-                        recovery_evidence=("command", command_call),
-                    )
-                else:
-                    if state.fault is ControllerFault.COMMAND:
-                        streak = state.recovery_valid_streak + 1
-                        recovered = (
-                            streak >= self._controller.workspace_recovery_samples
-                        )
-                        state = replace(
-                            state,
-                            fault=(
-                                ControllerFault.NONE
-                                if recovered
-                                else ControllerFault.COMMAND
-                            ),
-                            recovery_valid_streak=0 if recovered else streak,
-                            recovery_evidence=(
-                                None if recovered else ("command", command_call)
-                            ),
-                        )
+                command_result = MotionCommandResult(
+                    (
+                        MotionCommandStatus.REJECTED
+                        if rejected
+                        else MotionCommandStatus.ACCEPTED
+                    ),
+                    MotionFault.COMMAND if rejected else MotionFault.NONE,
+                    command_call,
+                )
+                state = reduce_command_result(
+                    state,
+                    previous_state,
+                    command_result,
+                    self._controller,
+                )
+                if not rejected:
                     commands.append(
                         _PendingCommand(
                             at + self._config.command_delay,

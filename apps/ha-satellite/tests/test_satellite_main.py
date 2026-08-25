@@ -986,6 +986,9 @@ class TestTheLoop:
         assert failed_state.fault is ControllerFault.COMMAND
         assert failed_state.last_safe_sample == before
         assert motion.coordinated_gaze == []
+        failed_event = application.controller_diagnostics()[-1]
+        assert failed_event["command_accepted"] is False
+        assert failed_event["fault"] == "command"
 
         clock.advance(0.05)
         application.tick()
@@ -999,6 +1002,7 @@ class TestTheLoop:
         assert recovered_state.fault is ControllerFault.NONE
         assert recovered_state.last_safe_sample == before
         assert len(motion.coordinated_gaze) == 2
+        assert application.controller_diagnostics()[-1]["command_accepted"] is True
 
 
 class TestDisabledGazeStartup:

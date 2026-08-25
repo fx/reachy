@@ -21,9 +21,11 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     ControllerFault,
     ControllerMode,
     ControllerState,
+    ControllerStep,
     GazeObservation,
     HeadMeasurement,
     initial_controller_state,
+    reduce_command_result,
     step_controller,
 )
 from reachy_mini_ha_satellite.behaviour.intents import (
@@ -137,7 +139,9 @@ class SatelliteBehaviour:
         self._last_antennas: AntennaPose | None = None
         self._outcome = GazeOutcome.UNKNOWN
         self._idle_since: float | None = now
-        self._pending_command_state: ControllerState | None = None
+        self._pending_prior_state: ControllerState | None = None
+        self._pending_command_step: ControllerStep | None = None
+        self._pending_observation_age: float | None = None
 
     @property
     def state(self) -> PipelineState:
@@ -238,15 +242,22 @@ class SatelliteBehaviour:
         command_ready = result.state.head_initialized and (
             not self._config.body_enabled or result.state.body_feedback.initialized
         )
+        received_at = prepared.directive.received_at
+        observation_age = (
+            None if received_at is None else max(0.0, prepared.now - received_at)
+        )
         intents: list[MotionIntent] = []
-        if command_ready and (
+        emitted = command_ready and (
             settled_handoff
             or result.state.fault is ControllerFault.COMMAND
             or (
                 now_owned and (not previously_owned or result.sample != previous_sample)
             )
-        ):
-            self._pending_command_state = previous_controller
+        )
+        if emitted:
+            self._pending_prior_state = previous_controller
+            self._pending_command_step = result
+            self._pending_observation_age = observation_age
             intents.append(CommandGaze(result.sample))
         intents.extend(
             self._express(
@@ -256,53 +267,44 @@ class SatelliteBehaviour:
                 force_head=settled_handoff,
             )
         )
-        received_at = prepared.directive.received_at
-        self._diagnostics.record(
-            result,
-            at=prepared.now,
-            observation_age=(
-                None if received_at is None else max(0.0, prepared.now - received_at)
-            ),
-            emitted=any(isinstance(intent, CommandGaze) for intent in intents),
-        )
+        if not emitted:
+            self._diagnostics.record(
+                result,
+                at=prepared.now,
+                observation_age=observation_age,
+                emitted=False,
+            )
         return tuple(intents)
 
     def complete_command(self, result: MotionCommandResult) -> None:
-        """Commit an accepted sample or restore the prior safe trajectory atomically."""
-        previous = self._pending_command_state
-        self._pending_command_state = None
-        if result.status is MotionCommandStatus.REJECTED:
-            if previous is None:
-                previous = self._controller
-            self._controller = replace(
-                self._controller,
-                world_yaw=previous.world_yaw,
-                elevation=previous.elevation,
-                body_yaw=previous.body_yaw,
-                last_safe_sample=previous.last_safe_sample,
-                fault=ControllerFault.COMMAND,
-                recovery_valid_streak=0,
-                recovery_evidence=("command", result.call),
-            )
+        """Reduce one command transaction and then record its completed evidence."""
+        previous = self._pending_prior_state
+        pending = self._pending_command_step
+        observation_age = self._pending_observation_age
+        self._pending_prior_state = None
+        self._pending_command_step = None
+        self._pending_observation_age = None
+        if previous is None or pending is None:
             return
-        if self._controller.fault is not ControllerFault.COMMAND:
-            return
-        evidence = ("command", result.call)
-        independent = evidence != self._controller.recovery_evidence
-        streak = self._controller.recovery_valid_streak + (1 if independent else 0)
-        self._controller = replace(
-            self._controller,
-            fault=(
-                ControllerFault.NONE
-                if streak >= self._config.workspace_recovery_samples
-                else ControllerFault.COMMAND
-            ),
-            recovery_valid_streak=(
-                0 if streak >= self._config.workspace_recovery_samples else streak
-            ),
-            recovery_evidence=(
-                None if streak >= self._config.workspace_recovery_samples else evidence
-            ),
+        self._controller = reduce_command_result(
+            pending.state,
+            previous,
+            result,
+            self._config,
+        )
+        at = pending.state.last_step_at
+        if at is None:
+            raise AssertionError("an emitted controller command must belong to a tick")
+        diagnostic_step = replace(
+            pending,
+            state=replace(pending.state, fault=self._controller.fault),
+        )
+        self._diagnostics.record(
+            diagnostic_step,
+            at=at,
+            observation_age=observation_age,
+            emitted=True,
+            command_accepted=result.status is MotionCommandStatus.ACCEPTED,
         )
 
     @staticmethod

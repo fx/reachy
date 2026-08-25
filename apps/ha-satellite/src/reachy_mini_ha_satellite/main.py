@@ -730,7 +730,10 @@ class SatelliteApplication:
 
     def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
         """Return the behavior layer's bounded private controller evidence."""
-        return tuple(dict(event) for event in self._behaviour.controller_diagnostics())
+        return cast(
+            "tuple[dict[str, object], ...]",
+            self._behaviour.controller_diagnostics(),
+        )
 
     def reset_controller_diagnostics(self) -> None:
         """Clear controller diagnostics and no application or motion state."""
