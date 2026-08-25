@@ -96,63 +96,184 @@ def test_req_074_each_observation_is_consumed_once() -> None:
 #:% age or the trajectory produced from an otherwise identical timed observation
 #:% sequence.
 def test_req_075_capture_clock_is_invariant_to_nominal_cadence() -> None:
-    """Different real poll cadences agree on age, estimate and common-time trajectory."""
-    config = ControllerConfig()
-    observations = (
-        _observation(0, 0.1, x=0.2),
-        _observation(1, 0.2, x=0.4),
-        _observation(2, 0.3, x=0.5),
+    """Independent common-time values reject receipt interpreted as capture."""
+    config = ControllerConfig(prediction_horizon=0.8, staleness_seconds=0.9)
+    observation_sequences = (
+        (
+            replace(
+                _observation(0, 0.14, x=0.12),
+                captured_at=0.03,
+                received_at=0.14,
+            ),
+            replace(
+                _observation(1, 0.31, x=0.34),
+                captured_at=0.17,
+                received_at=0.31,
+            ),
+            replace(
+                _observation(2, 0.52, x=0.61),
+                captured_at=0.33,
+                received_at=0.52,
+            ),
+        ),
+        (
+            replace(
+                _observation(0, 0.14, x=0.12),
+                captured_at=0.01,
+                received_at=0.14,
+            ),
+            replace(
+                _observation(1, 0.31, x=0.34),
+                captured_at=0.12,
+                received_at=0.31,
+            ),
+            replace(
+                _observation(2, 0.52, x=0.61),
+                captured_at=0.29,
+                received_at=0.52,
+            ),
+        ),
+    )
+    schedules = (
+        (0.14, 0.19, 0.24, 0.29, 0.31, 0.36, 0.41, 0.46, 0.51, 0.52, 0.57, 0.62),
+        (0.14, 0.24, 0.31, 0.41, 0.52, 0.62),
+    )
+    common_times = frozenset((0.14, 0.24, 0.31, 0.41, 0.52, 0.62))
+    expected = (
+        {
+            0.14: (
+                0.11,
+                0.21,
+                AxisState(-0.0007635815477, -0.0305432619099, -0.6108652381980),
+            ),
+            0.24: (
+                0.21,
+                0.31,
+                AxisState(-0.0106901416685, -0.1832595714594, -1.8325957145940),
+            ),
+            0.31: (
+                0.14,
+                0.24,
+                AxisState(-0.0295536602240, -0.3591887600604, -2.6878070480713),
+            ),
+            0.41: (
+                0.24,
+                0.34,
+                AxisState(-0.0794351702460, -0.6384414403795, -2.7925268031909),
+            ),
+            0.52: (
+                0.19,
+                0.29,
+                AxisState(-0.1665585158471, -0.9456193887305, -2.7925268031909),
+            ),
+            0.62: (
+                0.29,
+                0.39,
+                AxisState(-0.2621938322101, -0.9599310885969, -1.5707963267949),
+            ),
+        },
+        {
+            0.14: (
+                0.13,
+                0.23,
+                AxisState(-0.0007635815477, -0.0305432619099, -0.6108652381980),
+            ),
+            0.24: (
+                0.23,
+                0.33,
+                AxisState(-0.0129808863117, -0.2138028333693, -1.8325957145940),
+            ),
+            0.31: (
+                0.19,
+                0.29,
+                AxisState(-0.0345322119153, -0.4019493267343, -2.6878070480713),
+            ),
+            0.41: (
+                0.29,
+                0.39,
+                AxisState(-0.0886897786047, -0.6812020070534, -2.7925268031909),
+            ),
+            0.52: (
+                0.23,
+                0.33,
+                AxisState(-0.1789520988655, -0.9599310885969, -2.5339007413045),
+            ),
+            0.62: (
+                0.33,
+                0.43,
+                AxisState(-0.2749452077252, -0.9599310885969, -1.3121702649085),
+            ),
+        },
     )
 
-    def run(interval: float) -> dict[float, tuple[float, object, AxisState]]:
+    def run(
+        sequence: tuple[GazeObservation, ...],
+        schedule: tuple[float, ...],
+    ) -> dict[float, tuple[float, float, AxisState]]:
         state = initial_controller_state(config)
         latest: GazeObservation | None = None
-        records: dict[float, tuple[float, object, AxisState]] = {}
-        at = interval
-        while at <= 0.4 + 1e-12:
-            available = [item for item in observations if item.received_at <= at]
+        prior_at = schedule[0] - 0.05
+        records: dict[float, tuple[float, float, AxisState]] = {}
+        for at in schedule:
+            available = [item for item in sequence if item.received_at <= at]
             if available:
                 latest = available[-1]
             result = step_controller(
                 state,
                 latest,
                 now=at,
-                dt=interval,
+                dt=at - prior_at,
                 config=config,
             )
             state = result.state
-            rounded = round(at, 10)
-            if math.isclose(rounded % 0.1, 0.0, abs_tol=1e-9):
-                assert latest is not None
-                records[rounded] = (
-                    rounded - latest.captured_at,
-                    state.estimator,
+            if at in common_times:
+                records[at] = (
+                    result.prediction_horizon - config.actuator_delay,
+                    result.prediction_horizon,
                     state.world_yaw,
                 )
-            at = round(at + interval, 10)
+            prior_at = at
         return records
 
-    fast = run(0.05)
-    slow = run(0.1)
-    assert fast.keys() == slow.keys()
-    for at in fast:
-        fast_age, fast_estimator, fast_axis = fast[at]
-        slow_age, slow_estimator, slow_axis = slow[at]
-        assert fast_age == pytest.approx(slow_age)
-        assert fast_estimator == slow_estimator
-        common_interval = 0.1
-        assert fast_axis.position == pytest.approx(
-            slow_axis.position,
-            abs=config.yaw_limits.max_velocity * common_interval,
-        )
-        assert fast_axis.velocity == pytest.approx(
-            slow_axis.velocity,
-            abs=config.yaw_limits.max_acceleration * common_interval,
-        )
-        assert fast_axis.acceleration == pytest.approx(
-            slow_axis.acceleration,
-            abs=config.yaw_limits.max_jerk * common_interval,
-        )
+    def assert_matches_oracle(
+        actual: dict[float, tuple[float, float, AxisState]],
+        oracle: dict[float, tuple[float, float, AxisState]],
+    ) -> None:
+        assert actual.keys() == oracle.keys()
+        time_epsilon = 1e-9
+        for at, (expected_age, expected_horizon, expected_axis) in oracle.items():
+            age, horizon, axis = actual[at]
+            assert age == pytest.approx(expected_age, abs=1e-12)
+            assert horizon == pytest.approx(expected_horizon, abs=1e-12)
+            assert axis.position == pytest.approx(
+                expected_axis.position,
+                abs=config.yaw_limits.max_velocity * time_epsilon,
+            )
+            assert axis.velocity == pytest.approx(
+                expected_axis.velocity,
+                abs=config.yaw_limits.max_acceleration * time_epsilon,
+            )
+            assert axis.acceleration == pytest.approx(
+                expected_axis.acceleration,
+                abs=config.yaw_limits.max_jerk * time_epsilon,
+            )
+
+    for sequence, schedule, oracle in zip(
+        observation_sequences,
+        schedules,
+        expected,
+        strict=True,
+    ):
+        assert_matches_oracle(run(sequence, schedule), oracle)
+
+    receipt_as_capture = tuple(
+        replace(observation, captured_at=observation.received_at)
+        for observation in observation_sequences[0]
+    )
+    mutated = run(receipt_as_capture, schedules[0])
+    assert mutated[0.14][0] != pytest.approx(expected[0][0.14][0], abs=1e-12)
+    with pytest.raises(AssertionError):
+        assert_matches_oracle(mutated, expected[0])
 
 
 #:= docs/specs/gaze-control/index.md#req-076-observation-discontinuities-reset-prediction
