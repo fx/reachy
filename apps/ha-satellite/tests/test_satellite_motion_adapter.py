@@ -79,6 +79,8 @@ class TestTheHeadPose:
 
 def _directive(
     *,
+    source: DetectionSource = DetectionSource.REMOTE,
+    generation: int = 0,
     sequence: int = 1,
     captured_at: float = 0.0,
     received_at: float = 0.1,
@@ -89,9 +91,9 @@ def _directive(
     detections = Detections(
         faces=(face(x, y),),
         fresh=True,
-        source=DetectionSource.REMOTE,
+        source=source,
         age_seconds=received_at - captured_at,
-        generation=0,
+        generation=generation,
         sequence=sequence,
         captured_at=captured_at,
         received_at=received_at,
@@ -329,6 +331,44 @@ class TestCaptureTimeCalibration:
                 FakeRobot(),
                 tick_seconds=MIN_BEHAVIOUR_TICK_SECONDS / 2.0,
             )
+
+    def test_advancing_future_identities_replace_deferred_watermarks(self) -> None:
+        """Each source retains one retryable current identity, never stale predecessors."""
+        robot = FakeRobot()
+        motion = ReachyMotion(robot)
+        motion.acquire(0.0)
+        latest: dict[DetectionSource, GazeDirective] = {}
+        for source in DetectionSource:
+            for generation in range(20):
+                directive = _directive(
+                    source=source,
+                    generation=generation,
+                    sequence=generation + 1,
+                    captured_at=1.0,
+                    received_at=1.1,
+                )
+                assert (
+                    motion.calibrate(directive, 0.0).state is CalibrationStatus.DEFERRED
+                )
+                latest[source] = directive
+
+        assert len(motion._deferred) == len(DetectionSource)
+        stale = _directive(
+            source=DetectionSource.REMOTE,
+            generation=18,
+            sequence=19,
+            captured_at=1.0,
+            received_at=1.1,
+        )
+        assert motion.calibrate(stale, 0.0).state is CalibrationStatus.REJECTED
+
+        motion.observe(1.0)
+        current = motion.calibrate(latest[DetectionSource.REMOTE], 1.0)
+
+        assert current.state is CalibrationStatus.ACCEPTED
+        assert motion.calibrate(stale, 1.0).state is CalibrationStatus.REJECTED
+        assert len(motion._cache) == 1
+        assert len(motion._deferred) == len(DetectionSource) - 1
 
     def test_capture_after_newest_history_defers_once_then_rejects(self) -> None:
         """Future capture is bounded defer, not pose extrapolation or hot retry."""

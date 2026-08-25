@@ -359,7 +359,7 @@ class ReachyMotion:
             maximum_samples=history_samples,
         )
         self._cache: dict[DetectionSource, tuple[tuple[int, int], GazeCalibration]] = {}
-        self._deferred: dict[tuple[DetectionSource, int, int], int] = {}
+        self._deferred: dict[DetectionSource, tuple[int, int]] = {}
         self._acquired = False
         self._released = False
         self._last_head_measurement: tuple[float, float, float] | None = None
@@ -429,9 +429,16 @@ class ReachyMotion:
         ):
             return GazeCalibration(CalibrationStatus.REJECTED)
         source, generation, sequence = identity
+        candidate = generation, sequence
+        deferred = self._deferred.get(source)
+        if deferred is not None and candidate < deferred:
+            return GazeCalibration(CalibrationStatus.REJECTED)
         cached = self._cache.get(source)
-        if cached is not None and cached[0] == (generation, sequence):
-            return cached[1]
+        if cached is not None:
+            if cached[0] == candidate:
+                return cached[1]
+            if candidate < cached[0]:
+                return GazeCalibration(CalibrationStatus.REJECTED)
         if not self._acquired:
             self.acquire(now)
         if self.released:
@@ -443,9 +450,8 @@ class ReachyMotion:
         if directive.captured_at < bounds[0]:
             return self._cache_result(identity, CalibrationStatus.REJECTED)
         if directive.captured_at > bounds[1]:
-            deferred = self._deferred.get(identity, 0)
-            if deferred < 1:
-                self._deferred[identity] = deferred + 1
+            if deferred != candidate:
+                self._deferred[source] = candidate
                 return GazeCalibration(CalibrationStatus.DEFERRED)
             return self._cache_result(identity, CalibrationStatus.REJECTED)
 
@@ -508,7 +514,7 @@ class ReachyMotion:
             return self._cache_result(identity, CalibrationStatus.REJECTED)
         result = GazeCalibration(CalibrationStatus.ACCEPTED, target)
         self._cache[source] = ((generation, sequence), result)
-        self._deferred.pop(identity, None)
+        self._deferred.pop(source, None)
         return result
 
     def command_gaze(self, sample: GazeSample) -> None:
@@ -557,5 +563,5 @@ class ReachyMotion:
         source, generation, sequence = identity
         result = GazeCalibration(state)
         self._cache[source] = ((generation, sequence), result)
-        self._deferred.pop(identity, None)
+        self._deferred.pop(source, None)
         return result
