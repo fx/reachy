@@ -11,18 +11,17 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** Seven specs are
-registered in `.duvet/config.toml` — perception, groundstation, robot-link,
-reachyctl, ha-satellite, provisioning and benchmarks — so `duvet report --ci`
-and `duvet query -c implementation` check those 64 requirements and nothing
-else. The snapshot is nonetheless larger than that: duvet loads a specification
-an annotation points at whether or not it is registered, so the file lists the
-requirement text every annotation cites — including the annotations that already
-point at architecture, which is not registered. Regeneration is byte-identical,
-so CI is deterministic — and a green run is evidence about those seven specs
-only. A spec is registered by the change that implements it. See
-`.duvet/config.toml` for why the one remaining spec is unregistered, and for why
-annotations are written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
+**`.duvet/snapshot.txt` records annotations, not coverage.** All nine specs and
+all 92 requirements are now registered in `.duvet/config.toml`, so `duvet report
+--ci` and `duvet query -c implementation` check the complete requirement set.
+The distinction still matters: duvet also loads any specification an annotation
+points at before registration, which is why an older snapshot could contain more
+requirement text than the gate covered. That historical mismatch ended when 0015
+registered architecture and 0019 registered gaze-control with its final safety,
+diagnostics and deterministic acceptance evidence in place. Regeneration is
+byte-identical, and a green run is now evidence about all nine specs. See
+`.duvet/config.toml` for each registration rationale and for why annotations are
+written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
 
 An anchor duvet resolves is **not** always the anchor GitHub renders. Duvet
 derives its section identifier from the heading with its own rules, and an

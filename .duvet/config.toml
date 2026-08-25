@@ -29,7 +29,7 @@
 # EVERY SPEC IS REGISTERED. THIS IS THE STATE THIS COMMENT HAS BEEN DESCRIBING
 # AS THE GOAL SINCE BEFORE ANY CODE EXISTED.
 #
-# `docs/specs/` holds 8 specs carrying 73 requirements, and all 8 are registered
+# `docs/specs/` holds 9 specs carrying 92 requirements, and all 9 are registered
 # below, so `duvet query -c implementation` and `duvet report --ci` mean what
 # they appear to mean for every requirement this repository has:
 #
@@ -69,7 +69,13 @@
 #     implementing change lands, so the rule is that a spec is registered by the
 #     change that completes it, in that change's pull request, alongside the
 #     annotations that make it pass. Architecture is completed by the change
-#     that finishes the plan, so that is where it is registered.
+#     that finishes the plan, so that is where it is registered;
+#   - gaze-control, whose 19 — REQ-074 to REQ-092 — are implemented across
+#     change 0019's observation foundation, coordinated runtime integration and
+#     final safety evidence. It is registered by 0019's final implementation,
+#     which completes the deterministic acceptance matrix, bounded diagnostics,
+#     recovery validation and rollout contract without claiming live canary
+#     outcome evidence that does not yet exist.
 #
 # The rule that governed the order also governs anything added later: a new spec
 # is registered by the change that completes it, not by the change that writes
@@ -169,6 +175,16 @@ format = "markdown"
 # siblings are the mechanism the requirement describes.
 [[specification]]
 source = "docs/specs/architecture/index.md"
+format = "markdown"
+
+# --- Gaze control: implemented across change 0019's three reviewed tasks -----
+# Registered by 0019's final implementation task, which adds the unified safety
+# state, bounded private diagnostics, named REQ-074–092 acceptance matrix and
+# rollback-ready rollout contract after the first two tasks established the
+# estimator, deterministic plant and coordinated runtime. Live canary outcome
+# bookkeeping remains pending and is not represented as implementation evidence.
+[[specification]]
+source = "docs/specs/gaze-control/index.md"
 format = "markdown"
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses

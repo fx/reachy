@@ -369,7 +369,9 @@ credential and useless for learning one. A separate control unsets it.
 |---|---|
 | `/` | The settings form and the resolved configuration |
 | `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once, which bootstrap values are read-only and which compatibility inputs are ignored |
-| `/status` | What the robot is doing: pipeline state, why the head is where it is |
+| `/status` | What the robot is doing: pipeline and gaze state plus controller mode, fault and derived safe hold |
+| `/diagnostics/controller` | `GET` — bounded scalar controller events with no image, credential or installation identity |
+| `/diagnostics/controller/reset` | `POST` — same-origin diagnostics-only reset; it does not move the robot or change controller state |
 | `/stop` | `POST` — stops the application so a restart-required change can take effect |
 | `/livez` | Whether the interface is up |
 
@@ -424,6 +426,106 @@ statement that something upstream stopped. `/status` says which of the four
 situations it is: `tracking`, `nobody` (a live detector reported an empty frame),
 `stale` (results stopped arriving), or `unknown` (nothing has produced a result
 yet).
+
+---
+
+## Predictive gaze canary and rollback
+
+This is the rollback contract for the private head-only and coordinated-body
+canaries. It declares the decision thresholds before motion begins; it is not a
+record that either canary ran.
+
+**Command and output evidence: ⏳ PENDING ACTUAL COORDINATOR EXECUTION.** No
+transcript is supplied here because this repository has no robot attached. The
+coordinator records only scrubbed aggregate outcomes after executing against the
+private robot; endpoint, account, installation and raw-log details remain
+private.
+
+### Retain the rollback target first
+
+Before installing a candidate, retain the last released satellite wheel and its
+published checksum in private storage, verify that checksum, and make private
+exact backups of every resolved configuration layer the installation uses,
+including the daemon environment and application overrides. The backup names and
+contents must carry no installation identifier into this repository. A version
+label or remembered defaults are not a backup: rollback uses the retained bytes
+and the exact configuration that was running.
+
+`REACHY_SATELLITE_BODY_MOTION_ENABLED` must be `false` before the head-only
+canary. It may become `true` only for the separately approved body canary after
+all head-only evidence passes, and it must be restored to `false` when that
+canary or any rollback ends. Body motion remains restart-bound and false by
+default regardless of a successful canary.
+
+### Abort thresholds
+
+Abort the current canary immediately, issue no further candidate motion and run
+the rollback below on any of these observations:
+
+- any non-finite command or measurement, malformed/non-canonical pose, atomic
+  world/head/body identity failure, derivative-envelope breach or configured
+  workspace rejection;
+- any non-`none` controller fault or `safe_hold: true` in `/status`, including
+  timing, pose, calibration, derivative, workspace, body-feedback or command
+  acceptance failure;
+- `/livez` stops returning its successful response, the application leaves its
+  running state, or `/status` cannot be read;
+- head-only step evidence misses the gaze-control envelope: normalized error
+  above `0.025` three seconds after a supported 35-degree step, angular
+  overshoot above 2 degrees, or 5-degree-per-second horizontal or vertical
+  tracking exceeding 1.5 degrees mean lag, 2 degrees maximum lag, or 1.5 degrees
+  lag half a second after stopping;
+- perception remains `unknown` or `stale` for more than one configured staleness
+  window while the canary target is intentionally visible, or a fresh result
+  cannot transition back to tracking;
+- the groundstation session fails to remain healthy, Home Assistant loses the
+  existing device or its entities, or one complete wake/listen/process/respond
+  exchange fails;
+- during the body canary, body feedback is missing or divergent long enough to
+  fault, a coordinated command fails exact world-gaze equals body plus
+  head-on-body identity, any body derivative exceeds its envelope, or body motion
+  occurs while the restart-bound setting is false.
+
+A reset of `/diagnostics/controller` is never remediation for one of these
+conditions. It clears evidence only; it neither clears a controller fault nor
+changes motion, settings, perception or pipeline state.
+
+### Staged execution
+
+1. With body motion false, install the verified candidate and run the head-only
+   deterministic-envelope canary while observing `/livez`, `/status`, bounded
+   controller diagnostics, perception, the groundstation session and the
+   existing Home Assistant device.
+2. If every head-only threshold passes, stop the application, privately enable
+   body motion, restart, and run the separately gated coordinated-body canary
+   against the same abort rules plus the body-specific rules above.
+3. Stop after the evidence interval, restore body motion to false, restart and
+   verify the head-only steady state. Do not infer a shipping-default decision
+   from a canary; changing the default requires its own approved proposal.
+
+### Rollback
+
+On any abort, or when the private canary is intentionally ended without approval
+to retain the candidate:
+
+1. restore the private exact configuration backup with body motion explicitly
+   false;
+2. stop the satellite before replacing files;
+3. restore the retained checksum-verified released wheel and the exact backed-up
+   configuration, without merging candidate values into it;
+4. restart the satellite;
+5. verify the application stays running, `/livez` succeeds, `/status` is readable
+   with controller fault `none` and safe hold false, and perception can move from
+   a fresh result to tracking;
+6. verify the groundstation session is healthy, Home Assistant still owns the
+   pre-existing device and entities, and a complete voice exchange succeeds;
+7. confirm body motion remains false and retain only scrubbed aggregate evidence
+   of the abort and recovery.
+
+The rollback is incomplete if only the wheel or only the configuration was
+restored. Both are one tested target, and all application, liveness, controller,
+perception, groundstation and Home Assistant checks above must pass before the
+robot is called recovered.
 
 ---
 

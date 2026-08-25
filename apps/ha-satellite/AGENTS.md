@@ -3,16 +3,21 @@
 The robot-side ESPHome voice satellite for Home Assistant. Distribution
 `reachy-mini-ha-satellite`, import name `reachy_mini_ha_satellite`.
 
-**Spec:** [ha-satellite](../../docs/specs/ha-satellite/).
-**Fills this in:**
+**Specs:** [ha-satellite](../../docs/specs/ha-satellite/) and
+[gaze-control](../../docs/specs/gaze-control/).
+**Fills these in:**
 [0011](../../docs/changes/0011-satellite-esphome-vendoring.md) (done),
 [0012](../../docs/changes/0012-satellite-ports-and-adapters.md) (done),
-[0013](../../docs/changes/0013-satellite-behaviour-and-ui.md) (done) and
+[0013](../../docs/changes/0013-satellite-behaviour-and-ui.md) (done),
 [0016](../../docs/changes/0016-audible-playback.md) (done, on the robot as well
 as in the suite: announcements were played through the real speaker and judged
 audible across a room, and that change's own Outcome section records the
-levels). `docs/specs/ha-satellite/index.md` is registered in
-`.duvet/config.toml`, so all eleven of its requirements are traced.
+levels), and
+[0019](../../docs/changes/0019-predictive-gaze-and-coordinated-motion.md), whose
+implementation and deterministic acceptance evidence are present while its
+private head/body canary outcome bookkeeping remains pending. Both specs are
+registered in `.duvet/config.toml`; repository traceability covers all nine specs
+and all 92 requirements.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -130,6 +135,18 @@ deployment can get irreversibly wrong.
   directives, measured motion and coordinated samples must remain resolvable
   runtime types there; adapters and behavior import them rather than redeclaring
   aliases or leaving protocol annotations behind `TYPE_CHECKING`.
+- **Controller fault and lifecycle are independent.** Stable fault categories
+  derive `safe_hold`; they are never encoded as tracking modes. One validated
+  `ControllerConfig` instance is shared by behavior and the production motion
+  adapter, every atomic q/v/a sample is checked before promotion or hardware,
+  and a failed daemon call cannot promote its candidate. Recovery counts only
+  configured consecutive independent timestamps, observation identities,
+  candidates or command calls; replayed evidence does not advance it.
+- **Controller diagnostics are bounded and identifier-free.** The pure fixed-size
+  ring retains only its fixed scalar/enum/boolean/null schema. `/status` adds the
+  mode/fault/safe-hold summary; `GET /diagnostics/controller` reads the bounded
+  events and same-origin `POST /diagnostics/controller/reset` clears only that
+  ring, without changing controller, motion, settings or perception state.
 - **Four released gaze settings are compatibility inputs only.**
   `gaze_deadzone`, `gaze_smoothing`, `camera_horizontal_fov_degrees` and
   `camera_vertical_fov_degrees` remain accepted and validated so upgrades keep
