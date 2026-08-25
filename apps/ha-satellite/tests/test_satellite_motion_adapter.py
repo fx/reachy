@@ -16,7 +16,6 @@ from satellite_support import FakeMedia, FakeRobot, face
 from reachy_contracts import NormalisedPoint
 from reachy_mini_ha_satellite.adapters.daemon import PoseMatrix
 from reachy_mini_ha_satellite.adapters.motion_reachy import (
-    CalibrationState,
     ReachyMotion,
     TimedPoseHistory,
     head_pose_matrix,
@@ -28,6 +27,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
 from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective, GazeSelector
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
+    CalibrationStatus,
     Detections,
     DetectionSource,
     HeadPose,
@@ -203,7 +203,7 @@ class TestCaptureTimeCalibration:
 
         result = motion.calibrate(_directive(received_at=0.4), 1.0)
 
-        assert result.state is CalibrationState.ACCEPTED
+        assert result.state is CalibrationStatus.ACCEPTED
         assert result.target is not None
         assert result.target.world_yaw == pytest.approx(math.radians(35.0))
         assert robot.image_gaze[0][2:] == (0.0, False)
@@ -239,7 +239,7 @@ class TestCaptureTimeCalibration:
 
         result = motion.calibrate(_directive(), 0.0)
 
-        assert result.state is CalibrationState.ACCEPTED
+        assert result.state is CalibrationStatus.ACCEPTED
         assert len(robot.image_gaze) == 2
 
     def test_capture_after_newest_history_defers_once_then_rejects(self) -> None:
@@ -253,8 +253,8 @@ class TestCaptureTimeCalibration:
         second = motion.calibrate(directive, 0.0)
         third = motion.calibrate(directive, 0.0)
 
-        assert first.state is CalibrationState.DEFERRED
-        assert second.state is CalibrationState.REJECTED
+        assert first.state is CalibrationStatus.DEFERRED
+        assert second.state is CalibrationStatus.REJECTED
         assert third is second
         assert robot.image_gaze == []
 
@@ -268,7 +268,7 @@ class TestCaptureTimeCalibration:
         first = motion.calibrate(directive, 0.0)
         cached = motion.calibrate(directive, 0.1)
 
-        assert first.state is CalibrationState.REJECTED
+        assert first.state is CalibrationStatus.REJECTED
         assert cached is first
         assert robot.image_gaze == []
 
@@ -276,13 +276,13 @@ class TestCaptureTimeCalibration:
 class TestMeasuredFeedbackFailures:
     """Unavailable or malformed feedback is represented as missing, never a crash."""
 
-    def test_pose_failure_returns_no_body_measurement(self) -> None:
-        """A failed measured pose read leaves calibration history unchanged."""
+    def test_pose_failure_preserves_independent_body_measurement(self) -> None:
+        """A failed pose-history read cannot manufacture a body-feedback loss."""
         robot = FakeRobot(measured_head_poses=(RuntimeError("pose unavailable"),))
 
         measured = ReachyMotion(robot, body_enabled=True).observe(0.0)
 
-        assert measured is None
+        assert measured == 0.0
 
     @pytest.mark.parametrize(
         "joints",
@@ -467,7 +467,7 @@ class TestReleasingOnShutdown:
 
         result = motion.calibrate(_directive(), 0.0)
 
-        assert result.state is CalibrationState.REJECTED
+        assert result.state is CalibrationStatus.REJECTED
         assert robot.image_gaze == []
         assert robot.automatic_body_yaw == [False, True]
 

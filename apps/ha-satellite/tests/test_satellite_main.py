@@ -907,6 +907,23 @@ class TestTheLoop:
 class TestPredictiveTickTiming:
     """One injected clock read supplies both calibration time and exact controller dt."""
 
+    def test_disabled_gaze_skips_measurement_and_calibration(self) -> None:
+        """Restart-bound disable leaves only pure pipeline expression on each tick."""
+        motion = FakeMotion()
+        application = SatelliteApplication(
+            settings=_settings(face_tracking_enabled="false"),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(tracking_enabled=False, now=0.0),
+            clock=lambda: 1.0,
+        )
+
+        application.tick()
+
+        assert motion.observed == []
+        assert motion.calibrated == []
+
     def test_each_tick_reads_time_once_and_uses_exact_difference(
         self,
         monkeypatch: pytest.MonkeyPatch,

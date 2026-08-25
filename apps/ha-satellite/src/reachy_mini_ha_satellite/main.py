@@ -629,6 +629,7 @@ class SatelliteApplication:
         self._sleep = sleep
         self._tick_seconds = settings.behaviour_tick_seconds
         self._cleanup_timeout_seconds = cleanup_timeout_seconds
+        self._gaze_enabled = settings.face_tracking_enabled
         # What tells Home Assistant about a setting this application adopted.
         # Nothing until `publish_live_changes` is called, which is what an
         # application built without the speaker-boost control stays at.
@@ -727,12 +728,17 @@ class SatelliteApplication:
         previous = self._last_tick_at
         dt = 0.0 if previous is None else now - previous
         self._last_tick_at = now
-        measured_yaw = self._motion.observe(now)
+        measured_yaw = self._motion.observe(now) if self._gaze_enabled else None
         prepared = self._behaviour.prepare(self._perception.latest(), now)
-        calibration = self._motion.calibrate(prepared.directive, now)
+        calibration = (
+            self._motion.calibrate(prepared.directive, now)
+            if prepared.directive.face is not None
+            else None
+        )
         calibrated = (
             calibration.target
-            if calibration.state is CalibrationStatus.ACCEPTED
+            if calibration is not None
+            and calibration.state is CalibrationStatus.ACCEPTED
             else None
         )
         body_measurement = (

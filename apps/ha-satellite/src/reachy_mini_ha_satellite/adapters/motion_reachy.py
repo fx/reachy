@@ -8,6 +8,7 @@ returns an absolute world-gaze anchor to the pure behavior layer.
 
 from __future__ import annotations
 
+import contextlib
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -18,16 +19,10 @@ import numpy as np
 
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
+    CalibratedGaze,
+    CalibrationStatus,
+    GazeCalibration,
     HeadPose,
-)
-from reachy_mini_ha_satellite.ports import (
-    CalibratedGaze as CalibratedTarget,
-)
-from reachy_mini_ha_satellite.ports import (
-    CalibrationStatus as CalibrationState,
-)
-from reachy_mini_ha_satellite.ports import (
-    GazeCalibration as CalibrationResult,
 )
 
 if TYPE_CHECKING:
@@ -38,9 +33,6 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.ports import DetectionSource
 
 __all__ = [
-    "CalibratedTarget",
-    "CalibrationResult",
-    "CalibrationState",
     "ReachyMotion",
     "TimedPoseHistory",
     "head_pose_matrix",
@@ -337,14 +329,10 @@ class ReachyMotion:
         self._handle = handle
         self._body_enabled = body_enabled
         self._history = TimedPoseHistory()
-        self._cache: dict[
-            DetectionSource, tuple[tuple[int, int], CalibrationResult]
-        ] = {}
+        self._cache: dict[DetectionSource, tuple[tuple[int, int], GazeCalibration]] = {}
         self._deferred: dict[tuple[DetectionSource, int, int], int] = {}
         self._acquired = False
         self._released = False
-        self._auto_yaw_restored = False
-        self._measured_body_yaw: float | None = None
 
     @property
     def released(self) -> bool:
@@ -354,11 +342,6 @@ class ReachyMotion:
     def _terminal(self) -> bool:
         """Re-read terminal state across daemon callbacks that may release."""
         return self._released
-
-    @property
-    def measured_body_yaw(self) -> float | None:
-        """Return the latest valid measured body yaw."""
-        return self._measured_body_yaw
 
     def acquire(self, now: float) -> None:
         """Disable competing body yaw and seed measured state before gaze owns head."""
@@ -370,13 +353,16 @@ class ReachyMotion:
             self.observe(now)
 
     def observe(self, now: float) -> float | None:
-        """Append conservative measured pose and optional body feedback."""
+        """Sample independent pose history and optional body feedback."""
         if self._released:
             return None
-        try:
+        with contextlib.suppress(
+            RuntimeError,
+            TypeError,
+            ValueError,
+            np.linalg.LinAlgError,
+        ):
             self._history.append(now, self._handle.get_current_head_pose())
-        except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
-            return None
         if not self._body_enabled:
             return None
         try:
@@ -388,20 +374,19 @@ class ReachyMotion:
                 return None
         except (IndexError, RuntimeError, TypeError, ValueError):
             return None
-        self._measured_body_yaw = measured
         return measured
 
-    def calibrate(self, directive: GazeDirective, now: float) -> CalibrationResult:
+    def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
         """Calibrate one new actionable face identity, with bounded retry/reject."""
         if self._released or not directive.actionable or directive.face is None:
-            return CalibrationResult(CalibrationState.REJECTED)
+            return GazeCalibration(CalibrationStatus.REJECTED)
         identity = directive.identity
         if (
             identity is None
             or directive.captured_at is None
             or directive.received_at is None
         ):
-            return CalibrationResult(CalibrationState.REJECTED)
+            return GazeCalibration(CalibrationStatus.REJECTED)
         source, generation, sequence = identity
         cached = self._cache.get(source)
         if cached is not None and cached[0] == (generation, sequence):
@@ -409,37 +394,37 @@ class ReachyMotion:
         if not self._acquired:
             self.acquire(now)
         if self.released:
-            return CalibrationResult(CalibrationState.REJECTED)
+            return GazeCalibration(CalibrationStatus.REJECTED)
 
         bounds = self._history.bounds
         if bounds is None:
-            return self._cache_result(identity, CalibrationState.REJECTED)
+            return self._cache_result(identity, CalibrationStatus.REJECTED)
         if directive.captured_at < bounds[0]:
-            return self._cache_result(identity, CalibrationState.REJECTED)
+            return self._cache_result(identity, CalibrationStatus.REJECTED)
         if directive.captured_at > bounds[1]:
             deferred = self._deferred.get(identity, 0)
             if deferred < 1:
                 self._deferred[identity] = deferred + 1
-                return CalibrationResult(CalibrationState.DEFERRED)
-            return self._cache_result(identity, CalibrationState.REJECTED)
+                return GazeCalibration(CalibrationStatus.DEFERRED)
+            return self._cache_result(identity, CalibrationStatus.REJECTED)
 
         camera = self._handle.media.camera
         if camera is None:
-            return self._cache_result(identity, CalibrationState.REJECTED)
+            return self._cache_result(identity, CalibrationStatus.REJECTED)
         try:
             capture_rotation = self._history.rotation_at(directive.captured_at)
             if capture_rotation is None:
-                return self._cache_result(identity, CalibrationState.REJECTED)
+                return self._cache_result(identity, CalibrationStatus.REJECTED)
             u, v = image_pixel(directive.face.centre, *camera.resolution)
             bracket: tuple[np.ndarray, np.ndarray] | None = None
             target_rotation: np.ndarray | None = None
             for _attempt in range(2):
                 if self._terminal():
-                    return CalibrationResult(CalibrationState.REJECTED)
+                    return GazeCalibration(CalibrationStatus.REJECTED)
                 pre_pose = self._handle.get_current_head_pose()
                 pre = _pose_rotation(pre_pose, measured=True)
                 if self._terminal():
-                    return CalibrationResult(CalibrationState.REJECTED)
+                    return GazeCalibration(CalibrationStatus.REJECTED)
                 target_pose = self._handle.look_at_image(
                     u,
                     v,
@@ -447,17 +432,17 @@ class ReachyMotion:
                     perform_movement=False,
                 )
                 if self._terminal():
-                    return CalibrationResult(CalibrationState.REJECTED)
+                    return GazeCalibration(CalibrationStatus.REJECTED)
                 post_pose = self._handle.get_current_head_pose()
                 if self._terminal():
-                    return CalibrationResult(CalibrationState.REJECTED)
+                    return GazeCalibration(CalibrationStatus.REJECTED)
                 post = _pose_rotation(post_pose, measured=True)
                 if _rotation_distance(pre, post) <= _BRACKET_LIMIT:
                     bracket = pre, post
                     target_rotation = _pose_rotation(target_pose, measured=False)
                     break
             if bracket is None or target_rotation is None:
-                return self._cache_result(identity, CalibrationState.REJECTED)
+                return self._cache_result(identity, CalibrationStatus.REJECTED)
             query_rotation = _slerp(bracket[0], bracket[1], 0.5)
             query_pose = np.eye(4, dtype=np.float64)
             query_pose[:3, :3] = query_rotation
@@ -468,7 +453,7 @@ class ReachyMotion:
                 target_rotation,
             )
             yaw, elevation = _direction_angles(rebased)
-            target = CalibratedTarget(
+            target = CalibratedGaze(
                 source=source,
                 generation=generation,
                 sequence=sequence,
@@ -479,8 +464,8 @@ class ReachyMotion:
                 world_elevation=elevation,
             )
         except (IndexError, RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
-            return self._cache_result(identity, CalibrationState.REJECTED)
-        result = CalibrationResult(CalibrationState.ACCEPTED, target)
+            return self._cache_result(identity, CalibrationStatus.REJECTED)
+        result = GazeCalibration(CalibrationStatus.ACCEPTED, target)
         self._cache[source] = ((generation, sequence), result)
         self._deferred.pop(identity, None)
         return result
@@ -519,18 +504,17 @@ class ReachyMotion:
         if self._released:
             return
         self._released = True
-        if self._acquired and not self._auto_yaw_restored:
-            self._auto_yaw_restored = True
+        if self._acquired:
             self._handle.set_automatic_body_yaw(True)
 
     def _cache_result(
         self,
         identity: tuple[DetectionSource, int, int],
-        state: CalibrationState,
-    ) -> CalibrationResult:
+        state: CalibrationStatus,
+    ) -> GazeCalibration:
         """Cache one terminal calibration decision per detection source."""
         source, generation, sequence = identity
-        result = CalibrationResult(state)
+        result = GazeCalibration(state)
         self._cache[source] = ((generation, sequence), result)
         self._deferred.pop(identity, None)
         return result

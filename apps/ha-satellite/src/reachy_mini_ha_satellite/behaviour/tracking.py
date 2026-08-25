@@ -128,7 +128,6 @@ class GazeSelector:
         self._maximum_gap = maximum_gap
         self._epoch = 0
         self._current: GazeDirective | None = None
-        self._selected: FaceDetection | None = None
         self._watermarks: dict[DetectionSource, tuple[int, int]] = {}
 
     def select(self, detections: Detections) -> GazeDirective:
@@ -177,18 +176,17 @@ class GazeSelector:
             ):
                 discontinuity = True
 
+        previous_face = current.face if current is not None else None
         selected: FaceDetection | None
         associated = False
-        if self._selected is None:
+        if previous_face is None:
             selected = choose_face(detections.faces)
         else:
-            selected, associated = _associated_face(detections.faces, self._selected)
+            selected, associated = _associated_face(detections.faces, previous_face)
 
         if selected is None:
-            discontinuity = self._selected is not None or (
-                current is not None and current.outcome is GazeOutcome.TRACKING
-            )
-        elif (self._selected is not None and not associated) or (
+            discontinuity = previous_face is not None
+        elif (previous_face is not None and not associated) or (
             current is not None
             and current.outcome
             in {
@@ -202,7 +200,6 @@ class GazeSelector:
             self._break_continuity()
 
         self._watermarks[source] = generation, sequence
-        self._selected = selected
         directive = GazeDirective(
             GazeOutcome.TRACKING if selected is not None else GazeOutcome.NOBODY,
             source=source,
@@ -218,16 +215,15 @@ class GazeSelector:
 
     def stand_down(self) -> GazeDirective:
         """Return unknown after tracking is disabled, breaking continuity once."""
-        if self._selected is not None:
+        if self._current is not None and self._current.face is not None:
             self._break_continuity()
         directive = GazeDirective(GazeOutcome.UNKNOWN, target_epoch=self._epoch)
         self._current = directive
         return directive
 
     def _break_continuity(self) -> None:
-        """Advance the private target epoch and forget the selected face."""
+        """Advance the process-local target epoch."""
         self._epoch += 1
-        self._selected = None
 
     def _current_or_unknown(self) -> GazeDirective:
         """Return current state without allowing a replay to mutate it."""

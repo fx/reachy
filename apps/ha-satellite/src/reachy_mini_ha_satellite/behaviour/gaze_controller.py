@@ -1012,14 +1012,7 @@ def step_controller(
         body_measurement,
         now=now,
         config=config,
-        monitor=state.mode
-        in {
-            ControllerMode.ACTIVE,
-            ControllerMode.HOLD,
-            ControllerMode.RETURNING,
-            ControllerMode.WORKSPACE_HOLD,
-            ControllerMode.BODY_FEEDBACK_HOLD,
-        },
+        monitor=state.mode not in {ControllerMode.UNKNOWN, ControllerMode.IDLE},
     )
     if body_seed is not None:
         state = replace(state, body_yaw=body_seed, body_feedback=body_feedback)
@@ -1132,6 +1125,30 @@ def step_controller(
             yaw_goal = _return_velocity(state.world_yaw, config.yaw_limits)
             elevation_goal = _return_velocity(state.elevation, config.elevation_limits)
 
+    if body_feedback_hold:
+        world, elevation, body = _brake_hidden(state, dt, config)
+        held_state = replace(
+            state,
+            mode=ControllerMode.BODY_FEEDBACK_HOLD,
+            estimator=estimator,
+            deadband=deadband,
+            world_yaw=world,
+            elevation=elevation,
+            body_yaw=body,
+            body_feedback=body_feedback,
+            last_observation_identity=last_identity,
+            consumption_watermarks=watermarks,
+            target_visible=target_visible,
+            loss_started_at=loss_started,
+        )
+        return ControllerStep(
+            state=held_state,
+            observation_consumed=consumed,
+            estimator_reset=reset,
+            prediction_horizon=horizon,
+            stale=stale,
+        )
+
     world = step_axis(
         state.world_yaw,
         yaw_goal,
@@ -1166,30 +1183,6 @@ def step_controller(
         stall_dt=config.stall_integration_dt,
     )
     candidate = _sample(world, elevation, body, config)
-
-    if body_feedback_hold:
-        world, elevation, body = _brake_hidden(state, dt, config)
-        held_state = replace(
-            state,
-            mode=ControllerMode.BODY_FEEDBACK_HOLD,
-            estimator=estimator,
-            deadband=deadband,
-            world_yaw=world,
-            elevation=elevation,
-            body_yaw=body,
-            body_feedback=body_feedback,
-            last_observation_identity=last_identity,
-            consumption_watermarks=watermarks,
-            target_visible=target_visible,
-            loss_started_at=loss_started,
-        )
-        return ControllerStep(
-            state=held_state,
-            observation_consumed=consumed,
-            estimator_reset=reset,
-            prediction_horizon=horizon,
-            stale=stale,
-        )
 
     recovering = state.mode is ControllerMode.WORKSPACE_HOLD
     valid_streak = state.workspace_valid_streak

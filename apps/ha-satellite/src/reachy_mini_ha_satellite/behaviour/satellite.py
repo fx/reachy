@@ -197,6 +197,7 @@ class SatelliteBehaviour:
         """Advance one controller tick and return ordered gaze/expression intents."""
         observation = self._observation(prepared.directive, calibrated)
         previously_owned = self._owns_head()
+        previous_sample = self._controller.last_safe_sample
         result = step_controller(
             self._controller,
             observation,
@@ -210,7 +211,9 @@ class SatelliteBehaviour:
         settled_handoff = previously_owned and result.mode is ControllerMode.IDLE
 
         intents: list[MotionIntent] = []
-        if now_owned or settled_handoff:
+        if settled_handoff or (
+            now_owned and (not previously_owned or result.sample != previous_sample)
+        ):
             intents.append(CommandGaze(result.sample))
         intents.extend(
             self._express(

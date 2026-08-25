@@ -194,6 +194,33 @@ class TestTwoPhasePredictiveGaze:
         assert second is not None
         assert second.sample.world_yaw != first.sample.world_yaw
 
+    def test_unchanged_owned_sample_is_not_recommanded(self) -> None:
+        """A centered stationary face does not spend motor traffic at tick cadence."""
+        behaviour = SatelliteBehaviour(now=0.0)
+        detections = _seen(face(0.0, 0.0))
+        first_prepared = behaviour.prepare(detections, 0.1)
+        centered = replace(
+            _calibrated(first_prepared),
+            world_yaw=0.0,
+            world_elevation=0.0,
+        )
+        first = behaviour.finish(
+            first_prepared,
+            calibrated=centered,
+            body_measurement=None,
+            dt=0.0,
+        )
+        second_prepared = behaviour.prepare(detections, 0.15)
+        second = behaviour.finish(
+            second_prepared,
+            calibrated=centered,
+            body_measurement=None,
+            dt=0.05,
+        )
+
+        assert _gaze(first) is not None
+        assert _gaze(second) is None
+
     def test_calibration_failure_does_not_activate_a_never_observed_controller(
         self,
     ) -> None:
