@@ -800,8 +800,10 @@ class TestTheBootstrapSetting:
 
         assert resolution.sources["state_dir"] is SettingSource.ENVIRONMENT
 
-    def test_the_report_marks_it_unwritable_and_everything_else_writable(self) -> None:
-        """Which is what the page renders from."""
+    def test_the_report_marks_bootstrap_unwritable_and_current_values_writable(
+        self,
+    ) -> None:
+        """Compatibility rows are covered separately as ignored and read-only."""
         report = {
             row.name: row for row in configuration_report(load_settings(MINIMAL, {}))
         }

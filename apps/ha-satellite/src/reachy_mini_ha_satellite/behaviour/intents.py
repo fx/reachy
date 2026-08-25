@@ -15,12 +15,8 @@ release are composition-root lifecycle rather than movements and have no intent.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-from reachy_mini_ha_satellite.ports import AntennaPose, HeadPose
-
-if TYPE_CHECKING:
-    from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
+from reachy_mini_ha_satellite.ports import AntennaPose, GazeSample, HeadPose
 
 __all__ = [
     "CommandGaze",

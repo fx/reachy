@@ -23,13 +23,14 @@ from reachy_mini_ha_satellite.adapters.motion_reachy import (
     project_measured_pose,
     rebase_calibrated_rotation,
 )
-from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
-from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective, GazeSelector
+from reachy_mini_ha_satellite.behaviour.tracking import GazeSelector
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibrationStatus,
     Detections,
     DetectionSource,
+    GazeDirective,
+    GazeSample,
     HeadPose,
 )
 
@@ -121,6 +122,45 @@ class TestMeasuredPoseHistory:
         forward = midpoint @ np.array([1.0, 0.0, 0.0])
         assert math.atan2(forward[1], forward[0]) == pytest.approx(math.radians(85.0))
         assert np.linalg.det(midpoint) == pytest.approx(1.0)
+
+    def test_large_pitch_midpoint_keeps_the_positive_elevation_sign(self) -> None:
+        """The Y-dominant quaternion branch must not reverse scalar subtraction."""
+        history = TimedPoseHistory()
+        history.append(0.0, head_pose_matrix(HeadPose()))
+        history.append(1.0, head_pose_matrix(HeadPose(pitch=math.radians(170.0))))
+
+        midpoint = history.rotation_at(0.5)
+
+        assert midpoint is not None
+        forward = midpoint @ np.array([1.0, 0.0, 0.0])
+        elevation = math.atan2(forward[2], math.hypot(forward[0], forward[1]))
+        assert elevation == pytest.approx(math.radians(85.0))
+
+    @pytest.mark.parametrize(
+        "pose",
+        [
+            HeadPose(roll=math.radians(170.0)),
+            HeadPose(pitch=math.radians(170.0)),
+            HeadPose(yaw=math.radians(170.0)),
+        ],
+        ids=["x-dominant", "y-dominant", "z-dominant"],
+    )
+    def test_dominant_quaternion_branches_return_proper_midpoints(
+        self,
+        pose: HeadPose,
+    ) -> None:
+        """Every diagonal-dominant branch follows the same shortest SO(3) path."""
+        history = TimedPoseHistory()
+        target = head_pose_matrix(pose)[:3, :3]
+        history.append(0.0, head_pose_matrix(HeadPose()))
+        history.append(1.0, head_pose_matrix(pose))
+
+        midpoint = history.rotation_at(0.5)
+
+        assert midpoint is not None
+        assert np.allclose(midpoint.T @ midpoint, np.eye(3), atol=1e-12)
+        assert np.linalg.det(midpoint) == pytest.approx(1.0)
+        assert np.allclose(midpoint @ midpoint, target, atol=1e-12)
 
 
 class TestCaptureTimeCalibration:
@@ -242,6 +282,26 @@ class TestCaptureTimeCalibration:
         assert result.state is CalibrationStatus.ACCEPTED
         assert len(robot.image_gaze) == 2
 
+    def test_older_than_three_seconds_but_fresh_capture_remains_calibratable(
+        self,
+    ) -> None:
+        """History retention follows configured receipt staleness, not a fixed cap."""
+        robot = FakeRobot()
+        motion = ReachyMotion(
+            robot,
+            staleness_seconds=5.0,
+            tick_seconds=0.05,
+        )
+        motion.acquire(0.0)
+        for index in range(1, 81):
+            motion.observe(index * 0.05)
+        directive = _directive(captured_at=0.0, received_at=4.0)
+
+        result = motion.calibrate(directive, 4.0)
+
+        assert result.state is CalibrationStatus.ACCEPTED
+        assert len(robot.image_gaze) == 1
+
     def test_capture_after_newest_history_defers_once_then_rejects(self) -> None:
         """Future capture is bounded defer, not pose extrapolation or hot retry."""
         robot = FakeRobot()
@@ -276,13 +336,31 @@ class TestCaptureTimeCalibration:
 class TestMeasuredFeedbackFailures:
     """Unavailable or malformed feedback is represented as missing, never a crash."""
 
+    def test_first_tick_pose_failure_preserves_acquisition_measurement(self) -> None:
+        """A transient read cannot discard the valid pose sampled before ownership."""
+        initial = head_pose_matrix(HeadPose(yaw=0.4, pitch=0.2))
+        robot = FakeRobot(
+            measured_head_poses=(initial, RuntimeError("pose unavailable"))
+        )
+        motion = ReachyMotion(robot)
+
+        acquired = motion.acquire(0.0)
+        repeated = motion.observe(0.05)
+
+        assert acquired.world_yaw == pytest.approx(0.4)
+        assert acquired.world_elevation == pytest.approx(0.2)
+        assert repeated.world_yaw == acquired.world_yaw
+        assert repeated.head_measured_at == 0.0
+
     def test_pose_failure_preserves_independent_body_measurement(self) -> None:
         """A failed pose-history read cannot manufacture a body-feedback loss."""
         robot = FakeRobot(measured_head_poses=(RuntimeError("pose unavailable"),))
 
         measured = ReachyMotion(robot, body_enabled=True).observe(0.0)
 
-        assert measured == 0.0
+        assert measured.world_yaw is None
+        assert measured.world_elevation is None
+        assert measured.body_yaw == 0.0
 
     @pytest.mark.parametrize(
         "joints",
@@ -301,7 +379,7 @@ class TestMeasuredFeedbackFailures:
 
         measured = ReachyMotion(robot, body_enabled=True).observe(0.0)
 
-        assert measured is None
+        assert measured.body_yaw is None
 
 
 class TestCommandingTheRobot:

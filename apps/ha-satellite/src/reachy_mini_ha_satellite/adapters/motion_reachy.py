@@ -21,16 +21,17 @@ from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
     CalibrationStatus,
+    DetectionSource,
     GazeCalibration,
+    GazeDirective,
+    GazeSample,
     HeadPose,
+    MotionMeasurement,
 )
 
 if TYPE_CHECKING:
     from reachy_contracts import NormalisedPoint
     from reachy_mini_ha_satellite.adapters.daemon import PoseMatrix, RobotHandle
-    from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
-    from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective
-    from reachy_mini_ha_satellite.ports import DetectionSource
 
 __all__ = [
     "ReachyMotion",
@@ -41,8 +42,13 @@ __all__ = [
     "rebase_calibrated_rotation",
 ]
 
-_POSE_HISTORY_SECONDS: Final = 3.0
-_POSE_HISTORY_COUNT: Final = 256
+_DEFAULT_STALENESS_SECONDS: Final = 2.0
+_DEFAULT_TICK_SECONDS: Final = 0.05
+_HISTORY_ENDPOINT_SAMPLES: Final = 2
+_DEFAULT_HISTORY_SAMPLES: Final = (
+    math.ceil(_DEFAULT_STALENESS_SECONDS / _DEFAULT_TICK_SECONDS)
+    + _HISTORY_ENDPOINT_SAMPLES
+)
 _BRACKET_LIMIT: Final = math.radians(0.5)
 _MEASURED_ROTATION_RESIDUAL_LIMIT: Final = 1e-2
 _MEASURED_BOTTOM_ROW_LIMIT: Final = 1e-3
@@ -185,7 +191,11 @@ def _rotation_quaternion(rotation: np.ndarray) -> np.ndarray:
             message = "rotation cannot be represented as a quaternion"
             raise ValueError(message)
         quaternion = np.empty(4, dtype=np.float64)
-        quaternion[0] = (matrix[second, first] - matrix[first, second]) / scale
+        cyclic_first = (index + 1) % 3
+        cyclic_second = (index + 2) % 3
+        quaternion[0] = (
+            matrix[cyclic_second, cyclic_first] - matrix[cyclic_first, cyclic_second]
+        ) / scale
         quaternion[index + 1] = 0.25 * scale
         quaternion[first + 1] = (matrix[first, index] + matrix[index, first]) / scale
         quaternion[second + 1] = (matrix[second, index] + matrix[index, second]) / scale
@@ -245,8 +255,8 @@ class TimedPoseHistory:
     def __init__(
         self,
         *,
-        maximum_age: float = _POSE_HISTORY_SECONDS,
-        maximum_samples: int = _POSE_HISTORY_COUNT,
+        maximum_age: float = _DEFAULT_STALENESS_SECONDS,
+        maximum_samples: int = _DEFAULT_HISTORY_SAMPLES,
     ) -> None:
         """Create an empty finite history."""
         if not math.isfinite(maximum_age) or maximum_age <= 0.0:
@@ -324,15 +334,31 @@ class ReachyMotion:
         handle: RobotHandle,
         *,
         body_enabled: bool = False,
+        staleness_seconds: float = _DEFAULT_STALENESS_SECONDS,
+        tick_seconds: float = _DEFAULT_TICK_SECONDS,
     ) -> None:
-        """Take the structural daemon handle without importing its SDK."""
+        """Take the daemon handle and derive bounded history from runtime timing."""
+        if not math.isfinite(staleness_seconds) or staleness_seconds <= 0.0:
+            message = "motion staleness seconds must be finite and positive"
+            raise ValueError(message)
+        if not math.isfinite(tick_seconds) or tick_seconds <= 0.0:
+            message = "motion tick seconds must be finite and positive"
+            raise ValueError(message)
+        history_samples = (
+            math.ceil(staleness_seconds / tick_seconds) + _HISTORY_ENDPOINT_SAMPLES
+        )
         self._handle = handle
         self._body_enabled = body_enabled
-        self._history = TimedPoseHistory()
+        self._history = TimedPoseHistory(
+            maximum_age=staleness_seconds,
+            maximum_samples=history_samples,
+        )
         self._cache: dict[DetectionSource, tuple[tuple[int, int], GazeCalibration]] = {}
         self._deferred: dict[tuple[DetectionSource, int, int], int] = {}
         self._acquired = False
         self._released = False
+        self._last_head_measurement: tuple[float, float, float] | None = None
+        self._last_body_measurement: tuple[float, float] | None = None
 
     @property
     def released(self) -> bool:
@@ -343,38 +369,48 @@ class ReachyMotion:
         """Re-read terminal state across daemon callbacks that may release."""
         return self._released
 
-    def acquire(self, now: float) -> None:
-        """Disable competing body yaw and seed measured state before gaze owns head."""
+    def acquire(self, now: float) -> MotionMeasurement:
+        """Disable competing body yaw and return measured acquisition state."""
         if self._released or self._acquired:
-            return
+            return self._measurement()
         self._acquired = True
         self._handle.set_automatic_body_yaw(False)
-        if not self._released:
-            self.observe(now)
+        return self.observe(now) if not self._terminal() else self._measurement()
 
-    def observe(self, now: float) -> float | None:
-        """Sample independent pose history and optional body feedback."""
+    def _measurement(self) -> MotionMeasurement:
+        """Return cached independent measurements without changing timestamps."""
+        head = self._last_head_measurement
+        body = self._last_body_measurement
+        return MotionMeasurement(
+            world_yaw=None if head is None else head[0],
+            world_elevation=None if head is None else head[1],
+            head_measured_at=None if head is None else head[2],
+            body_yaw=None if body is None else body[0],
+            body_measured_at=None if body is None else body[1],
+        )
+
+    def observe(self, now: float) -> MotionMeasurement:
+        """Sample independent measured head direction and optional body yaw."""
         if self._released:
-            return None
+            return self._measurement()
         with contextlib.suppress(
             RuntimeError,
             TypeError,
             ValueError,
             np.linalg.LinAlgError,
         ):
-            self._history.append(now, self._handle.get_current_head_pose())
-        if not self._body_enabled:
-            return None
-        try:
-            head_joints, _antennas = self._handle.get_current_joint_positions()
-            if len(head_joints) != 7:
-                return None
-            measured = float(head_joints[0])
-            if not math.isfinite(measured):
-                return None
-        except (IndexError, RuntimeError, TypeError, ValueError):
-            return None
-        return measured
+            pose = self._handle.get_current_head_pose()
+            rotation = _pose_rotation(pose, measured=True)
+            self._history.append(now, pose)
+            world_yaw, world_elevation = _direction_angles(rotation)
+            self._last_head_measurement = (world_yaw, world_elevation, now)
+        if self._body_enabled:
+            with contextlib.suppress(IndexError, RuntimeError, TypeError, ValueError):
+                head_joints, _antennas = self._handle.get_current_joint_positions()
+                measured = float(head_joints[0]) if len(head_joints) == 7 else math.nan
+                if math.isfinite(measured):
+                    self._last_body_measurement = (measured, now)
+        return self._measurement()
 
     def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
         """Calibrate one new actionable face identity, with bounded retry/reject."""

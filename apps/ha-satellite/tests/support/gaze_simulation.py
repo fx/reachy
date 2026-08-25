@@ -21,11 +21,11 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     ControllerMode,
     ControllerState,
     GazeObservation,
-    GazeSample,
     ImagePoint,
     initial_controller_state,
     step_controller,
 )
+from reachy_mini_ha_satellite.ports import GazeSample
 
 _DEGREES: Final = math.pi / 180.0
 

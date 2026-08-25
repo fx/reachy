@@ -110,17 +110,25 @@ deployment can get irreversibly wrong.
   direct gaze gain, vertical trim, smoothing loop, deadzone loop or linear
   neutral return around it.
 - **Calibrated gaze commands absolute canonical world poses.**
-  `adapters/motion_reachy.py` retains bounded measured-pose history, brackets the
-  SDK's non-moving image query, rebases capture against query, and constructs
-  zero-roll, zero-translation head commands. With body enabled, head and body
-  travel in one `set_target` call and world gaze remains body yaw plus
-  head-on-body yaw. Body feedback observes commanded state; it never overwrites
-  commanded position, velocity or acceleration after initialization.
+  `adapters/motion_reachy.py` retains bounded measured-pose history whose age and
+  capacity derive from configured staleness and tick cadence, brackets the SDK's
+  non-moving image query, rebases capture against query, and constructs zero-roll,
+  zero-translation head commands. The controller seeds world yaw/elevation from
+  measured pose before its first hardware sample. With body enabled it also waits
+  for measured joint zero before head and body travel in one `set_target` call;
+  world gaze remains body yaw plus head-on-body yaw. Later body feedback observes
+  commanded state and never overwrites commanded position, velocity or
+  acceleration.
 - **Gaze acquisition disables daemon automatic body yaw.** This happens before
-  the first head command even in head-only mode. Terminal release restores it
-  exactly once before later cleanup and blocks every racing or later gaze, head
-  and antenna call. Body motion is restart-bound, false by default and remains a
-  provisional opt-in.
+  the first gaze head command even in head-only mode. Tracking disabled at
+  startup performs no acquisition, automatic-yaw toggle or motion-feedback read.
+  Terminal release is always called, restores automatic yaw exactly once only
+  when acquired, and blocks every racing or later gaze, head and antenna call.
+  Body motion is restart-bound, false by default and remains a provisional opt-in.
+- **Values crossing the motion boundary belong to `ports.py`.** Qualified gaze
+  directives, measured motion and coordinated samples must remain resolvable
+  runtime types there; adapters and behavior import them rather than redeclaring
+  aliases or leaving protocol annotations behind `TYPE_CHECKING`.
 - **Four released gaze settings are compatibility inputs only.**
   `gaze_deadzone`, `gaze_smoothing`, `camera_horizontal_fov_degrees` and
   `camera_vertical_fov_degrees` remain accepted and validated so upgrades keep

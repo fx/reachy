@@ -58,6 +58,7 @@ from satellite_support import (
 
 from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
+from reachy_mini_ha_satellite.adapters.motion_reachy import ReachyMotion
 from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
@@ -72,7 +73,8 @@ from reachy_mini_ha_satellite.behaviour import (
 )
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyMeasurement,
-    GazeSample,
+    ControllerConfig,
+    HeadMeasurement,
 )
 from reachy_mini_ha_satellite.behaviour.intents import MotionIntent
 from reachy_mini_ha_satellite.config import (
@@ -109,7 +111,9 @@ from reachy_mini_ha_satellite.ports import (
     CalibratedGaze,
     Detections,
     DetectionSource,
+    GazeSample,
     HeadPose,
+    MotionMeasurement,
     SourceSelection,
 )
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
@@ -904,6 +908,74 @@ class TestTheLoop:
         assert application.status()["pipeline"] == "idle"
 
 
+class TestDisabledGazeStartup:
+    """Restart-bound disabled tracking never takes daemon gaze ownership."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_startup_does_not_touch_motion_feedback_or_auto_yaw(
+        self,
+    ) -> None:
+        """Pipeline-only behavior leaves all gaze acquisition edges untouched."""
+        events: list[str] = []
+        robot = FakeRobot(events=events)
+        motion = ReachyMotion(robot)
+        stop = asyncio.Event()
+
+        async def _stop_after_first_tick(_seconds: float) -> None:
+            stop.set()
+
+        application = SatelliteApplication(
+            settings=_settings(face_tracking_enabled="false"),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+            behaviour=SatelliteBehaviour(tracking_enabled=False, now=0.0),
+            clock=lambda: 1.0,
+            sleep=_stop_after_first_tick,
+        )
+
+        await application.run(stop)
+
+        assert not any(event.startswith("motion.auto_yaw") for event in events)
+        assert "motion.pose" not in events
+        assert "motion.joints" not in events
+
+
+class TestBodyColdStart:
+    """Coordinated motion waits for measured body position before hardware output."""
+
+    def test_missing_first_joint_feedback_emits_no_body_target(self) -> None:
+        """A configured body cannot cold-start from an internal zero assumption."""
+        robot = FakeRobot(
+            measured_joints=(
+                RuntimeError("joint feedback unavailable"),
+                RuntimeError("joint feedback unavailable"),
+            )
+        )
+        motion = ReachyMotion(robot, body_enabled=True)
+        motion.acquire(0.0)
+        perception = FakePerception()
+        perception.see(face(0.5, 0.0), source=DetectionSource.REMOTE)
+        application = SatelliteApplication(
+            settings=_settings(body_motion_enabled="true"),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=perception,
+            behaviour=SatelliteBehaviour(
+                controller_config=ControllerConfig(body_enabled=True),
+                now=0.0,
+            ),
+            clock=lambda: 0.1,
+        )
+
+        application.tick()
+
+        assert robot.body_yaws == []
+        assert not any(
+            head is not None and body is not None for head, _a, body in robot.targets
+        )
+
+
 class TestPredictiveTickTiming:
     """One injected clock read supplies both calibration time and exact controller dt."""
 
@@ -945,6 +1017,7 @@ class TestPredictiveTickTiming:
             prepared: PreparedGazeTick,
             *,
             calibrated: CalibratedGaze | None,
+            head_measurement: HeadMeasurement | None,
             body_measurement: BodyMeasurement | None,
             dt: float,
         ) -> tuple[MotionIntent, ...]:
@@ -952,6 +1025,7 @@ class TestPredictiveTickTiming:
             return original_finish(
                 prepared,
                 calibrated=calibrated,
+                head_measurement=head_measurement,
                 body_measurement=body_measurement,
                 dt=dt,
             )
@@ -986,9 +1060,9 @@ class TestShutdown:
         class OrderedMotion(FakeMotion):
             """Record motion lifecycle around the ordinary fake."""
 
-            def acquire(self, now: float) -> None:
+            def acquire(self, now: float) -> MotionMeasurement:
                 events.append("motion.acquire")
-                super().acquire(now)
+                return super().acquire(now)
 
             def release(self) -> None:
                 events.append("motion.release")

@@ -214,8 +214,10 @@ the environment. The page reports the layer for exactly this reason: a value
 showing `override` is one `reachyctl` can no longer change, until the page is
 used to save it back to what the environment says.
 
-**Four settings are readable on the page and not writable there**, because they
-decide whether the page can be reached at all. An override sits *above* the
+**Four bootstrap settings are readable on the page and not writable there**,
+because they decide whether the page can be reached at all. This is separate
+from the four retired gaze compatibility inputs, which are also read-only but
+because predictive gaze ignores them. An override sits *above* the
 environment, so an override can only be undone by writing another one — and a
 page that had written one of these wrongly would be the page you could no longer
 open to undo it. Set them in the environment:
@@ -294,11 +296,16 @@ log line, no page and no error message.
 Predictive gaze consumes each source-qualified detection once, calibrates its
 image point against measured capture and query poses without moving, and then
 advances one jerk-limited world-yaw/elevation trajectory at the behavior cadence.
+Measured-pose history derives its retention age and capacity from the configured
+staleness window and behavior tick, so any supported fresh capture can be rebased
+without extrapolation. The first hardware sample is seeded from measured world
+head pose; body-enabled motion additionally waits for valid measured body yaw.
 It owns the head through active tracking, loss hold and neutral return; antennas
 continue expressing pipeline state, and the current pipeline head pose receives
 one handoff only after the return settles. The daemon's automatic body yaw is
 disabled before either head-only or coordinated gaze takes ownership and restored
-once during terminal shutdown.
+once during terminal shutdown. With face tracking disabled at startup, none of
+those acquisition, feedback or automatic-yaw calls are made.
 
 The four legacy field-of-view, deadzone and smoothing variables remain valid only
 so existing environments keep starting. The startup report and settings page mark
@@ -361,7 +368,7 @@ credential and useless for learning one. A separate control unsets it.
 | Path | What it is |
 |---|---|
 | `/` | The settings form and the resolved configuration |
-| `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once and which are read-only |
+| `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once, which bootstrap values are read-only and which compatibility inputs are ignored |
 | `/status` | What the robot is doing: pipeline state, why the head is where it is |
 | `/stop` | `POST` — stops the application so a restart-required change can take effect |
 | `/livez` | Whether the interface is up |

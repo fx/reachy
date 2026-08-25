@@ -17,6 +17,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     ControllerMode,
     ControllerState,
     GazeObservation,
+    HeadMeasurement,
     initial_controller_state,
     step_controller,
 )
@@ -32,12 +33,13 @@ from reachy_mini_ha_satellite.behaviour.pipeline import (
     PipelineMachine,
     PipelineState,
 )
-from reachy_mini_ha_satellite.behaviour.tracking import (
+from reachy_mini_ha_satellite.behaviour.tracking import GazeSelector
+from reachy_mini_ha_satellite.ports import (
+    NEUTRAL_ANTENNAS,
+    NEUTRAL_HEAD,
     GazeDirective,
     GazeOutcome,
-    GazeSelector,
 )
-from reachy_mini_ha_satellite.ports import NEUTRAL_ANTENNAS, NEUTRAL_HEAD
 
 if TYPE_CHECKING:
     from reachy_mini_ha_satellite.ports import (
@@ -191,6 +193,7 @@ class SatelliteBehaviour:
         prepared: PreparedGazeTick,
         *,
         calibrated: CalibratedGaze | None,
+        head_measurement: HeadMeasurement | None = None,
         body_measurement: BodyMeasurement | None,
         dt: float,
     ) -> tuple[MotionIntent, ...]:
@@ -204,15 +207,22 @@ class SatelliteBehaviour:
             now=prepared.now,
             dt=dt,
             config=self._config,
+            head_measurement=head_measurement,
             body_measurement=body_measurement,
         )
         self._controller = result.state
         now_owned = self._owns_head()
         settled_handoff = previously_owned and result.mode is ControllerMode.IDLE
 
+        command_ready = result.state.head_initialized and (
+            not self._config.body_enabled or result.state.body_feedback.initialized
+        )
         intents: list[MotionIntent] = []
-        if settled_handoff or (
-            now_owned and (not previously_owned or result.sample != previous_sample)
+        if command_ready and (
+            settled_handoff
+            or (
+                now_owned and (not previously_owned or result.sample != previous_sample)
+            )
         ):
             intents.append(CommandGaze(result.sample))
         intents.extend(

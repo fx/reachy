@@ -13,6 +13,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyMeasurement,
     ControllerConfig,
     ControllerMode,
+    HeadMeasurement,
 )
 from reachy_mini_ha_satellite.behaviour.intents import (
     CommandGaze,
@@ -21,8 +22,12 @@ from reachy_mini_ha_satellite.behaviour.intents import (
 )
 from reachy_mini_ha_satellite.behaviour.pipeline import PipelineEvent, PipelineState
 from reachy_mini_ha_satellite.behaviour.satellite import SatelliteBehaviour
-from reachy_mini_ha_satellite.behaviour.tracking import GazeOutcome
-from reachy_mini_ha_satellite.ports import CalibratedGaze, Detections, DetectionSource
+from reachy_mini_ha_satellite.ports import (
+    CalibratedGaze,
+    Detections,
+    DetectionSource,
+    GazeOutcome,
+)
 
 if TYPE_CHECKING:
     from reachy_contracts import FaceDetection
@@ -92,6 +97,7 @@ def _finish(
     dt: float = 0.05,
     yaw: float = 0.4,
     body: BodyMeasurement | None = None,
+    head_available: bool = True,
 ) -> tuple[MotionIntent, ...]:
     """Run both pure phases with calibration for an actionable face."""
     prepared = behaviour.prepare(detections, now)
@@ -99,6 +105,11 @@ def _finish(
     return behaviour.finish(
         prepared,
         calibrated=target,
+        head_measurement=(
+            HeadMeasurement(world_yaw=0.0, world_elevation=0.0, measured_at=now)
+            if head_available
+            else None
+        ),
         body_measurement=body,
         dt=dt,
     )
@@ -207,6 +218,7 @@ class TestTwoPhasePredictiveGaze:
         first = behaviour.finish(
             first_prepared,
             calibrated=centered,
+            head_measurement=HeadMeasurement(0.0, 0.0, 0.1),
             body_measurement=None,
             dt=0.0,
         )
@@ -214,6 +226,7 @@ class TestTwoPhasePredictiveGaze:
         second = behaviour.finish(
             second_prepared,
             calibrated=centered,
+            head_measurement=HeadMeasurement(0.0, 0.0, 0.15),
             body_measurement=None,
             dt=0.05,
         )
@@ -262,6 +275,79 @@ class TestTwoPhasePredictiveGaze:
         assert _gaze(intents) is None
         assert _head(intents) is not None
 
+    def test_first_gaze_sample_is_seeded_from_measured_nonneutral_head(self) -> None:
+        """Acquisition advances from physical pose within configured q/v/a/j bounds."""
+        config = ControllerConfig()
+        behaviour = SatelliteBehaviour(controller_config=config, now=0.0)
+        behaviour.handle(PipelineEvent.PROCESSING, 0.0)
+        prepared = behaviour.prepare(_seen(face(0.5, 0.0)), 0.1)
+
+        intents = behaviour.finish(
+            prepared,
+            calibrated=replace(
+                _calibrated(prepared),
+                world_yaw=0.6,
+                world_elevation=0.25,
+            ),
+            head_measurement=HeadMeasurement(
+                world_yaw=0.4,
+                world_elevation=0.2,
+                measured_at=0.1,
+            ),
+            body_measurement=None,
+            dt=0.05,
+        )
+
+        gaze = _gaze(intents)
+        assert gaze is not None
+        state = behaviour.controller_state
+        assert abs(gaze.sample.world_yaw - 0.4) <= config.yaw_limits.max_velocity * 0.05
+        assert abs(gaze.sample.elevation - 0.2) <= (
+            config.elevation_limits.max_velocity * 0.05
+        )
+        assert abs(state.world_yaw.velocity) <= config.yaw_limits.max_velocity
+        assert abs(state.world_yaw.acceleration) <= config.yaw_limits.max_acceleration
+        assert abs(state.world_yaw.acceleration) <= config.yaw_limits.max_jerk * 0.05
+
+    def test_missing_measured_head_suppresses_first_hardware_command(self) -> None:
+        """A face cannot snap from an unseeded internal neutral assumption."""
+        behaviour = SatelliteBehaviour(now=0.0)
+
+        intents = _finish(
+            behaviour,
+            _seen(face(0.5, 0.0)),
+            now=0.1,
+            head_available=False,
+        )
+
+        assert _gaze(intents) is None
+        assert not behaviour.controller_state.head_initialized
+
+    def test_body_enabled_cold_start_waits_for_measured_body_seed(self) -> None:
+        """Missing first joint feedback emits no guessed body target."""
+        config = replace(ControllerConfig(), body_enabled=True)
+        behaviour = SatelliteBehaviour(controller_config=config, now=0.0)
+        detections = _seen(face(0.5, 0.0))
+
+        missing = _finish(behaviour, detections, now=0.1)
+        still_missing = _finish(behaviour, detections, now=0.15)
+        seeded = _finish(
+            behaviour,
+            detections,
+            now=0.2,
+            body=BodyMeasurement(yaw=0.1, measured_at=0.2),
+        )
+
+        assert _gaze(missing) is None
+        assert _gaze(still_missing) is None
+        assert missing == tuple(
+            item for item in missing if not isinstance(item, CommandGaze)
+        )
+        assert behaviour.controller_state.body_feedback.initialized
+        gaze = _gaze(seeded)
+        assert gaze is not None
+        assert gaze.sample.body_enabled
+
     def test_body_measurement_is_forwarded_to_the_pure_controller(self) -> None:
         """The first valid body sample initializes commanded body state once."""
         config = replace(ControllerConfig(), body_enabled=True)
@@ -283,6 +369,18 @@ class TestTwoPhasePredictiveGaze:
 
 class TestLossReturnAndHandoff:
     """Loss retains ownership through bounded return, then yields exactly once."""
+
+    def test_fresh_empty_before_any_face_does_not_claim_the_head(self) -> None:
+        """NOBODY is reported without manufacturing an active loss lifecycle."""
+        behaviour = SatelliteBehaviour(now=0.0)
+        empty = _seen(sequence=1, captured_at=0.0, received_at=0.0)
+
+        intents = _finish(behaviour, empty, now=0.0)
+
+        assert behaviour.status(0.0).outcome is GazeOutcome.NOBODY
+        assert behaviour.controller_state.mode is ControllerMode.UNKNOWN
+        assert _gaze(intents) is None
+        assert _head(intents) is not None
 
     def test_explicit_empty_returns_and_hands_current_pipeline_head_once(self) -> None:
         """Final gaze precedes one current processing head on first settled idle."""
@@ -315,7 +413,16 @@ class TestLossReturnAndHandoff:
         assert any(isinstance(item, MoveHead) for item in settled[1:])
         assert handoffs == 1
         repeated = _finish(behaviour, empty, now=now + 0.05)
+        advanced_empty = _seen(
+            sequence=3,
+            captured_at=now + 0.05,
+            received_at=now + 0.10,
+        )
+        advanced = _finish(behaviour, advanced_empty, now=now + 0.10)
+
         assert _gaze(repeated) is None
+        assert _gaze(advanced) is None
+        assert behaviour.controller_state.mode is ControllerMode.IDLE
 
     def test_reacquisition_during_return_cancels_handoff(self) -> None:
         """A new calibrated face keeps ownership before pipeline head can resume."""

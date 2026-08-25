@@ -25,7 +25,6 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     EstimatorReset,
     EstimatorState,
     GazeObservation,
-    GazeSample,
     ImagePoint,
     allocate_body,
     apply_deadband,
@@ -35,6 +34,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     step_controller,
     update_estimator,
 )
+from reachy_mini_ha_satellite.ports import GazeSample
 
 _DEGREES = math.pi / 180.0
 
@@ -868,6 +868,56 @@ class TestMeasuredBodyObserver:
         assert faulted.mode is ControllerMode.BODY_FEEDBACK_HOLD
         assert faulted.sample == transient.state.last_safe_sample
 
+    def test_recovery_requires_strictly_new_feedback_samples(self) -> None:
+        """Duplicate timestamps and missing reads cannot satisfy recovery cadence."""
+        config = replace(
+            ControllerConfig(),
+            body_enabled=True,
+            body_feedback_recovery_samples=3,
+        )
+        measurement = BodyMeasurement(yaw=0.1, measured_at=1.0)
+        body = AxisState(position=0.1)
+        state = replace(
+            initial_controller_state(config),
+            mode=ControllerMode.BODY_FEEDBACK_HOLD,
+            body_yaw=body,
+            body_feedback=BodyFeedbackState(
+                initialized=True,
+                last_measurement=measurement,
+                faulted=True,
+            ),
+            last_safe_sample=GazeSample(0.1, 0.0, 0.1, 0.0, True),
+        )
+
+        duplicate = step_controller(
+            state,
+            None,
+            now=1.1,
+            dt=0.05,
+            config=config,
+            body_measurement=measurement,
+        )
+        missing = step_controller(
+            duplicate.state,
+            None,
+            now=1.2,
+            dt=0.05,
+            config=config,
+        )
+        newer = step_controller(
+            missing.state,
+            None,
+            now=1.2,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.1, measured_at=1.2),
+        )
+
+        assert duplicate.mode is ControllerMode.BODY_FEEDBACK_HOLD
+        assert duplicate.state.body_feedback.valid_streak == 0
+        assert missing.state.body_feedback.valid_streak == 0
+        assert newer.state.body_feedback.valid_streak == 1
+
     def test_persistent_divergence_holds_and_three_valid_samples_recover(self) -> None:
         """Ordinary lag passes; persistent error brakes until bounded valid evidence."""
         config = replace(
@@ -923,27 +973,28 @@ class TestMeasuredBodyObserver:
         )
         recovery = faulted
         for index in range(2):
+            measured_at = 0.70 + index * 0.05
             recovery = step_controller(
                 recovery.state,
                 None,
-                now=0.65 + index * 0.05,
+                now=measured_at,
                 dt=0.05,
                 config=config,
                 body_measurement=BodyMeasurement(
                     yaw=recovery.state.body_yaw.position,
-                    measured_at=0.65 + index * 0.05,
+                    measured_at=measured_at,
                 ),
             )
             assert recovery.mode is ControllerMode.BODY_FEEDBACK_HOLD
         recovered = step_controller(
             recovery.state,
             None,
-            now=0.75,
+            now=0.80,
             dt=0.05,
             config=config,
             body_measurement=BodyMeasurement(
                 yaw=recovery.state.body_yaw.position,
-                measured_at=0.75,
+                measured_at=0.80,
             ),
         )
 

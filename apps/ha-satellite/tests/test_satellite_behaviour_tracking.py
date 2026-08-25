@@ -8,12 +8,8 @@ from typing import TYPE_CHECKING, Final
 import pytest
 from satellite_support import face
 
-from reachy_mini_ha_satellite.behaviour.tracking import (
-    GazeOutcome,
-    GazeSelector,
-    choose_face,
-)
-from reachy_mini_ha_satellite.ports import Detections, DetectionSource
+from reachy_mini_ha_satellite.behaviour.tracking import GazeSelector, choose_face
+from reachy_mini_ha_satellite.ports import Detections, DetectionSource, GazeOutcome
 
 if TYPE_CHECKING:
     from reachy_contracts import FaceDetection
@@ -176,6 +172,31 @@ class TestIdentityCacheAndDiscontinuities:
 
         assert replayed is current
         assert replayed.face == face(0.3, 0.0)
+
+    def test_obsolete_inactive_source_staleness_cannot_replace_current_source(
+        self,
+    ) -> None:
+        """A cached remote view going stale after local fallback is not active loss."""
+        selector = GazeSelector()
+        remote = _result(face(0.4, 0.0), generation=1, sequence=9)
+        selector.select(remote)
+        local = selector.select(
+            _result(
+                face(-0.3, 0.0),
+                source=_LOCAL_SOURCE,
+                generation=0,
+                sequence=2,
+                captured_at=1.1,
+                received_at=1.2,
+            )
+        )
+
+        replayed = selector.select(
+            replace(remote, fresh=False, faces=(), age_seconds=99.0)
+        )
+
+        assert replayed is local
+        assert replayed.outcome is GazeOutcome.TRACKING
 
     def test_old_generation_cannot_resurface_after_fallback(self) -> None:
         """Keep bounded per-source watermarks across fallback."""

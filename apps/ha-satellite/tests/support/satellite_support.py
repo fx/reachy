@@ -27,7 +27,6 @@ certain about exactly the property it was checking.
 from __future__ import annotations
 
 import importlib
-import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -48,7 +47,10 @@ from reachy_mini_ha_satellite.ports import (
     Detections,
     DetectionSource,
     GazeCalibration,
+    GazeDirective,
+    GazeSample,
     HeadPose,
+    MotionMeasurement,
 )
 
 if TYPE_CHECKING:
@@ -64,8 +66,6 @@ if TYPE_CHECKING:
     )
     from reachy_mini_ha_satellite.adapters.output_gain import Samples
     from reachy_mini_ha_satellite.adapters.perception_local import PixelFace
-    from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
-    from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective
     from reachy_mini_ha_satellite.esphome.models import ServerState
     from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
     from reachy_mini_ha_satellite.wake_word import ModelInput
@@ -654,6 +654,7 @@ class FakeMotion:
         self.acquired: list[float] = []
         self.observed: list[float] = []
         self.calibrated: list[tuple[GazeDirective, float]] = []
+        self.world_measurements: list[tuple[float, float] | BaseException | None] = []
         self.body_measurements: list[float | BaseException | None] = []
         self._released = False
 
@@ -666,21 +667,33 @@ class FakeMotion:
         """
         return self._released
 
-    def acquire(self, now: float) -> None:
+    def acquire(self, now: float) -> MotionMeasurement:
         """Record idempotent predictive gaze acquisition."""
-        if self._released or self.acquired:
-            return
-        self.acquired.append(now)
+        if not self._released and not self.acquired:
+            self.acquired.append(now)
+        return MotionMeasurement(None, None, None, None, None)
 
-    def observe(self, now: float) -> float | None:
-        """Return the next scripted measured body yaw."""
+    def observe(self, now: float) -> MotionMeasurement:
+        """Return the next scripted measured world direction and body yaw."""
         if self._released:
-            return None
+            return MotionMeasurement(None, None, None, None, None)
         self.observed.append(now)
-        scripted = self.body_measurements.pop(0) if self.body_measurements else None
-        if isinstance(scripted, BaseException):
-            raise scripted
-        return scripted
+        world = (
+            self.world_measurements.pop(0) if self.world_measurements else (0.0, 0.0)
+        )
+        body = self.body_measurements.pop(0) if self.body_measurements else None
+        if isinstance(world, BaseException):
+            raise world
+        if isinstance(body, BaseException):
+            raise body
+        world_yaw, world_elevation = (None, None) if world is None else world
+        return MotionMeasurement(
+            world_yaw=world_yaw,
+            world_elevation=world_elevation,
+            head_measured_at=now,
+            body_yaw=body,
+            body_measured_at=now if body is not None else None,
+        )
 
     def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
         """Return a deterministic world anchor for an actionable fake directive."""
@@ -1061,9 +1074,7 @@ class FakeRobot:
         self.targets: list[
             tuple[PoseMatrix | None, list[float] | None, float | None]
         ] = []
-        self.gaze: list[tuple[float, float, float]] = []
         self.image_gaze: list[tuple[int, int, float, bool]] = []
-        self.durations: list[float] = []
         self.automatic_body_yaw: list[bool] = []
         self.motor_enables = 0
         self.wake_ups = 0
@@ -1147,42 +1158,6 @@ class FakeRobot:
         """Record daemon automatic-body-yaw ownership changes."""
         self.automatic_body_yaw.append(enabled)
         self.events.append(f"motion.auto_yaw.{str(enabled).lower()}")
-
-    def look_at_world(
-        self,
-        x: float,
-        y: float,
-        z: float,
-        duration: float = 1.0,
-        perform_movement: bool = True,
-    ) -> PoseMatrix:
-        """Record a world direction and return its canonical rigid pose."""
-        self.gaze.append((x, y, z))
-        self.durations.append(duration)
-        self.events.append("motion.world_pose")
-        yaw = math.atan2(y, x)
-        elevation = math.atan2(z, math.hypot(x, y))
-        cos_pitch = math.cos(-elevation)
-        sin_pitch = math.sin(-elevation)
-        cos_yaw = math.cos(yaw)
-        sin_yaw = math.sin(yaw)
-        about_y = np.array(
-            [
-                [cos_pitch, 0.0, sin_pitch],
-                [0.0, 1.0, 0.0],
-                [-sin_pitch, 0.0, cos_pitch],
-            ],
-            dtype=np.float64,
-        )
-        about_z = np.array(
-            [[cos_yaw, -sin_yaw, 0.0], [sin_yaw, cos_yaw, 0.0], [0.0, 0.0, 1.0]],
-            dtype=np.float64,
-        )
-        pose = np.eye(4, dtype=np.float64)
-        pose[:3, :3] = about_z @ about_y
-        if perform_movement:
-            self.set_target(head=pose)
-        return pose
 
 
 # --- Wake words ---------------------------------------------------------------

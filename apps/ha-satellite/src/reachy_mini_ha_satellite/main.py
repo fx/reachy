@@ -83,6 +83,7 @@ from reachy_mini_ha_satellite.behaviour import (
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyMeasurement,
     ControllerConfig,
+    HeadMeasurement,
 )
 from reachy_mini_ha_satellite.config import (
     OVERRIDES_FILENAME,
@@ -728,7 +729,7 @@ class SatelliteApplication:
         previous = self._last_tick_at
         dt = 0.0 if previous is None else now - previous
         self._last_tick_at = now
-        measured_yaw = self._motion.observe(now) if self._gaze_enabled else None
+        measurement = self._motion.observe(now) if self._gaze_enabled else None
         prepared = self._behaviour.prepare(self._perception.latest(), now)
         calibration = (
             self._motion.calibrate(prepared.directive, now)
@@ -741,14 +742,32 @@ class SatelliteApplication:
             and calibration.state is CalibrationStatus.ACCEPTED
             else None
         )
+        head_measurement = (
+            HeadMeasurement(
+                world_yaw=measurement.world_yaw,
+                world_elevation=measurement.world_elevation,
+                measured_at=measurement.head_measured_at,
+            )
+            if measurement is not None
+            and measurement.world_yaw is not None
+            and measurement.world_elevation is not None
+            and measurement.head_measured_at is not None
+            else None
+        )
         body_measurement = (
-            None
-            if measured_yaw is None
-            else BodyMeasurement(yaw=measured_yaw, measured_at=now)
+            BodyMeasurement(
+                yaw=measurement.body_yaw,
+                measured_at=measurement.body_measured_at,
+            )
+            if measurement is not None
+            and measurement.body_yaw is not None
+            and measurement.body_measured_at is not None
+            else None
         )
         intents = self._behaviour.finish(
             prepared,
             calibrated=calibrated,
+            head_measurement=head_measurement,
             body_measurement=body_measurement,
             dt=dt,
         )
@@ -810,9 +829,10 @@ class SatelliteApplication:
         """
         self._stop = stop
         try:
-            acquired_at = self._clock()
-            self._motion.acquire(acquired_at)
-            self._last_tick_at = acquired_at
+            if self._gaze_enabled:
+                acquired_at = self._clock()
+                self._motion.acquire(acquired_at)
+                self._last_tick_at = acquired_at
             self._audio.start()
             await self._perception.start()
             for service in self._services:
@@ -2048,7 +2068,12 @@ def build_application(
         samples_per_chunk=settings.samples_per_chunk,
         boost_percent=settings.speaker_boost_percent,
     )
-    motion = ReachyMotion(handle, body_enabled=settings.body_motion_enabled)
+    motion = ReachyMotion(
+        handle,
+        body_enabled=settings.body_motion_enabled,
+        staleness_seconds=settings.staleness_seconds,
+        tick_seconds=settings.behaviour_tick_seconds,
+    )
     perception: PerceptionPort = (
         build_perception_source(settings, handle.media) or _NoPerception()
     )

@@ -198,9 +198,8 @@ class MediaInterface(Protocol):
 class RobotHandle(Protocol):
     """The handle the daemon hands a running application.
 
-    Deliberately five members. The SDK's own object has forty, and naming only
-    what startup and the adapters call is what keeps "which parts of the SDK does
-    this application depend on?" a question with a short answer.
+    It names only what startup and the active adapters call, keeping "which parts
+    of the SDK does this application depend on?" a question with a short answer.
     """
 
     def enable_motors(self, ids: list[str] | None = None) -> None:
@@ -264,35 +263,6 @@ class RobotHandle(Protocol):
 
     def set_automatic_body_yaw(self, enabled: bool) -> None:
         """Enable or disable the daemon's independent body-yaw modulation."""
-        ...
-
-    def look_at_world(
-        self,
-        x: float,
-        y: float,
-        z: float,
-        duration: float = 1.0,
-        perform_movement: bool = True,
-    ) -> PoseMatrix:
-        """Aim the head at a point in the robot's own frame.
-
-        The frame's origin is the neutral head position, with x forward, y to
-        the robot's left and z up. Only the direction matters: the SDK
-        normalises the vector, so a target twice as far away in the same
-        direction is the same movement.
-
-        Args:
-            x: Forward, in metres.
-            y: To the robot's left, in metres.
-            z: Upwards, in metres.
-            duration: How long to take. Zero commands the pose immediately and
-                returns without waiting, which is the only value the motion
-                adapter uses — see `motion_reachy.py`.
-            perform_movement: Whether to move, or only to compute the pose.
-
-        Returns:
-            The head pose the target works out to.
-        """
         ...
 
 

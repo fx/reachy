@@ -15,7 +15,7 @@ though the attribute is still there.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, get_type_hints
 
 from satellite_support import (
     FakeAudio,
@@ -35,6 +35,7 @@ from reachy_mini_ha_satellite.adapters.audio_reachy import (
     ReachyCapture,
     ReachyPlayback,
 )
+from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
 from reachy_mini_ha_satellite.adapters.motion_reachy import ReachyMotion
 from reachy_mini_ha_satellite.esphome.seams import AudioCapture, MediaPlayback
 from reachy_mini_ha_satellite.ports import (
@@ -45,7 +46,10 @@ from reachy_mini_ha_satellite.ports import (
     CapturePort,
     Detections,
     DetectionSource,
+    GazeDirective,
+    GazeSample,
     HeadPose,
+    MotionMeasurement,
     MotionPort,
     PerceptionPort,
     PlaybackPort,
@@ -65,6 +69,41 @@ def _audio() -> ReachyAudio:
         The adapter.
     """
     return ReachyAudio(FakeMedia(), FakeSoundSource(), detach=immediately)
+
+
+class TestDaemonSurfaceIsNarrow:
+    """The structural SDK surface names only calls active adapters consume."""
+
+    def test_robot_handle_has_no_legacy_motion_members(self) -> None:
+        """A removed runtime path cannot keep widening the SDK boundary."""
+        public = {name for name in vars(RobotHandle) if not name.startswith("_")}
+
+        assert public == {
+            "enable_motors",
+            "wake_up",
+            "media",
+            "set_target",
+            "get_current_head_pose",
+            "get_current_joint_positions",
+            "look_at_image",
+            "set_automatic_body_yaw",
+        }
+
+
+class TestPortAnnotationsResolve:
+    """Crossing motion values are owned and resolvable at the port boundary."""
+
+    def test_motion_port_type_hints_resolve_without_import_order(self) -> None:
+        """Runtime introspection must not depend on behavior TYPE_CHECKING names."""
+        acquire = get_type_hints(MotionPort.acquire)
+        observe = get_type_hints(MotionPort.observe)
+        calibrate = get_type_hints(MotionPort.calibrate)
+        command = get_type_hints(MotionPort.command_gaze)
+
+        assert acquire["return"] is MotionMeasurement
+        assert observe["return"] is MotionMeasurement
+        assert calibrate["directive"] is GazeDirective
+        assert command["sample"] is GazeSample
 
 
 class TestEveryPortHasAFake:

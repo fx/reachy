@@ -44,12 +44,8 @@ from reachy_mini_ha_satellite.behaviour.satellite import (
     PreparedGazeTick,
     SatelliteBehaviour,
 )
-from reachy_mini_ha_satellite.behaviour.tracking import (
-    GazeDirective,
-    GazeOutcome,
-    GazeSelector,
-    choose_face,
-)
+from reachy_mini_ha_satellite.behaviour.tracking import GazeSelector, choose_face
+from reachy_mini_ha_satellite.ports import GazeDirective, GazeOutcome
 
 __all__ = [
     "ERROR_SECONDS",

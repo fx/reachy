@@ -33,16 +33,15 @@ would leave a wire shape free to drift.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from reachy_contracts import FaceDetection
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-
-    from reachy_contracts import FaceDetection
-    from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
-    from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective
 
 __all__ = [
     "NEUTRAL_ANTENNAS",
@@ -55,7 +54,11 @@ __all__ = [
     "DetectionSource",
     "Detections",
     "GazeCalibration",
+    "GazeDirective",
+    "GazeOutcome",
+    "GazeSample",
     "HeadPose",
+    "MotionMeasurement",
     "MotionPort",
     "PerceptionPort",
     "PlaybackPort",
@@ -318,6 +321,105 @@ NEUTRAL_HEAD = HeadPose()
 NEUTRAL_ANTENNAS = AntennaPose()
 
 
+class GazeOutcome(StrEnum):
+    """What the latest perception result says about predictive gaze."""
+
+    TRACKING = "tracking"
+    NOBODY = "nobody"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class GazeDirective:
+    """One selected completed result, explicit loss, or unknown input."""
+
+    outcome: GazeOutcome
+    source: DetectionSource | None = None
+    generation: int | None = None
+    sequence: int | None = None
+    captured_at: float | None = None
+    received_at: float | None = None
+    face: FaceDetection | None = None
+    target_epoch: int = 0
+
+    @property
+    def identity(self) -> tuple[DetectionSource, int, int] | None:
+        """Return the source-qualified result identity when complete."""
+        if self.source is None or self.generation is None or self.sequence is None:
+            return None
+        return self.source, self.generation, self.sequence
+
+    @property
+    def actionable(self) -> bool:
+        """Whether this is a qualified result the controller may consume."""
+        return self.identity is not None and self.outcome in {
+            GazeOutcome.TRACKING,
+            GazeOutcome.NOBODY,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class GazeSample:
+    """One atomic world-yaw, elevation and optional body allocation sample."""
+
+    world_yaw: float
+    elevation: float
+    body_yaw: float
+    head_yaw: float
+    body_enabled: bool
+
+    def __post_init__(self) -> None:
+        """Keep every command scalar finite and coordinated."""
+        values = (self.world_yaw, self.elevation, self.body_yaw, self.head_yaw)
+        if not all(math.isfinite(value) for value in values):
+            message = "gaze sample must contain only finite values"
+            raise ValueError(message)
+        if not math.isclose(
+            self.world_yaw,
+            self.body_yaw + self.head_yaw,
+            abs_tol=1e-12,
+        ):
+            message = "world yaw must equal body yaw plus head yaw"
+            raise ValueError(message)
+        if not self.body_enabled and self.body_yaw != 0.0:
+            message = "a body-disabled sample cannot carry body motion"
+            raise ValueError(message)
+
+
+@dataclass(frozen=True, slots=True)
+class MotionMeasurement:
+    """Latest independent measured head direction and body yaw."""
+
+    world_yaw: float | None
+    world_elevation: float | None
+    head_measured_at: float | None
+    body_yaw: float | None
+    body_measured_at: float | None
+
+    def __post_init__(self) -> None:
+        """Keep optional measured values finite, timestamped and atomic."""
+        head_present = self.world_yaw is not None
+        if head_present != (self.world_elevation is not None) or head_present != (
+            self.head_measured_at is not None
+        ):
+            message = "measured head direction and timestamp must be supplied together"
+            raise ValueError(message)
+        if (self.body_yaw is None) != (self.body_measured_at is None):
+            message = "measured body yaw and timestamp must be supplied together"
+            raise ValueError(message)
+        for value in (
+            self.world_yaw,
+            self.world_elevation,
+            self.head_measured_at,
+            self.body_yaw,
+            self.body_measured_at,
+        ):
+            if value is not None and not math.isfinite(value):
+                message = "motion measurement values must be finite"
+                raise ValueError(message)
+
+
 class CalibrationStatus(StrEnum):
     """Whether a qualified directive was calibrated, deferred or rejected."""
 
@@ -365,12 +467,12 @@ class MotionPort(Protocol):
     event loop for half a second.
     """
 
-    def acquire(self, now: float) -> None:
-        """Take gaze ownership and seed measured state idempotently."""
+    def acquire(self, now: float) -> MotionMeasurement:
+        """Take gaze ownership and return initial measured state idempotently."""
         ...
 
-    def observe(self, now: float) -> float | None:
-        """Sample measured pose and return measured body yaw when enabled."""
+    def observe(self, now: float) -> MotionMeasurement:
+        """Sample measured world head direction and optional body yaw."""
         ...
 
     def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:

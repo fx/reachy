@@ -1,4 +1,4 @@
-"""The settings interface: every setting changeable, and one of them unreadable.
+"""Every current operator setting changeable; compatibility values read-only.
 
 These drive the real application over `httpx.ASGITransport`, which speaks HTTP to
 the ASGI app in memory. The routes, the form handling and the responses are the
@@ -6,10 +6,12 @@ real ones; no socket is opened, so these stay unit tests. The overrides file is 
 real file in an in-memory filesystem, which is what lets the write-through be
 tested rather than described.
 
-ha-satellite REQ-049 is two claims and both are here: every operator-facing
-setting can be changed from this page, and the one marked secret is reported as
-set or unset and never by value — so the page is usable for rotating a credential
-and useless for learning one. The credential used throughout carries a tab, a
+ha-satellite REQ-049 is two claims and both are here: every current
+operator-facing setting can be changed from this page, and the one marked secret
+is reported as set or unset and never by value — so the page is usable for
+rotating a credential and useless for learning one. Bootstrap settings stay
+environment-only; retired gaze inputs stay visible but ignored and cannot be
+persisted even by a crafted form. The credential used throughout carries a tab, a
 newline and a backslash, because a value that reaches a renderer before a
 redactor leaks in a form no plain-string search would find.
 
@@ -247,6 +249,27 @@ class TestLegacyGazeCompatibility:
         assert response.text.count("legacy compatibility; ignored") >= len(
             COMPATIBILITY_SETTINGS
         )
+
+    @pytest.mark.asyncio
+    async def test_crafted_submission_cannot_persist_compatibility_fields(self) -> None:
+        """Read-only rendering is backed by server-side refusal, not browser trust."""
+        settings = load_settings(ENVIRONMENT, {}).settings
+        fields = {
+            "gaze_deadzone": "0.9",
+            "gaze_smoothing": "0.9",
+            "camera_horizontal_fov_degrees": "100.0",
+            "camera_vertical_fov_degrees": "80.0",
+        }
+
+        async with _client(_app()) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, **fields),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 303
+        assert not (set(_store().load()) & COMPATIBILITY_SETTINGS)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("name", sorted(COMPATIBILITY_SETTINGS))

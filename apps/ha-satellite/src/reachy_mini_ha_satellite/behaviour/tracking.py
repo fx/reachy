@@ -9,9 +9,9 @@ state only: it is neither persistent identity nor part of the wire protocol.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING, Final
+
+from reachy_mini_ha_satellite.ports import GazeDirective, GazeOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -28,49 +28,6 @@ __all__ = [
 
 _ASSOCIATION_LIMIT: Final = 0.60
 _DEFAULT_MAXIMUM_GAP: Final = 0.50
-
-
-class GazeOutcome(StrEnum):
-    """What the latest perception result says about gaze."""
-
-    TRACKING = "tracking"
-    NOBODY = "nobody"
-    STALE = "stale"
-    UNKNOWN = "unknown"
-
-
-@dataclass(frozen=True, slots=True)
-class GazeDirective:
-    """One selected completed result, explicit loss, or unknown input.
-
-    ``target_epoch`` is deliberately private to this process. A target change
-    resets prediction without inventing a person identifier that perception did
-    not provide.
-    """
-
-    outcome: GazeOutcome
-    source: DetectionSource | None = None
-    generation: int | None = None
-    sequence: int | None = None
-    captured_at: float | None = None
-    received_at: float | None = None
-    face: FaceDetection | None = None
-    target_epoch: int = 0
-
-    @property
-    def identity(self) -> tuple[DetectionSource, int, int] | None:
-        """Return the source-qualified result identity when complete."""
-        if self.source is None or self.generation is None or self.sequence is None:
-            return None
-        return self.source, self.generation, self.sequence
-
-    @property
-    def actionable(self) -> bool:
-        """Whether this is a new qualified result the controller may consume."""
-        return self.identity is not None and self.outcome in {
-            GazeOutcome.TRACKING,
-            GazeOutcome.NOBODY,
-        }
 
 
 def _initial_key(face: FaceDetection) -> tuple[float, float, float, float]:
@@ -142,6 +99,12 @@ class GazeSelector:
             return self._current_or_unknown()
 
         current = self._current
+        if (
+            not detections.fresh
+            and current is not None
+            and current.source is not source
+        ):
+            return current
         if not detections.fresh:
             if current is not None and current.outcome is GazeOutcome.STALE:
                 return current
