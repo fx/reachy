@@ -1,17 +1,8 @@
-"""Head, antennas and gaze, against a robot handle that is a fake.
+"""Measured calibration and canonical commands against a fake daemon handle.
 
-Two things are worth pinning here and both of them are silent when they are
-wrong.
-
-**The signs.** A positive pitch has to raise the head and a face to the right of
-the frame has to turn the robot to its right. Get either backwards and the robot
-tracks a face by looking away from it, which no test of "did it move?" catches.
-
-**The resolution independence.** Robot-link REQ-021 says a detection's position
-is normalised, and the point of that is that halving the capture resolution
-changes nothing about where the head goes. The adapter is what makes that true
-in the motion direction, and it is true here because nothing in `look_at` knows
-a frame's dimensions.
+The tests pin normalized-to-interior-pixel conversion, capture/query pose
+rebasing, bounded SO(3) history, grouped head-body semantics, measured feedback
+failures, automatic-yaw ownership and terminal release without robot hardware.
 """
 
 from __future__ import annotations
@@ -224,6 +215,37 @@ class TestCaptureTimeCalibration:
         assert first.state is CalibrationState.REJECTED
         assert cached is first
         assert robot.image_gaze == []
+
+
+class TestMeasuredFeedbackFailures:
+    """Unavailable or malformed feedback is represented as missing, never a crash."""
+
+    def test_pose_failure_returns_no_body_measurement(self) -> None:
+        """A failed measured pose read leaves calibration history unchanged."""
+        robot = FakeRobot(measured_head_poses=(RuntimeError("pose unavailable"),))
+
+        measured = ReachyMotion(robot, body_enabled=True).observe(0.0)
+
+        assert measured is None
+
+    @pytest.mark.parametrize(
+        "joints",
+        [
+            ([0.0], [0.0, 0.0]),
+            ([math.nan, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0, 0.0]),
+            RuntimeError("joints unavailable"),
+        ],
+    )
+    def test_malformed_or_missing_joint_feedback_returns_none(
+        self,
+        joints: tuple[list[float], list[float]] | BaseException,
+    ) -> None:
+        """The pure controller owns persistence and recovery for missing feedback."""
+        robot = FakeRobot(measured_joints=(joints,))
+
+        measured = ReachyMotion(robot, body_enabled=True).observe(0.0)
+
+        assert measured is None
 
 
 class TestCommandingTheRobot:

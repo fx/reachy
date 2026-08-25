@@ -370,21 +370,26 @@ class ReachyMotion:
             self.observe(now)
 
     def observe(self, now: float) -> float | None:
-        """Append measured world pose and optional body feedback for this tick."""
+        """Append conservative measured pose and optional body feedback."""
         if self._released:
             return None
-        self._history.append(now, self._handle.get_current_head_pose())
-        if self._body_enabled:
+        try:
+            self._history.append(now, self._handle.get_current_head_pose())
+        except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
+            return None
+        if not self._body_enabled:
+            return None
+        try:
             head_joints, _antennas = self._handle.get_current_joint_positions()
             if len(head_joints) != 7:
-                message = "body feedback requires seven measured head joints"
-                raise ValueError(message)
+                return None
             measured = float(head_joints[0])
             if not math.isfinite(measured):
-                message = "measured body yaw must be finite"
-                raise ValueError(message)
-            self._measured_body_yaw = measured
-        return self._measured_body_yaw
+                return None
+        except (IndexError, RuntimeError, TypeError, ValueError):
+            return None
+        self._measured_body_yaw = measured
+        return measured
 
     def calibrate(self, directive: GazeDirective, now: float) -> CalibrationResult:
         """Calibrate one new actionable face identity, with bounded retry/reject."""
@@ -487,6 +492,8 @@ class ReachyMotion:
         if not self._acquired:
             message = "gaze motion must be acquired before its first command"
             raise RuntimeError(message)
+        if sample.body_enabled is not self._body_enabled:
+            return
         pose = head_pose_matrix(
             HeadPose(yaw=sample.world_yaw, pitch=sample.elevation, roll=0.0)
         )
