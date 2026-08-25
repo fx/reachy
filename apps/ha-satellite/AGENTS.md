@@ -13,11 +13,12 @@ The robot-side ESPHome voice satellite for Home Assistant. Distribution
 as in the suite: announcements were played through the real speaker and judged
 audible across a room, and that change's own Outcome section records the
 levels), and
-[0019](../../docs/changes/0019-predictive-gaze-and-coordinated-motion.md), whose
-implementation and deterministic acceptance evidence are present while its
-private head/body canary outcome bookkeeping remains pending. Both specs are
-registered in `.duvet/config.toml`; repository traceability covers all nine specs
-and all 92 requirements.
+[0019](../../docs/changes/0019-predictive-gaze-and-coordinated-motion.md) (done,
+including deterministic acceptance evidence and the scrubbed staged-rollout
+outcome). Body motion remains restart-bound, false by default and a provisional
+opt-in because the rollout did not settle calibration or its shipping default.
+Both specs are registered in `.duvet/config.toml`; repository traceability covers
+all nine specs and all 92 requirements.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.

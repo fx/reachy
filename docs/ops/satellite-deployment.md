@@ -312,7 +312,8 @@ so existing environments keep starting. The startup report and settings page mar
 them `legacy compatibility; ignored`; the form renders them read-only, and an
 ordinary save removes stale copies from the overrides file. They do not enter the
 predictive controller. Body motion is separately restart-bound, disabled by
-default and provisional pending live calibration evidence.
+default and remains a provisional opt-in because the completed rollout did not
+settle calibration or a shipping-default decision.
 
 ### Detection source
 
@@ -431,15 +432,14 @@ yet).
 
 ## Predictive gaze canary and rollback
 
-This is the rollback contract for the private head-only and coordinated-body
-canaries. It declares the decision thresholds before motion begins; it is not a
-record that either canary ran.
+This is the reusable rollback contract for private head-only and
+coordinated-body canaries. It declares the decision thresholds before motion
+begins and remains the procedure for later candidate evaluation.
 
-**Command and output evidence: ⏳ PENDING ACTUAL COORDINATOR EXECUTION.** No
-transcript is supplied here because this repository has no robot attached. The
-coordinator records only scrubbed aggregate outcomes after executing against the
-private robot; endpoint, account, installation and raw-log details remain
-private.
+The current staged rollout ran to completion. Its scrubbed aggregate evidence is
+recorded in the [change 0019 outcome](../changes/0019-predictive-gaze-and-coordinated-motion.md#outcome).
+No transcript is supplied here; raw evidence and installation-specific details
+remain private.
 
 ### Retain the rollback target first
 

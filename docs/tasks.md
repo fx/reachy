@@ -4,14 +4,12 @@ Catch-all task list for work not tracked in a specific [change document](changes
 
 ## Backlog
 
-- [ ] **Run the end-to-end session against a real Reachy Mini, and replace every
-      `⏳ PENDING HARDWARE VERIFICATION` marker in the runbooks with what the
-      command actually printed.** Every change document from 0004 onwards defers
-      something to this session, and
-      [0015](changes/0015-docs-and-runbooks.md) is where the list was gathered.
-      Nothing in this repository has a robot attached, so these steps have never
-      been run; the markers exist so a reader can tell which parts of a runbook
-      are transcribed and which are not.
+- [ ] **Run the remaining end-to-end steps against a real Reachy Mini, and replace
+      each outstanding `⏳ PENDING HARDWARE VERIFICATION` marker in the runbooks
+      with what the command actually printed.**
+      [0015](changes/0015-docs-and-runbooks.md) gathered the original list. Later
+      hardware-backed changes completed some of that work; the items below are
+      only the unrelated steps whose runbook verification remains outstanding.
 
       Grep for the marker to find them: `grep -rn "PENDING HARDWARE" docs/`.
       What the session has to execute, and what it is answering:
@@ -53,11 +51,7 @@ Catch-all task list for work not tracked in a specific [change document](changes
         outstanding**; the speaker's own volume and ducking were settled by
         [0016](changes/0016-audible-playback.md)
       - The three required antenna motions read as distinct across a room —
-        still, opposed, together — and the predictive head-only canary stays
-        inside change 0019's predeclared safety and tracking abort thresholds
-      - A face is tracked end to end through the groundstation; only after that
-        head-only evidence passes, run the separately gated coordinated-body
-        canary, then restore body motion to its false default
+        still, opposed, together
 
       **Home Assistant**
       - It discovers the robot over mDNS and registers it under the announced

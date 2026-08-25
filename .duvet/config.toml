@@ -181,8 +181,9 @@ format = "markdown"
 # Registered by 0019's final implementation task, which adds the unified safety
 # state, bounded private diagnostics, named REQ-074–092 acceptance matrix and
 # rollback-ready rollout contract after the first two tasks established the
-# estimator, deterministic plant and coordinated runtime. Live canary outcome
-# bookkeeping remains pending and is not represented as implementation evidence.
+# estimator, deterministic plant and coordinated runtime. The staged rollout is
+# complete and its scrubbed aggregate outcome remains operational evidence rather
+# than a substitute for implementation evidence.
 [[specification]]
 source = "docs/specs/gaze-control/index.md"
 format = "markdown"

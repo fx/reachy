@@ -272,12 +272,13 @@ scrubbed and aggregate.
 
 ## Open Questions
 
-- **Body default:** Should coordinated body motion ship enabled after canary
-  calibration, or remain restart-bound opt-in? Deferred to the canary outcome or
-  a later proposal if 0019 evidence is insufficient.
+- **Body default:** Should coordinated body motion ship enabled, or remain a
+  restart-bound opt-in? The staged rollout restored it to false and did not settle
+  a shipping default; that decision is deferred to a later proposal.
 - **Body calibration:** Which allocation shares, head comfort angle, derivative
-  limits and feedback-divergence threshold become supported defaults? Deferred
-  when the calibration cannot finish inside the rollout task.
+  limits and feedback-divergence threshold become supported defaults? The staged
+  rollout did not settle those values; calibration is deferred to a later
+  proposal.
 - **Target association:** Is deterministic center-and-confidence association
   sufficient for multiple faces, or does a later wire-compatible tracking
   identity need its own proposal?

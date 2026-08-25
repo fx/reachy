@@ -8,8 +8,35 @@ from typing import Final
 
 import pytest
 
-RUNBOOK: Final = (
-    Path(__file__).resolve().parents[3] / "docs" / "ops" / "satellite-deployment.md"
+REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[3]
+RUNBOOK: Final = REPOSITORY_ROOT / "docs" / "ops" / "satellite-deployment.md"
+CHANGE_0019: Final = (
+    REPOSITORY_ROOT
+    / "docs"
+    / "changes"
+    / "0019-predictive-gaze-and-coordinated-motion.md"
+)
+_STALE_COMPLETION_REFERENCES: Final = (
+    (RUNBOOK, "pending actual coordinator execution"),
+    (REPOSITORY_ROOT / "AGENTS.md", "canary outcome bookkeeping remains pending"),
+    (
+        REPOSITORY_ROOT / "apps" / "ha-satellite" / "AGENTS.md",
+        "head/body canary outcome bookkeeping remains pending",
+    ),
+    (
+        REPOSITORY_ROOT / ".duvet" / "config.toml",
+        "live canary outcome bookkeeping remains pending",
+    ),
+    (REPOSITORY_ROOT / "docs" / "tasks.md", "these steps have never been run"),
+    (
+        REPOSITORY_ROOT / "docs" / "tasks.md",
+        "the predictive head-only canary stays",
+    ),
+    (
+        REPOSITORY_ROOT / "docs" / "tasks.md",
+        "run the separately gated coordinated-body canary",
+    ),
+    (CHANGE_0019, "deferred to the canary outcome"),
 )
 _NUMBERED_STEP: Final = re.compile(r"(?ms)^\d+\. .+?(?=^\d+\. |\Z)")
 
@@ -23,6 +50,28 @@ def _steps(section: str) -> tuple[str, ...]:
     """Parse structural ordered-list items without depending on line wrapping."""
     return tuple(
         " ".join(match.group().split()) for match in _NUMBERED_STEP.finditer(section)
+    )
+
+
+@pytest.mark.filesystem
+def test_completed_rollout_has_no_stale_pending_canary_references() -> None:
+    """A completed change cannot leave its owned rollout references pending."""
+    change = CHANGE_0019.read_text(encoding="utf-8")
+    status = re.search(r"(?m)^\*\*Status:\*\* (.+)$", change)
+
+    assert status is not None
+    assert status.group(1) == "complete"
+    for path, stale_phrase in _STALE_COMPLETION_REFERENCES:
+        text = " ".join(path.read_text(encoding="utf-8").split()).casefold()
+        relative_path = path.relative_to(REPOSITORY_ROOT)
+        assert stale_phrase not in text, (
+            f"stale completion reference in {relative_path}"
+        )
+
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    assert "[change 0019 outcome]" in runbook
+    assert (
+        "../changes/0019-predictive-gaze-and-coordinated-motion.md#outcome" in runbook
     )
 
 

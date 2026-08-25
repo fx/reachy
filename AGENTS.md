@@ -366,10 +366,12 @@ writes it. A registered spec whose requirements nothing implements is a red job
 that stays red, and one that is going to stay red is one somebody switches off.
 That rule is what put architecture last in the original plan: six changes
 implemented its nine requirements and 0015 registered it, adding the two that
-were still missing. Change 0019 later registers gaze-control only with its final
+were still missing. Change 0019 later registered gaze-control with its final
 safety implementation, deterministic REQ-074–092 acceptance matrix and bounded
-diagnostics in place; private canary outcome bookkeeping remains pending and is
-not substituted for implementation evidence. The header comment in
+diagnostics in place. Its three tasks and staged rollout are complete, with
+scrubbed aggregate evidence in the change document. Body motion remains
+restart-bound, false by default and a provisional opt-in because the rollout did
+not settle calibration or a shipping-default decision. The header comment in
 `.duvet/config.toml` records which change registered which spec and why.
 
 Two requirements are cited from files that are neither Python nor a workflow, and
