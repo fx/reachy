@@ -1,6 +1,6 @@
 [project]
 name = "reachy-session-client"
-version = "0.1.0"
+version = "0.2.0"
 description = "The one client implementation of the robot link session protocol"
 requires-python = ">=3.12"
 dependencies = [

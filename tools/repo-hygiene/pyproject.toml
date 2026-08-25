@@ -1,6 +1,6 @@
 [project]
 name = "reachy-hygiene"
-version = "0.1.0"
+version = "0.2.0"
 description = "Repository hygiene gates: the generic environment-leak scanner"
 requires-python = ">=3.12"
 dependencies = []
