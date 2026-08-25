@@ -111,14 +111,38 @@ def test_body_setting_uses_layer_specific_key_names() -> None:
     assert all(
         setting_name in step and environment_name not in step for step in config_steps
     )
-    assert any("`false`" in step for step in override_steps)
-    assert any("`false`" in step for step in managed_steps)
+    assert any('`"body_motion_enabled": "false"`' in step for step in override_steps)
+    assert any(
+        "`REACHY_SATELLITE_BODY_MOTION_ENABLED=false`" in step for step in managed_steps
+    )
 
     normalized = " ".join(
         _section(text, "## Predictive gaze canary", "\n---\n\n## Stopping").split()
     )
     assert f"application override JSON key {environment_name}" not in normalized
     assert f"managed environment variable {setting_name}" not in normalized
+
+
+@pytest.mark.filesystem
+def test_body_setting_values_match_each_layer_representation() -> None:
+    """Override JSON stores strings while environment and `/config` keep their forms."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    staged = _steps(_section(text, "### Staged execution", "### Rollback"))
+    rollback = _steps(_section(text, "### Rollback", "\n---"))
+    rollout_steps = staged + rollback
+
+    assert any('`"body_motion_enabled": "true"`' in step for step in staged)
+    assert any('`"body_motion_enabled": "false"`' in step for step in rollback)
+    assert any("`REACHY_SATELLITE_BODY_MOTION_ENABLED=true`" in step for step in staged)
+    assert any(
+        "`REACHY_SATELLITE_BODY_MOTION_ENABLED=false`" in step for step in rollback
+    )
+    config_steps = tuple(step for step in rollout_steps if "`/config`" in step)
+    assert any("JSON boolean `true`" in step for step in config_steps)
+    assert any("JSON boolean `false`" in step for step in config_steps)
+    rollout = " ".join(rollout_steps)
+    assert '`"body_motion_enabled": true`' not in rollout
+    assert '`"body_motion_enabled": false`' not in rollout
 
 
 @pytest.mark.filesystem
@@ -192,14 +216,14 @@ def test_rollback_restores_each_layer_then_forces_body_false_in_winner() -> None
         for index, step in enumerate(steps)
         if "application override JSON key `body_motion_enabled`" in step
         and "force" in step
-        and "`false`" in step
+        and '`"body_motion_enabled": "false"`' in step
     )
     managed_false = next(
         index
         for index, step in enumerate(steps)
         if "managed environment variable `REACHY_SATELLITE_BODY_MOTION_ENABLED`" in step
         and "force" in step
-        and "`false`" in step
+        and "`REACHY_SATELLITE_BODY_MOTION_ENABLED=false`" in step
     )
     checksums = next(
         index
@@ -211,7 +235,8 @@ def test_rollback_restores_each_layer_then_forces_body_false_in_winner() -> None
     resolved = next(
         index
         for index, step in enumerate(steps)
-        if "resolved `/config`" in step and "`body_motion_enabled` is `false`" in step
+        if "resolved `/config`" in step
+        and "`body_motion_enabled` is JSON boolean `false`" in step
     )
     wheel = next(
         index
