@@ -40,9 +40,9 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     predict_error,
     step_controller,
     update_estimator,
-    validate_gaze_sample,
 )
 from reachy_mini_ha_satellite.behaviour.satellite import SatelliteBehaviour
+from reachy_mini_ha_satellite.motion_validation import validate_gaze_sample
 from reachy_mini_ha_satellite.ports import HeadPose
 
 _DEGREES: Final = math.pi / 180.0
@@ -450,7 +450,7 @@ def test_req_089_every_safety_channel_is_stable_and_holds_last_safe() -> None:
         pose.state.fault,
         calibration.state.fault,
         workspace.state.fault,
-        validate_gaze_sample(derivative_sample, config),
+        ControllerFault(validate_gaze_sample(derivative_sample, config).value),
         ControllerFault.BODY_FEEDBACK,
         ControllerFault.COMMAND,
     }

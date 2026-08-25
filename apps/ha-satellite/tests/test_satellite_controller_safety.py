@@ -15,8 +15,8 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     HeadMeasurement,
     initial_controller_state,
     step_controller,
-    validate_gaze_sample,
 )
+from reachy_mini_ha_satellite.motion_validation import SampleFault, validate_gaze_sample
 from reachy_mini_ha_satellite.ports import GazeSample
 
 
@@ -203,8 +203,8 @@ def test_shared_sample_validator_covers_derivatives_workspace_and_body_coherence
         body_enabled=False,
     )
 
-    assert validate_gaze_sample(derivative, config) is ControllerFault.DERIVATIVE
-    assert validate_gaze_sample(workspace, config) is ControllerFault.WORKSPACE
+    assert validate_gaze_sample(derivative, config) is SampleFault.DERIVATIVE
+    assert validate_gaze_sample(workspace, config) is SampleFault.WORKSPACE
     with pytest.raises(ValueError, match="body-disabled"):
         GazeSample(0.1, 0.0, 0.1, 0.0, False)
     with pytest.raises(ValueError, match="finite"):

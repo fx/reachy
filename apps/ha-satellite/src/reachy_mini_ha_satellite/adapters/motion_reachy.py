@@ -16,11 +16,8 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from reachy_mini_ha_satellite.behaviour.gaze_controller import (
-    ControllerConfig,
-    ControllerFault,
-    validate_gaze_sample,
-)
+from reachy_mini_ha_satellite.behaviour.gaze_controller import ControllerConfig
+from reachy_mini_ha_satellite.motion_validation import SampleFault, validate_gaze_sample
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -590,7 +587,7 @@ class ReachyMotion:
                 MotionFault.COMMAND,
                 call,
             )
-        if validate_gaze_sample(sample, self._config) is not ControllerFault.NONE:
+        if validate_gaze_sample(sample, self._config) is not SampleFault.NONE:
             return MotionCommandResult(
                 MotionCommandStatus.REJECTED,
                 MotionFault.COMMAND,

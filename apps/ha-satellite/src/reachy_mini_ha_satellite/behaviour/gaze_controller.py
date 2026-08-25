@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import Final
 
 from reachy_contracts import FaceDetection
+from reachy_mini_ha_satellite.motion_validation import validate_gaze_sample
 from reachy_mini_ha_satellite.ports import GazeSample
 
 __all__ = [
@@ -40,7 +41,6 @@ __all__ = [
     "step_axis",
     "step_controller",
     "update_estimator",
-    "validate_gaze_sample",
 ]
 
 _DEGREES: Final = math.pi / 180.0
@@ -999,50 +999,6 @@ def _brake_hidden(
     )
 
 
-def validate_gaze_sample(
-    sample: GazeSample,
-    config: ControllerConfig,
-) -> ControllerFault:
-    """Validate one complete atomic sample without owning controller state."""
-    if sample.body_enabled is not config.body_enabled:
-        return ControllerFault.WORKSPACE
-    axes = (
-        (
-            sample.world_yaw,
-            sample.world_yaw_velocity,
-            sample.world_yaw_acceleration,
-            config.yaw_limits,
-        ),
-        (
-            sample.elevation,
-            sample.elevation_velocity,
-            sample.elevation_acceleration,
-            config.elevation_limits,
-        ),
-        (
-            sample.body_yaw,
-            sample.body_yaw_velocity,
-            sample.body_yaw_acceleration,
-            config.body_limits,
-        ),
-    )
-    if (
-        any(
-            not limits.minimum <= position <= limits.maximum
-            for position, _velocity, _acceleration, limits in axes
-        )
-        or not config.yaw_limits.minimum <= sample.head_yaw <= config.yaw_limits.maximum
-    ):
-        return ControllerFault.WORKSPACE
-    if any(
-        abs(velocity) > limits.max_velocity + _EPSILON
-        or abs(acceleration) > limits.max_acceleration + _EPSILON
-        for _position, velocity, acceleration, limits in axes
-    ):
-        return ControllerFault.DERIVATIVE
-    return ControllerFault.NONE
-
-
 def _transition_valid(
     previous: AxisState,
     candidate: AxisState,
@@ -1489,7 +1445,8 @@ def step_controller(
     )
     candidate = _sample(world, elevation, body, config)
 
-    validation_fault: ControllerFault = validate_gaze_sample(candidate, config)
+    sample_fault = validate_gaze_sample(candidate, config)
+    validation_fault = ControllerFault(sample_fault.value)
     if validation_fault == ControllerFault.NONE and not all(
         (
             _transition_valid(state.world_yaw, world, dt, config.yaw_limits),
