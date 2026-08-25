@@ -452,11 +452,12 @@ Before installing a candidate, complete this preflight transaction:
 3. copy the exact application overrides layer at `<state_dir>/settings.json` and
    record its original SHA256; if the file is absent, record `ABSENT` rather than
    creating a layer that was not running;
-4. record which layer supplies the effective
-   `REACHY_SATELLITE_BODY_MOTION_ENABLED` value: the application override when
-   that key is present, otherwise the managed daemon environment when that key is
-   present, otherwise the retained wheel default;
-5. seal a private manifest that pairs each exact configuration-layer backup with
+4. inspect the application override JSON key `body_motion_enabled`; when present,
+   record the override layer as the effective body-setting winner;
+5. only when that override key is absent, inspect the managed environment variable
+   `REACHY_SATELLITE_BODY_MOTION_ENABLED`; record the managed layer as winner when
+   present, otherwise record the retained wheel default as winner;
+6. seal a private manifest that pairs each exact configuration-layer backup with
    its original SHA256, then confirm these checks completed before any candidate
    install.
 
@@ -465,8 +466,8 @@ repository. A version label, parsed key/value export or remembered defaults are
 not a backup: rollback uses the retained bytes, including non-setting bytes, and
 the exact precedence that was running.
 
-`REACHY_SATELLITE_BODY_MOTION_ENABLED` must resolve to `false` in `/config`
-before the head-only canary is allowed to own motion. It may become `true` only
+The `/config` field `body_motion_enabled` must resolve to `false` before the
+head-only canary is allowed to own motion. It may become `true` only
 for the separately approved body canary after all head-only evidence passes, and
 it must be restored to `false` when that canary or any rollback ends. Body motion
 remains restart-bound and false by default regardless of a successful canary.
@@ -510,20 +511,30 @@ changes motion, settings, perception or pipeline state.
    released application and install the verified candidate with body motion
    staged false; no candidate wheel is installed before that preflight completes.
 2. Restart the candidate with motion ownership inhibited, require the resolved
-   `/config` value for body motion to be `false`, then allow the head-only
+   `/config` field `body_motion_enabled` to be `false`, then allow the head-only
    deterministic-envelope canary while observing `/livez`, `/status`, bounded
    controller diagnostics, perception, the groundstation session and the
    existing Home Assistant device.
-3. If every head-only threshold passes, stop the application, privately enable
-   body motion in the highest-precedence effective body-setting layer, restart
-   with motion inhibited, require `/config` to resolve body motion to `true`, and
-   only then run the separately gated coordinated-body canary against the same
-   abort rules plus the body-specific rules above.
-4. Stop after the evidence interval, restore body motion to false in that winning
-   layer, restart with motion inhibited, require `/config` to resolve it to
-   `false`, and only then verify the head-only steady state. Do not infer a
-   shipping-default decision from a canary; changing the default requires its own
-   approved proposal.
+3. If every head-only threshold passes, stop the application. When the override
+   layer wins, privately set the application override JSON key
+   `body_motion_enabled` to `true`.
+4. When the managed layer or retained default wins, privately set the managed
+   environment variable `REACHY_SATELLITE_BODY_MOTION_ENABLED` to `true`; this
+   makes the managed layer the explicit canary winner instead of modifying wheel
+   defaults.
+5. Restart with motion inhibited, require the `/config` field
+   `body_motion_enabled` to resolve to `true`, and only then run the separately
+   gated coordinated-body canary against the same abort rules plus the body-
+   specific rules above.
+6. Stop after the evidence interval. When the override layer was the canary
+   winner, restore the application override JSON key `body_motion_enabled` to
+   `false`.
+7. When the managed layer was the canary winner, restore the managed environment
+   variable `REACHY_SATELLITE_BODY_MOTION_ENABLED` to `false`.
+8. Restart with motion inhibited, require the `/config` field
+   `body_motion_enabled` to resolve to `false`, and only then verify the head-only
+   steady state. Do not infer a shipping-default decision from a canary; changing
+   the default requires its own approved proposal.
 
 ### Rollback
 
@@ -539,23 +550,32 @@ to retain the candidate, use one ordered transaction:
    as retained, including comments, ordering, whitespace and unrelated values;
 4. restore the application overrides layer with all non-body bytes exactly as
    retained; restore absence as absence rather than creating an override file;
-5. name the highest-precedence effective body-setting layer from the restored
-   bytes — override when present for that key, otherwise managed environment when
-   present, otherwise the retained artifact default — before changing anything;
-6. force only `REACHY_SATELLITE_BODY_MOTION_ENABLED` to `false` in that winning
-   mutable layer; when the retained default already wins at `false`, leave both
-   mutable layers byte-identical instead of manufacturing an override;
-7. record and verify the original SHA256 and safety-modified SHA256 for each layer
+5. inspect the restored application override JSON key `body_motion_enabled`; when
+   present, name the override as the highest-precedence effective body-setting
+   layer;
+6. only when that override key is absent, inspect the restored managed environment
+   variable `REACHY_SATELLITE_BODY_MOTION_ENABLED`; name the managed layer as the
+   highest-precedence effective body-setting layer when present, otherwise name
+   the retained artifact default;
+7. when the override wins, force only the application override JSON key
+   `body_motion_enabled` to `false` and leave every other override byte exactly as
+   restored;
+8. when the managed layer wins, force only the managed environment variable
+   `REACHY_SATELLITE_BODY_MOTION_ENABLED` to `false` and leave every other
+   managed-environment byte exactly as restored; when the retained default wins
+   at `false`, leave both mutable layers byte-identical rather than manufacturing
+   an override;
+9. record and verify the original SHA256 and safety-modified SHA256 for each layer
    in the private manifest; an unchanged layer has equal checksums and an absent
    layer remains `ABSENT`, so every divergence is explicit per layer;
-8. install the retained checksum-verified released wheel only after the candidate
-   is stopped and every configuration-layer checksum and body precedence action
-   is complete;
-9. restart the retained application with motion ownership inhibited so its
-   configuration and health endpoints can be checked without a motion command;
-10. verify the resolved `/config` value says body motion is `false` while motion
-    ownership remains inhibited;
-11. only after that resolved check may you permit any motion restart or canary
+10. install the retained checksum-verified released wheel only after the candidate
+    is stopped and every configuration-layer checksum and body precedence action
+    is complete;
+11. restart the retained application with motion ownership inhibited so its
+    configuration and health endpoints can be checked without a motion command;
+12. verify the resolved `/config` field `body_motion_enabled` is `false` while
+    motion ownership remains inhibited;
+13. only after that resolved check may you permit any motion restart or canary
     check; verify `/livez`, perception, the groundstation session, Home
     Assistant's existing device and entities, and one complete voice exchange
     before calling rollback complete.

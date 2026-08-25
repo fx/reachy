@@ -69,6 +69,59 @@ def test_preflight_checksums_every_config_layer_before_candidate_install() -> No
 
 
 @pytest.mark.filesystem
+def test_body_setting_uses_layer_specific_key_names() -> None:
+    """Managed environment, override JSON and `/config` use distinct spellings."""
+    text = RUNBOOK.read_text(encoding="utf-8")
+    preflight = _steps(
+        _section(
+            text,
+            "### Retain the rollback target first",
+            "### Abort thresholds",
+        )
+    )
+    staged = _steps(_section(text, "### Staged execution", "### Rollback"))
+    rollback = _steps(_section(text, "### Rollback", "\n---"))
+    rollout_steps = preflight + staged + rollback
+    environment_name = "`REACHY_SATELLITE_BODY_MOTION_ENABLED`"
+    setting_name = "`body_motion_enabled`"
+
+    override_steps = tuple(
+        step
+        for step in rollout_steps
+        if "application override" in step
+        and (setting_name in step or environment_name in step)
+    )
+    managed_steps = tuple(
+        step
+        for step in rollout_steps
+        if "managed environment" in step
+        and (setting_name in step or environment_name in step)
+    )
+    config_steps = tuple(step for step in rollout_steps if "`/config`" in step)
+
+    assert override_steps
+    assert managed_steps
+    assert config_steps
+    assert all(
+        setting_name in step and environment_name not in step for step in override_steps
+    )
+    assert all(
+        environment_name in step and setting_name not in step for step in managed_steps
+    )
+    assert all(
+        setting_name in step and environment_name not in step for step in config_steps
+    )
+    assert any("`false`" in step for step in override_steps)
+    assert any("`false`" in step for step in managed_steps)
+
+    normalized = " ".join(
+        _section(text, "## Predictive gaze canary", "\n---\n\n## Stopping").split()
+    )
+    assert f"application override JSON key {environment_name}" not in normalized
+    assert f"managed environment variable {setting_name}" not in normalized
+
+
+@pytest.mark.filesystem
 def test_rollback_stops_and_releases_candidate_before_any_restore_write() -> None:
     """Artifact/config writes are forbidden until candidate motion ownership is gone."""
     text = RUNBOOK.read_text(encoding="utf-8")
@@ -121,16 +174,30 @@ def test_rollback_restores_each_layer_then_forces_body_false_in_winner() -> None
         if "application overrides layer" in step
         and "all non-body bytes exactly" in step
     )
-    winner = next(
+    override_winner = next(
         index
         for index, step in enumerate(steps)
         if "highest-precedence effective body-setting layer" in step
-        and "override when present" in step
+        and "application override JSON key `body_motion_enabled`" in step
     )
-    force_false = next(
+    managed_winner = next(
         index
         for index, step in enumerate(steps)
-        if "that winning mutable layer" in step
+        if "highest-precedence effective body-setting layer" in step
+        and "managed environment variable `REACHY_SATELLITE_BODY_MOTION_ENABLED`"
+        in step
+    )
+    override_false = next(
+        index
+        for index, step in enumerate(steps)
+        if "application override JSON key `body_motion_enabled`" in step
+        and "force" in step
+        and "`false`" in step
+    )
+    managed_false = next(
+        index
+        for index, step in enumerate(steps)
+        if "managed environment variable `REACHY_SATELLITE_BODY_MOTION_ENABLED`" in step
         and "force" in step
         and "`false`" in step
     )
@@ -144,7 +211,7 @@ def test_rollback_restores_each_layer_then_forces_body_false_in_winner() -> None
     resolved = next(
         index
         for index, step in enumerate(steps)
-        if "resolved `/config`" in step and "body motion is `false`" in step
+        if "resolved `/config`" in step and "`body_motion_enabled` is `false`" in step
     )
     wheel = next(
         index
@@ -162,7 +229,8 @@ def test_rollback_restores_each_layer_then_forces_body_false_in_winner() -> None
         if "permit any motion restart or canary" in step
     )
 
-    assert stop < managed_restore < override_restore < winner < force_false < checksums
+    assert stop < managed_restore < override_restore < override_winner
+    assert override_winner < managed_winner < override_false < managed_false < checksums
     assert checksums < wheel < restart < resolved < motion
 
 
