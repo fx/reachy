@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import replace
 
 import pytest
+from satellite_support import assert_public_controller_diagnostic_event
 
 from reachy_mini_ha_satellite.behaviour.controller_diagnostics import (
     ControllerDiagnostics,
@@ -56,10 +57,32 @@ def test_diagnostics_ring_evicts_oldest_and_snapshots_deterministically() -> Non
     assert [event["at"] for event in first] == [0.05, 0.1]
 
 
-def test_diagnostics_schema_has_only_allowed_scalar_values_and_no_forbidden_keys() -> (
-    None
-):
-    """No payload key can retain an image, installation identity or free-form error."""
+def test_diagnostics_privacy_guard_rejects_unknown_scalar_identifiers() -> None:
+    """A differently named scalar identifier must not extend the public schema."""
+    diagnostics = ControllerDiagnostics(capacity=1)
+    config = ControllerConfig()
+    step = step_controller(
+        initial_controller_state(config),
+        None,
+        now=0.0,
+        dt=0.0,
+        config=config,
+    )
+    diagnostics.record(
+        step,
+        config=config,
+        at=0.0,
+        observation_age=None,
+        emitted=False,
+    )
+    mutated = {**diagnostics.snapshot()[0], "robot_serial": 7.0}
+
+    with pytest.raises(AssertionError):
+        assert_public_controller_diagnostic_event(mutated)
+
+
+def test_diagnostics_schema_matches_exact_unversioned_public_allowlist() -> None:
+    """Every required key and only those keys retain documented scalar/null types."""
     diagnostics = ControllerDiagnostics(capacity=1)
     config = ControllerConfig()
     step = step_controller(
@@ -78,23 +101,11 @@ def test_diagnostics_schema_has_only_allowed_scalar_values_and_no_forbidden_keys
     )
 
     event = diagnostics.snapshot()[0]
-    forbidden = {
-        "source",
-        "generation",
-        "sequence",
-        "identity",
-        "face",
-        "image",
-        "config",
-        "credential",
-        "network",
-        "path",
-        "exception",
-    }
-    assert forbidden.isdisjoint(event)
-    assert all(
-        value is None or isinstance(value, str | float | bool)
-        for value in event.values()
+    assert event["observation_age"] is None
+    assert event["command_accepted"] is None
+    assert_public_controller_diagnostic_event(event)
+    assert_public_controller_diagnostic_event(
+        {**event, "observation_age": 0.1, "command_accepted": True}
     )
 
 
@@ -186,10 +197,7 @@ def test_saturated_event_explains_allocation_workspace_and_derivative_limits() -
     assert event["world_yaw_position_limited"] is True
     assert event["world_yaw_velocity_limited"] is True
     assert event["world_yaw_acceleration_limited"] is True
-    assert all(
-        value is None or isinstance(value, str | float | bool)
-        for value in event.values()
-    )
+    assert_public_controller_diagnostic_event(event)
 
 
 def test_reset_clears_only_ring_contents() -> None:

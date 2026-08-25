@@ -56,7 +56,7 @@ def validate_gaze_sample(
     sample: GazeSample,
     config: _GazeEnvelope,
 ) -> SampleFault:
-    """Validate q/v/a, world-head-body identity and configured workspace."""
+    """Validate body-mode agreement and configured position/derivative bounds."""
     if sample.body_enabled is not config.body_enabled:
         return SampleFault.WORKSPACE
     axes = (

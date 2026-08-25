@@ -29,6 +29,10 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+from satellite_support import (
+    assert_public_controller_diagnostics_response,
+    public_controller_diagnostic_event,
+)
 
 from reachy_mini_ha_satellite.config import (
     COMPATIBILITY_SETTINGS,
@@ -73,22 +77,7 @@ class RecordingHost:
         self.applied: list[Settings] = []
         self.stops = 0
         self.events: tuple[dict[str, object], ...] = (
-            {
-                "at": 1.0,
-                "mode": "active",
-                "fault": "none",
-                "safe_hold": False,
-                "observation_age": 0.1,
-                "observation_consumed": True,
-                "estimator_reset": "first",
-                "prediction_horizon": 0.2,
-                "deadband_active": True,
-                "world_yaw": 0.1,
-                "elevation": 0.0,
-                "body_yaw": 0.0,
-                "emitted": True,
-                "command_accepted": True,
-            },
+            public_controller_diagnostic_event(),
         )
         self.diagnostics_resets = 0
 
@@ -719,10 +708,10 @@ class TestTheMachineReadableSurfaces:
         assert not status["running"]
 
     @pytest.mark.asyncio
-    async def test_controller_diagnostics_are_fixed_scalar_and_identifier_free(
+    async def test_controller_diagnostics_match_exact_public_response_schema(
         self,
     ) -> None:
-        """The detailed route cannot grow installation or image-shaped payloads."""
+        """The unversioned envelope and every event expose only required public keys."""
         host = RecordingHost()
 
         async with _client(_app(host)) as client:
@@ -732,25 +721,7 @@ class TestTheMachineReadableSurfaces:
         payload = response.json()
         assert payload["running"]
         assert payload["events"] == list(host.events)
-        forbidden = {
-            "source",
-            "generation",
-            "sequence",
-            "identity",
-            "face",
-            "image",
-            "config",
-            "credential",
-            "network",
-            "path",
-            "exception",
-        }
-        for event in payload["events"]:
-            assert forbidden.isdisjoint(event)
-            assert all(
-                value is None or isinstance(value, str | float | bool)
-                for value in event.values()
-            )
+        assert_public_controller_diagnostics_response(payload)
 
     @pytest.mark.asyncio
     async def test_controller_diagnostics_report_when_no_application_is_running(
@@ -761,7 +732,9 @@ class TestTheMachineReadableSurfaces:
             read = await client.get("/diagnostics/controller")
             reset = await client.post("/diagnostics/controller/reset")
 
-        assert read.json() == {"running": False, "events": []}
+        payload = read.json()
+        assert payload == {"running": False, "events": []}
+        assert_public_controller_diagnostics_response(payload)
         assert reset.status_code == 503
         assert reset.json() == {"reset": False}
 

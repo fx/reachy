@@ -17,6 +17,7 @@ from gaze_simulation import (
     constant_target,
     moving_target,
 )
+from satellite_support import assert_public_controller_diagnostic_event
 
 from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.adapters.motion_reachy import (
@@ -368,7 +369,7 @@ def test_simulation_calibration_oracle_is_independent_and_mutation_sensitive() -
 #:% Crossing configured tracking activation and release regions MUST suppress
 #:% bounded image noise without causing command chatter or a command discontinuity.
 def test_req_079_hysteresis_is_continuous_across_bounded_noise() -> None:
-    """Static noise never activates and an active command reaches zero continuously."""
+    """Bounded static inputs stay inactive and produce exactly zero output."""
     config = ControllerConfig()
     state = DeadbandState()
     for x, y in DEFAULT_NOISE:
@@ -680,7 +681,7 @@ def test_req_090_head_ownership_covers_lifecycle_and_safety_then_yields() -> Non
 #:% observation ages, estimator transitions, limits, commands and fault categories
 #:% without retaining images, face crops, credentials or installation identifiers.
 def test_req_091_diagnostics_are_bounded_private_and_reset_only_the_ring() -> None:
-    """Fixed schema, deterministic eviction and reset retain no forbidden payload."""
+    """Exact public schema, deterministic eviction and reset bound the evidence."""
     diagnostics = ControllerDiagnostics(capacity=2)
     config = ControllerConfig()
     state = initial_controller_state(config)
@@ -704,11 +705,8 @@ def test_req_091_diagnostics_are_bounded_private_and_reset_only_the_ring() -> No
     snapshot = diagnostics.snapshot()
     assert len(snapshot) == 2
     assert [event["at"] for event in snapshot] == [0.05, 0.1]
-    assert all(
-        key not in event
-        for event in snapshot
-        for key in ("source", "generation", "sequence", "identity", "image", "face")
-    )
+    for event in snapshot:
+        assert_public_controller_diagnostic_event(event)
     controller_before = state
     diagnostics.reset()
     assert diagnostics.snapshot() == ()

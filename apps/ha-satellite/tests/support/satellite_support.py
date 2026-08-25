@@ -57,7 +57,7 @@ from reachy_mini_ha_satellite.ports import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from types import ModuleType
 
     from google.protobuf import message
@@ -74,6 +74,9 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.wake_word import ModelInput
 
 __all__ = [
+    "CONTROLLER_DIAGNOSTIC_EVENT_KEYS",
+    "CONTROLLER_DIAGNOSTIC_NULLABLE_KEYS",
+    "CONTROLLER_DIAGNOSTIC_RESPONSE_KEYS",
     "CREDENTIAL",
     "FakeAudio",
     "FakeCamera",
@@ -91,6 +94,8 @@ __all__ = [
     "FakeWakeWordFeatures",
     "ManualClock",
     "ManualDetach",
+    "assert_public_controller_diagnostic_event",
+    "assert_public_controller_diagnostics_response",
     "available_wake_word",
     "connected",
     "face",
@@ -99,6 +104,7 @@ __all__ = [
     "inline",
     "no_sleep",
     "playable",
+    "public_controller_diagnostic_event",
     "pushed_numbers",
     "sent_packets",
     "silence",
@@ -111,6 +117,141 @@ __all__ = [
 # A placeholder credential. Not anybody's — see the root AGENTS.md on what may
 # enter a tracked file in a public repository.
 CREDENTIAL: Final = "example-credential"
+
+# The controller diagnostics endpoint is deliberately unversioned. This exact
+# allowlist is therefore its public version boundary: adding a key is an API and
+# privacy change rather than a backwards-compatible implementation detail. Every
+# event key is required; only the two names below may carry null.
+CONTROLLER_DIAGNOSTIC_EVENT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "at",
+        "mode",
+        "fault",
+        "safe_hold",
+        "observation_age",
+        "observation_consumed",
+        "estimator_reset",
+        "prediction_horizon",
+        "deadband_active",
+        "world_yaw",
+        "elevation",
+        "body_yaw",
+        "head_yaw",
+        "allocation_body_share",
+        "world_yaw_velocity",
+        "world_yaw_acceleration",
+        "world_yaw_jerk",
+        "elevation_velocity",
+        "elevation_acceleration",
+        "elevation_jerk",
+        "body_yaw_velocity",
+        "body_yaw_acceleration",
+        "body_yaw_jerk",
+        "world_yaw_minimum",
+        "world_yaw_maximum",
+        "world_yaw_max_velocity",
+        "world_yaw_max_acceleration",
+        "world_yaw_max_jerk",
+        "elevation_minimum",
+        "elevation_maximum",
+        "elevation_max_velocity",
+        "elevation_max_acceleration",
+        "elevation_max_jerk",
+        "body_yaw_minimum",
+        "body_yaw_maximum",
+        "body_yaw_max_velocity",
+        "body_yaw_max_acceleration",
+        "body_yaw_max_jerk",
+        "world_yaw_position_limited",
+        "world_yaw_velocity_limited",
+        "world_yaw_acceleration_limited",
+        "world_yaw_jerk_limited",
+        "elevation_position_limited",
+        "elevation_velocity_limited",
+        "elevation_acceleration_limited",
+        "elevation_jerk_limited",
+        "body_yaw_position_limited",
+        "body_yaw_velocity_limited",
+        "body_yaw_acceleration_limited",
+        "body_yaw_jerk_limited",
+        "emitted",
+        "command_accepted",
+    }
+)
+CONTROLLER_DIAGNOSTIC_RESPONSE_KEYS: Final[frozenset[str]] = frozenset(
+    {"running", "events"}
+)
+CONTROLLER_DIAGNOSTIC_NULLABLE_KEYS: Final[frozenset[str]] = frozenset(
+    {"observation_age", "command_accepted"}
+)
+_CONTROLLER_DIAGNOSTIC_STRING_KEYS: Final[frozenset[str]] = frozenset(
+    {"mode", "fault", "estimator_reset"}
+)
+_CONTROLLER_DIAGNOSTIC_BOOLEAN_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "safe_hold",
+        "observation_consumed",
+        "deadband_active",
+        "world_yaw_position_limited",
+        "world_yaw_velocity_limited",
+        "world_yaw_acceleration_limited",
+        "world_yaw_jerk_limited",
+        "elevation_position_limited",
+        "elevation_velocity_limited",
+        "elevation_acceleration_limited",
+        "elevation_jerk_limited",
+        "body_yaw_position_limited",
+        "body_yaw_velocity_limited",
+        "body_yaw_acceleration_limited",
+        "body_yaw_jerk_limited",
+        "emitted",
+    }
+)
+
+
+def assert_public_controller_diagnostic_event(event: Mapping[str, object]) -> None:
+    """Require the exact unversioned event schema and its scalar/null types."""
+    assert frozenset(event) == CONTROLLER_DIAGNOSTIC_EVENT_KEYS
+    for key, value in event.items():
+        if key in _CONTROLLER_DIAGNOSTIC_STRING_KEYS:
+            assert type(value) is str
+        elif key in _CONTROLLER_DIAGNOSTIC_BOOLEAN_KEYS:
+            assert type(value) is bool
+        elif key in CONTROLLER_DIAGNOSTIC_NULLABLE_KEYS:
+            expected = float if key == "observation_age" else bool
+            assert value is None or type(value) is expected
+        else:
+            assert type(value) is float
+
+
+def assert_public_controller_diagnostics_response(
+    payload: Mapping[str, object],
+) -> None:
+    """Require the exact response envelope and every exact public event."""
+    assert frozenset(payload) == CONTROLLER_DIAGNOSTIC_RESPONSE_KEYS
+    assert type(payload["running"]) is bool
+    events = payload["events"]
+    assert isinstance(events, list)
+    for event in events:
+        assert isinstance(event, dict)
+        assert_public_controller_diagnostic_event(event)
+
+
+def public_controller_diagnostic_event() -> dict[str, object]:
+    """Build one complete event fixture against the independent public allowlist."""
+    event: dict[str, object] = dict.fromkeys(CONTROLLER_DIAGNOSTIC_EVENT_KEYS, 0.0)
+    event.update(
+        {
+            "mode": "active",
+            "fault": "none",
+            "estimator_reset": "first",
+            **dict.fromkeys(_CONTROLLER_DIAGNOSTIC_BOOLEAN_KEYS, False),
+            "observation_age": None,
+            "command_accepted": None,
+        }
+    )
+    assert_public_controller_diagnostic_event(event)
+    return event
 
 
 async def inline[ResultT](function: Callable[[], ResultT]) -> ResultT:
