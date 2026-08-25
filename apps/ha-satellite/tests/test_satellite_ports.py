@@ -15,8 +15,11 @@ though the attribute is still there.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Callable
 from typing import Final, get_type_hints
 
+import pytest
 from satellite_support import (
     FakeAudio,
     FakeCapture,
@@ -43,9 +46,11 @@ from reachy_mini_ha_satellite.ports import (
     NEUTRAL_HEAD,
     AntennaPose,
     AudioPort,
+    CalibrationStatus,
     CapturePort,
     Detections,
     DetectionSource,
+    GazeCalibration,
     GazeDirective,
     GazeSample,
     HeadPose,
@@ -69,6 +74,51 @@ def _audio() -> ReachyAudio:
         The adapter.
     """
     return ReachyAudio(FakeMedia(), FakeSoundSource(), detach=immediately)
+
+
+class TestMotionValuesRejectMalformedCrossingState:
+    """Port-owned values validate the atomic facts hardware consumers receive."""
+
+    @pytest.mark.parametrize(
+        ("build", "message"),
+        [
+            (lambda: GazeSample(math.nan, 0.0, 0.0, 0.0, False), "finite"),
+            (lambda: GazeSample(0.2, 0.0, 0.0, 0.1, False), "world yaw"),
+            (lambda: GazeSample(0.2, 0.0, 0.1, 0.1, False), "body-disabled"),
+        ],
+        ids=["finite", "gaze-identity", "disabled-body"],
+    )
+    def test_gaze_sample_is_finite_coordinated_and_body_consistent(
+        self,
+        build: Callable[[], object],
+        message: str,
+    ) -> None:
+        """Malformed grouped samples fail before reaching a motion adapter."""
+        with pytest.raises(ValueError, match=message):
+            build()
+
+    @pytest.mark.parametrize(
+        ("build", "message"),
+        [
+            (lambda: MotionMeasurement(0.1, None, 0.0, None, None), "head"),
+            (lambda: MotionMeasurement(None, None, None, 0.1, None), "body"),
+            (lambda: MotionMeasurement(math.nan, 0.0, 0.0, None, None), "finite"),
+        ],
+        ids=["partial-head", "partial-body", "nonfinite"],
+    )
+    def test_motion_measurement_is_atomic_and_finite(
+        self,
+        build: Callable[[], object],
+        message: str,
+    ) -> None:
+        """Construction itself rejects malformed measurement shape."""
+        with pytest.raises(ValueError, match=message):
+            build()
+
+    def test_calibration_status_and_target_are_coherent(self) -> None:
+        """Accepted-without-target is not a result a caller can misread."""
+        with pytest.raises(ValueError, match="only accepted"):
+            GazeCalibration(CalibrationStatus.ACCEPTED)
 
 
 class TestDaemonSurfaceIsNarrow:
