@@ -214,10 +214,8 @@ class Service(Protocol):
 def apply_intents(motion: MotionPort, intents: Sequence[MotionIntent]) -> None:
     """Carry out what the behaviour layer decided.
 
-    The whole of the impure half of the behaviour layer, and it is four lines
-    long by design: an intent corresponds to exactly one port method, so there
-    is no translation here to get wrong and nothing to test beyond that the
-    four cases reach the four methods.
+    The whole command half of the behavior boundary: each intent corresponds to
+    exactly one port method, so there is no second gaze calculation here.
 
     Args:
         motion: What to command.

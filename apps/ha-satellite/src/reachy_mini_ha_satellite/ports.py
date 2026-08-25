@@ -6,14 +6,11 @@ performs input or output. That division is the whole reason this file exists,
 because the robot is one device on a desk and anything only testable on it is
 effectively untested.
 
-**These are written in the behaviour layer's vocabulary, not the SDK's.** The
-question asked of every method below was "would the state machine phrase it this
-way?", and where the answer was "no, that is how the Reachy Mini SDK phrases it"
-the method was rewritten. The SDK wants a four-by-four pose matrix and a pixel
-pair; the behaviour layer wants "look at that face" and "tilt the head up". A
-port shaped like the SDK would carry every SDK change through to the state
-machine and would turn the fakes into SDK emulators, which is the opposite of
-what makes them useful.
+**These are written in application vocabulary, not the SDK's.** Behavior
+prepares a source-qualified directive and consumes an absolute calibrated world
+target; the motion adapter alone turns normalized geometry into the daemon's
+pixel query and canonical pose matrix. The port exposes that two-phase boundary
+without exposing SDK matrices to behavior.
 
 Two consequences are worth stating outright.
 
@@ -23,20 +20,15 @@ observation once, while session and fallback mechanics remain properties of the
 adapters. A branch on transport failure in the state machine would still be the
 state machine having opinions about sockets.
 
-**The gaze target is normalised, never pixels.** Robot-link REQ-021 fixes the
-coordinates a detection is reported in — origin at the image centre, both axes
-running to plus or minus one, vertical axis pointing up — and the port carries
-them through unchanged so that changing the capture resolution changes nothing
-the behaviour layer sees. Converting to something the robot's motion layer can
-be commanded with is the motion adapter's job, because that conversion needs the
-camera's geometry and the behaviour layer has no business knowing it.
+**Image observations remain normalized, never pixels.** Robot-link REQ-021 fixes
+the coordinates a detection reports. The calibration call receives the selected
+directive intact; only the adapter reads camera resolution, clamps an interior
+pixel, brackets the daemon query with measured poses and returns an absolute
+world target.
 
-`FaceDetection` and `NormalisedPoint` are imported from `reachy_contracts`
-rather than restated. They are the shared vocabulary for "a face's centre and
-how much the detector believes itself", which is exactly what the behaviour
-layer wants to hear; declaring a second pair of types here would put a copy of a
-shape that already exists one import away, free to drift from it — see the root
-`AGENTS.md` on wire types being declared once.
+`FaceDetection` is imported from `reachy_contracts` rather than restated. It is
+the shared vocabulary for a face's centre and confidence; declaring a copy here
+would leave a wire shape free to drift.
 """
 
 from __future__ import annotations

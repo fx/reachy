@@ -28,7 +28,7 @@ that apply here.
 | `src/reachy_mini_ha_satellite/esphome/` | The vendored ESPHome protocol layer, with its `LICENSE`, `NOTICE` and per-file provenance |
 | `src/reachy_mini_ha_satellite/esphome/seams.py` | The two audio interfaces cut into it. Not vendored; filled by `adapters/audio_reachy.py` |
 | `src/reachy_mini_ha_satellite/assets/` | Wake-word models and sounds that ship in the wheel, with the registry recording each one's terms |
-| `src/reachy_mini_ha_satellite/behaviour/` | The pure decision layer: a pipeline state machine, a face tracker, and what each state looks like |
+| `src/reachy_mini_ha_satellite/behaviour/` | The pure decision layer: pipeline expression, source-qualified face selection, predictive gaze estimation, bounded coordinated trajectories and head arbitration |
 | `src/reachy_mini_ha_satellite/wake_word.py` | What actually *runs* the wake-word models over captured audio — the thresholds, the refractory window and the mute check, with only the model calls behind a seam |
 | `src/reachy_mini_ha_satellite/config.py` | Settings, their three layers, and the one place a secret is declared to be one |
 | `src/reachy_mini_ha_satellite/web/` | The settings interface REQ-049 requires |
@@ -102,6 +102,31 @@ deployment can get irreversibly wrong.
   `main`, `web`, the SDK), greps for the dynamic imports and clock reads ruff
   cannot see, and proves both halves still fire by running them against a
   fixture that breaks them.
+- **Predictive gaze is two-phase and owns one controller trajectory.** Behavior
+  first prepares a source-qualified directive; `main.py` samples measured state
+  and asks the motion adapter to calibrate outside behavior; behavior then
+  finishes the controller tick. Re-reading one detection advances the existing
+  trajectory without reapplying its image correction. Do not reintroduce a
+  direct gaze gain, vertical trim, smoothing loop, deadzone loop or linear
+  neutral return around it.
+- **Calibrated gaze commands absolute canonical world poses.**
+  `adapters/motion_reachy.py` retains bounded measured-pose history, brackets the
+  SDK's non-moving image query, rebases capture against query, and constructs
+  zero-roll, zero-translation head commands. With body enabled, head and body
+  travel in one `set_target` call and world gaze remains body yaw plus
+  head-on-body yaw. Body feedback observes commanded state; it never overwrites
+  commanded position, velocity or acceleration after initialization.
+- **Gaze acquisition disables daemon automatic body yaw.** This happens before
+  the first head command even in head-only mode. Terminal release restores it
+  exactly once before later cleanup and blocks every racing or later gaze, head
+  and antenna call. Body motion is restart-bound, false by default and remains a
+  provisional opt-in.
+- **Four released gaze settings are compatibility inputs only.**
+  `gaze_deadzone`, `gaze_smoothing`, `camera_horizontal_fov_degrees` and
+  `camera_vertical_fov_degrees` remain accepted and validated so upgrades keep
+  starting, but predictive control reads none of them. They stay outside
+  `LIVE_SETTINGS`, are read-only and marked `legacy compatibility; ignored` on
+  the settings surface, and an ordinary save drops stale override copies.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys
   a device on what it announces, so a derived default would be correct on a

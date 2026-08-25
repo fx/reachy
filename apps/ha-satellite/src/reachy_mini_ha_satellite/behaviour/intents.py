@@ -6,12 +6,10 @@ description, and `main.py` is what applies it. That separation is ha-satellite
 REQ-042, and it is why the whole of this package can be exercised on a machine
 with no robot attached.
 
-The four kinds are the four movements `ports.MotionPort` accepts — one each for
-`look_at`, `look_ahead`, `move_head` and `move_antennas` — and that
-correspondence is deliberate: an intent with no port method behind it would be a
-decision nobody could carry out. The port's other two members, `release` and
-`released`, are lifecycle rather than movement and have no intent, because
-letting go of the robot is not something the behaviour layer decides.
+The three kinds are the three commands behavior arbitrates: canonical
+coordinated gaze, a pipeline head pose, and independent antennas. Each has one
+`ports.MotionPort` method behind it. Measurement, calibration, acquisition and
+release are composition-root lifecycle rather than movements and have no intent.
 """
 
 from __future__ import annotations
