@@ -351,6 +351,10 @@ class ReachyMotion:
         """Whether terminal release has begun."""
         return self._released
 
+    def _terminal(self) -> bool:
+        """Re-read terminal state across daemon callbacks that may release."""
+        return self._released
+
     @property
     def measured_body_yaw(self) -> float | None:
         """Return the latest valid measured body yaw."""
@@ -360,9 +364,10 @@ class ReachyMotion:
         """Disable competing body yaw and seed measured state before gaze owns head."""
         if self._released or self._acquired:
             return
-        self._handle.set_automatic_body_yaw(False)
         self._acquired = True
-        self.observe(now)
+        self._handle.set_automatic_body_yaw(False)
+        if not self._released:
+            self.observe(now)
 
     def observe(self, now: float) -> float | None:
         """Append measured world pose and optional body feedback for this tick."""
@@ -424,15 +429,23 @@ class ReachyMotion:
             bracket: tuple[np.ndarray, np.ndarray] | None = None
             target_rotation: np.ndarray | None = None
             for _attempt in range(2):
+                if self._terminal():
+                    return CalibrationResult(CalibrationState.REJECTED)
                 pre_pose = self._handle.get_current_head_pose()
                 pre = _pose_rotation(pre_pose, measured=True)
+                if self._terminal():
+                    return CalibrationResult(CalibrationState.REJECTED)
                 target_pose = self._handle.look_at_image(
                     u,
                     v,
                     duration=0.0,
                     perform_movement=False,
                 )
+                if self._terminal():
+                    return CalibrationResult(CalibrationState.REJECTED)
                 post_pose = self._handle.get_current_head_pose()
+                if self._terminal():
+                    return CalibrationResult(CalibrationState.REJECTED)
                 post = _pose_rotation(post_pose, measured=True)
                 if _rotation_distance(pre, post) <= _BRACKET_LIMIT:
                     bracket = pre, post

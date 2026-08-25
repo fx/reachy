@@ -23,6 +23,7 @@ import pytest
 from satellite_support import FakeMedia, FakeRobot, face
 
 from reachy_contracts import NormalisedPoint
+from reachy_mini_ha_satellite.adapters.daemon import PoseMatrix
 from reachy_mini_ha_satellite.adapters.motion_reachy import (
     CalibrationState,
     ReachyMotion,
@@ -336,6 +337,61 @@ class TestReleasingOnShutdown:
         motion.move_head(HeadPose(yaw=0.1))
 
         assert events.index("motion.auto_yaw.false") < events.index("motion.command")
+
+    def test_release_racing_acquire_restores_without_sampling_or_commanding(
+        self,
+    ) -> None:
+        """Terminal release during the disable call blocks acquisition's next edge."""
+
+        class ReleaseDuringAcquire(FakeRobot):
+            """Release its adapter from inside automatic-yaw disable."""
+
+            motion: ReachyMotion | None = None
+
+            def set_automatic_body_yaw(self, enabled: bool) -> None:
+                super().set_automatic_body_yaw(enabled)
+                if not enabled:
+                    assert self.motion is not None
+                    self.motion.release()
+
+        robot = ReleaseDuringAcquire()
+        motion = ReachyMotion(robot)
+        robot.motion = motion
+
+        motion.acquire(0.0)
+
+        assert motion.released
+        assert robot.automatic_body_yaw == [False, True]
+        assert "motion.pose" not in robot.events
+        assert robot.targets == []
+
+    def test_release_after_pre_bracket_blocks_calibration_query(self) -> None:
+        """A terminal transition between measured pose and query sends no query."""
+
+        class ReleaseAfterPrePose(FakeRobot):
+            """Release when calibration reads its pre-query measured pose."""
+
+            motion: ReachyMotion | None = None
+            pose_reads = 0
+
+            def get_current_head_pose(self) -> PoseMatrix:
+                pose = super().get_current_head_pose()
+                self.pose_reads += 1
+                if self.pose_reads == 2:
+                    assert self.motion is not None
+                    self.motion.release()
+                return pose
+
+        robot = ReleaseAfterPrePose()
+        motion = ReachyMotion(robot)
+        robot.motion = motion
+        motion.acquire(0.0)
+
+        result = motion.calibrate(_directive(), 0.0)
+
+        assert result.state is CalibrationState.REJECTED
+        assert robot.image_gaze == []
+        assert robot.automatic_body_yaw == [False, True]
 
     def test_terminal_release_restores_auto_yaw_once_and_blocks_later_calls(
         self,

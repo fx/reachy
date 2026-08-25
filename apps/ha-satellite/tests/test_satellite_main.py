@@ -67,9 +67,14 @@ from reachy_mini_ha_satellite.behaviour import (
     MoveAntennas,
     MoveHead,
     PipelineEvent,
+    PreparedGazeTick,
     SatelliteBehaviour,
 )
-from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    BodyMeasurement,
+    GazeSample,
+)
+from reachy_mini_ha_satellite.behaviour.intents import MotionIntent
 from reachy_mini_ha_satellite.config import (
     ENV_PREFIX,
     ConfigurationError,
@@ -101,6 +106,7 @@ from reachy_mini_ha_satellite.main import (
 )
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
+    CalibratedGaze,
     Detections,
     DetectionSource,
     HeadPose,
@@ -898,8 +904,157 @@ class TestTheLoop:
         assert application.status()["pipeline"] == "idle"
 
 
+class TestPredictiveTickTiming:
+    """One injected clock read supplies both calibration time and exact controller dt."""
+
+    def test_each_tick_reads_time_once_and_uses_exact_difference(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No nominal cadence or second clock read may replace measured elapsed time."""
+        readings = iter((1.0, 1.125))
+        clock_reads: list[float] = []
+
+        def _clock() -> float:
+            value = next(readings)
+            clock_reads.append(value)
+            return value
+
+        behaviour = SatelliteBehaviour(now=0.0)
+        original_finish = behaviour.finish
+        dts: list[float] = []
+
+        def _finish(
+            prepared: PreparedGazeTick,
+            *,
+            calibrated: CalibratedGaze | None,
+            body_measurement: BodyMeasurement | None,
+            dt: float,
+        ) -> tuple[MotionIntent, ...]:
+            dts.append(dt)
+            return original_finish(
+                prepared,
+                calibrated=calibrated,
+                body_measurement=body_measurement,
+                dt=dt,
+            )
+
+        monkeypatch.setattr(behaviour, "finish", _finish)
+        motion = FakeMotion()
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+            behaviour=behaviour,
+            clock=_clock,
+        )
+
+        application.tick()
+        application.tick()
+
+        assert clock_reads == [1.0, 1.125]
+        assert motion.observed == clock_reads
+        assert dts == [0.0, 0.125]
+
+
 class TestShutdown:
     """ha-satellite REQ-050, in the order the requirement states it."""
+
+    @pytest.mark.asyncio
+    async def test_start_and_cleanup_order_is_deterministic(self) -> None:
+        """Acquire first; release motion/media, reverse services, then perception."""
+        events: list[str] = []
+
+        class OrderedMotion(FakeMotion):
+            """Record motion lifecycle around the ordinary fake."""
+
+            def acquire(self, now: float) -> None:
+                events.append("motion.acquire")
+                super().acquire(now)
+
+            def release(self) -> None:
+                events.append("motion.release")
+                super().release()
+
+        class OrderedAudio(FakeAudio):
+            """Record media lifecycle around the ordinary fake."""
+
+            def start(self) -> None:
+                events.append("audio.start")
+                super().start()
+
+            def stop(self) -> None:
+                events.append("audio.stop")
+                super().stop()
+
+        class OrderedPerception(FakePerception):
+            """Record perception lifecycle around the ordinary fake."""
+
+            async def start(self) -> None:
+                events.append("perception.start")
+                await super().start()
+
+            async def aclose(self) -> None:
+                events.append("perception.close")
+                await super().aclose()
+
+        class OrderedService:
+            """Record one service name at both lifecycle edges."""
+
+            def __init__(self, name: str) -> None:
+                self.name = name
+
+            async def start(self) -> None:
+                events.append(f"{self.name}.start")
+
+            async def aclose(self) -> None:
+                events.append(f"{self.name}.close")
+
+        application, stop = _application(
+            audio=OrderedAudio(),
+            motion=OrderedMotion(),
+            perception=OrderedPerception(),
+            services=[OrderedService("first"), OrderedService("second")],
+            stop_after=1,
+        )
+
+        await application.run(stop)
+
+        assert events == [
+            "motion.acquire",
+            "audio.start",
+            "perception.start",
+            "first.start",
+            "second.start",
+            "motion.release",
+            "audio.stop",
+            "second.close",
+            "first.close",
+            "perception.close",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_repeated_close_is_idempotent(self) -> None:
+        """A signal and run-finally cleanup release every owner only once."""
+        audio = FakeAudio()
+        motion = FakeMotion()
+        perception = FakePerception()
+        service = RecordingService()
+        application, _stop = _application(
+            audio=audio,
+            motion=motion,
+            perception=perception,
+            services=[service],
+        )
+
+        await application.aclose()
+        await application.aclose()
+
+        assert audio.stopped == 1
+        assert perception.closed == 1
+        assert service.closed == 1
+        assert motion.released
 
     @pytest.mark.asyncio
     async def test_it_stops_motion_and_releases_the_media_interface(self) -> None:
