@@ -94,6 +94,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BOOTSTRAP_SETTINGS",
+    "COMPATIBILITY_SETTINGS",
     "ENV_PREFIX",
     "IDENTITY_SETTING",
     "LIVE_SETTINGS",
@@ -172,6 +173,18 @@ BOOTSTRAP_SETTINGS: Final[frozenset[str]] = frozenset(
     {"state_dir", "web_enabled", "web_host", "web_port"}
 )
 
+# Released direct-gaze settings remain valid environment inputs so an upgrade
+# does not fail to start. Predictive gaze deliberately ignores them, the web
+# form cannot write them, and an ordinary save drops stale override copies.
+COMPATIBILITY_SETTINGS: Final[frozenset[str]] = frozenset(
+    {
+        "gaze_deadzone",
+        "gaze_smoothing",
+        "camera_horizontal_fov_degrees",
+        "camera_vertical_fov_degrees",
+    }
+)
+
 # Settings the running application can adopt without being restarted. Everything
 # else is read while something is being built — a socket is bound, a session is
 # opened, an identity is announced — so changing it takes effect at the next
@@ -185,8 +198,6 @@ LIVE_SETTINGS: Final[frozenset[str]] = frozenset(
     {
         "log_level",
         "behaviour_tick_seconds",
-        "gaze_deadzone",
-        "gaze_smoothing",
         "idle_seconds",
         "speaker_boost_percent",
     }
@@ -273,6 +284,9 @@ class Settings(BaseSettings):
             no detector is built and no session is opened, which is the
             configuration for a robot with neither a groundstation nor cores to
             spare.
+        body_motion_enabled: Whether predictive gaze coordinates body yaw with
+            its canonical world head target. Restart-bound and false by default
+            while live body calibration remains provisional.
         detection_source: Which detector answers — see ha-satellite REQ-047.
         groundstation_url: Where the groundstation serves its session endpoint.
             Required by every selection but `local`.
@@ -292,16 +306,16 @@ class Settings(BaseSettings):
             the lower-scoring one is suppressed.
         local_detection_interval_seconds: How long between local detection
             passes.
-        camera_horizontal_fov_degrees: How much of the scene the camera sees
-            across, which is what turns a normalised position into an angle.
-        camera_vertical_fov_degrees: The same, vertically.
+        camera_horizontal_fov_degrees: Legacy compatibility input, validated and
+            reported but ignored by daemon-calibrated predictive gaze.
+        camera_vertical_fov_degrees: Legacy compatibility input with the same
+            migration behavior.
         behaviour_tick_seconds: How often the behaviour layer is asked what the
             robot should be doing.
-        gaze_deadzone: How far a face must move, in normalised image
-            coordinates, before the head is re-commanded. Zero would put a
-            command on the motor bus every tick for a face that has not moved.
-        gaze_smoothing: How much of the way towards a new target one tick
-            moves. One follows instantly and jitters; zero never arrives.
+        gaze_deadzone: Legacy compatibility input, validated and reported but
+            ignored by predictive gaze.
+        gaze_smoothing: Legacy compatibility input with the same migration
+            behavior.
         idle_seconds: How long without a visible face before the robot settles
             into its idle behaviour.
         daemon_api_url: Where the robot daemon serves its own HTTP API, which
@@ -357,6 +371,7 @@ class Settings(BaseSettings):
     samples_per_chunk: int = Field(default=160, ge=16, le=16000)
 
     face_tracking_enabled: bool = True
+    body_motion_enabled: bool = False
 
     #:= docs/specs/ha-satellite/index.md#req-047-detection-source-is-selectable
     #:% The source of face detections MUST be selectable between the groundstation, the
@@ -648,7 +663,9 @@ def _declared_values(
         The raw string values to validate, the layer each came from, and the
         override keys that name nothing.
     """
-    applicable = set(Settings.model_fields) - BOOTSTRAP_SETTINGS
+    applicable = (
+        set(Settings.model_fields) - BOOTSTRAP_SETTINGS - COMPATIBILITY_SETTINGS
+    )
     values: dict[str, str] = {}
     sources: dict[str, SettingSource] = dict.fromkeys(
         Settings.model_fields,
@@ -924,8 +941,8 @@ class SettingReport:
         secret: Whether the value is withheld.
         live: Whether changing it takes effect without a restart.
         writable: Whether the settings interface may change it. False for the
-            bootstrap settings, which decide where the interface's own file
-            lives and so cannot be supplied by it.
+            bootstrap settings and ignored migration-only compatibility values.
+        compatibility: Whether this legacy input is accepted but ignored.
     """
 
     name: str
@@ -935,6 +952,7 @@ class SettingReport:
     secret: bool
     live: bool
     writable: bool
+    compatibility: bool
 
 
 def configuration_report(resolution: Resolution) -> tuple[SettingReport, ...]:
@@ -957,7 +975,8 @@ def configuration_report(resolution: Resolution) -> tuple[SettingReport, ...]:
             source=resolution.sources.get(name, SettingSource.DEFAULT),
             secret=name in SECRET_SETTINGS,
             live=name in LIVE_SETTINGS,
-            writable=name not in BOOTSTRAP_SETTINGS,
+            writable=name not in BOOTSTRAP_SETTINGS | COMPATIBILITY_SETTINGS,
+            compatibility=name in COMPATIBILITY_SETTINGS,
         )
         for name in Settings.model_fields
     )
@@ -976,11 +995,15 @@ def log_resolved_configuration(resolution: Resolution) -> None:
     """
     rendered = resolved_configuration(resolution.settings)
     for name, value in rendered.items():
+        compatibility = (
+            "; legacy compatibility; ignored" if name in COMPATIBILITY_SETTINGS else ""
+        )
         _LOGGER.info(
-            "configuration.resolved %s=%s (%s)",
+            "configuration.resolved %s=%s (%s)%s",
             name,
             value,
             resolution.sources.get(name, SettingSource.DEFAULT).value,
+            compatibility,
         )
     for name in resolution.declared_but_unread:
         _LOGGER.warning(
@@ -992,8 +1015,9 @@ def log_resolved_configuration(resolution: Resolution) -> None:
     for name in resolution.ignored_overrides:
         _LOGGER.warning(
             "configuration.override_ignored %s cannot be supplied by the "
-            "overrides file; it names no setting, or it decides where that file "
-            "lives. Delete it from the settings interface.",
+            "overrides file; it is unknown, bootstrap-only, or legacy "
+            "compatibility that predictive gaze ignores. Save ordinary settings "
+            "to drop it.",
             name,
         )
 

@@ -631,9 +631,6 @@ class SatelliteApplication:
         self._sleep = sleep
         self._tick_seconds = settings.behaviour_tick_seconds
         self._cleanup_timeout_seconds = cleanup_timeout_seconds
-        # What the perception source was built for. Held rather than re-read,
-        # because it is decided once at startup — see `apply_live`.
-        self._tracking_enabled = settings.face_tracking_enabled
         # What tells Home Assistant about a setting this application adopted.
         # Nothing until `publish_live_changes` is called, which is what an
         # application built without the speaker-boost control stays at.
@@ -769,13 +766,11 @@ class SatelliteApplication:
     def apply_live(self, settings: Settings) -> None:
         """Adopt the settings that can be changed without a restart.
 
-        Only the ones in `config.LIVE_SETTINGS` are read here, and
-        `face_tracking_enabled` is deliberately not among them even though the
-        behaviour layer could adopt it: switching it on means *building* a
-        detector, which happens once in `build_application`. Taking it from
-        `settings` here would switch the behaviour layer's tracking on against a
-        perception source that reports nothing, and the page would have said it
-        applied.
+        Only the names in `config.LIVE_SETTINGS` are read here.
+        `face_tracking_enabled` builds a detector and `body_motion_enabled`
+        changes controller and daemon ownership, so both remain restart-bound.
+        Legacy gaze gains and camera fields of view are compatibility inputs and
+        are intentionally read nowhere in predictive control.
 
         `speaker_boost_percent` *is* among them: both outputs read it per
         pushed chunk, so adopting it here is heard from the next chunk onwards
@@ -2049,7 +2044,7 @@ def build_application(
         samples_per_chunk=settings.samples_per_chunk,
         boost_percent=settings.speaker_boost_percent,
     )
-    motion = ReachyMotion(handle)
+    motion = ReachyMotion(handle, body_enabled=settings.body_motion_enabled)
     perception: PerceptionPort = (
         build_perception_source(settings, handle.media) or _NoPerception()
     )
@@ -2058,6 +2053,7 @@ def build_application(
         tracking_enabled=settings.face_tracking_enabled,
         controller_config=ControllerConfig(
             staleness_seconds=settings.staleness_seconds,
+            body_enabled=settings.body_motion_enabled,
         ),
         now=time.monotonic(),
     )

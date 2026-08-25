@@ -57,6 +57,7 @@ from starlette.routing import Route
 
 from reachy_mini_ha_satellite.config import (
     BOOTSTRAP_SETTINGS,
+    COMPATIBILITY_SETTINGS,
     LIVE_SETTINGS,
     SECRET_SETTINGS,
     ConfigurationError,
@@ -424,6 +425,7 @@ def create_app(
                 "live": sorted(LIVE_SETTINGS),
                 "secret": sorted(SECRET_SETTINGS),
                 "read_only": sorted(BOOTSTRAP_SETTINGS),
+                "compatibility_ignored": sorted(COMPATIBILITY_SETTINGS),
                 "ignored_overrides": list(resolved.ignored_overrides),
                 "declared_but_unread": list(resolved.declared_but_unread),
             },
@@ -546,7 +548,7 @@ def _overrides_from(
     """
     wanted: dict[str, str] = {}
     for name in setting_names():
-        if name in BOOTSTRAP_SETTINGS:
+        if name in BOOTSTRAP_SETTINGS | COMPATIBILITY_SETTINGS:
             # Never written from here, however the form was submitted: these
             # decide where the file being written lives and whether this page is
             # served at all. A browser submits every field it rendered, so
