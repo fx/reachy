@@ -44,6 +44,7 @@ def test_diagnostics_ring_evicts_oldest_and_snapshots_deterministically() -> Non
         state = step.state
         diagnostics.record(
             step,
+            config=config,
             at=at,
             observation_age=None,
             emitted=False,
@@ -68,7 +69,13 @@ def test_diagnostics_schema_has_only_allowed_scalar_values_and_no_forbidden_keys
         dt=0.0,
         config=config,
     )
-    diagnostics.record(step, at=0.0, observation_age=None, emitted=False)
+    diagnostics.record(
+        step,
+        config=config,
+        at=0.0,
+        observation_age=None,
+        emitted=False,
+    )
 
     event = diagnostics.snapshot()[0]
     forbidden = {
@@ -191,7 +198,13 @@ def test_reset_clears_only_ring_contents() -> None:
     config = ControllerConfig()
     state = initial_controller_state(config)
     step = step_controller(state, None, now=0.0, dt=0.0, config=config)
-    diagnostics.record(step, at=0.0, observation_age=None, emitted=False)
+    diagnostics.record(
+        step,
+        config=config,
+        at=0.0,
+        observation_age=None,
+        emitted=False,
+    )
     controller_before = step.state
 
     diagnostics.reset()

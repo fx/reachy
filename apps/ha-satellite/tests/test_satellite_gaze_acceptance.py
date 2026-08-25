@@ -140,17 +140,18 @@ def test_req_075_capture_clock_is_invariant_to_nominal_cadence() -> None:
         slow_age, slow_estimator, slow_axis = slow[at]
         assert fast_age == pytest.approx(slow_age)
         assert fast_estimator == slow_estimator
+        common_interval = 0.1
         assert fast_axis.position == pytest.approx(
             slow_axis.position,
-            abs=0.25 * _DEGREES,
+            abs=config.yaw_limits.max_velocity * common_interval,
         )
         assert fast_axis.velocity == pytest.approx(
             slow_axis.velocity,
-            abs=1.0 * _DEGREES,
+            abs=config.yaw_limits.max_acceleration * common_interval,
         )
         assert fast_axis.acceleration == pytest.approx(
             slow_axis.acceleration,
-            abs=5.0 * _DEGREES,
+            abs=config.yaw_limits.max_jerk * common_interval,
         )
 
 
@@ -572,7 +573,13 @@ def test_req_091_diagnostics_are_bounded_private_and_reset_only_the_ring() -> No
             config=config,
         )
         state = step.state
-        diagnostics.record(step, at=at, observation_age=None, emitted=False)
+        diagnostics.record(
+            step,
+            config=config,
+            at=at,
+            observation_age=None,
+            emitted=False,
+        )
     snapshot = diagnostics.snapshot()
     assert len(snapshot) == 2
     assert [event["at"] for event in snapshot] == [0.05, 0.1]

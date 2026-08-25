@@ -60,6 +60,10 @@ DropBodyMeasurement = Callable[[int, float], bool]
 BodyMeasurementOffset = Callable[[int, float], float]
 RejectCommand = Callable[[GazeSample, int, float], bool]
 MotionFaultAt = Callable[[int, float], bool]
+CalibrationOracle = Callable[
+    [ImagePoint, float, float, float, float],
+    tuple[float, float],
+]
 
 DEFAULT_NOISE: Final[tuple[tuple[float, float], ...]] = (
     (-0.018, 0.000),
@@ -96,6 +100,19 @@ def _projection(angle: float, field_of_view: float) -> float:
 def _distortion(value: float) -> float:
     """Apply a small odd nonlinear radial distortion."""
     return value * (1.0 + 0.03 * value * value)
+
+
+def _calibration_oracle(
+    image: ImagePoint,
+    capture_yaw: float,
+    capture_elevation: float,
+    horizontal_fov: float,
+    vertical_fov: float,
+) -> tuple[float, float]:
+    """Independently reconstruct a world anchor from capture pose and image geometry."""
+    yaw_error = math.atan(image.x * math.tan(horizontal_fov / 2.0))
+    elevation_error = math.atan(image.y * math.tan(vertical_fov / 2.0))
+    return capture_yaw - yaw_error, capture_elevation + elevation_error
 
 
 def _keep_observation(_index: int, _at: float) -> bool:
@@ -153,6 +170,7 @@ class PlantConfig:
     vertical_camera_fov: float = 67.0 * _DEGREES
     projection: Projection = _projection
     distortion: Distortion = _distortion
+    calibration_oracle: CalibrationOracle = _calibration_oracle
     noise: tuple[tuple[float, float], ...] = ()
 
     def __post_init__(self) -> None:
@@ -355,6 +373,15 @@ class GazePlant:
                         target_elevation,
                         observation_index,
                     )
+                    calibrated_yaw, calibrated_elevation = (
+                        self._config.calibration_oracle(
+                            image,
+                            plant_world_yaw,
+                            plant_elevation,
+                            self._config.horizontal_camera_fov,
+                            self._config.vertical_camera_fov,
+                        )
+                    )
                     observation = GazeObservation(
                         source="simulated-camera",
                         generation=0,
@@ -366,8 +393,8 @@ class GazePlant:
                             centre=NormalisedPoint(x=image.x, y=image.y),
                             confidence=0.9,
                         ),
-                        world_yaw=target_yaw,
-                        world_elevation=target_elevation,
+                        world_yaw=calibrated_yaw,
+                        world_elevation=calibrated_elevation,
                     )
                     observation = self._faults.corrupt_observation(
                         observation,
