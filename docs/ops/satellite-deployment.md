@@ -296,9 +296,9 @@ log line, no page and no error message.
 Predictive gaze consumes each source-qualified detection once, calibrates its
 image point against measured capture and query poses without moving, and then
 advances one jerk-limited world-yaw/elevation trajectory at the behavior cadence.
-Measured-pose history derives its retention age and capacity from the configured
-staleness window and behavior tick, so any supported fresh capture can be rebased
-without extrapolation. The first hardware sample is seeded from measured world
+Measured-pose history derives its retention age from the configured staleness
+window and sizes its capacity for that window at the minimum supported behavior
+tick, so any supported fresh capture can be rebased without extrapolation. The first hardware sample is seeded from measured world
 head pose; body-enabled motion additionally waits for valid measured body yaw.
 It owns the head through active tracking, loss hold and neutral return; antennas
 continue expressing pipeline state, and the current pipeline head pose receives
