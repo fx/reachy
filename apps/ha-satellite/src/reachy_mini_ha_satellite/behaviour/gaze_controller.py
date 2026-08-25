@@ -912,6 +912,7 @@ def _observe_body_feedback(
     *,
     now: float,
     config: ControllerConfig,
+    monitor: bool,
 ) -> tuple[BodyFeedbackState, AxisState | None, bool]:
     """Update independent body feedback and decide whether commands stay held."""
     if not config.body_enabled:
@@ -932,6 +933,15 @@ def _observe_body_feedback(
         if not feedback.initialized and age_valid and latest is not None
         else None
     )
+    if not monitor:
+        return (
+            BodyFeedbackState(
+                initialized=feedback.initialized or seed is not None,
+                last_measurement=latest,
+            ),
+            seed,
+            False,
+        )
     commanded_position = seed.position if seed is not None else state.body_yaw.position
     divergent = (
         age_valid
@@ -1002,6 +1012,14 @@ def step_controller(
         body_measurement,
         now=now,
         config=config,
+        monitor=state.mode
+        in {
+            ControllerMode.ACTIVE,
+            ControllerMode.HOLD,
+            ControllerMode.RETURNING,
+            ControllerMode.WORKSPACE_HOLD,
+            ControllerMode.BODY_FEEDBACK_HOLD,
+        },
     )
     if body_seed is not None:
         state = replace(state, body_yaw=body_seed, body_feedback=body_feedback)

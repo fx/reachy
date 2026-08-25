@@ -725,7 +725,7 @@ class SatelliteApplication:
             return
         now = self._clock()
         previous = self._last_tick_at
-        dt = 0.0 if previous is None else max(0.0, now - previous)
+        dt = 0.0 if previous is None else now - previous
         self._last_tick_at = now
         measured_yaw = self._motion.observe(now)
         prepared = self._behaviour.prepare(self._perception.latest(), now)

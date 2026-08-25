@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -66,6 +67,21 @@ def _calibrated(prepared: PreparedGazeTick, yaw: float = 0.4) -> CalibratedGaze:
         world_yaw=yaw,
         world_elevation=0.1,
     )
+
+
+def _wrong_epoch(calibrated: CalibratedGaze) -> CalibratedGaze:
+    """Return calibration for another associated target."""
+    return replace(calibrated, target_epoch=calibrated.target_epoch + 1)
+
+
+def _wrong_capture(calibrated: CalibratedGaze) -> CalibratedGaze:
+    """Return calibration for another capture time."""
+    return replace(calibrated, captured_at=calibrated.captured_at + 0.01)
+
+
+def _wrong_receipt(calibrated: CalibratedGaze) -> CalibratedGaze:
+    """Return calibration for another receipt time."""
+    return replace(calibrated, received_at=calibrated.received_at + 0.01)
 
 
 def _finish(
@@ -188,6 +204,30 @@ class TestTwoPhasePredictiveGaze:
         intents = behaviour.finish(
             prepared,
             calibrated=None,
+            body_measurement=None,
+            dt=0.05,
+        )
+
+        assert _gaze(intents) is None
+        assert _head(intents) is not None
+
+    @pytest.mark.parametrize(
+        "change",
+        [_wrong_epoch, _wrong_capture, _wrong_receipt],
+        ids=["target", "capture", "receipt"],
+    )
+    def test_calibration_must_match_the_complete_prepared_directive(
+        self,
+        change: Callable[[CalibratedGaze], CalibratedGaze],
+    ) -> None:
+        """Stale adapter output cannot be joined to a different target or time."""
+        behaviour = SatelliteBehaviour(now=0.0)
+        prepared = behaviour.prepare(_seen(face(0.6, 0.0)), 0.1)
+        mismatched = change(_calibrated(prepared))
+
+        intents = behaviour.finish(
+            prepared,
+            calibrated=mismatched,
             body_measurement=None,
             dt=0.05,
         )

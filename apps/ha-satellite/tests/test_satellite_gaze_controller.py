@@ -778,6 +778,24 @@ class TestMeasuredBodyObserver:
         assert result.state.body_feedback == BodyFeedbackState()
         assert result.state.body_yaw == AxisState()
 
+    def test_missing_feedback_does_not_claim_an_idle_body(self) -> None:
+        """Feedback is a guard only while predictive gaze controls body output."""
+        config = replace(ControllerConfig(), body_enabled=True)
+        state = initial_controller_state(config)
+
+        for now in (0.0, 1.0, 2.0):
+            result = step_controller(
+                state,
+                None,
+                now=now,
+                dt=0.05,
+                config=config,
+            )
+            state = result.state
+
+        assert result.mode is ControllerMode.UNKNOWN
+        assert not result.state.body_feedback.faulted
+
     def test_persistent_missing_feedback_holds_last_safe_sample(self) -> None:
         """Only missing feedback older than the persistence window faults."""
         config = replace(
@@ -794,17 +812,25 @@ class TestMeasuredBodyObserver:
             config=config,
             body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.0),
         )
-        transient = step_controller(
+        active = step_controller(
             seeded.state,
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.1),
+        )
+        transient = step_controller(
+            active.state,
             None,
-            now=0.2,
+            now=0.3,
             dt=0.05,
             config=config,
         )
         faulted = step_controller(
             transient.state,
             None,
-            now=0.7,
+            now=0.8,
             dt=0.05,
             config=config,
         )
@@ -830,27 +856,35 @@ class TestMeasuredBodyObserver:
             config=config,
             body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.0),
         )
+        active = step_controller(
+            seeded.state,
+            _observation(),
+            now=0.1,
+            dt=0.05,
+            config=config,
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.1),
+        )
         command = AxisState(position=0.3, velocity=0.1, acceleration=0.1)
         commanded = replace(
-            seeded.state,
+            active.state,
             body_yaw=command,
             last_safe_sample=GazeSample(0.3, 0.0, 0.3, 0.0, True),
         )
         transient = step_controller(
             commanded,
             None,
-            now=0.1,
+            now=0.15,
             dt=0.05,
             config=config,
-            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.1),
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.15),
         )
         faulted = step_controller(
             transient.state,
             None,
-            now=0.6,
+            now=0.65,
             dt=0.05,
             config=config,
-            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.6),
+            body_measurement=BodyMeasurement(yaw=0.0, measured_at=0.65),
         )
 
         assert transient.mode is not ControllerMode.BODY_FEEDBACK_HOLD

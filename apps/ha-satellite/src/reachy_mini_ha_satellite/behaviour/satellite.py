@@ -252,6 +252,9 @@ class SatelliteBehaviour:
                 calibrated.sequence,
             )
             != identity
+            or calibrated.captured_at != directive.captured_at
+            or calibrated.received_at != directive.received_at
+            or calibrated.target_epoch != directive.target_epoch
         ):
             return None
         return GazeObservation(
