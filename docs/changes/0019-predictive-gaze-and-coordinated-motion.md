@@ -242,10 +242,12 @@ outcome is scrubbed prose and aggregate measurement.
 
 ## Outcome
 
-The reviewed rollout candidate was code revision `5b29382`. Before either
-canary, two rollback rehearsals completed successfully after deployment-tool
-verification errors; each restored the released artifact and healthy runtime
-before rollout continued.
+The final reviewed and deployed rollout candidate was code revision `460fbfc`;
+the deployed wheel's SHA-256 was
+`73e7706c56a5ed03c94bf8d0d7c98aabf6b394039698f298e8db9d1c36307c61`. Before
+either canary, two rollback rehearsals completed successfully after
+deployment-tool verification errors; each restored the released artifact and
+healthy runtime before rollout continued.
 
 Aggregate head-only evidence comprised 120 health samples, with tracking in 52;
 active, hold, returning and idle controller modes were observed. The controller
@@ -264,8 +266,14 @@ events/counter-rotation steps; the maximum body command was `4.307811°`. The
 groundstation remained ready with one active session, more than 26,000 frames and
 zero dropped frames, and the face capability remained ready.
 
-Body motion was restored to `false`. Final head-only verification comprised 30
-health samples with zero application, livez, fault or safe-hold failures. The
+After the canaries, the only production-code delta corrected diagnostics so
+observation age is measured from capture time rather than receipt time; the
+controller and motion paths were unchanged.
+
+Body motion was restored to `false`. The final exact-head redeployment payload
+was verified, followed by 60 health samples with zero livez failures. Controller
+fault remained `none`, the non-finite count remained zero, and idle and returning
+modes were observed. The diagnostics retained 128 capture-age samples. The
 managed layer and every non-canary override value were unchanged. Raw evidence,
 configuration and artifacts remain private; every value recorded here is
 scrubbed and aggregate.
