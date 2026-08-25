@@ -506,26 +506,40 @@ changes motion, settings, perception or pipeline state.
 ### Rollback
 
 On any abort, or when the private canary is intentionally ended without approval
-to retain the candidate:
+to retain the candidate, use one ordered transaction:
 
-1. restore the private exact configuration backup with body motion explicitly
-   false;
-2. stop the satellite before replacing files;
-3. restore the retained checksum-verified released wheel and the exact backed-up
-   configuration, without merging candidate values into it;
-4. restart the satellite;
-5. verify the application stays running, `/livez` succeeds, `/status` is readable
-   with controller fault `none` and safe hold false, and perception can move from
-   a fresh result to tracking;
-6. verify the groundstation session is healthy, Home Assistant still owns the
-   pre-existing device and entities, and a complete voice exchange succeeds;
-7. confirm body motion remains false and retain only scrubbed aggregate evidence
-   of the abort and recovery.
+1. preserve the byte-for-byte configuration backup unchanged as the audit and
+   recovery source; do not edit the retained bytes to encode a safer target;
+2. stop and release the candidate application before any configuration or
+   artifact write, then confirm it no longer owns motion or media;
+3. restore all non-body configuration values exactly from the private byte
+   backup;
+4. force only body motion to false as a safety override in the effective restored
+   configuration;
+5. record that forced value as a documented divergence from the byte backup,
+   record and verify the effective configuration checksum, and retain both the
+   original backup checksum and the effective checksum privately;
+6. install the retained checksum-verified released wheel only after the candidate
+   is stopped and the effective configuration is staged;
+7. restart the retained application;
+8. verify `/livez`, perception, the groundstation session, Home Assistant's
+   existing device and entities, and one complete voice exchange before calling
+   rollback complete.
 
-The rollback is incomplete if only the wheel or only the configuration was
-restored. Both are one tested target, and all application, liveness, controller,
-perception, groundstation and Home Assistant checks above must pass before the
-robot is called recovered.
+Status verification is retained-artifact-version-aware: always require the
+legacy status keys `running`, `pipeline`, `gaze`, `tracking` and `idle`, with the
+application running and its legacy health state coherent. The absence of
+`controller` is valid for an older retained artifact that predates that schema;
+only when `controller` is present — or retained-artifact metadata says that
+schema is supported — require controller fault `none` and safe hold `false`.
+Never reject an otherwise healthy retained release merely because it lacks a
+field introduced by the candidate being rolled back.
+
+The rollback is incomplete if only the wheel or only the effective configuration
+was restored, if the body-false divergence and both checksums were not accounted
+for, or if the candidate was allowed to retain ownership during a write. The
+application, liveness, status, perception, groundstation and Home Assistant
+checks above must pass before the robot is called recovered.
 
 ---
 

@@ -16,7 +16,7 @@ RUNBOOK: Final = (
 def test_rollback_stops_and_releases_candidate_before_any_restore_write() -> None:
     """Artifact/config writes are forbidden until candidate motion ownership is gone."""
     text = RUNBOOK.read_text(encoding="utf-8")
-    rollback = text.split("### Rollback", 1)[1].split("\n---", 1)[0]
+    rollback = " ".join(text.split("### Rollback", 1)[1].split("\n---", 1)[0].split())
 
     stop = rollback.index("stop and release the candidate application")
     configuration = rollback.index("restore all non-body configuration values")
@@ -32,7 +32,7 @@ def test_rollback_preserves_exact_backup_but_forces_body_false_with_accounting()
 ):
     """The immutable backup and deliberately safer effective target are distinct."""
     text = RUNBOOK.read_text(encoding="utf-8")
-    rollback = text.split("### Rollback", 1)[1].split("\n---", 1)[0]
+    rollback = " ".join(text.split("### Rollback", 1)[1].split("\n---", 1)[0].split())
 
     assert "preserve the byte-for-byte configuration backup unchanged" in rollback
     assert "force only body motion to false as a safety override" in rollback
@@ -44,7 +44,7 @@ def test_rollback_preserves_exact_backup_but_forces_body_false_with_accounting()
 def test_rollback_status_verification_is_retained_artifact_version_aware() -> None:
     """A healthy older release need not implement the candidate controller schema."""
     text = RUNBOOK.read_text(encoding="utf-8")
-    rollback = text.split("### Rollback", 1)[1].split("\n---", 1)[0]
+    rollback = " ".join(text.split("### Rollback", 1)[1].split("\n---", 1)[0].split())
 
     assert "always require the legacy status keys" in rollback
     for key in ("`running`", "`pipeline`", "`gaze`", "`tracking`", "`idle`"):
