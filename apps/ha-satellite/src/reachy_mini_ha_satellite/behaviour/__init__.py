@@ -46,7 +46,9 @@ from reachy_mini_ha_satellite.behaviour.satellite import (
 )
 from reachy_mini_ha_satellite.behaviour.tracking import (
     FaceTracker,
+    GazeDirective,
     GazeOutcome,
+    GazeSelector,
     TrackingDecision,
     choose_face,
 )
@@ -56,7 +58,9 @@ __all__ = [
     "BehaviourStatus",
     "Expression",
     "FaceTracker",
+    "GazeDirective",
     "GazeOutcome",
+    "GazeSelector",
     "LookAhead",
     "LookAt",
     "MotionIntent",
