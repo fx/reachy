@@ -753,6 +753,19 @@ class TestTheMachineReadableSurfaces:
             )
 
     @pytest.mark.asyncio
+    async def test_controller_diagnostics_report_when_no_application_is_running(
+        self,
+    ) -> None:
+        """Absent runtime has explicit read and reset responses."""
+        async with _client(_app()) as client:
+            read = await client.get("/diagnostics/controller")
+            reset = await client.post("/diagnostics/controller/reset")
+
+        assert read.json() == {"running": False, "events": []}
+        assert reset.status_code == 503
+        assert reset.json() == {"reset": False}
+
+    @pytest.mark.asyncio
     async def test_controller_reset_changes_diagnostics_only(self) -> None:
         """Reset emits no stop, settings adoption or other application mutation."""
         host = RecordingHost()

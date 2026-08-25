@@ -70,6 +70,55 @@ def _invalid_divergence(config: ControllerConfig) -> ControllerConfig:
     )
 
 
+def _invalid_loss_hold(config: ControllerConfig) -> ControllerConfig:
+    return replace(config, staleness_seconds=1.0, loss_hold_seconds=1.1)
+
+
+def _invalid_head_age(config: ControllerConfig) -> ControllerConfig:
+    return replace(
+        config,
+        staleness_seconds=0.2,
+        prediction_horizon=0.2,
+        loss_hold_seconds=0.1,
+        head_measurement_max_age=0.3,
+        body_feedback_max_age=0.2,
+    )
+
+
+def _invalid_body_age(config: ControllerConfig) -> ControllerConfig:
+    return replace(
+        config,
+        staleness_seconds=0.2,
+        prediction_horizon=0.2,
+        loss_hold_seconds=0.1,
+        head_measurement_max_age=0.2,
+        body_feedback_max_age=0.3,
+    )
+
+
+def _invalid_large_knot_range(config: ControllerConfig) -> ControllerConfig:
+    return replace(config, body_large_point=60.0 * math.pi / 180.0)
+
+
+def _invalid_body_goal(config: ControllerConfig) -> ControllerConfig:
+    return replace(
+        config,
+        body_limits=AxisLimits(-0.2, 0.2, 1.0, 1.0, 1.0),
+    )
+
+
+def _invalid_large_head_residual(config: ControllerConfig) -> ControllerConfig:
+    return replace(config, body_head_comfort=5.0 * math.pi / 180.0)
+
+
+def _invalid_idle_position(config: ControllerConfig) -> ControllerConfig:
+    return replace(config, idle_position_epsilon=40.0 * math.pi / 180.0)
+
+
+def _invalid_idle_velocity(config: ControllerConfig) -> ControllerConfig:
+    return replace(config, idle_velocity_epsilon=30.0 * math.pi / 180.0)
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -83,6 +132,14 @@ def _invalid_divergence(config: ControllerConfig) -> ControllerConfig:
         _invalid_allocation_shares,
         _invalid_comfort,
         _invalid_divergence,
+        _invalid_loss_hold,
+        _invalid_head_age,
+        _invalid_body_age,
+        _invalid_large_knot_range,
+        _invalid_body_goal,
+        _invalid_large_head_residual,
+        _invalid_idle_position,
+        _invalid_idle_velocity,
     ],
 )
 def test_cross_envelope_configuration_is_rejected(
