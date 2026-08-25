@@ -21,6 +21,8 @@ from reachy_mini_ha_satellite.adapters.motion_reachy import (
     TimedPoseHistory,
     head_pose_matrix,
     image_pixel,
+    project_measured_pose,
+    rebase_calibrated_rotation,
 )
 from reachy_mini_ha_satellite.behaviour.gaze_controller import GazeSample
 from reachy_mini_ha_satellite.behaviour.tracking import GazeDirective, GazeSelector
@@ -131,6 +133,60 @@ class TestCaptureTimeCalibration:
             638,
             478,
         )
+
+    @pytest.mark.parametrize(("width", "height"), [(2, 480), (640, 2)])
+    def test_camera_requires_a_strict_interior_pixel(
+        self,
+        width: int,
+        height: int,
+    ) -> None:
+        """A one-pixel border leaves no valid query on a shorter axis."""
+        with pytest.raises(ValueError, match="at least 3 by 3"):
+            image_pixel(NormalisedPoint(x=0.0, y=0.0), width, height)
+
+    @pytest.mark.parametrize(
+        "pose",
+        [
+            np.eye(3, dtype=np.float64),
+            np.array(
+                [
+                    [math.nan, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+            np.array(
+                [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.01, 0.0, 0.0, 1.0],
+                ]
+            ),
+            np.diag([1.2, 1.0, 1.0, 1.0]),
+        ],
+    )
+    def test_malformed_measured_poses_are_rejected(self, pose: np.ndarray) -> None:
+        """Projection accepts small drift, not malformed measured semantics."""
+        with pytest.raises(ValueError, match="measured"):
+            project_measured_pose(pose)
+
+    @pytest.mark.parametrize(
+        "rotation",
+        [
+            np.full((2, 2), math.nan),
+            np.diag([2.0, 1.0, 1.0]),
+            np.diag([-1.0, 1.0, 1.0]),
+        ],
+    )
+    def test_rebase_rejects_malformed_strict_rotations(
+        self,
+        rotation: np.ndarray,
+    ) -> None:
+        """A query or target matrix cannot be normalized into plausible motion."""
+        with pytest.raises(ValueError, match="rotation"):
+            rebase_calibrated_rotation(rotation, np.eye(3), np.eye(3))
 
     def test_query_motion_is_removed_at_capture_time_not_receipt_time(self) -> None:
         """Compute capture @ query.T @ target during active head motion."""
