@@ -4,20 +4,29 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from itertools import pairwise
 
 import pytest
 
 from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    AxisState,
     ControllerConfig,
     ControllerFault,
+    ControllerMode,
     GazeObservation,
     HeadMeasurement,
     initial_controller_state,
+    reduce_command_result,
     step_controller,
 )
 from reachy_mini_ha_satellite.motion_validation import SampleFault, validate_gaze_sample
-from reachy_mini_ha_satellite.ports import GazeSample
+from reachy_mini_ha_satellite.ports import (
+    GazeSample,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
+)
 
 
 def _observation(sequence: int, at: float, *, yaw: float = 0.3) -> GazeObservation:
@@ -209,3 +218,79 @@ def test_shared_sample_validator_covers_derivatives_workspace_and_body_coherence
         GazeSample(0.1, 0.0, 0.1, 0.0, False)
     with pytest.raises(ValueError, match="finite"):
         GazeSample(math.nan, 0.0, 0.0, math.nan, False)
+
+
+def test_repeated_command_rejection_preserves_monotonic_hidden_braking() -> None:
+    """Retry rejection holds emitted q while hidden velocity and acceleration brake."""
+    config = ControllerConfig(workspace_recovery_samples=2)
+    hidden = AxisState(position=0.2, velocity=0.3, acceleration=0.4)
+    safe_sample = GazeSample(
+        0.2,
+        0.0,
+        0.0,
+        0.2,
+        False,
+        world_yaw_velocity=hidden.velocity,
+        world_yaw_acceleration=hidden.acceleration,
+    )
+    prior = replace(
+        initial_controller_state(config),
+        mode=ControllerMode.ACTIVE,
+        head_initialized=True,
+        world_yaw=hidden,
+        target_visible=True,
+        last_safe_sample=safe_sample,
+        last_step_at=0.1,
+    )
+    unsafe_candidate = replace(
+        prior,
+        world_yaw=AxisState(position=0.22, velocity=0.35, acceleration=0.5),
+        last_safe_sample=replace(safe_sample, world_yaw=0.22, head_yaw=0.22),
+        last_step_at=0.15,
+    )
+    rejected = reduce_command_result(
+        unsafe_candidate,
+        prior,
+        MotionCommandResult(
+            MotionCommandStatus.REJECTED,
+            MotionFault.COMMAND,
+            call=1,
+        ),
+        config,
+    )
+
+    held = rejected
+    derivatives = []
+    for call in (2, 3, 4):
+        braking = step_controller(
+            held,
+            None,
+            now=0.1 + call * 0.05,
+            dt=0.05,
+            config=config,
+        )
+        held = reduce_command_result(
+            braking.state,
+            held,
+            MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.COMMAND,
+                call=call,
+            ),
+            config,
+        )
+        derivatives.append(
+            (abs(held.world_yaw.velocity), abs(held.world_yaw.acceleration))
+        )
+        assert held.last_safe_sample == safe_sample
+        assert held.fault is ControllerFault.COMMAND
+
+    assert all(
+        later_velocity <= earlier_velocity
+        and later_acceleration <= earlier_acceleration
+        for (earlier_velocity, earlier_acceleration), (
+            later_velocity,
+            later_acceleration,
+        ) in pairwise(derivatives)
+    )
+    assert derivatives[-1] < derivatives[0]

@@ -170,6 +170,38 @@ def test_recovery_gates_are_positive_integers_excluding_booleans(
         ControllerConfig(**cast("dict[str, Any]", {name: value}))
 
 
+def test_body_allocation_must_fit_each_signed_asymmetric_body_endpoint() -> None:
+    """A generous positive body range cannot hide clamping on the negative side."""
+    with pytest.raises(ValueError, match="signed body range"):
+        replace(
+            ControllerConfig(),
+            body_limits=AxisLimits(
+                minimum=-10.0 * math.pi / 180.0,
+                maximum=70.0 * math.pi / 180.0,
+                max_velocity=1.0,
+                max_acceleration=2.0,
+                max_jerk=4.0,
+            ),
+        )
+
+
+def test_body_allocation_residual_head_must_fit_comfort_at_each_signed_endpoint() -> (
+    None
+):
+    """A generous negative body range cannot hide positive residual head excess."""
+    with pytest.raises(ValueError, match="signed head comfort"):
+        replace(
+            ControllerConfig(),
+            body_limits=AxisLimits(
+                minimum=-70.0 * math.pi / 180.0,
+                maximum=10.0 * math.pi / 180.0,
+                max_velocity=1.0,
+                max_acceleration=2.0,
+                max_jerk=4.0,
+            ),
+        )
+
+
 def test_motion_enablement_flags_are_actual_booleans() -> None:
     """No truthy scalar can change a restart-bound motion safety decision."""
     with pytest.raises(ValueError, match="boolean"):

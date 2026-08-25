@@ -27,6 +27,7 @@ from reachy_mini_ha_satellite.behaviour.controller_diagnostics import (
     ControllerDiagnostics,
 )
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    AxisState,
     ControllerConfig,
     ControllerFault,
     ControllerMode,
@@ -37,7 +38,6 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     allocate_body,
     apply_deadband,
     initial_controller_state,
-    predict_error,
     step_controller,
     update_estimator,
 )
@@ -96,34 +96,62 @@ def test_req_074_each_observation_is_consumed_once() -> None:
 #:% age or the trajectory produced from an otherwise identical timed observation
 #:% sequence.
 def test_req_075_capture_clock_is_invariant_to_nominal_cadence() -> None:
-    """Only explicit capture times and dt values enter otherwise identical runs."""
+    """Different real poll cadences agree on age, estimate and common-time trajectory."""
     config = ControllerConfig()
-    observations = (_observation(0, 0.1), _observation(1, 0.2, x=0.5))
+    observations = (
+        _observation(0, 0.1, x=0.2),
+        _observation(1, 0.2, x=0.4),
+        _observation(2, 0.3, x=0.5),
+    )
 
-    def run() -> tuple[object, ...]:
+    def run(interval: float) -> dict[float, tuple[float, object, AxisState]]:
         state = initial_controller_state(config)
-        results = []
-        for observation in observations:
+        latest: GazeObservation | None = None
+        records: dict[float, tuple[float, object, AxisState]] = {}
+        at = interval
+        while at <= 0.4 + 1e-12:
+            available = [item for item in observations if item.received_at <= at]
+            if available:
+                latest = available[-1]
             result = step_controller(
                 state,
-                observation,
-                now=observation.received_at,
-                dt=0.05,
+                latest,
+                now=at,
+                dt=interval,
                 config=config,
             )
             state = result.state
-            results.append(result)
-        return tuple(results)
+            rounded = round(at, 10)
+            if math.isclose(rounded % 0.1, 0.0, abs_tol=1e-9):
+                assert latest is not None
+                records[rounded] = (
+                    rounded - latest.captured_at,
+                    state.estimator,
+                    state.world_yaw,
+                )
+            at = round(at + interval, 10)
+        return records
 
-    assert run() == run()
-    estimator, _reset = update_estimator(None, observations[0], config)
-    _predicted, horizon = predict_error(estimator, now=0.4, config=config)
-    assert horizon == pytest.approx(
-        min(
-            config.prediction_horizon,
-            0.4 - observations[0].captured_at + config.actuator_delay,
+    fast = run(0.05)
+    slow = run(0.1)
+    assert fast.keys() == slow.keys()
+    for at in fast:
+        fast_age, fast_estimator, fast_axis = fast[at]
+        slow_age, slow_estimator, slow_axis = slow[at]
+        assert fast_age == pytest.approx(slow_age)
+        assert fast_estimator == slow_estimator
+        assert fast_axis.position == pytest.approx(
+            slow_axis.position,
+            abs=0.25 * _DEGREES,
         )
-    )
+        assert fast_axis.velocity == pytest.approx(
+            slow_axis.velocity,
+            abs=1.0 * _DEGREES,
+        )
+        assert fast_axis.acceleration == pytest.approx(
+            slow_axis.acceleration,
+            abs=5.0 * _DEGREES,
+        )
 
 
 #:= docs/specs/gaze-control/index.md#req-076-observation-discontinuities-reset-prediction
@@ -181,6 +209,37 @@ def test_req_078_ego_motion_is_rebased_exactly_once() -> None:
     rebased = rebase_calibrated_rotation(capture, query, target)
     forward = rebased @ np.array([1.0, 0.0, 0.0])
     assert math.atan2(forward[1], forward[0]) == pytest.approx(35.0 * _DEGREES)
+
+
+def test_simulation_calibration_oracle_is_independent_and_mutation_sensitive() -> None:
+    """Inverting camera-to-world calibration breaks fixation instead of self-confirming."""
+
+    def inverted_calibration(
+        image: ImagePoint,
+        capture_yaw: float,
+        capture_elevation: float,
+        horizontal_fov: float,
+        vertical_fov: float,
+    ) -> tuple[float, float]:
+        yaw_error = math.atan(image.x * math.tan(horizontal_fov / 2.0))
+        elevation_error = math.atan(image.y * math.tan(vertical_fov / 2.0))
+        return capture_yaw + yaw_error, capture_elevation - elevation_error
+
+    target = constant_target(yaw=35.0 * _DEGREES, elevation=10.0 * _DEGREES)
+    correct = GazePlant().run(4.0, target)
+    inverted = GazePlant(PlantConfig(calibration_oracle=inverted_calibration)).run(
+        4.0, target
+    )
+
+    assert abs(correct[-1].image_error.x) <= 0.025
+    assert abs(correct[-1].image_error.y) <= 0.025
+    assert (
+        max(
+            abs(inverted[-1].image_error.x),
+            abs(inverted[-1].image_error.y),
+        )
+        > 0.025
+    )
 
 
 #:= docs/specs/gaze-control/index.md#req-079-centering-has-continuous-hysteresis

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import replace
 
 import pytest
 
@@ -12,13 +13,17 @@ from reachy_mini_ha_satellite.behaviour.controller_diagnostics import (
     ControllerEvent,
 )
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    AxisState,
     ControllerConfig,
     ControllerFault,
     ControllerMode,
+    ControllerStep,
     EstimatorReset,
+    allocate_body,
     initial_controller_state,
     step_controller,
 )
+from reachy_mini_ha_satellite.ports import GazeSample
 
 
 def test_diagnostics_ring_evicts_oldest_and_snapshots_deterministically() -> None:
@@ -122,6 +127,62 @@ def test_unbounded_internal_ring_is_refused_even_if_invariant_is_corrupted() -> 
 
     with pytest.raises(AssertionError, match="always bounded"):
         _ = diagnostics.capacity
+
+
+def test_saturated_event_explains_allocation_workspace_and_derivative_limits() -> None:
+    """REQ-091 evidence names configured envelopes and which limits are active."""
+    config = replace(ControllerConfig(), body_enabled=True)
+    world = AxisState(
+        position=config.yaw_limits.maximum,
+        velocity=config.yaw_limits.max_velocity,
+        acceleration=config.yaw_limits.max_acceleration,
+    )
+    body_position = allocate_body(world.position, config)
+    body = AxisState(position=body_position)
+    sample = GazeSample(
+        world.position,
+        0.0,
+        body.position,
+        world.position - body.position,
+        True,
+        world_yaw_velocity=world.velocity,
+        world_yaw_acceleration=world.acceleration,
+    )
+    state = replace(
+        initial_controller_state(config),
+        mode=ControllerMode.ACTIVE,
+        world_yaw=world,
+        body_yaw=body,
+        last_safe_sample=sample,
+    )
+    step = ControllerStep(state, True, EstimatorReset.NONE, 0.2, False)
+    diagnostics = ControllerDiagnostics(capacity=2)
+
+    diagnostics.record(
+        step,
+        config=config,
+        at=1.0,
+        observation_age=0.1,
+        emitted=True,
+    )
+    event = diagnostics.snapshot()[0]
+
+    assert event["allocation_body_share"] == pytest.approx(
+        body.position / world.position
+    )
+    assert event["head_yaw"] == pytest.approx(sample.head_yaw)
+    assert event["world_yaw_minimum"] == config.yaw_limits.minimum
+    assert event["world_yaw_maximum"] == config.yaw_limits.maximum
+    assert event["world_yaw_max_velocity"] == config.yaw_limits.max_velocity
+    assert event["world_yaw_max_acceleration"] == config.yaw_limits.max_acceleration
+    assert event["world_yaw_max_jerk"] == config.yaw_limits.max_jerk
+    assert event["world_yaw_position_limited"] is True
+    assert event["world_yaw_velocity_limited"] is True
+    assert event["world_yaw_acceleration_limited"] is True
+    assert all(
+        value is None or isinstance(value, str | float | bool)
+        for value in event.values()
+    )
 
 
 def test_reset_clears_only_ring_contents() -> None:

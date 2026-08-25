@@ -811,6 +811,43 @@ class TestApplyingIntents:
 class TestTheLoop:
     """What ticking does, and what a pipeline event does between ticks."""
 
+    def test_later_intent_failure_cannot_suppress_gaze_transaction_completion(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A successful gaze result is reduced before any later intent can raise."""
+
+        class FailingHeadMotion(FakeMotion):
+            """Accept gaze, then fail a competing head command."""
+
+            def move_head(self, pose: HeadPose) -> None:
+                del pose
+                raise RuntimeError("later head command failed")
+
+        behaviour = SatelliteBehaviour(now=0.0)
+        sample = GazeSample(0.0, 0.0, 0.0, 0.0, False)
+        completed: list[MotionCommandResult] = []
+
+        def finish(*_args: object, **_kwargs: object) -> tuple[MotionIntent, ...]:
+            return CommandGaze(sample), MoveHead(HeadPose(pitch=0.1))
+
+        monkeypatch.setattr(behaviour, "finish", finish)
+        monkeypatch.setattr(behaviour, "complete_command", completed.append)
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FailingHeadMotion(),
+            perception=FakePerception(),
+            behaviour=behaviour,
+            clock=lambda: 0.1,
+        )
+
+        with pytest.raises(RuntimeError, match="later head command failed"):
+            application.tick()
+
+        assert len(completed) == 1
+        assert completed[0].status is MotionCommandStatus.ACCEPTED
+
     @pytest.mark.asyncio
     async def test_it_starts_everything_before_ticking(self) -> None:
         """A tick against an unstarted perception source would read nothing."""
@@ -3710,6 +3747,28 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         motion = cast("ReachyMotion", application._motion)
         assert motion._config is application._behaviour._config
         assert application._behaviour._config.require_motion_measurements
+
+    def test_released_short_staleness_still_assembles_with_bounded_dependents(
+        self,
+    ) -> None:
+        """A previously valid sub-0.35s setting is migrated, not rejected at startup."""
+        resolution = load_settings(
+            _ENVIRONMENT,
+            {"staleness_seconds": "0.2"},
+        )
+
+        application = build_application(
+            resolution,
+            FakeRobot(),
+            identity=_identity(),
+        )
+
+        config = application._behaviour._config
+        assert config.staleness_seconds == pytest.approx(0.2)
+        assert config.prediction_horizon <= config.staleness_seconds
+        assert config.loss_hold_seconds <= config.staleness_seconds
+        assert config.head_measurement_max_age <= config.staleness_seconds
+        assert config.body_feedback_max_age <= config.staleness_seconds
 
     def test_a_robot_with_tracking_off_still_assembles(self) -> None:
         """And its behaviour layer is handed a source that answers "nothing yet"."""

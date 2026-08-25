@@ -27,6 +27,9 @@ from reachy_mini_ha_satellite.ports import (
     Detections,
     DetectionSource,
     GazeOutcome,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
 )
 
 if TYPE_CHECKING:
@@ -409,20 +412,23 @@ class TestLossReturnAndHandoff:
             now += 0.05
 
         assert behaviour.controller_state.mode is ControllerMode.IDLE
+        assert len(settled) == 1
         assert isinstance(settled[0], CommandGaze)
-        assert any(isinstance(item, MoveHead) for item in settled[1:])
-        assert handoffs == 1
-        repeated = _finish(behaviour, empty, now=now + 0.05)
-        advanced_empty = _seen(
-            sequence=3,
-            captured_at=now + 0.05,
-            received_at=now + 0.10,
-        )
-        advanced = _finish(behaviour, advanced_empty, now=now + 0.10)
+        assert handoffs == 0
 
-        assert _gaze(repeated) is None
-        assert _gaze(advanced) is None
-        assert behaviour.controller_state.mode is ControllerMode.IDLE
+        deferred = behaviour.complete_command(
+            MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.COMMAND,
+                call=1,
+            )
+        )
+        assert deferred == ()
+        assert behaviour.controller_state.mode is ControllerMode.RETURNING
+        assert behaviour._owns_head()
+        diagnostic = behaviour.controller_diagnostics()[-1]
+        assert diagnostic["command_accepted"] is False
+        assert diagnostic["fault"] == "command"
 
     def test_reacquisition_during_return_cancels_handoff(self) -> None:
         """A new calibrated face keeps ownership before pipeline head can resume."""
