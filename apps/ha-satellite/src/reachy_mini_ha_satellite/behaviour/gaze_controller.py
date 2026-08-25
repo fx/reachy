@@ -15,7 +15,12 @@ from enum import StrEnum
 from typing import Final
 
 from reachy_contracts import FaceDetection
-from reachy_mini_ha_satellite.ports import GazeSample
+from reachy_mini_ha_satellite.motion_validation import validate_gaze_sample
+from reachy_mini_ha_satellite.ports import (
+    GazeSample,
+    MotionCommandResult,
+    MotionCommandStatus,
+)
 
 __all__ = [
     "AxisLimits",
@@ -23,6 +28,7 @@ __all__ = [
     "BodyFeedbackState",
     "BodyMeasurement",
     "ControllerConfig",
+    "ControllerFault",
     "ControllerMode",
     "ControllerState",
     "ControllerStep",
@@ -36,6 +42,7 @@ __all__ = [
     "apply_deadband",
     "initial_controller_state",
     "predict_error",
+    "reduce_command_result",
     "step_axis",
     "step_controller",
     "update_estimator",
@@ -76,9 +83,58 @@ def _unit(name: str, value: float) -> None:
         raise ValueError(message)
 
 
+def _positive_integer(name: str, value: object) -> None:
+    """Require a real positive integer rather than accepting bool as one."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        message = f"the {name} must be a positive integer, not {value!r}"
+        raise ValueError(message)
+
+
+def _boolean(name: str, value: object) -> None:
+    """Require an actual boolean at a runtime boundary."""
+    if not isinstance(value, bool):
+        message = f"the {name} must be boolean, not {value!r}"
+        raise ValueError(message)
+
+
 def _clamp(value: float, lower: float, upper: float) -> float:
     """Bound a scalar to one closed interval."""
     return min(upper, max(lower, value))
+
+
+def _smoothstep(value: float) -> float:
+    """Return cubic smoothstep on a clamped unit interval."""
+    phase = _clamp(value, 0.0, 1.0)
+    return phase * phase * (3.0 - 2.0 * phase)
+
+
+def _unclamped_body_allocation(
+    world_yaw: float,
+    *,
+    noise_floor: float,
+    midpoint: float,
+    mid_share: float,
+    large_point: float,
+    large_share: float,
+    head_comfort: float,
+) -> float:
+    """Calculate signed body allocation before a workspace could clip it."""
+    magnitude = abs(world_yaw)
+    if magnitude <= noise_floor:
+        return 0.0
+    if magnitude <= midpoint:
+        phase = (magnitude - noise_floor) / (midpoint - noise_floor)
+        allocated = mid_share * _smoothstep(phase) * magnitude
+    elif magnitude <= large_point:
+        phase = (magnitude - midpoint) / (large_point - midpoint)
+        share = mid_share + (large_share - mid_share) * _smoothstep(phase)
+        allocated = share * magnitude
+    else:
+        head_at_large = large_point * (1.0 - large_share)
+        comfort_gap = head_comfort - head_at_large
+        head_residual = head_comfort - comfort_gap * large_point / magnitude
+        allocated = magnitude - head_residual
+    return math.copysign(allocated, world_yaw)
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,15 +321,26 @@ class EstimatorState:
 
 
 class ControllerMode(StrEnum):
-    """Externally meaningful pure-controller lifecycle."""
+    """Externally meaningful target and ownership lifecycle."""
 
     UNKNOWN = "unknown"
     ACTIVE = "active"
     HOLD = "hold"
     RETURNING = "returning"
     IDLE = "idle"
-    WORKSPACE_HOLD = "workspace_hold"
-    BODY_FEEDBACK_HOLD = "body_feedback_hold"
+
+
+class ControllerFault(StrEnum):
+    """Stable categories for real safety channels, independent from lifecycle."""
+
+    NONE = "none"
+    TIMING = "timing"
+    POSE = "pose"
+    CALIBRATION = "calibration"
+    DERIVATIVE = "derivative"
+    WORKSPACE = "workspace"
+    BODY_FEEDBACK = "body_feedback"
+    COMMAND = "command"
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +388,7 @@ class ControllerConfig:
         max_jerk=500.0 * _DEGREES,
     )
     body_enabled: bool = False
+    require_motion_measurements: bool = False
     head_measurement_max_age: float = 0.25
     body_feedback_max_age: float = 0.25
     body_feedback_divergence: float = 8.0 * _DEGREES
@@ -389,32 +457,134 @@ class ControllerConfig:
         if self.estimator_alpha == 0.0 or self.estimator_beta == 0.0:
             message = "estimator gains must be greater than zero"
             raise ValueError(message)
-        if self.minimum_observation_dt > self.maximum_observation_dt:
-            message = "minimum observation dt must not exceed its maximum"
+        if (
+            not self.minimum_observation_dt
+            <= self.maximum_observation_dt
+            <= self.estimator_gap
+        ):
+            message = (
+                "observation dt bounds must not exceed the supported estimator gap"
+            )
             raise ValueError(message)
-        if self.actuator_delay > self.prediction_horizon:
-            message = "actuator delay must not exceed prediction horizon"
+        if not self.actuator_delay <= self.prediction_horizon <= self.staleness_seconds:
+            message = "actuator delay, prediction horizon and staleness must be ordered"
+            raise ValueError(message)
+        if self.loss_hold_seconds > self.staleness_seconds:
+            message = "loss hold must not exceed observation staleness"
             raise ValueError(message)
         if not 0.0 < self.deadband_stop < self.deadband_start:
             message = "deadband stop must be positive and lower than start"
+            raise ValueError(message)
+        if (
+            max(
+                self.deadband_x * self.deadband_start,
+                self.deadband_y * self.deadband_start,
+            )
+            >= self.image_position_limit
+        ):
+            message = "deadband activation must fit inside the image position envelope"
             raise ValueError(message)
         if not self.body_noise_floor < self.body_midpoint < self.body_large_point:
             message = "body allocation knots must increase"
             raise ValueError(message)
         _unit("body midpoint share", self.body_mid_share)
         _unit("body large share", self.body_large_share)
-        if self.body_mid_share > self.body_large_share:
-            message = "body allocation share must not decrease"
+        if not 0.0 < self.body_mid_share <= self.body_large_share < 1.0:
+            message = "body allocation shares must increase strictly below one"
             raise ValueError(message)
         if self.stall_integration_dt > self.maximum_tick_dt:
             message = "stall integration dt must not exceed maximum tick dt"
             raise ValueError(message)
-        if self.workspace_recovery_samples < 1:
-            message = "workspace recovery requires at least one sample"
+        for name, limits in (
+            ("yaw", self.yaw_limits),
+            ("elevation", self.elevation_limits),
+            ("body", self.body_limits),
+        ):
+            if not limits.minimum <= 0.0 <= limits.maximum:
+                message = f"{name} neutral must lie inside its configured range"
+                raise ValueError(message)
+        if self.head_measurement_max_age > self.staleness_seconds:
+            message = "head measurement age must not exceed observation staleness"
             raise ValueError(message)
-        if self.body_feedback_recovery_samples < 1:
-            message = "body feedback recovery requires at least one sample"
+        if self.body_feedback_max_age > self.staleness_seconds:
+            message = "body feedback age must not exceed observation staleness"
             raise ValueError(message)
+        if self.body_feedback_divergence > (
+            self.body_limits.maximum - self.body_limits.minimum
+        ):
+            message = "body feedback divergence must fit inside the body range"
+            raise ValueError(message)
+        if self.body_large_point > max(
+            abs(self.yaw_limits.minimum), self.yaw_limits.maximum
+        ):
+            message = "body allocation knots must fit inside world-yaw range"
+            raise ValueError(message)
+        if self.body_head_comfort > max(
+            abs(self.yaw_limits.minimum), self.yaw_limits.maximum
+        ):
+            message = "head comfort must fit inside world-yaw range"
+            raise ValueError(message)
+        if self.body_large_point * self.body_large_share > max(
+            abs(self.body_limits.minimum), self.body_limits.maximum
+        ):
+            message = "body allocation goal must fit inside body range"
+            raise ValueError(message)
+        if (
+            self.body_large_point * (1.0 - self.body_large_share)
+            > self.body_head_comfort
+        ):
+            message = "large allocation must leave the head inside comfort"
+            raise ValueError(message)
+        for endpoint in (self.yaw_limits.minimum, self.yaw_limits.maximum):
+            allocated = _unclamped_body_allocation(
+                endpoint,
+                noise_floor=self.body_noise_floor,
+                midpoint=self.body_midpoint,
+                mid_share=self.body_mid_share,
+                large_point=self.body_large_point,
+                large_share=self.body_large_share,
+                head_comfort=self.body_head_comfort,
+            )
+            clamped = _clamp(
+                allocated,
+                self.body_limits.minimum,
+                self.body_limits.maximum,
+            )
+            residual_head = endpoint - clamped
+            if allocated != clamped or abs(residual_head) > self.body_head_comfort:
+                message = (
+                    "body allocation must fit each signed body range and keep "
+                    "residual gaze inside signed head comfort"
+                )
+                raise ValueError(message)
+        if self.idle_position_epsilon > min(
+            min(abs(limits.minimum), limits.maximum)
+            for limits in (self.yaw_limits, self.elevation_limits, self.body_limits)
+        ):
+            message = "idle position epsilon must fit inside every position range"
+            raise ValueError(message)
+        if self.idle_velocity_epsilon > min(
+            self.yaw_limits.max_velocity,
+            self.elevation_limits.max_velocity,
+            self.body_limits.max_velocity,
+        ):
+            message = "idle velocity epsilon must fit inside every velocity range"
+            raise ValueError(message)
+        if self.idle_acceleration_epsilon > min(
+            self.yaw_limits.max_acceleration,
+            self.elevation_limits.max_acceleration,
+            self.body_limits.max_acceleration,
+        ):
+            message = (
+                "idle acceleration epsilon must fit inside every acceleration range"
+            )
+            raise ValueError(message)
+        _positive_integer("workspace recovery samples", self.workspace_recovery_samples)
+        _positive_integer(
+            "body feedback recovery samples", self.body_feedback_recovery_samples
+        )
+        _boolean("body enabled", self.body_enabled)
+        _boolean("require motion measurements", self.require_motion_measurements)
 
 
 _DEFAULT_CONFIG: Final = ControllerConfig()
@@ -437,7 +607,15 @@ class ControllerState:
     target_visible: bool | None
     loss_started_at: float | None
     last_safe_sample: GazeSample
-    workspace_valid_streak: int = 0
+    fault: ControllerFault = ControllerFault.NONE
+    recovery_valid_streak: int = 0
+    recovery_evidence: tuple[object, ...] | None = None
+    last_step_at: float | None = None
+
+    @property
+    def safe_hold(self) -> bool:
+        """Derive safety hold from the independent fault channel."""
+        return self.fault is not ControllerFault.NONE
 
 
 @dataclass(frozen=True, slots=True)
@@ -467,8 +645,13 @@ class ControllerStep:
 
     @property
     def workspace_accepted(self) -> bool:
-        """Return whether this step is outside workspace hold."""
-        return self.state.mode is not ControllerMode.WORKSPACE_HOLD
+        """Return whether this step is outside a workspace fault."""
+        return self.state.fault is not ControllerFault.WORKSPACE
+
+    @property
+    def safe_hold(self) -> bool:
+        """Return the derived safety state without conflating it with mode."""
+        return self.state.safe_hold
 
 
 def initial_controller_state(
@@ -490,6 +673,46 @@ def initial_controller_state(
         target_visible=None,
         loss_started_at=None,
         last_safe_sample=neutral,
+    )
+
+
+def reduce_command_result(
+    candidate: ControllerState,
+    prior_safe: ControllerState,
+    result: MotionCommandResult,
+    config: ControllerConfig,
+) -> ControllerState:
+    """Commit one daemon result or atomically restore the prior safe trajectory."""
+    evidence = ("command", result.call)
+    if result.status is MotionCommandStatus.REJECTED:
+        retrying_safe_hold = candidate.fault is ControllerFault.COMMAND
+        return replace(
+            candidate,
+            mode=candidate.mode if retrying_safe_hold else prior_safe.mode,
+            world_yaw=(
+                candidate.world_yaw if retrying_safe_hold else prior_safe.world_yaw
+            ),
+            elevation=(
+                candidate.elevation if retrying_safe_hold else prior_safe.elevation
+            ),
+            body_yaw=(
+                candidate.body_yaw if retrying_safe_hold else prior_safe.body_yaw
+            ),
+            last_safe_sample=prior_safe.last_safe_sample,
+            fault=ControllerFault.COMMAND,
+            recovery_valid_streak=0,
+            recovery_evidence=evidence,
+        )
+    if candidate.fault is not ControllerFault.COMMAND:
+        return candidate
+    independent = evidence != candidate.recovery_evidence
+    streak = candidate.recovery_valid_streak + (1 if independent else 0)
+    recovered = streak >= config.workspace_recovery_samples
+    return replace(
+        candidate,
+        fault=ControllerFault.NONE if recovered else ControllerFault.COMMAND,
+        recovery_valid_streak=0 if recovered else streak,
+        recovery_evidence=None if recovered else evidence,
     )
 
 
@@ -739,43 +962,22 @@ def step_axis(
     return AxisState(proposed, velocity, acceleration)
 
 
-def _smoothstep(value: float) -> float:
-    """Return cubic smoothstep on a clamped unit interval."""
-    phase = _clamp(value, 0.0, 1.0)
-    return phase * phase * (3.0 - 2.0 * phase)
-
-
 def allocate_body(world_yaw: float, config: ControllerConfig) -> float:
     """Return continuous odd-symmetric monotonic body-yaw allocation."""
     _finite("world yaw allocation input", world_yaw)
     if not config.body_enabled:
         return 0.0
-    magnitude = abs(world_yaw)
-    if magnitude <= config.body_noise_floor:
-        return 0.0
-    if magnitude <= config.body_midpoint:
-        phase = (magnitude - config.body_noise_floor) / (
-            config.body_midpoint - config.body_noise_floor
-        )
-        share = config.body_mid_share * _smoothstep(phase)
-        allocated = share * magnitude
-    elif magnitude <= config.body_large_point:
-        phase = (magnitude - config.body_midpoint) / (
-            config.body_large_point - config.body_midpoint
-        )
-        share = config.body_mid_share + (
-            config.body_large_share - config.body_mid_share
-        ) * _smoothstep(phase)
-        allocated = share * magnitude
-    else:
-        head_at_large = config.body_large_point * (1.0 - config.body_large_share)
-        comfort_gap = config.body_head_comfort - head_at_large
-        head_residual = config.body_head_comfort - (
-            comfort_gap * config.body_large_point / magnitude
-        )
-        allocated = magnitude - head_residual
+    allocated = _unclamped_body_allocation(
+        world_yaw,
+        noise_floor=config.body_noise_floor,
+        midpoint=config.body_midpoint,
+        mid_share=config.body_mid_share,
+        large_point=config.body_large_point,
+        large_share=config.body_large_share,
+        head_comfort=config.body_head_comfort,
+    )
     return _clamp(
-        math.copysign(allocated, world_yaw),
+        allocated,
         config.body_limits.minimum,
         config.body_limits.maximum,
     )
@@ -822,6 +1024,12 @@ def _sample(
         body_yaw=body,
         head_yaw=world_yaw.position - body,
         body_enabled=config.body_enabled,
+        world_yaw_velocity=world_yaw.velocity,
+        world_yaw_acceleration=world_yaw.acceleration,
+        elevation_velocity=elevation.velocity,
+        elevation_acceleration=elevation.acceleration,
+        body_yaw_velocity=body_yaw.velocity if config.body_enabled else 0.0,
+        body_yaw_acceleration=(body_yaw.acceleration if config.body_enabled else 0.0),
     )
 
 
@@ -872,8 +1080,36 @@ def _brake_hidden(
     )
 
 
+def _transition_valid(
+    previous: AxisState,
+    candidate: AxisState,
+    dt: float,
+    limits: AxisLimits,
+) -> bool:
+    """Check q/v/a envelopes, jerk and conservative discrete coherence."""
+    if not limits.minimum <= candidate.position <= limits.maximum:
+        return False
+    if abs(candidate.velocity) > limits.max_velocity + _EPSILON:
+        return False
+    if abs(candidate.acceleration) > limits.max_acceleration + _EPSILON:
+        return False
+    if dt <= 0.0:
+        return candidate == previous
+    if abs(candidate.acceleration - previous.acceleration) > (
+        limits.max_jerk * dt + _EPSILON
+    ):
+        return False
+    if abs(candidate.velocity - previous.velocity) > (
+        limits.max_acceleration * dt + _EPSILON
+    ):
+        return False
+    return abs(candidate.position - previous.position) <= (
+        limits.max_velocity * dt + _EPSILON
+    )
+
+
 def _accept_workspace(_sample: GazeSample) -> bool:
-    """Accept every finite coordinated sample when no workspace is supplied."""
+    """Accept every validated coordinated sample when no workspace is supplied."""
     return True
 
 
@@ -1000,15 +1236,48 @@ def step_controller(
     workspace_accepts: Callable[[GazeSample], bool] = _accept_workspace,
     head_measurement: HeadMeasurement | None = None,
     body_measurement: BodyMeasurement | None = None,
+    input_fault: ControllerFault = ControllerFault.NONE,
+    input_evidence: tuple[object, ...] | None = None,
 ) -> ControllerStep:
-    """Advance one pure controller tick with explicit time and timestep."""
-    _finite("controller time", now)
-    _non_negative("controller dt", dt)
-    if (
-        not state.head_initialized
-        and head_measurement is not None
+    """Advance one pure controller tick with explicit validated evidence."""
+    time_valid = math.isfinite(now) and math.isfinite(dt) and dt >= 0.0
+    if time_valid and state.last_step_at is not None:
+        elapsed = now - state.last_step_at
+        time_valid = elapsed >= 0.0 and dt <= elapsed + _EPSILON
+    if not time_valid:
+        world, elevation, body = _brake_hidden(
+            state,
+            0.0 if not math.isfinite(dt) or dt < 0.0 else dt,
+            config,
+        )
+        faulted = replace(
+            state,
+            world_yaw=world,
+            elevation=elevation,
+            body_yaw=body,
+            fault=ControllerFault.TIMING,
+            recovery_valid_streak=0,
+            recovery_evidence=None,
+        )
+        return ControllerStep(faulted, False, EstimatorReset.NONE, 0.0, False)
+    if input_fault is not ControllerFault.NONE:
+        world, elevation, body = _brake_hidden(state, dt, config)
+        faulted = replace(
+            state,
+            world_yaw=world,
+            elevation=elevation,
+            body_yaw=body,
+            fault=input_fault,
+            recovery_valid_streak=0,
+            recovery_evidence=input_evidence,
+            last_step_at=now,
+        )
+        return ControllerStep(faulted, False, EstimatorReset.NONE, 0.0, False)
+    head_is_current = (
+        head_measurement is not None
         and 0.0 <= now - head_measurement.measured_at <= config.head_measurement_max_age
-    ):
+    )
+    if not state.head_initialized and head_is_current and head_measurement is not None:
         world_yaw = AxisState(position=head_measurement.world_yaw)
         elevation = AxisState(position=head_measurement.world_elevation)
         body_yaw = state.body_yaw.position if config.body_enabled else 0.0
@@ -1025,12 +1294,33 @@ def step_controller(
                 body_enabled=config.body_enabled,
             ),
         )
+    motion_expected = observation is not None or state.mode in {
+        ControllerMode.ACTIVE,
+        ControllerMode.HOLD,
+        ControllerMode.RETURNING,
+    }
+    if config.require_motion_measurements and motion_expected and not head_is_current:
+        world, elevation, body = _brake_hidden(state, dt, config)
+        faulted = replace(
+            state,
+            world_yaw=world,
+            elevation=elevation,
+            body_yaw=body,
+            fault=ControllerFault.POSE,
+            recovery_valid_streak=0,
+            recovery_evidence=None,
+            last_step_at=now,
+        )
+        return ControllerStep(faulted, False, EstimatorReset.NONE, 0.0, False)
     body_feedback, body_seed, body_feedback_hold = _observe_body_feedback(
         state,
         body_measurement,
         now=now,
         config=config,
-        monitor=state.mode not in {ControllerMode.UNKNOWN, ControllerMode.IDLE},
+        monitor=(
+            state.mode not in {ControllerMode.UNKNOWN, ControllerMode.IDLE}
+            or state.fault is ControllerFault.BODY_FEEDBACK
+        ),
     )
     if body_seed is not None:
         state = replace(
@@ -1166,15 +1456,16 @@ def step_controller(
             ControllerMode.ACTIVE,
             ControllerMode.HOLD,
             ControllerMode.RETURNING,
-            ControllerMode.WORKSPACE_HOLD,
-            ControllerMode.BODY_FEEDBACK_HOLD,
         }
     )
     if body_feedback_hold or body_cold:
         world, elevation, body = _brake_hidden(state, dt, config)
+        if body_cold and not body_feedback.faulted:
+            body_feedback = replace(body_feedback, faulted=True)
+        latest_body = body_feedback.last_measurement
         held_state = replace(
             state,
-            mode=ControllerMode.BODY_FEEDBACK_HOLD,
+            mode=mode,
             estimator=estimator,
             deadband=deadband,
             world_yaw=world,
@@ -1185,6 +1476,12 @@ def step_controller(
             consumption_watermarks=watermarks,
             target_visible=target_visible,
             loss_started_at=loss_started,
+            fault=ControllerFault.BODY_FEEDBACK,
+            recovery_valid_streak=body_feedback.valid_streak,
+            recovery_evidence=(
+                None if latest_body is None else latest_body.measured_at,
+            ),
+            last_step_at=now,
         )
         return ControllerStep(
             state=held_state,
@@ -1229,22 +1526,73 @@ def step_controller(
     )
     candidate = _sample(world, elevation, body, config)
 
-    recovering = state.mode is ControllerMode.WORKSPACE_HOLD
-    valid_streak = state.workspace_valid_streak
-    candidate_accepted = workspace_accepts(candidate)
-    if not candidate_accepted:
-        valid_streak = 0
-    elif recovering:
-        valid_streak += 1
-    accepted = candidate_accepted and (
-        not recovering or valid_streak >= config.workspace_recovery_samples
-    )
+    sample_fault = validate_gaze_sample(candidate, config)
+    validation_fault = ControllerFault(sample_fault.value)
+    if validation_fault == ControllerFault.NONE and not all(
+        (
+            _transition_valid(state.world_yaw, world, dt, config.yaw_limits),
+            _transition_valid(state.elevation, elevation, dt, config.elevation_limits),
+            _transition_valid(state.body_yaw, body, dt, config.body_limits),
+        )
+    ):
+        validation_fault = ControllerFault.DERIVATIVE
+    if validation_fault == ControllerFault.NONE and not workspace_accepts(candidate):
+        validation_fault = ControllerFault.WORKSPACE
 
-    if not accepted:
+    recovering_fault: ControllerFault = state.fault
+    evidence: tuple[object, ...] | None
+    if recovering_fault is ControllerFault.BODY_FEEDBACK:
+        recovering_fault = ControllerFault.NONE
+    if recovering_fault is ControllerFault.POSE:
+        evidence = (
+            "pose",
+            None if head_measurement is None else head_measurement.measured_at,
+        )
+    elif recovering_fault is ControllerFault.CALIBRATION:
+        evidence = (
+            "calibration",
+            None if observation is None else observation.identity,
+        )
+    elif recovering_fault is ControllerFault.COMMAND:
+        evidence = input_evidence
+    elif recovering_fault is ControllerFault.TIMING:
+        evidence = ("timing", now)
+    else:
+        evidence = (
+            "candidate",
+            now,
+            candidate.world_yaw,
+            candidate.elevation,
+            candidate.body_yaw,
+            candidate.world_yaw_velocity,
+            candidate.elevation_velocity,
+            candidate.body_yaw_velocity,
+        )
+
+    fault: ControllerFault
+    if validation_fault != ControllerFault.NONE:
+        fault = validation_fault
+        valid_streak = 0
+        recovery_evidence = None
+    elif recovering_fault != ControllerFault.NONE:
+        independent = evidence is not None and evidence != state.recovery_evidence
+        valid_streak = state.recovery_valid_streak + (1 if independent else 0)
+        recovery_evidence = evidence if independent else state.recovery_evidence
+        fault = (
+            ControllerFault.NONE
+            if valid_streak >= config.workspace_recovery_samples
+            else recovering_fault
+        )
+    else:
+        fault = ControllerFault.NONE
+        valid_streak = 0
+        recovery_evidence = None
+
+    if fault != ControllerFault.NONE:
         world, elevation, body = _brake_hidden(state, dt, config)
         held_state = replace(
             state,
-            mode=ControllerMode.WORKSPACE_HOLD,
+            mode=mode,
             estimator=estimator,
             deadband=deadband,
             world_yaw=world,
@@ -1255,7 +1603,10 @@ def step_controller(
             consumption_watermarks=watermarks,
             target_visible=target_visible,
             loss_started_at=loss_started,
-            workspace_valid_streak=valid_streak,
+            fault=fault,
+            recovery_valid_streak=valid_streak,
+            recovery_evidence=recovery_evidence,
+            last_step_at=now,
         )
         return ControllerStep(
             state=held_state,
@@ -1279,7 +1630,10 @@ def step_controller(
         target_visible=target_visible,
         loss_started_at=loss_started,
         last_safe_sample=candidate,
-        workspace_valid_streak=0,
+        fault=ControllerFault.NONE,
+        recovery_valid_streak=0,
+        recovery_evidence=None,
+        last_step_at=now,
     )
     if mode is ControllerMode.RETURNING and _idle(candidate_state, config):
         mode = ControllerMode.IDLE

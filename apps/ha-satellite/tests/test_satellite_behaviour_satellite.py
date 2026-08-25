@@ -27,6 +27,9 @@ from reachy_mini_ha_satellite.ports import (
     Detections,
     DetectionSource,
     GazeOutcome,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
 )
 
 if TYPE_CHECKING:
@@ -192,6 +195,52 @@ class TestTwoPhasePredictiveGaze:
         assert _head(intents) is None
         assert _antennas(intents) is not None
         assert behaviour.status(0.1).tracking
+
+    def test_diagnostics_observation_age_uses_capture_clock(self) -> None:
+        """Diagnostic age matches controller prediction when receipt is delayed."""
+        behaviour = SatelliteBehaviour(now=0.0)
+        captured_at = 1.0
+        received_at = 1.4
+        now = 2.0
+
+        intents = _finish(
+            behaviour,
+            _seen(
+                face(0.5, 0.0),
+                captured_at=captured_at,
+                received_at=received_at,
+            ),
+            now=now,
+        )
+        behaviour.complete_command(
+            MotionCommandResult(MotionCommandStatus.ACCEPTED, call=1)
+        )
+
+        assert _gaze(intents) is not None
+        event = behaviour.controller_diagnostics()[-1]
+        assert event["observation_age"] == pytest.approx(max(0.0, now - captured_at))
+
+    def test_diagnostics_observation_age_falls_back_to_receipt_without_capture(
+        self,
+    ) -> None:
+        """A metadata-compatible stale result reports receipt age when capture is absent."""
+        behaviour = SatelliteBehaviour(now=0.0)
+        received_at = 1.4
+        now = 2.0
+        stale = Detections(
+            fresh=False,
+            source=DetectionSource.REMOTE,
+            age_seconds=now - received_at,
+            generation=0,
+            sequence=1,
+            captured_at=None,
+            received_at=received_at,
+        )
+
+        _finish(behaviour, stale, now=now)
+
+        event = behaviour.controller_diagnostics()[-1]
+        assert event["observation_age"] == pytest.approx(max(0.0, now - received_at))
 
     def test_cached_observation_advances_trajectory_without_new_identity(self) -> None:
         """Repeated reads retain estimator identity while jerk-limited q advances."""
@@ -408,21 +457,45 @@ class TestLossReturnAndHandoff:
                 break
             now += 0.05
 
-        assert behaviour.controller_state.mode is ControllerMode.IDLE
-        assert isinstance(settled[0], CommandGaze)
-        assert any(isinstance(item, MoveHead) for item in settled[1:])
-        assert handoffs == 1
-        repeated = _finish(behaviour, empty, now=now + 0.05)
-        advanced_empty = _seen(
-            sequence=3,
-            captured_at=now + 0.05,
-            received_at=now + 0.10,
-        )
-        advanced = _finish(behaviour, advanced_empty, now=now + 0.10)
+        settled_state = behaviour.controller_state
+        assert settled_state.mode is ControllerMode.IDLE
+        assert sum(isinstance(item, CommandGaze) for item in settled) == 1
+        assert not any(isinstance(item, MoveHead) for item in settled)
+        assert handoffs == 0
 
-        assert _gaze(repeated) is None
-        assert _gaze(advanced) is None
+        deferred = behaviour.complete_command(
+            MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.COMMAND,
+                call=1,
+            )
+        )
+        assert deferred == ()
+        rejected_state = behaviour.controller_state
+        assert rejected_state.mode is ControllerMode.RETURNING
+        assert behaviour._owns_head()
+        diagnostic = behaviour.controller_diagnostics()[-1]
+        assert diagnostic["command_accepted"] is False
+        assert diagnostic["fault"] == "command"
+
+        deferred_handoff: tuple[MotionIntent, ...] = ()
+        call = 2
+        cursor = now + 0.05
+        for _ in range(500):
+            intents = _finish(behaviour, empty, now=cursor)
+            assert not any(isinstance(item, MoveHead) for item in intents)
+            if _gaze(intents) is not None:
+                deferred_handoff = behaviour.complete_command(
+                    MotionCommandResult(MotionCommandStatus.ACCEPTED, call=call)
+                )
+                call += 1
+                if deferred_handoff:
+                    break
+            cursor += 0.05
+
         assert behaviour.controller_state.mode is ControllerMode.IDLE
+        assert len(deferred_handoff) == 1
+        assert isinstance(deferred_handoff[0], MoveHead)
 
     def test_reacquisition_during_return_cancels_handoff(self) -> None:
         """A new calibrated face keeps ownership before pipeline head can resume."""
@@ -451,7 +524,13 @@ class TestLossReturnAndHandoff:
 
     def test_stale_input_reports_stale_while_controller_returns(self) -> None:
         """Receipt staleness starts hold/return without replaying image data."""
-        config = ControllerConfig(staleness_seconds=0.2, loss_hold_seconds=0.0)
+        config = ControllerConfig(
+            staleness_seconds=0.2,
+            prediction_horizon=0.2,
+            head_measurement_max_age=0.2,
+            body_feedback_max_age=0.2,
+            loss_hold_seconds=0.0,
+        )
         behaviour = SatelliteBehaviour(controller_config=config, now=0.0)
         active = _seen(face(0.4, 0.0), received_at=0.1)
         _finish(behaviour, active, now=0.1)

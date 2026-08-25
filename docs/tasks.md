@@ -4,14 +4,12 @@ Catch-all task list for work not tracked in a specific [change document](changes
 
 ## Backlog
 
-- [ ] **Run the end-to-end session against a real Reachy Mini, and replace every
-      `⏳ PENDING HARDWARE VERIFICATION` marker in the runbooks with what the
-      command actually printed.** Every change document from 0004 onwards defers
-      something to this session, and
-      [0015](changes/0015-docs-and-runbooks.md) is where the list was gathered.
-      Nothing in this repository has a robot attached, so these steps have never
-      been run; the markers exist so a reader can tell which parts of a runbook
-      are transcribed and which are not.
+- [ ] **Run the remaining end-to-end steps against a real Reachy Mini, and replace
+      each outstanding `⏳ PENDING HARDWARE VERIFICATION` marker in the runbooks
+      with what the command actually printed.**
+      [0015](changes/0015-docs-and-runbooks.md) gathered the original list. Later
+      hardware-backed changes completed some of that work; the items below are
+      only the unrelated steps whose runbook verification remains outstanding.
 
       Grep for the marker to find them: `grep -rn "PENDING HARDWARE" docs/`.
       What the session has to execute, and what it is answering:
@@ -53,9 +51,7 @@ Catch-all task list for work not tracked in a specific [change document](changes
         outstanding**; the speaker's own volume and ducking were settled by
         [0016](changes/0016-audible-playback.md)
       - The three required antenna motions read as distinct across a room —
-        still, opposed, together — and the head tracks smoothly at the tuned
-        deadzone and smoothing
-      - A face is tracked end to end, through the groundstation
+        still, opposed, together
 
       **Home Assistant**
       - It discovers the robot over mDNS and registers it under the announced
@@ -118,23 +114,25 @@ Catch-all task list for work not tracked in a specific [change document](changes
       [0002](changes/0002-ci-and-hygiene-gates.md)'s completion notes list six
       checks to require and deliberately exclude this one, because it passed
       vacuously while no specification was registered. As of
-      [0015](changes/0015-docs-and-runbooks.md) all eight specs are registered
-      and all 73 requirements are traced, so the exclusion no longer applies.
-      A repository setting rather than a file, which is why it is a task here.
+      [0019](changes/0019-predictive-gaze-and-coordinated-motion.md) registers
+      the ninth spec only with its final safety and deterministic acceptance
+      evidence present, so all nine specs and all 92 requirements are traced and
+      the exclusion no longer applies. A repository setting rather than a file,
+      which is why it is a task here.
 
-- [ ] Correct the Overview of **all eight** [specs](specs/), every one of which
-      still says nothing is implemented yet:
+- [ ] Correct the stale Overview text in the **seven** [specs](specs/) that still
+      say nothing is implemented yet:
 
       ```
       grep -rn "implemented yet" docs/specs/
       ```
 
-      Every change document in the plan is now complete, so the sentence is
-      false in all eight — five of them say it outright, and
-      [architecture](specs/architecture/), [robot-link](specs/robot-link/) and
-      [ha-satellite](specs/ha-satellite/) carry it inside a longer sentence. It
-      is here rather than in a change document because a spec edit is its own
-      proposal, made through `/spec-writer`;
+      Every change document in the original plan is complete, so the sentence
+      is false in all seven matches — five say it outright, while
+      [architecture](specs/architecture/) and [robot-link](specs/robot-link/)
+      carry it inside a longer sentence. It is here rather than in a change
+      document because a spec edit is its own proposal, made through
+      `/spec-writer`;
       [0014](changes/0014-benchmarks-and-gates.md) raised it for the benchmarks
       spec alone and it is the same defect everywhere.
 

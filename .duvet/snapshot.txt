@@ -75,6 +75,102 @@ SPECIFICATION: [Benchmarks](docs/specs/benchmarks/index.md)
     TEXT[!MUST,implementation,implication]: The suite MUST record the size of each published artifact and treat growth
     TEXT[!MUST,implementation,implication]: beyond a stated tolerance as a regression.
 
+SPECIFICATION: [Predictive Gaze and Coordinated Motion](docs/specs/gaze-control/index.md)
+  SECTION: [REQ-074: Each observation is consumed once](#req-074-each-observation-is-consumed-once)
+    TEXT[!MUST,implementation]: Repeated reads of one source-qualified face-detection result MUST NOT compound
+    TEXT[!MUST,implementation]: its correction while the previously established trajectory continues.
+
+  SECTION: [REQ-075: Observation time uses the capture clock](#req-075-observation-time-uses-the-capture-clock)
+    TEXT[!MUST,implementation]: Changing nominal detector or behavior-loop cadence MUST NOT change observation
+    TEXT[!MUST,implementation]: age or the trajectory produced from an otherwise identical timed observation
+    TEXT[!MUST,implementation]: sequence.
+
+  SECTION: [REQ-076: Observation discontinuities reset prediction](#req-076-observation-discontinuities-reset-prediction)
+    TEXT[!MUST,implementation]: An observation after a detection-source, source-generation, selected-target,
+    TEXT[!MUST,implementation]: timestamp-order or supported-gap discontinuity MUST NOT inherit target velocity
+    TEXT[!MUST,implementation]: from the preceding observation stream.
+
+  SECTION: [REQ-077: Prediction is bounded separately from staleness](#req-077-prediction-is-bounded-separately-from-staleness)
+    TEXT[!MUST,implementation]: The controller MUST bound predicted image position, target velocity and
+    TEXT[!MUST,implementation]: prediction horizon while treating receipt-time staleness as the separate trigger
+    TEXT[!MUST,implementation]: for loss handling.
+
+  SECTION: [REQ-078: Calibrated gaze accounts for camera motion](#req-078-calibrated-gaze-accounts-for-camera-motion)
+    TEXT[!MUST,implementation]: Head motion between image capture and calibration MUST neither shift a
+    TEXT[!MUST,implementation]: stationary target's world-gaze anchor nor be counted more than once.
+
+  SECTION: [REQ-079: Centering has continuous hysteresis](#req-079-centering-has-continuous-hysteresis)
+    TEXT[!MUST,implementation]: Crossing configured tracking activation and release regions MUST suppress
+    TEXT[!MUST,implementation]: bounded image noise without causing command chatter or a command discontinuity.
+
+  SECTION: [REQ-080: Step tracking settles without whiplash](#req-080-step-tracking-settles-without-whiplash)
+    TEXT[!MUST,implementation]: For a stationary target that makes a 35-degree horizontal yaw step inside the
+    TEXT[!MUST,implementation]: supported operating envelope, predictive gaze MUST enter a normalized image
+    TEXT[!MUST,implementation]: error of 0.025 within 3 seconds and limit angular overshoot to 2 degrees.
+
+  SECTION: [REQ-081: Moving-target lag is bounded](#req-081-moving-target-lag-is-bounded)
+    TEXT[!MUST,implementation]: For a target moving at 5 degrees per second inside the supported operating
+    TEXT[!MUST,implementation]: envelope, predictive gaze MUST after at most 1.5 seconds of acquisition limit
+    TEXT[!MUST,implementation]: mean lag over the next 4 seconds to 1.5 degrees, maximum lag to 2 degrees and lag
+    TEXT[!MUST,implementation]: 0.5 seconds after motion stops to 1.5 degrees on both horizontal and vertical
+    TEXT[!MUST,implementation]: axes.
+
+  SECTION: [REQ-082: Static noise does not move the robot](#req-082-static-noise-does-not-move-the-robot)
+    TEXT[!MUST,implementation]: For bounded static detection noise inside the configured non-activation
+    TEXT[!MUST,implementation]: envelope, predictive gaze MUST issue no tracking motion after settling.
+
+  SECTION: [REQ-083: Motion derivatives remain bounded](#req-083-motion-derivatives-remain-bounded)
+    TEXT[!MUST,implementation]: Every commanded head and body trajectory MUST remain within its configured
+    TEXT[!MUST,implementation]: position, velocity, acceleration and jerk envelopes across acquisition,
+    TEXT[!MUST,implementation]: tracking, reversal, workspace limiting, loss, return and recovery.
+
+  SECTION: [REQ-084: Tracking uses canonical head poses](#req-084-tracking-uses-canonical-head-poses)
+    TEXT[!MUST,implementation]: Tracking commands MUST use zero head roll and canonical head translation so
+    TEXT[!MUST,implementation]: expressive pose offsets cannot distort fixation or consume the parallel head's
+    TEXT[!MUST,implementation]: tracking workspace.
+
+  SECTION: [REQ-085: Head and body preserve one world gaze](#req-085-head-and-body-preserve-one-world-gaze)
+    TEXT[!MUST,implementation]: When body motion is enabled, every coordinated command MUST preserve the
+    TEXT[!MUST,implementation]: identity that world-gaze yaw equals body yaw plus head-on-body yaw.
+
+  SECTION: [REQ-086: Body allocation is continuous](#req-086-body-allocation-is-continuous)
+    TEXT[!MUST,implementation]: When body motion is enabled, the controller MUST allocate a continuous,
+    TEXT[!MUST,implementation]: odd-symmetric and monotonic body share that ignores the configured noise floor,
+    TEXT[!MUST,implementation]: uses a modest body contribution for small lateral gaze shifts and leaves the
+    TEXT[!MUST,implementation]: head inside its configured comfort region for large shifts.
+
+  SECTION: [REQ-087: Measured body feedback cannot corrupt trajectory limits](#req-087-measured-body-feedback-cannot-corrupt-trajectory-limits)
+    TEXT[!MUST,implementation]: When body motion is enabled, ordinary measured-body lag MUST NOT reset the
+    TEXT[!MUST,implementation]: commanded trajectory or cause its derivative envelopes to be exceeded, while
+    TEXT[!MUST,implementation]: missing or persistently divergent feedback enters bounded safe hold.
+
+  SECTION: [REQ-088: Loss returns all controlled axes smoothly](#req-088-loss-returns-all-controlled-axes-smoothly)
+    TEXT[!MUST,implementation]: After the configured loss hold, the controller MUST return every controlled head
+    TEXT[!MUST,implementation]: and body axis toward neutral through the same derivative-bounded trajectory and
+    TEXT[!MUST,implementation]: release gaze ownership only after position, velocity and acceleration settle.
+
+  SECTION: [REQ-089: Unsafe targets never reach hardware](#req-089-unsafe-targets-never-reach-hardware)
+    TEXT[!MUST,implementation]: A non-finite, malformed, non-canonical or out-of-workspace atomic target MUST
+    TEXT[!MUST,implementation]: emit no unsafe hardware command, retain derivative-bounded motion from the last
+    TEXT[!MUST,implementation]: safe command, report safe hold and require consecutive valid samples before
+    TEXT[!MUST,implementation]: recovery.
+
+  SECTION: [REQ-090: Tracking ownership is explicit](#req-090-tracking-ownership-is-explicit)
+    TEXT[!MUST,implementation]: Predictive gaze MUST exclusively own the head during acquisition, tracking,
+    TEXT[!MUST,implementation]: loss hold, neutral return and safety clamp while leaving antenna expression
+    TEXT[!MUST,implementation]: independent and yielding the head once on return to idle.
+
+  SECTION: [REQ-091: Controller diagnostics are bounded and private](#req-091-controller-diagnostics-are-bounded-and-private)
+    TEXT[!MUST,implementation]: The operator diagnostics surface MUST report bounded scalar controller state,
+    TEXT[!MUST,implementation]: observation ages, estimator transitions, limits, commands and fault categories
+    TEXT[!MUST,implementation]: without retaining images, face crops, credentials or installation identifiers.
+
+  SECTION: [REQ-092: Deterministic simulation gates the controller](#req-092-deterministic-simulation-gates-the-controller)
+    TEXT[!MUST,implementation]: Controller acceptance MUST be demonstrated without hardware by deterministic
+    TEXT[!MUST,implementation]: simulation covering step targets, sustained horizontal and vertical motion,
+    TEXT[!MUST,implementation]: reversal, bounded noise, observation delay and loss, cadence stalls, workspace
+    TEXT[!MUST,implementation]: rejection, coordinated body catch-up, feedback divergence and neutral return.
+
 SPECIFICATION: [Groundstation](docs/specs/groundstation/index.md)
   SECTION: [REQ-022: Capabilities register without transport changes](#req-022-capabilities-register-without-transport-changes)
     TEXT[!MUST,implementation]: Adding a capability MUST NOT require modification to the session layer, the

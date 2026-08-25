@@ -29,6 +29,10 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+from satellite_support import (
+    assert_public_controller_diagnostics_response,
+    public_controller_diagnostic_event,
+)
 
 from reachy_mini_ha_satellite.config import (
     COMPATIBILITY_SETTINGS,
@@ -72,6 +76,10 @@ class RecordingHost:
         """Start having been asked for nothing."""
         self.applied: list[Settings] = []
         self.stops = 0
+        self.events: tuple[dict[str, object], ...] = (
+            public_controller_diagnostic_event(),
+        )
+        self.diagnostics_resets = 0
 
     def status(self) -> dict[str, object]:
         """Report a robot doing nothing in particular.
@@ -97,6 +105,15 @@ class RecordingHost:
     def request_stop(self) -> None:
         """Record a restart request."""
         self.stops += 1
+
+    def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
+        """Return fixed scalar evidence."""
+        return self.events
+
+    def reset_controller_diagnostics(self) -> None:
+        """Clear only the diagnostic fake state."""
+        self.events = ()
+        self.diagnostics_resets += 1
 
 
 def _store() -> OverrideStore:
@@ -691,6 +708,71 @@ class TestTheMachineReadableSurfaces:
         assert not status["running"]
 
     @pytest.mark.asyncio
+    async def test_controller_diagnostics_match_exact_public_response_schema(
+        self,
+    ) -> None:
+        """The unversioned envelope and every event expose only required public keys."""
+        host = RecordingHost()
+
+        async with _client(_app(host)) as client:
+            response = await client.get("/diagnostics/controller")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["running"]
+        assert payload["events"] == list(host.events)
+        assert_public_controller_diagnostics_response(payload)
+
+    @pytest.mark.asyncio
+    async def test_controller_diagnostics_report_when_no_application_is_running(
+        self,
+    ) -> None:
+        """Absent runtime has explicit read and reset responses."""
+        async with _client(_app()) as client:
+            read = await client.get("/diagnostics/controller")
+            reset = await client.post("/diagnostics/controller/reset")
+
+        payload = read.json()
+        assert payload == {"running": False, "events": []}
+        assert_public_controller_diagnostics_response(payload)
+        assert reset.status_code == 503
+        assert reset.json() == {"reset": False}
+
+    @pytest.mark.asyncio
+    async def test_controller_reset_changes_diagnostics_only(self) -> None:
+        """Reset emits no stop, settings adoption or other application mutation."""
+        host = RecordingHost()
+        before = (tuple(host.applied), host.stops)
+
+        async with _client(_app(host)) as client:
+            response = await client.post("/diagnostics/controller/reset")
+
+        assert response.status_code == 200
+        assert response.json() == {"reset": True}
+        assert host.events == ()
+        assert host.diagnostics_resets == 1
+        assert (tuple(host.applied), host.stops) == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "path"),
+        [
+            ("post", "/diagnostics/controller"),
+            ("get", "/diagnostics/controller/reset"),
+        ],
+    )
+    async def test_controller_diagnostics_refuse_wrong_methods(
+        self,
+        method: str,
+        path: str,
+    ) -> None:
+        """Read and reset routes have one method each."""
+        async with _client(_app(RecordingHost())) as client:
+            response = await getattr(client, method)(path)
+
+        assert response.status_code == 405
+
+    @pytest.mark.asyncio
     async def test_the_interface_answers_that_it_is_up(self) -> None:
         """The cheapest question a deployment check can ask."""
         async with _client(_app()) as client:
@@ -881,7 +963,10 @@ class TestARequestFromSomewhereElse:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", ["/settings", "/reset", "/stop"])
+    @pytest.mark.parametrize(
+        "path",
+        ["/settings", "/reset", "/stop", "/diagnostics/controller/reset"],
+    )
     async def test_a_cross_site_submission_is_refused(self, path: str) -> None:
         """Every route that changes something, not just the form.
 
@@ -970,7 +1055,9 @@ class TestNothingIsCached:
     """A settings page in a shared browser's cache outlives the session."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("path", ["/", "/config", "/status", "/livez"])
+    @pytest.mark.parametrize(
+        "path", ["/", "/config", "/status", "/diagnostics/controller", "/livez"]
+    )
     async def test_every_response_says_not_to_keep_it(self, path: str) -> None:
         """A robot's address and identity are not things to leave lying about.
 

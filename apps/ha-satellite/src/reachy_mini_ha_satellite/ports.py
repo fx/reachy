@@ -58,6 +58,9 @@ __all__ = [
     "GazeOutcome",
     "GazeSample",
     "HeadPose",
+    "MotionCommandResult",
+    "MotionCommandStatus",
+    "MotionFault",
     "MotionMeasurement",
     "MotionPort",
     "PerceptionPort",
@@ -361,17 +364,34 @@ class GazeDirective:
 
 @dataclass(frozen=True, slots=True)
 class GazeSample:
-    """One atomic world-yaw, elevation and optional body allocation sample."""
+    """One atomic coordinated command and its complete trajectory derivatives."""
 
     world_yaw: float
     elevation: float
     body_yaw: float
     head_yaw: float
     body_enabled: bool
+    world_yaw_velocity: float = 0.0
+    world_yaw_acceleration: float = 0.0
+    elevation_velocity: float = 0.0
+    elevation_acceleration: float = 0.0
+    body_yaw_velocity: float = 0.0
+    body_yaw_acceleration: float = 0.0
 
     def __post_init__(self) -> None:
-        """Keep every command scalar finite and coordinated."""
-        values = (self.world_yaw, self.elevation, self.body_yaw, self.head_yaw)
+        """Keep every command scalar finite, canonical and coordinated."""
+        values = (
+            self.world_yaw,
+            self.elevation,
+            self.body_yaw,
+            self.head_yaw,
+            self.world_yaw_velocity,
+            self.world_yaw_acceleration,
+            self.elevation_velocity,
+            self.elevation_acceleration,
+            self.body_yaw_velocity,
+            self.body_yaw_acceleration,
+        )
         if not all(math.isfinite(value) for value in values):
             message = "gaze sample must contain only finite values"
             raise ValueError(message)
@@ -382,20 +402,62 @@ class GazeSample:
         ):
             message = "world yaw must equal body yaw plus head yaw"
             raise ValueError(message)
-        if not self.body_enabled and self.body_yaw != 0.0:
+        body_derivatives = (self.body_yaw_velocity, self.body_yaw_acceleration)
+        if not self.body_enabled and (
+            self.body_yaw != 0.0 or any(value != 0.0 for value in body_derivatives)
+        ):
             message = "a body-disabled sample cannot carry body motion"
+            raise ValueError(message)
+
+
+class MotionFault(StrEnum):
+    """Stable typed failures produced by the hardware motion boundary."""
+
+    NONE = "none"
+    POSE = "pose"
+    CALIBRATION = "calibration"
+    COMMAND = "command"
+    RELEASED = "released"
+
+
+class MotionCommandStatus(StrEnum):
+    """Whether one daemon command was accepted transactionally."""
+
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True, slots=True)
+class MotionCommandResult:
+    """Typed result of exactly one attempted coordinated daemon command."""
+
+    status: MotionCommandStatus
+    fault: MotionFault = MotionFault.NONE
+    call: int = 0
+
+    def __post_init__(self) -> None:
+        """Keep accepted and rejected results coherent and independently numbered."""
+        if isinstance(self.call, bool) or self.call < 0:
+            message = "motion command call must be a non-negative integer"
+            raise ValueError(message)
+        if (self.status is MotionCommandStatus.ACCEPTED) != (
+            self.fault is MotionFault.NONE
+        ):
+            message = "accepted motion commands must carry no fault"
             raise ValueError(message)
 
 
 @dataclass(frozen=True, slots=True)
 class MotionMeasurement:
-    """Latest independent measured head direction and body yaw."""
+    """Latest independent measured head direction and body yaw with typed validity."""
 
     world_yaw: float | None
     world_elevation: float | None
     head_measured_at: float | None
     body_yaw: float | None
     body_measured_at: float | None
+    head_fault: MotionFault = MotionFault.NONE
+    body_fault: MotionFault = MotionFault.NONE
 
     def __post_init__(self) -> None:
         """Keep optional measured values finite, timestamped and atomic."""
@@ -407,6 +469,12 @@ class MotionMeasurement:
             raise ValueError(message)
         if (self.body_yaw is None) != (self.body_measured_at is None):
             message = "measured body yaw and timestamp must be supplied together"
+            raise ValueError(message)
+        if head_present and self.head_fault is not MotionFault.NONE:
+            message = "a valid head measurement cannot carry a fault"
+            raise ValueError(message)
+        if self.body_yaw is not None and self.body_fault is not MotionFault.NONE:
+            message = "a valid body measurement cannot carry a fault"
             raise ValueError(message)
         for value in (
             self.world_yaw,
@@ -444,15 +512,20 @@ class CalibratedGaze:
 
 @dataclass(frozen=True, slots=True)
 class GazeCalibration:
-    """Accepted target or a bounded non-acceptance result."""
+    """Accepted target or a typed bounded non-acceptance result."""
 
     state: CalibrationStatus
     target: CalibratedGaze | None = None
+    fault: MotionFault = MotionFault.NONE
 
     def __post_init__(self) -> None:
-        """Keep the status and optional target shape coherent."""
-        if (self.state is CalibrationStatus.ACCEPTED) != (self.target is not None):
+        """Keep status, target and typed validity coherent."""
+        accepted = self.state is CalibrationStatus.ACCEPTED
+        if accepted != (self.target is not None):
             message = "only accepted gaze calibration may carry a target"
+            raise ValueError(message)
+        if accepted and self.fault is not MotionFault.NONE:
+            message = "accepted calibration must carry no fault"
             raise ValueError(message)
 
 
@@ -479,8 +552,8 @@ class MotionPort(Protocol):
         """Calibrate one qualified directive without commanding motion."""
         ...
 
-    def command_gaze(self, sample: GazeSample) -> None:
-        """Command one canonical coordinated world-gaze sample."""
+    def command_gaze(self, sample: GazeSample) -> MotionCommandResult:
+        """Validate and transactionally command one canonical coordinated sample."""
         ...
 
     def move_head(self, pose: HeadPose) -> None:

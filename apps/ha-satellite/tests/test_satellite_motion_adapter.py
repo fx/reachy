@@ -23,6 +23,7 @@ from reachy_mini_ha_satellite.adapters.motion_reachy import (
     project_measured_pose,
     rebase_calibrated_rotation,
 )
+from reachy_mini_ha_satellite.behaviour.gaze_controller import ControllerConfig
 from reachy_mini_ha_satellite.behaviour.tracking import GazeSelector
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
@@ -32,6 +33,8 @@ from reachy_mini_ha_satellite.ports import (
     GazeDirective,
     GazeSample,
     HeadPose,
+    MotionCommandStatus,
+    MotionFault,
 )
 from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
 
@@ -436,8 +439,8 @@ class TestCaptureTimeCalibration:
 class TestMeasuredFeedbackFailures:
     """Unavailable or malformed feedback is represented as missing, never a crash."""
 
-    def test_first_tick_pose_failure_preserves_acquisition_measurement(self) -> None:
-        """A transient read cannot discard the valid pose sampled before ownership."""
+    def test_first_tick_pose_failure_is_explicit_without_discarding_cache(self) -> None:
+        """A transient read reports typed invalidity rather than stale pose as fresh."""
         initial = head_pose_matrix(HeadPose(yaw=0.4, pitch=0.2))
         robot = FakeRobot(
             measured_head_poses=(initial, RuntimeError("pose unavailable"))
@@ -445,12 +448,18 @@ class TestMeasuredFeedbackFailures:
         motion = ReachyMotion(robot)
 
         acquired = motion.acquire(0.0)
-        repeated = motion.observe(0.05)
+        failed = motion.observe(0.05)
 
         assert acquired.world_yaw == pytest.approx(0.4)
         assert acquired.world_elevation == pytest.approx(0.2)
-        assert repeated.world_yaw == acquired.world_yaw
-        assert repeated.head_measured_at == 0.0
+        assert failed.world_yaw is None
+        assert failed.head_measured_at is None
+        assert failed.head_fault is MotionFault.POSE
+        cached = motion._last_head_measurement
+        assert cached is not None
+        assert cached[0] == pytest.approx(0.4)
+        assert cached[1] == pytest.approx(0.2)
+        assert cached[2] == 0.0
 
     def test_pose_failure_preserves_independent_body_measurement(self) -> None:
         """A failed pose-history read cannot manufacture a body-feedback loss."""
@@ -515,8 +524,9 @@ class TestCommandingTheRobot:
         motion.acquire(0.0)
         sample = GazeSample(0.4, 0.2, 0.0, 0.4, False)
 
-        motion.command_gaze(sample)
+        result = motion.command_gaze(sample)
 
+        assert result.status is MotionCommandStatus.ACCEPTED
         head, antennas, body = robot.targets[-1]
         assert head is not None
         assert antennas is None
@@ -531,8 +541,9 @@ class TestCommandingTheRobot:
         motion.acquire(0.0)
         sample = GazeSample(0.4, 0.1, 0.15, 0.25, True)
 
-        motion.command_gaze(sample)
+        result = motion.command_gaze(sample)
 
+        assert result.status is MotionCommandStatus.ACCEPTED
         head, antennas, body = robot.targets[-1]
         assert head is not None
         assert antennas is None
@@ -540,6 +551,54 @@ class TestCommandingTheRobot:
         forward = head[:3, :3] @ np.array([1.0, 0.0, 0.0])
         world = math.atan2(forward[1], forward[0])
         assert world == pytest.approx(sample.body_yaw + sample.head_yaw)
+
+    def test_shared_validator_rejects_derivative_violation_before_daemon_call(
+        self,
+    ) -> None:
+        """Adapter defense reuses the pure envelope and sends no unsafe target."""
+        robot = FakeRobot()
+        config = ControllerConfig()
+        motion = ReachyMotion(robot, controller_config=config)
+        motion.acquire(0.0)
+        before = len(robot.targets)
+        sample = GazeSample(
+            0.1,
+            0.0,
+            0.0,
+            0.1,
+            False,
+            world_yaw_velocity=config.yaw_limits.max_velocity * 2.0,
+        )
+
+        result = motion.command_gaze(sample)
+
+        assert result.status is MotionCommandStatus.REJECTED
+        assert result.fault is MotionFault.COMMAND
+        assert len(robot.targets) == before
+
+    def test_failed_daemon_call_returns_typed_rejection(self) -> None:
+        """An adapter exception is bounded and cannot claim command acceptance."""
+
+        class RejectingRobot(FakeRobot):
+            """Raise instead of accepting a grouped target."""
+
+            def set_target(
+                self,
+                head: PoseMatrix | None = None,
+                antennas: list[float] | None = None,
+                body_yaw: float | None = None,
+            ) -> None:
+                del head, antennas, body_yaw
+                raise RuntimeError("command rejected")
+
+        motion = ReachyMotion(RejectingRobot())
+        motion.acquire(0.0)
+
+        result = motion.command_gaze(GazeSample(0.1, 0.0, 0.0, 0.1, False))
+
+        assert result.status is MotionCommandStatus.REJECTED
+        assert result.fault is MotionFault.COMMAND
+        assert result.call == 1
 
 
 class TestReleasingOnShutdown:

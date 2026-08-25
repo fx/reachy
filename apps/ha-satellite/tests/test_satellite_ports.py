@@ -46,6 +46,7 @@ from reachy_mini_ha_satellite.ports import (
     NEUTRAL_HEAD,
     AntennaPose,
     AudioPort,
+    CalibratedGaze,
     CalibrationStatus,
     CapturePort,
     Detections,
@@ -54,6 +55,9 @@ from reachy_mini_ha_satellite.ports import (
     GazeDirective,
     GazeSample,
     HeadPose,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
     MotionMeasurement,
     MotionPort,
     PerceptionPort,
@@ -119,6 +123,64 @@ class TestMotionValuesRejectMalformedCrossingState:
         """Accepted-without-target is not a result a caller can misread."""
         with pytest.raises(ValueError, match="only accepted"):
             GazeCalibration(CalibrationStatus.ACCEPTED)
+
+    @pytest.mark.parametrize("call", [True, -1])
+    def test_motion_command_call_is_a_non_negative_real_integer(
+        self,
+        call: int,
+    ) -> None:
+        """Boolean or negative call evidence cannot advance recovery."""
+        with pytest.raises(ValueError, match="non-negative integer"):
+            MotionCommandResult(MotionCommandStatus.ACCEPTED, call=call)
+
+    @pytest.mark.parametrize(
+        ("status", "fault"),
+        [
+            (MotionCommandStatus.ACCEPTED, MotionFault.COMMAND),
+            (MotionCommandStatus.REJECTED, MotionFault.NONE),
+        ],
+    )
+    def test_motion_command_status_and_fault_are_coherent(
+        self,
+        status: MotionCommandStatus,
+        fault: MotionFault,
+    ) -> None:
+        """A caller cannot mistake a rejected daemon call for acceptance."""
+        with pytest.raises(ValueError, match="accepted motion commands"):
+            MotionCommandResult(status, fault)
+
+    def test_valid_measurements_cannot_also_claim_typed_faults(self) -> None:
+        """Typed validity has one unambiguous state per measured channel."""
+        with pytest.raises(ValueError, match="valid head"):
+            MotionMeasurement(0.0, 0.0, 0.0, None, None, head_fault=MotionFault.POSE)
+        with pytest.raises(ValueError, match="valid body"):
+            MotionMeasurement(
+                None,
+                None,
+                None,
+                0.0,
+                0.0,
+                body_fault=MotionFault.POSE,
+            )
+
+    def test_accepted_calibration_cannot_carry_a_fault(self) -> None:
+        """The typed calibration boundary cannot be both valid and invalid."""
+        target = CalibratedGaze(
+            source=DetectionSource.REMOTE,
+            generation=0,
+            sequence=0,
+            captured_at=0.0,
+            received_at=0.1,
+            target_epoch=0,
+            world_yaw=0.0,
+            world_elevation=0.0,
+        )
+        with pytest.raises(ValueError, match="accepted calibration"):
+            GazeCalibration(
+                CalibrationStatus.ACCEPTED,
+                target,
+                MotionFault.CALIBRATION,
+            )
 
 
 class TestDaemonSurfaceIsNarrow:

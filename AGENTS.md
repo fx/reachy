@@ -336,7 +336,7 @@ its step.
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, every released wheel — the `reachyctl` set and the robot application — built, installed into an empty environment, verified, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — all eight specs, all 73 requirements | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — all nine specs, all 92 requirements | `just duvet` |
 | `provisioning.yml` | pull requests, pushes to `main` | `Provisioning lint`; `Idempotency`, which applies the playbook twice against a container target and fails on any changed step in the second application | `just provision-lint`, `just provision-idempotency` |
 | `bench.yml` | pull requests, pushes to `main` | `Benchmark` — the hardware-free suite, judged against the committed baseline | `just bench`, `just bench-compare` |
 
@@ -355,7 +355,7 @@ time. It no longer does — see below — so it belongs in the required set now.
 
 ## Requirements traceability
 
-**All eight specs are registered and all 73 requirements are traced.**
+**All nine specs are registered and all 92 requirements are traced.**
 `.duvet/config.toml` registers every `docs/specs/*/index.md`, so a green
 "Requirements traceability" run is evidence about the whole of this
 repository's requirements rather than about a subset.
@@ -364,10 +364,15 @@ A spec is registered by the change that **completes** it, in that change's pull
 request, alongside the annotations that make it pass — never by the change that
 writes it. A registered spec whose requirements nothing implements is a red job
 that stays red, and one that is going to stay red is one somebody switches off.
-That rule is what put architecture last: six changes implemented its nine
-requirements and 0015 registered it, adding the two that were still missing.
-The header comment in `.duvet/config.toml` records which change registered which
-spec and why.
+That rule is what put architecture last in the original plan: six changes
+implemented its nine requirements and 0015 registered it, adding the two that
+were still missing. Change 0019 later registered gaze-control with its final
+safety implementation, deterministic REQ-074–092 acceptance matrix and bounded
+diagnostics in place. Its three tasks and staged rollout are complete, with
+scrubbed aggregate evidence in the change document. Body motion remains
+restart-bound, false by default and a provisional opt-in because the rollout did
+not settle calibration or a shipping-default decision. The header comment in
+`.duvet/config.toml` records which change registered which spec and why.
 
 Two requirements are cited from files that are neither Python nor a workflow, and
 both have a `[[source]]` block of their own: REQ-001 from the `Justfile`, whose

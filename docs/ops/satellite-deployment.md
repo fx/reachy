@@ -312,7 +312,8 @@ so existing environments keep starting. The startup report and settings page mar
 them `legacy compatibility; ignored`; the form renders them read-only, and an
 ordinary save removes stale copies from the overrides file. They do not enter the
 predictive controller. Body motion is separately restart-bound, disabled by
-default and provisional pending live calibration evidence.
+default and remains a provisional opt-in because the completed rollout did not
+settle calibration or a shipping-default decision.
 
 ### Detection source
 
@@ -369,7 +370,9 @@ credential and useless for learning one. A separate control unsets it.
 |---|---|
 | `/` | The settings form and the resolved configuration |
 | `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once, which bootstrap values are read-only and which compatibility inputs are ignored |
-| `/status` | What the robot is doing: pipeline state, why the head is where it is |
+| `/status` | What the robot is doing: pipeline and gaze state plus controller mode, fault and derived safe hold |
+| `/diagnostics/controller` | `GET` — bounded scalar controller events with no image, credential or installation identity |
+| `/diagnostics/controller/reset` | `POST` — same-origin diagnostics-only reset; it does not move the robot or change controller state |
 | `/stop` | `POST` — stops the application so a restart-required change can take effect |
 | `/livez` | Whether the interface is up |
 
@@ -424,6 +427,179 @@ statement that something upstream stopped. `/status` says which of the four
 situations it is: `tracking`, `nobody` (a live detector reported an empty frame),
 `stale` (results stopped arriving), or `unknown` (nothing has produced a result
 yet).
+
+---
+
+## Predictive gaze canary and rollback
+
+This is the reusable rollback contract for private head-only and
+coordinated-body canaries. It declares the decision thresholds before motion
+begins and remains the procedure for later candidate evaluation.
+
+The current staged rollout ran to completion. Its scrubbed aggregate evidence is
+recorded in the [change 0019 outcome](../changes/0019-predictive-gaze-and-coordinated-motion.md#outcome).
+No transcript is supplied here; raw evidence and installation-specific details
+remain private.
+
+### Retain the rollback target first
+
+Before installing a candidate, complete this preflight transaction:
+
+1. retain the last released satellite wheel and its published checksum in private
+   storage, and verify the retained wheel against that checksum;
+2. copy the exact managed daemon environment layer, including all comments,
+   ordering and whitespace, and record its original SHA256;
+3. copy the exact application overrides layer at `<state_dir>/settings.json` and
+   record its original SHA256; if the file is absent, record `ABSENT` rather than
+   creating a layer that was not running;
+4. inspect the application override JSON key `body_motion_enabled`; when present,
+   record the override layer as the effective body-setting winner;
+5. only when that override key is absent, inspect the managed environment variable
+   `REACHY_SATELLITE_BODY_MOTION_ENABLED`; record the managed layer as winner when
+   present, otherwise record the retained wheel default as winner;
+6. seal a private manifest that pairs each exact configuration-layer backup with
+   its original SHA256, then confirm these checks completed before any candidate
+   install.
+
+The backup names and contents must carry no installation identifier into this
+repository. A version label, parsed key/value export or remembered defaults are
+not a backup: rollback uses the retained bytes, including non-setting bytes, and
+the exact precedence that was running.
+
+The `/config` field `body_motion_enabled` must resolve to JSON boolean `false`
+before the head-only canary is allowed to own motion. It may become `true` only
+for the separately approved body canary after all head-only evidence passes, and
+it must be restored to `false` when that canary or any rollback ends. Body motion
+remains restart-bound and false by default regardless of a successful canary.
+
+### Abort thresholds
+
+Abort the current canary immediately, issue no further candidate motion and run
+the rollback below on any of these observations:
+
+- any non-finite command or measurement, malformed/non-canonical pose, atomic
+  world/head/body identity failure, derivative-envelope breach or configured
+  workspace rejection;
+- any non-`none` controller fault or `safe_hold: true` in `/status`, including
+  timing, pose, calibration, derivative, workspace, body-feedback or command
+  acceptance failure;
+- `/livez` stops returning its successful response, the application leaves its
+  running state, or `/status` cannot be read;
+- head-only step evidence misses the gaze-control envelope: normalized error
+  above `0.025` three seconds after a supported 35-degree step, angular
+  overshoot above 2 degrees, or 5-degree-per-second horizontal or vertical
+  tracking exceeding 1.5 degrees mean lag, 2 degrees maximum lag, or 1.5 degrees
+  lag half a second after stopping;
+- perception remains `unknown` or `stale` for more than one configured staleness
+  window while the canary target is intentionally visible, or a fresh result
+  cannot transition back to tracking;
+- the groundstation session fails to remain healthy, Home Assistant loses the
+  existing device or its entities, or one complete wake/listen/process/respond
+  exchange fails;
+- during the body canary, body feedback is missing or divergent long enough to
+  fault, a coordinated command fails exact world-gaze equals body plus
+  head-on-body identity, any body derivative exceeds its envelope, or body motion
+  occurs while the restart-bound setting is false.
+
+A reset of `/diagnostics/controller` is never remediation for one of these
+conditions. It clears evidence only; it neither clears a controller fault nor
+changes motion, settings, perception or pipeline state.
+
+### Staged execution
+
+1. After every preflight checksum and precedence record above is sealed, stop the
+   released application and install the verified candidate with body motion
+   staged false; no candidate wheel is installed before that preflight completes.
+2. Restart the candidate with motion ownership inhibited, require the resolved
+   `/config` field `body_motion_enabled` to be JSON boolean `false`, then allow
+   the head-only deterministic-envelope canary while observing `/livez`,
+   `/status`, bounded controller diagnostics, perception, the groundstation
+   session and the existing Home Assistant device.
+3. If every head-only threshold passes, stop the application. When the override
+   layer wins, privately set the application override JSON key
+   `body_motion_enabled` with the string-valued entry
+   `"body_motion_enabled": "true"`.
+4. When the managed layer or retained default wins, privately set the managed
+   environment variable `REACHY_SATELLITE_BODY_MOTION_ENABLED` with the native
+   environment assignment `REACHY_SATELLITE_BODY_MOTION_ENABLED=true`; this
+   makes the managed layer the explicit canary winner instead of modifying wheel
+   defaults.
+5. Restart with motion inhibited, require the `/config` field
+   `body_motion_enabled` to resolve to JSON boolean `true`, and only then run the
+   separately gated coordinated-body canary against the same abort rules plus the
+   body-specific rules above.
+6. Stop after the evidence interval. When the override layer was the canary
+   winner, restore the application override JSON key `body_motion_enabled` with
+   the string-valued entry `"body_motion_enabled": "false"`.
+7. When the managed layer was the canary winner, restore the managed environment
+   variable `REACHY_SATELLITE_BODY_MOTION_ENABLED` with the native environment
+   assignment `REACHY_SATELLITE_BODY_MOTION_ENABLED=false`.
+8. Restart with motion inhibited, require the `/config` field
+   `body_motion_enabled` to resolve to JSON boolean `false`, and only then verify
+   the head-only steady state. Do not infer a shipping-default decision from a
+   canary; changing the default requires its own approved proposal.
+
+### Rollback
+
+On any abort, or when the private canary is intentionally ended without approval
+to retain the candidate, use one ordered transaction:
+
+1. preserve every byte-for-byte configuration backup and the sealed precedence
+   manifest unchanged as the audit and recovery source; never edit retained
+   backup bytes to encode a safer target;
+2. stop and release the candidate application before any configuration or
+   artifact write, then confirm it no longer owns motion or media;
+3. restore the managed daemon environment layer with all non-body bytes exactly
+   as retained, including comments, ordering, whitespace and unrelated values;
+4. restore the application overrides layer with all non-body bytes exactly as
+   retained; restore absence as absence rather than creating an override file;
+5. inspect the restored application override JSON key `body_motion_enabled`; when
+   present, name the override as the highest-precedence effective body-setting
+   layer;
+6. only when that override key is absent, inspect the restored managed environment
+   variable `REACHY_SATELLITE_BODY_MOTION_ENABLED`; name the managed layer as the
+   highest-precedence effective body-setting layer when present, otherwise name
+   the retained artifact default;
+7. when the override wins, force only the application override JSON key
+   `body_motion_enabled` with the string-valued entry
+   `"body_motion_enabled": "false"`, and leave every other override byte exactly
+   as restored;
+8. when the managed layer wins, force only the managed environment variable
+   `REACHY_SATELLITE_BODY_MOTION_ENABLED` with the native environment assignment
+   `REACHY_SATELLITE_BODY_MOTION_ENABLED=false`, and leave every other managed-
+   environment byte exactly as restored; when the retained default wins at
+   `false`, leave both mutable layers byte-identical rather than manufacturing an
+   override;
+9. record and verify the original SHA256 and safety-modified SHA256 for each layer
+   in the private manifest; an unchanged layer has equal checksums and an absent
+   layer remains `ABSENT`, so every divergence is explicit per layer;
+10. install the retained checksum-verified released wheel only after the candidate
+    is stopped and every configuration-layer checksum and body precedence action
+    is complete;
+11. restart the retained application with motion ownership inhibited so its
+    configuration and health endpoints can be checked without a motion command;
+12. verify the resolved `/config` field `body_motion_enabled` is JSON boolean
+    `false` while motion ownership remains inhibited;
+13. only after that resolved check may you permit any motion restart or canary
+    check; verify `/livez`, perception, the groundstation session, Home
+    Assistant's existing device and entities, and one complete voice exchange
+    before calling rollback complete.
+
+Status verification is retained-artifact-version-aware: always require the
+legacy status keys `running`, `pipeline`, `gaze`, `tracking` and `idle`, with the
+application running and its legacy health state coherent. The absence of
+`controller` is valid for an older retained artifact that predates that schema;
+only when `controller` is present — or retained-artifact metadata says that
+schema is supported — require controller fault `none` and safe hold `false`.
+Never reject an otherwise healthy retained release merely because it lacks a
+field introduced by the candidate being rolled back.
+
+The rollback is incomplete if only the wheel or only the effective configuration
+was restored, if any layer lacks its original and safety-modified checksum, if
+the winning-layer body-false divergence was not accounted for, or if the
+candidate retained ownership during a write. The resolved body value plus the
+application, liveness, status, perception, groundstation and Home Assistant
+checks above must pass before the robot is called recovered.
 
 ---
 

@@ -9,7 +9,7 @@ validated proof of concept is evidence and a migration reference, not the
 implementation contract.
 
 **Spec:** [Predictive Gaze and Coordinated Motion](../specs/gaze-control/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0018
 
 ## Approval
@@ -213,41 +213,80 @@ outcome is scrubbed prose and aggregate measurement.
   - [x] Add deterministic cancellation and shutdown coverage proving command
         cessation, terminal release and cleanup ordering (PR #25)
 
-- [ ] Complete safety, diagnostics, traceability and staged rollout
-  - [ ] Add strict configuration, pose, workspace, derivative and atomic-sample
-        validation with last-safe-command hold and gated recovery
-  - [ ] Add bounded identifier-free status and trace endpoints, including a
-        motion-free diagnostics reset
-  - [ ] Run focused controller tests, the full HA-satellite suite, diff coverage,
-        repository checks and requirements traceability
-  - [ ] Add exact annotations for REQ-074 through REQ-092, register
+- [x] Complete safety, diagnostics, traceability and staged rollout (PR #26)
+  - [x] Add strict configuration, pose, workspace, derivative and atomic-sample
+        validation with last-safe-command hold and gated recovery (PR #26)
+  - [x] Add bounded identifier-free status and trace endpoints, including a
+        motion-free diagnostics reset (PR #26)
+  - [x] Run focused controller tests, the full HA-satellite suite, diff coverage,
+        repository checks and requirements traceability (PR #26)
+  - [x] Add exact annotations for REQ-074 through REQ-092, register
         `docs/specs/gaze-control/index.md` with `format = "markdown"`, and
-        regenerate the duvet snapshot from the repository root
-  - [ ] Update duvet registration narrative and counts to nine specs and 92
+        regenerate the duvet snapshot from the repository root (PR #26)
+  - [x] Update duvet registration narrative and counts to nine specs and 92
         requirements, and update the traceability claims in `AGENTS.md` and
-        `REVIEW.md`
-  - [ ] Define head-only and body-enabled abort thresholds before deployment,
+        `REVIEW.md` (PR #26)
+  - [x] Define head-only and body-enabled abort thresholds before deployment,
         retain the last released artifact and resolved configuration as the
         rollback target, and prohibit body enablement until head-only evidence
-        passes
-  - [ ] Run the rollback-ready head-only canary against the deterministic
+        passes (PR #26)
+  - [x] Run the rollback-ready head-only canary against the deterministic
         envelopes; on threshold breach restore the retained artifact and verify
-        application, perception, Home Assistant and groundstation health
-  - [ ] If head evidence is green, run the separately gated coordinated-body
-        canary with the same abort, rollback and post-rollback checks
-  - [ ] Record only scrubbed aggregate outcomes; defer any unclosed calibration or
-        shipping-default decision to a later proposal
-  - [ ] Mark 0019 complete and synchronize `docs/index.yml` and `docs/index.md`
-        when every task and traceability item is complete
+        application, perception, Home Assistant and groundstation health (PR #26)
+  - [x] If head evidence is green, run the separately gated coordinated-body
+        canary with the same abort, rollback and post-rollback checks (PR #26)
+  - [x] Record only scrubbed aggregate outcomes; defer any unclosed calibration or
+        shipping-default decision to a later proposal (PR #26)
+  - [x] Mark 0019 complete and synchronize `docs/index.yml` and `docs/index.md`
+        when every task and traceability item is complete (PR #26)
+
+## Outcome
+
+The final reviewed and deployed rollout candidate was code revision `460fbfc`;
+the deployed wheel's SHA-256 was
+`73e7706c56a5ed03c94bf8d0d7c98aabf6b394039698f298e8db9d1c36307c61`. Before
+either canary, two rollback rehearsals completed successfully after
+deployment-tool verification errors; each restored the released artifact and
+healthy runtime before rollout continued.
+
+Aggregate head-only evidence comprised 120 health samples, with tracking in 52;
+active, hold, returning and idle controller modes were observed. The controller
+consumed 47 observations and retained 128 bounded trace events, with zero faults,
+safe holds, rejected commands or non-finite values, a maximum envelope fraction
+of 1.000000 and zero atomic residual. Both livez and application health remained
+healthy. Voice states idle, listening, processing and responding were observed
+across 37 non-idle samples and one complete exchange, with no health failure.
+
+Aggregate coordinated-body evidence comprised 480 monitored samples, with
+tracking in 265; active, hold and returning modes were observed. The controller
+consumed 43 observations and retained 128 bounded events, with zero faults,
+rejections or non-finite values, a maximum envelope fraction of 1.000000 and a
+maximum identity residual of `3.47e-18` radians. There were 127 nonzero body
+events/counter-rotation steps; the maximum body command was `4.307811°`. The
+groundstation remained ready with one active session, more than 26,000 frames and
+zero dropped frames, and the face capability remained ready.
+
+After the canaries, the only production-code delta corrected diagnostics so
+observation age is measured from capture time rather than receipt time; the
+controller and motion paths were unchanged.
+
+Body motion was restored to `false`. The final exact-head redeployment payload
+was verified, followed by 60 health samples with zero livez failures. Controller
+fault remained `none`, the non-finite count remained zero, and idle and returning
+modes were observed. The diagnostics retained 128 capture-age samples. The
+managed layer and every non-canary override value were unchanged. Raw evidence,
+configuration and artifacts remain private; every value recorded here is
+scrubbed and aggregate.
 
 ## Open Questions
 
-- **Body default:** Should coordinated body motion ship enabled after canary
-  calibration, or remain restart-bound opt-in? Deferred to the canary outcome or
-  a later proposal if 0019 evidence is insufficient.
+- **Body default:** Should coordinated body motion ship enabled, or remain a
+  restart-bound opt-in? The staged rollout restored it to false and did not settle
+  a shipping default; that decision is deferred to a later proposal.
 - **Body calibration:** Which allocation shares, head comfort angle, derivative
-  limits and feedback-divergence threshold become supported defaults? Deferred
-  when the calibration cannot finish inside the rollout task.
+  limits and feedback-divergence threshold become supported defaults? The staged
+  rollout did not settle those values; calibration is deferred to a later
+  proposal.
 - **Target association:** Is deterministic center-and-confidence association
   sufficient for multiple faces, or does a later wire-compatible tracking
   identity need its own proposal?

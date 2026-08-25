@@ -47,6 +47,7 @@ from satellite_support import (
     FakePerception,
     FakeRobot,
     FakeWakeWordFeatures,
+    ManualClock,
     available_wake_word,
     connected,
     face,
@@ -74,6 +75,7 @@ from reachy_mini_ha_satellite.behaviour import (
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyMeasurement,
     ControllerConfig,
+    ControllerFault,
     HeadMeasurement,
 )
 from reachy_mini_ha_satellite.behaviour.intents import MotionIntent
@@ -113,6 +115,9 @@ from reachy_mini_ha_satellite.ports import (
     DetectionSource,
     GazeSample,
     HeadPose,
+    MotionCommandResult,
+    MotionCommandStatus,
+    MotionFault,
     MotionMeasurement,
     SourceSelection,
 )
@@ -456,6 +461,7 @@ def _application(
     audio: FakeAudio,
     motion: FakeMotion,
     perception: FakePerception,
+    behaviour: SatelliteBehaviour | None = None,
     services: Sequence[Any] = (),
     stop_after: int = 2,
 ) -> tuple[SatelliteApplication, asyncio.Event]:
@@ -465,6 +471,7 @@ def _application(
         audio: The microphone and speakers.
         motion: The head and the antennas.
         perception: What is in front of the robot.
+        behaviour: The pure behavior owner, or a fresh default.
         services: The things with lifetimes.
         stop_after: How many ticks to run before the stop event is set. The
             loop's wait is what sets it, so no wall time is spent, and the
@@ -496,7 +503,7 @@ def _application(
         audio=audio,
         motion=motion,
         perception=perception,
-        behaviour=SatelliteBehaviour(now=0.0),
+        behaviour=behaviour or SatelliteBehaviour(now=0.0),
         services=services,
         clock=_advancing(),
         sleep=_wait,
@@ -804,6 +811,47 @@ class TestApplyingIntents:
 class TestTheLoop:
     """What ticking does, and what a pipeline event does between ticks."""
 
+    def test_later_intent_failure_cannot_suppress_gaze_transaction_completion(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A successful gaze result is reduced before any later intent can raise."""
+
+        class FailingHeadMotion(FakeMotion):
+            """Accept gaze, then fail a competing head command."""
+
+            def move_head(self, pose: HeadPose) -> None:
+                del pose
+                raise RuntimeError("later head command failed")
+
+        behaviour = SatelliteBehaviour(now=0.0)
+        sample = GazeSample(0.0, 0.0, 0.0, 0.0, False)
+        completed: list[MotionCommandResult] = []
+
+        def finish(*_args: object, **_kwargs: object) -> tuple[MotionIntent, ...]:
+            return CommandGaze(sample), MoveHead(HeadPose(pitch=0.1))
+
+        def complete(result: MotionCommandResult) -> tuple[MotionIntent, ...]:
+            completed.append(result)
+            return ()
+
+        monkeypatch.setattr(behaviour, "finish", finish)
+        monkeypatch.setattr(behaviour, "complete_command", complete)
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=FailingHeadMotion(),
+            perception=FakePerception(),
+            behaviour=behaviour,
+            clock=lambda: 0.1,
+        )
+
+        with pytest.raises(RuntimeError, match="later head command failed"):
+            application.tick()
+
+        assert len(completed) == 1
+        assert completed[0].status is MotionCommandStatus.ACCEPTED
+
     @pytest.mark.asyncio
     async def test_it_starts_everything_before_ticking(self) -> None:
         """A tick against an unstarted perception source would read nothing."""
@@ -898,14 +946,104 @@ class TestTheLoop:
         assert len(set(commanded)) == len(commanded)
 
     def test_the_status_is_reported_for_the_settings_interface(self) -> None:
-        """The behaviour layer's own view, handed through unchanged."""
+        """Existing keys remain and controller mode, fault and safe hold are explicit."""
         application, _stop = _application(
             audio=FakeAudio(),
             motion=FakeMotion(),
             perception=FakePerception(),
         )
 
-        assert application.status()["pipeline"] == "idle"
+        status = application.status()
+        assert status["pipeline"] == "idle"
+        assert set(status) == {"pipeline", "gaze", "tracking", "idle", "controller"}
+        assert status["controller"] == {
+            "mode": "unknown",
+            "fault": "none",
+            "safe_hold": False,
+        }
+
+    def test_resetting_controller_diagnostics_changes_no_runtime_state_or_command(
+        self,
+    ) -> None:
+        """The operator reset is exactly motion-free and state preserving."""
+        motion = FakeMotion()
+        behaviour = SatelliteBehaviour(now=0.0)
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=motion,
+            perception=FakePerception(),
+            behaviour=behaviour,
+        )
+        application.tick()
+        assert application.controller_diagnostics()
+        before_state = behaviour.controller_state
+        before_commands = (
+            len(motion.coordinated_gaze),
+            len(motion.heads),
+            len(motion.antennas),
+        )
+
+        application.reset_controller_diagnostics()
+
+        assert application.controller_diagnostics() == ()
+        assert behaviour.controller_state == before_state
+        assert (
+            len(motion.coordinated_gaze),
+            len(motion.heads),
+            len(motion.antennas),
+        ) == before_commands
+
+    def test_failed_daemon_command_cannot_promote_candidate_and_needs_new_calls(
+        self,
+    ) -> None:
+        """Command acceptance is transactional and recovery counts distinct calls."""
+        clock = ManualClock(0.1)
+        motion = FakeMotion()
+        motion.command_results = [
+            MotionCommandResult(
+                MotionCommandStatus.REJECTED,
+                MotionFault.COMMAND,
+                call=1,
+            ),
+            MotionCommandResult(MotionCommandStatus.ACCEPTED, call=2),
+            MotionCommandResult(MotionCommandStatus.ACCEPTED, call=3),
+        ]
+        perception = FakePerception()
+        perception.see(face(0.5, 0.0), source=DetectionSource.REMOTE)
+        behaviour = SatelliteBehaviour(now=0.0)
+        application = SatelliteApplication(
+            settings=_settings(),
+            audio=FakeAudio(),
+            motion=motion,
+            perception=perception,
+            behaviour=behaviour,
+            clock=clock,
+        )
+        before = behaviour.controller_state.last_safe_sample
+
+        application.tick()
+        failed_state = behaviour.controller_state
+
+        assert failed_state.fault is ControllerFault.COMMAND
+        assert failed_state.last_safe_sample == before
+        assert motion.coordinated_gaze == []
+        failed_event = application.controller_diagnostics()[-1]
+        assert failed_event["command_accepted"] is False
+        assert failed_event["fault"] == "command"
+
+        clock.advance(0.05)
+        application.tick()
+        recovering_state = behaviour.controller_state
+        assert recovering_state.fault is ControllerFault.COMMAND
+        assert recovering_state.recovery_valid_streak == 1
+
+        clock.advance(0.05)
+        application.tick()
+        recovered_state = behaviour.controller_state
+        assert recovered_state.fault is ControllerFault.NONE
+        assert recovered_state.last_safe_sample == before
+        assert len(motion.coordinated_gaze) == 2
+        assert application.controller_diagnostics()[-1]["command_accepted"] is True
 
 
 class TestDisabledGazeStartup:
@@ -1020,6 +1158,8 @@ class TestPredictiveTickTiming:
             head_measurement: HeadMeasurement | None,
             body_measurement: BodyMeasurement | None,
             dt: float,
+            input_fault: ControllerFault = ControllerFault.NONE,
+            input_evidence: tuple[object, ...] | None = None,
         ) -> tuple[MotionIntent, ...]:
             dts.append(dt)
             return original_finish(
@@ -1028,6 +1168,8 @@ class TestPredictiveTickTiming:
                 head_measurement=head_measurement,
                 body_measurement=body_measurement,
                 dt=dt,
+                input_fault=input_fault,
+                input_evidence=input_evidence,
             )
 
         monkeypatch.setattr(behaviour, "finish", _finish)
@@ -3606,6 +3748,31 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         )
 
         assert application.status()["pipeline"] == "idle"
+        motion = cast("ReachyMotion", application._motion)
+        assert motion._config is application._behaviour._config
+        assert application._behaviour._config.require_motion_measurements
+
+    def test_released_short_staleness_still_assembles_with_bounded_dependents(
+        self,
+    ) -> None:
+        """A previously valid sub-0.35s setting is migrated, not rejected at startup."""
+        resolution = load_settings(
+            _ENVIRONMENT,
+            {"staleness_seconds": "0.2"},
+        )
+
+        application = build_application(
+            resolution,
+            FakeRobot(),
+            identity=_identity(),
+        )
+
+        config = application._behaviour._config
+        assert config.staleness_seconds == pytest.approx(0.2)
+        assert config.prediction_horizon <= config.staleness_seconds
+        assert config.loss_hold_seconds <= config.staleness_seconds
+        assert config.head_measurement_max_age <= config.staleness_seconds
+        assert config.body_feedback_max_age <= config.staleness_seconds
 
     def test_a_robot_with_tracking_off_still_assembles(self) -> None:
         """And its behaviour layer is handed a source that answers "nothing yet"."""
