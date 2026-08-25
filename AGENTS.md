@@ -107,6 +107,25 @@ the `reachyctl` wheel on a version tag, alongside the three unpublished wheels i
 depends on; the container image is published from `images.yml` on the same tag,
 and the robot application's wheel arrives with the change that builds it.
 
+`uv.lock` is one of the places that declares a version — it records one for every
+member whose manifest states it — so it is written by the same automation. It has
+to be: a release that bumps the manifests and leaves the lockfile behind is a
+release pull request on which `uv sync --locked` fails, and every job dies in its
+setup step before it runs anything at all.
+
+Its entry selects by SOURCE rather than by name —
+`$.package[?(@.source.editable || @.source.virtual)].version` — and both halves of
+that matter. A member added later is covered without touching this file. And a
+filter on `@.name` would match nothing, silently: the TOML updater parses each
+value into a position-tagged object so it can replace it in place, so `@.name` is
+an object and is never equal to a string. `@.name.value` works and is an
+implementation detail of release-please; the shape of a workspace member's source
+is not.
+
+A member that declares its version dynamically — `packages/reachy-contracts`,
+which derives it from `version.py` — has no version line in the lockfile at all,
+and so needs nothing here.
+
 ### The Justfile is the only command surface
 
 `just test`, `just lint`, `just typecheck`, `just check`, plus `just fmt`,
