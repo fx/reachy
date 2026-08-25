@@ -25,7 +25,7 @@ __all__ = ["VERSION", "SemanticVersion", "__version__"]
 # release automation looks for when it writes the derived version here; it sits
 # after the closing quote, where the build backend's expression has already
 # stopped reading.
-__version__ = "0.1.0"  # x-release-please-version
+__version__ = "0.2.0"  # x-release-please-version
 
 # MAJOR.MINOR.PATCH with no leading zeros. Pre-release and build metadata are
 # deliberately rejected: this repository releases from conventional commits and

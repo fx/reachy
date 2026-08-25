@@ -1,6 +1,6 @@
 [project]
 name = "reachy-groundstation"
-version = "0.1.0"
+version = "0.2.0"
 description = "Off-robot service hosting heavy computation as pluggable capabilities"
 requires-python = ">=3.12"
 dependencies = [

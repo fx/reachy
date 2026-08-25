@@ -1753,7 +1753,7 @@ wheels = [
 
 [[package]]
 name = "reachy"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "reachy-bench" },
@@ -1832,7 +1832,7 @@ provisioning = [
 
 [[package]]
 name = "reachy-bench"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "bench" }
 dependencies = [
     { name = "reachy-contracts" },
@@ -1849,7 +1849,7 @@ requires-dist = [
 
 [[package]]
 name = "reachy-checks"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/reachy-checks" }
 dependencies = [
     { name = "reachy-contracts" },
@@ -1881,7 +1881,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.12.5,<3" }]
 
 [[package]]
 name = "reachy-groundstation"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "services/groundstation" }
 dependencies = [
     { name = "numpy" },
@@ -1923,7 +1923,7 @@ provides-extras = ["cuda"]
 
 [[package]]
 name = "reachy-hygiene"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "tools/repo-hygiene" }
 
 [[package]]
@@ -1942,7 +1942,7 @@ wheels = [
 
 [[package]]
 name = "reachy-mini-ha-satellite"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/ha-satellite" }
 dependencies = [
     { name = "aioesphomeapi" },
@@ -1992,7 +1992,7 @@ provides-extras = ["local-detection"]
 
 [[package]]
 name = "reachy-session-client"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/reachy-session-client" }
 dependencies = [
     { name = "reachy-contracts" },
@@ -2007,7 +2007,7 @@ requires-dist = [
 
 [[package]]
 name = "reachyctl"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "cli/reachyctl" }
 dependencies = [
     { name = "asyncssh" },
