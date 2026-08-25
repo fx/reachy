@@ -195,23 +195,23 @@ outcome is scrubbed prose and aggregate measurement.
   - [x] Keep the released runtime path available until the foundation passes
         focused and HA-satellite member verification (PR #24)
 
-- [ ] Integrate coordinated trajectory generation and head–body allocation
-  - [ ] Replace legacy gaze intents with source-qualified observation and loss
-        directives while preserving pure behavior and head arbitration
-  - [ ] Add measured-pose history, calibrated capture/query rebasing and
-        canonical task-space commands in `adapters/motion_reachy.py`
-  - [ ] Advance jerk-limited world-yaw and elevation trajectories on every
-        behavior tick without recalibrating cached observations
-  - [ ] Add continuous, odd-symmetric and monotonic head–body allocation with
-        atomic world-gaze-preserving commands
-  - [ ] Keep commanded body trajectory separate from its measured observer and
-        add bounded feedback fault and recovery behavior
-  - [ ] Return every controlled axis through the same trajectory and force one
-        correct pipeline-head handoff after controller idle
-  - [ ] Replace obsolete settings behavior while preserving safe migration of
-        stale local overrides
-  - [ ] Add deterministic cancellation and shutdown coverage proving command
-        cessation, terminal release and cleanup ordering
+- [x] Integrate coordinated trajectory generation and head–body allocation (PR #25)
+  - [x] Replace legacy gaze intents with source-qualified observation and loss
+        directives while preserving pure behavior and head arbitration (PR #25)
+  - [x] Add measured-pose history, calibrated capture/query rebasing and
+        canonical task-space commands in `adapters/motion_reachy.py` (PR #25)
+  - [x] Advance jerk-limited world-yaw and elevation trajectories on every
+        behavior tick without recalibrating cached observations (PR #25)
+  - [x] Add continuous, odd-symmetric and monotonic head–body allocation with
+        atomic world-gaze-preserving commands (PR #25)
+  - [x] Keep commanded body trajectory separate from its measured observer and
+        add bounded feedback fault and recovery behavior (PR #25)
+  - [x] Return every controlled axis through the same trajectory and force one
+        correct pipeline-head handoff after controller idle (PR #25)
+  - [x] Replace obsolete settings behavior while preserving safe migration of
+        stale local overrides (PR #25)
+  - [x] Add deterministic cancellation and shutdown coverage proving command
+        cessation, terminal release and cleanup ordering (PR #25)
 
 - [ ] Complete safety, diagnostics, traceability and staged rollout
   - [ ] Add strict configuration, pose, workspace, derivative and atomic-sample
