@@ -1,6 +1,6 @@
 [project]
 name = "reachy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Workspace root for the Reachy Mini monorepo"
 readme = "README.md"
 requires-python = ">=3.12"
