@@ -110,9 +110,10 @@ deployment can get irreversibly wrong.
   direct gaze gain, vertical trim, smoothing loop, deadzone loop or linear
   neutral return around it.
 - **Calibrated gaze commands absolute canonical world poses.**
-  `adapters/motion_reachy.py` retains bounded measured-pose history whose age and
-  capacity derive from configured staleness and tick cadence, brackets the SDK's
-  non-moving image query, rebases capture against query, and constructs zero-roll,
+  `adapters/motion_reachy.py` retains bounded measured-pose history whose retention
+  age derives from configured staleness and whose capacity is sized for that window
+  at the minimum supported cadence, brackets the SDK's non-moving image query,
+  rebases capture against query, and constructs zero-roll,
   zero-translation head commands. The controller seeds world yaw/elevation from
   measured pose before its first hardware sample. With body enabled it also waits
   for measured joint zero before head and body travel in one `set_target` call;
