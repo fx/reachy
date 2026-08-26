@@ -269,18 +269,25 @@ class FeedRegistry:
             if payload is not None and self._revision > after:
                 return FeedFrame(payload=payload, revision=self._revision)
             # Nothing above awaited, so the event read here is the one any
-            # change after these checks will replace.
+            # change after these checks will replace. That holds for every
+            # caller because every caller runs between whole steps of the event
+            # loop — the shutdown signal included, which is why `service.py`
+            # schedules its `close` rather than running it in the handler.
             await self._changed.wait()
 
     def close(self) -> None:
         """Discard the payload and finish every viewer.
 
         Called twice over on the way out, and deliberately. `service.py`'s
-        server calls it the moment a shutdown signal arrives, which is before
-        uvicorn starts waiting for open responses to finish and therefore the
-        only point at which waking a parked viewer still makes that wait end;
-        the application's lifespan calls it again for every other way a process
-        can stop. Idempotent, so neither has to know whether the other ran.
+        server schedules it on the event loop the moment a shutdown signal
+        arrives, which is before uvicorn starts waiting for open responses to
+        finish and therefore the only point at which waking a parked viewer
+        still makes that wait end; the application's lifespan calls it again for
+        every other way a process can stop. Idempotent, so neither has to know
+        whether the other ran.
+
+        Every caller reaches this between steps of the event loop and never
+        inside one — see `next_frame`, whose correctness depends on it.
         """
         self._closed = True
         self._payload = None

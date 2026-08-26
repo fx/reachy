@@ -14,6 +14,7 @@ environment behind that first step.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import TYPE_CHECKING
 
@@ -100,14 +101,41 @@ class FeedClosingServer(uvicorn.Server):
     def handle_exit(self, sig: int, frame: FrameType | None) -> None:
         """Finish every viewer, then let uvicorn start stopping.
 
+        The close is handed to the event loop rather than performed here, and
+        that is the difference between removing the wait and moving it. This
+        runs in a signal handler, which Python may execute between any two
+        bytecodes of the main thread — including the handful in `next_frame`
+        between its closed check and its read of the event it is about to wait
+        on. Closing in that window would swap the event out from under a viewer
+        that had already decided to wait, and park it on one nothing will ever
+        set, which is the deadlock this class exists to prevent. Scheduling it
+        means the close runs between whole steps of the loop, where
+        `next_frame`'s own reasoning about not having awaited holds.
+
+        Nothing is lost by the deferral: uvicorn only notices `should_exit` on
+        the next pass of its serving loop, so the callback runs first, and the
+        drain begins after both.
+
         Args:
             sig: The signal that arrived.
             frame: The interrupted stack frame, which is uvicorn's to interpret.
         """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Before serving or after it: no loop is running, so no viewer is
+            # parked on the feed and there is nothing for the deferral to
+            # protect — and nothing that would run a scheduled callback either.
+            self._feed.close()
+        else:
+            # `call_soon_threadsafe` and not `call_soon`: the latter is not safe
+            # to call from a signal handler, and this is one even though it is
+            # already on the loop's thread.
+            loop.call_soon_threadsafe(self._feed.close)
         # Closing is idempotent, which is what makes a second signal harmless:
-        # it reaches a feed that is already closed and asks uvicorn to force the
-        # exit, and neither step is troubled by the other having happened.
-        self._feed.close()
+        # it reaches a feed that is already closed, or one with a close already
+        # scheduled, and asks uvicorn to force the exit. Neither step is
+        # troubled by the other having happened.
         super().handle_exit(sig, frame)
 
 

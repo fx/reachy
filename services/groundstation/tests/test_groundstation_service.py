@@ -17,6 +17,7 @@ Test module names are globally unique across the workspace — see the root
 from __future__ import annotations
 
 import ast
+import asyncio
 import importlib
 import json
 import signal
@@ -272,12 +273,47 @@ async def test_the_composition_root_wires_capability_shutdown() -> None:
     assert closed == ["echo"]
 
 
+@pytest.mark.asyncio
+async def test_a_shutdown_signal_closes_the_feed_between_steps_of_the_event_loop() -> (
+    None
+):
+    """A signal handler runs between bytecodes, and closing there could park a viewer.
+
+    `next_frame` reads the closed flag and then the event it waits on, with no
+    await between them, and relies on nothing changing in that gap. A close
+    performed inside the handler could land in it and swap the event out from
+    under a viewer that had already decided to wait — parking it on one nothing
+    will set, which is the deadlock this server exists to prevent. So the close
+    is handed to the loop, and this is what says so: nothing has changed when
+    `handle_exit` returns, and it has by the loop's next pass.
+    """
+    feed = FeedRegistry()
+    config = uvicorn.Config(_unserved, log_config=None)
+    server = FeedClosingServer(config, feed=feed)
+
+    with feed.authenticated_session():
+        assert feed.publish(jpeg_bytes()) is True
+        server.handle_exit(signal.SIGTERM, None)
+        # Still open, because the handler only scheduled the close.
+        assert feed.publish(jpeg_bytes()) is True
+
+        # `sleep(0)` yields to the loop and resumes on its next pass; it reads
+        # no clock and adds no wall time, so it is not the sleeping a unit test
+        # is forbidden.
+        await asyncio.sleep(0)
+        assert feed.publish(jpeg_bytes()) is False
+
+
 def test_a_shutdown_signal_closes_the_feed_before_the_server_starts_stopping() -> None:
     """The order is the fix: uvicorn waits for viewers before it says shutdown.
 
     A `handle_exit` that only delegated would leave the feed to the lifespan,
     which uvicorn sends after it has waited for every open response — and a
     viewer parked on the feed is one of those.
+
+    No loop is running here, so the close happens in the handler: before serving
+    or after it there is no viewer to park and nothing that would run a
+    scheduled callback.
     """
     feed = FeedRegistry()
     # An application that is never served, because what is under test happens
@@ -323,5 +359,8 @@ async def test_the_server_and_the_application_are_composed_around_one_feed() -> 
             assert (await client.head(STREAM_PATH)).status_code == 200
 
             server.handle_exit(signal.SIGTERM, None)
+            # The signal handler schedules the close; this is the loop pass it
+            # runs on.
+            await asyncio.sleep(0)
 
             assert (await client.head(STREAM_PATH)).status_code == 503
