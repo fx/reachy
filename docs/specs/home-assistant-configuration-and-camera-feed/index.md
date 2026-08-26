@@ -101,92 +101,108 @@ guarantees.
 
 ### REQ-095: Groundstation replacement is persisted and isolated
 
-The satellite MUST validate and persist an accepted groundstation session URL
-through its application-settings override layer and immediately replace any
-active remote source by retiring its client and source generation before a
-replacement can publish connection state or results.
+The satellite MUST apply the shared session-URL validation rules, durably retain
+and report an accepted URL as the effective value, adopt it immediately as the
+only remote detection source without overlap or eligibility for late results
+from the preceding source, preserve local fallback and bounded reconnection, and
+retain the preceding effective URL when adoption fails.
 
 #### Scenario: The running satellite changes groundstations
 
 - **GIVEN** an active authenticated remote session producing detections
 - **WHEN** the operator submits another valid session URL through Home Assistant
-- **THEN** the preceding client closes, its results become ineligible, one new
-  source generation starts with the replacement URL, and local fallback and
-  bounded reconnection retain their existing behavior
+- **THEN** detections and connection state come only from the replacement after
+  adoption, late results from the preceding source are ignored, and fallback and
+  bounded reconnection continue to work
 
-#### Scenario: URL validation fails
+#### Scenario: A URL change is refused
 
-- **GIVEN** a running remote session and a submitted value that is not an accepted
-  credential-free WebSocket session URL
-- **WHEN** the satellite validates the request
-- **THEN** no override is written, the current client and source generation remain
-  active, and the entity reads back the current URL
+- **GIVEN** a running remote source and a submitted URL that fails validation,
+  durable storage or live adoption
+- **WHEN** the change attempt finishes
+- **THEN** the preceding URL remains the effective read-back and no second remote
+  source remains active
 
 #### Scenario: The application restarts
 
 - **GIVEN** a URL successfully adopted from Home Assistant
 - **WHEN** the satellite application starts again
-- **THEN** the same override supplies the session URL without a redeployment
+- **THEN** that URL remains effective without a redeployment
 
 ### REQ-096: MJPEG is a bounded latest-frame view
 
-The groundstation MUST expose the latest validated original JPEG from an eligible
-robot session as a standards-compatible MJPEG stream without opening another
-robot connection, decoding or re-encoding solely for streaming, blocking
-capability processing, or accumulating intermediate frames for a slow viewer.
+The groundstation MUST retain at most one validated original JPEG globally for a
+standards-compatible MJPEG stream, replace rather than queue that frame for slow
+viewers, and add no robot connection, stream-only decode or re-encode, or
+capability-processing blockage.
 
 #### Scenario: A viewer is slower than the robot
 
-- **GIVEN** an eligible session delivering valid JPEG frames faster than one
+- **GIVEN** the sole eligible session delivering valid JPEG frames faster than one
   viewer consumes them
 - **WHEN** newer frames arrive before that viewer is ready
 - **THEN** intermediate frames are replaced and the next part contains the newest
   available original JPEG rather than a backlog
 
+#### Scenario: Session cardinality becomes ambiguous
+
+- **GIVEN** one retained feed frame and one active authenticated robot session
+- **WHEN** a second authenticated robot session becomes active
+- **THEN** no JPEG remains retained for the feed rather than one being kept for
+  each session
+
 #### Scenario: A malformed frame arrives
 
-- **GIVEN** an eligible session with a valid latest frame
+- **GIVEN** one eligible session with a valid latest frame
 - **WHEN** a later payload fails the groundstation's existing JPEG validation
 - **THEN** the malformed payload is not published and capability error handling
   continues independently
 
 ### REQ-097: Feed eligibility is deterministic
 
-The groundstation MUST serve `/stream.mjpg` only while exactly one active
-authenticated robot session has supplied a valid current JPEG, reject zero-session
-and multiple-session ambiguity deterministically, and remove a session's feed
-eligibility and frame when that session ends.
+The groundstation MUST serve `/stream.mjpg` only after exactly one active
+authenticated robot session has supplied a fresh validated JPEG while it is the
+sole session, clear all feed frame state and end viewers whenever authenticated
+session cardinality is zero or greater than one, and require another fresh
+validated JPEG after cardinality returns to one.
 
 #### Scenario: No eligible robot is connected
 
-- **GIVEN** no active authenticated session with a valid frame
+- **GIVEN** no active authenticated robot session
 - **WHEN** a viewer requests the feed
 - **THEN** the request receives the stable unavailable outcome and no stream is
   held open waiting for an unspecified future robot
 
-#### Scenario: Two eligible robots are connected
+#### Scenario: Two robots are connected
 
-- **GIVEN** two active authenticated sessions that have each supplied a valid
-  frame
-- **WHEN** a viewer requests the feed or an existing feed becomes ambiguous
-- **THEN** the groundstation returns the stable ambiguity outcome or ends the
-  existing stream rather than selecting a robot by timing or identifier
+- **GIVEN** one eligible session with an active feed
+- **WHEN** a second robot session authenticates
+- **THEN** the retained frame is cleared, the existing feed ends, and new requests
+  receive the stable ambiguity outcome rather than a stream selected by timing or
+  identifier
+
+#### Scenario: Ambiguity returns to one session
+
+- **GIVEN** ambiguity cleared the feed while two sessions were active
+- **WHEN** either session ends and one remains
+- **THEN** the prior frame is not resurrected and the feed stays unavailable until
+  the remaining session supplies a fresh validated JPEG
 
 #### Scenario: The selected session ends
 
 - **GIVEN** one eligible session with connected viewers
-- **WHEN** that session closes, is refused or is cancelled
-- **THEN** its latest frame is discarded, its viewers finish, and a later session
-  is considered only by a new request
+- **WHEN** that session closes or is cancelled
+- **THEN** its frame is discarded, its viewers finish, and a later session is
+  considered only after supplying its own fresh validated JPEG
 
 ### REQ-098: The unauthenticated feed has a bounded privacy surface
 
 The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
-the deployment's trusted-network boundary while retaining only the bounded live
-latest-frame slot, never recording or writing frames, never caching a response or
-frame outside that slot, emitting no frame content through observability,
-enforcing a finite viewer bound, and promptly cancelling viewer work on
-disconnect or loss of eligibility.
+the deployment's trusted-network boundary while retaining at most one live JPEG
+globally in application state, marking responses non-cacheable, never recording
+or writing frames or emitting frame content through observability, enforcing a
+finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+of eligibility.
 
 #### Scenario: A viewer disconnects
 
@@ -237,23 +253,25 @@ than permitting two producers.
 
 ### MJPEG feed
 
-The groundstation keeps one original compressed latest-frame slot per eligible
-session, replacing the prior value atomically after the existing JPEG validation
-succeeds. The capability pipeline continues to receive its one decoded frame;
-streaming reads the validated compressed bytes and does not add another decode.
-Each viewer tracks only the slot generation it last sent, so a slow consumer
-skips directly to the newest generation.
+The groundstation keeps one original compressed latest frame globally. While one
+authenticated camera session is active, a newly validated payload replaces that
+value atomically. Any transition to zero or multiple authenticated sessions
+clears it. Returning from multiple sessions to one leaves it empty until the
+remaining session supplies a fresh validated JPEG, so ambiguity can never
+resurrect an earlier image. The capability pipeline continues to receive its one
+decoded frame; streaming reads the validated compressed bytes and does not add
+another decode.
 
 `GET /stream.mjpg` responds as `multipart/x-mixed-replace`, with each part marked
 `image/jpeg` and carrying the original payload length. Responses prohibit cache
-storage. Zero eligible sessions, multiple eligible sessions and exhausted viewer
-capacity have separate stable non-success outcomes. The initial viewer bound is
-four; reaching it does not allocate per-viewer frame storage.
+storage. Zero eligible sessions, multiple authenticated sessions and exhausted
+viewer capacity have separate stable non-success outcomes. The initial viewer
+bound is four; reaching it does not allocate per-viewer frame storage, and a slow
+viewer advances directly to the newest global frame.
 
-Session eligibility begins only after robot-link authentication and receipt of a
-valid JPEG. Session completion unregisters the slot in a `finally` boundary and
-wakes viewers so they can finish. The endpoint never selects among multiple
-eligible sessions, even if one connected first or produced a newer frame.
+Session cardinality changes wake viewers so they can finish or observe the next
+fresh frame as applicable. The endpoint never selects among multiple sessions,
+even if one connected first or produced a newer frame.
 
 ### Home Assistant integration
 
@@ -270,10 +288,11 @@ frames are more sensitive than health or configuration metadata. Deployment
 guidance places the groundstation on a trusted network and warns against exposing
 the endpoint outside it.
 
-Only compressed bytes already accepted from the authenticated robot-link session
-enter the live slot. They are neither written to disk nor copied into logs,
-metrics, traces, caches or error messages. Viewer tasks are response-scoped and
-lose eligibility immediately when the selected session ends or ambiguity appears.
+Only compressed bytes already accepted from the sole authenticated robot-link
+session enter the one global live value. They are neither written to disk nor
+copied into logs, metrics, traces, caches or error messages. Viewer tasks are
+response-scoped and lose eligibility immediately when that session ends or
+ambiguity appears.
 
 ## Constraints
 

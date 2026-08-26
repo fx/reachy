@@ -22,18 +22,13 @@ The operator requested:
 > 2. ground station URL so it can be easily configured without redeploying
 > 3. the mjpeg stream from the ground station as feed so it can be viewed right in home assistant
 
-The approved interpretation is three independently and immediately effective
-motor-group switches; one persisted, immediately adopted groundstation URL text
-entity; and a feed consumed through Home Assistant's standard MJPEG integration.
-Motor disablement quiesces commands before torque-off, motor enablement
-reacquires measured state before movement, and a URL change cleanly replaces the
-active remote session. Video remains intentionally unauthenticated behind the
-same trusted-network boundary as existing operator surfaces. A feed exists only
-for exactly one eligible authenticated robot session; zero or multiple sessions
-fail deterministically.
-
-This proposal records the approval contract only. Production behavior starts in
-the three implementation tasks below.
+The operator approved the product, safety, lifecycle and privacy decisions now
+owned by
+[REQ-093–098](../specs/home-assistant-configuration-and-camera-feed/index.md#requirements),
+including the standard Home Assistant MJPEG integration and the proposal's stated
+exclusions. This document records their implementation sequencing and rationale;
+it does not repeat their observable contract. Production behavior starts in the
+three implementation tasks below.
 
 ## Motivation
 
@@ -110,51 +105,43 @@ not restated here. What implementing them requires of this change:
 
 Add an application-owned entity module beside `audio_entities.py`; no vendored
 ESPHome file changes. A motor coordinator owns effective group state, serializes
-writes and maps head, body and antenna groups to the SDK identifiers fixed by the
-spec. `RobotHandle` and the existing fakes gain the selective disable operation
-needed to complement selective enablement.
+writes and maps the three groups to the SDK identifiers fixed by REQ-094.
+`RobotHandle` and the existing fakes gain the selective disable operation needed
+to complement selective enablement.
 
-Every head, body and antenna command path consults the same gates. Disabling first
-prevents new commands, waits for an in-flight group command to leave the critical
-section, then removes torque. Re-enabling energizes the exact group, reads the
-current pose or joints and resets the relevant controller or expression state
-before opening its command gate. The switch publishes the read-back after the
-transition, including the preceding state when an SDK call fails.
-
-The body torque switch remains separate from `body_motion_enabled`. The former is
-live availability; the latter continues to decide at construction whether
-predictive gaze allocates and commands body yaw.
+The coordinator is injected into the entity setters and every motion-adapter
+entry point rather than copied into behavior. Its per-group critical sections,
+measured-state hooks and controller-reset callbacks are the implementation seam
+for REQ-094's transition scenarios. The body coordinator remains separately
+wired from the restart-bound `body_motion_enabled` construction input.
 
 #### Live groundstation URL
 
 Add the text entity outside the vendored directory and route it through
 `validate_session_url`, `OverrideStore` and the existing resolve-write-adopt
 configuration path. Refactor the remote branch of the perception source into one
-lifecycle owner that can serialize replacement, invalidate the old generation,
-close its `RemotePerception` and `SessionClient`, then create and start the
-replacement.
+serialized lifecycle owner around `RemotePerception` and `SessionClient`, with an
+explicit generation token at the result-publication boundary.
 
-The existing credential, capability set, frame cadence, staleness and reconnect
-policy carry into the replacement. A local-only selection persists the URL but
-has no remote source to swap. Remote-with-local-fallback continues using its
-existing fallback rules during the bounded replacement gap. Failed validation,
-persistence, close or construction leaves one known effective URL and never two
-active remote producers.
+That owner reuses the existing client builder for credential, capability, cadence,
+staleness and reconnect inputs instead of constructing a second session path. The
+local-only composition keeps persistence available without manufacturing a
+remote instance. Focused tests inject construction, close and publication seams
+to exercise the REQ-095 scenarios without sockets.
 
 #### Bounded MJPEG feed
 
-Inject a groundstation feed registry from `service.py` into the session and HTTP
-surfaces without importing capabilities across their enforced boundary. After the
-pipeline's existing JPEG validation succeeds, publish the original compressed
-payload to that session's one latest-frame slot before capability processing
-continues. The decoded image remains the single input shared by capabilities.
+Inject a groundstation feed registry from `service.py` into the session, pipeline
+and HTTP surfaces without importing capabilities across their enforced boundary.
+Its state contains session-cardinality metadata, one global optional JPEG payload,
+a monotonic frame revision and the fixed viewer semaphore — never a mapping from
+session keys to JPEG values.
 
-Session authentication and finalization register and unregister feed eligibility.
-`/stream.mjpg` snapshots the exactly-one selection, reserves one of four viewer
-slots, emits multipart JPEG parts from successive latest-slot generations, and
-releases the slot from response cancellation and session invalidation alike.
-Zero eligible sessions, ambiguous sessions and capacity exhaustion receive
-separate fixed responses. No viewer owns a frame queue or producer task.
+Authentication and finalization callbacks update cardinality and invalidate the
+global payload. The post-validation pipeline callback may replace that payload
+only for the sole active session. The `/stream.mjpg` response reads successive
+revisions under a response-scoped viewer reservation. These are implementation
+seams for REQ-096–098; their scenarios own the observable outcomes.
 
 Update `docs/setup/groundstation.md`, `docs/setup/home-assistant.md` and the
 relevant operations guidance with the trusted-network warning, standard MJPEG
@@ -184,7 +171,7 @@ Only commands and output actually observed are transcribed.
     reconnect work indistinguishable between generations.
   - **Alternatives considered:** Restarting the satellite, changing an internal
     URL field in place, or overlapping old and new clients during handoff.
-- **Decision:** Reuse the original validated JPEG in one latest-only slot.
+- **Decision:** Reuse the original validated JPEG in one global latest-only value.
   - **Why:** The robot already spent the capture and compression cost. Another
     connection, decode, encode or queue adds load and latency without improving
     what Home Assistant receives.
@@ -221,8 +208,8 @@ Only commands and output actually observed are transcribed.
 - No individual Stewart-actuator or left/right antenna control.
 - No robot-link wire-format change, second robot client or inbound robot listener.
 - No video authentication in this change.
-- No frame recording, retention beyond the live slot, disk write, content log,
-  stream cache or transcode.
+- No frame recording, retention beyond the sole global live JPEG, disk write,
+  content log, stream cache or transcode.
 - No custom Home Assistant component, native satellite camera entity,
   integration-registry mutation or still-image endpoint.
 - No arbitrary stream selection when multiple eligible robot sessions exist.
@@ -257,17 +244,18 @@ Only commands and output actually observed are transcribed.
   - [ ] Run the focused satellite suites and repository checks required above
 
 - [ ] Add the bounded MJPEG feed, documentation and final traceability
-  - [ ] Add a session-scoped latest-original-JPEG registry whose eligibility
-        begins after authentication and valid-frame receipt and ends in every
-        session finalization path
+  - [ ] Add one global optional latest-original-JPEG value beside session
+        cardinality metadata, with no per-session JPEG mapping
+  - [ ] Wire authentication and finalization to clear the global value on zero or
+        multiple sessions and require a post-ambiguity validated frame
   - [ ] Publish only payloads that pass existing JPEG validation, without another
         robot connection, stream-only decode or re-encode, capability blockage or
         per-viewer frame queue
   - [ ] Serve `/stream.mjpg` with standard multipart JPEG framing, no-store
-        responses, exactly-one-session selection and four bounded viewer slots
-  - [ ] Cover zero, one and multiple sessions, malformed frames, slow viewers,
-        replacement, disconnect, cancellation, capacity and application shutdown
-        using unit fakes and marked in-process transport tests
+        responses and four bounded viewer slots
+  - [ ] Cover zero, one and multiple sessions, post-ambiguity freshness, malformed
+        frames, slow viewers, replacement, disconnect, cancellation, capacity and
+        application shutdown using unit fakes and marked in-process transport tests
   - [ ] Prove logs, metrics, traces, errors and deployment storage contain no frame
         body, credential or installation identifier
   - [ ] Update setup and operations runbooks for the four entities, standard Home
@@ -283,25 +271,21 @@ Only commands and output actually observed are transcribed.
 
 ## Verification Stages
 
-1. **Deterministic motor acceptance:** exercise each group independently and in
-   concurrent command boundaries, including failed disable, failed enable,
-   measured-state failure, safe hold, terminal release and application shutdown.
-2. **Deterministic source acceptance:** exercise valid and invalid URL writes,
-   durable override failure, ordered replacement, rapid superseding writes,
-   stale old-generation results, reconnect and local fallback.
-3. **Deterministic feed acceptance:** exercise all eligibility cardinalities,
-   valid and malformed JPEGs, frame replacement under a stalled consumer, viewer
-   exhaustion, cancellation, session loss and service shutdown, then drive the
-   endpoint over an in-process HTTP transport.
-4. **Staged live verification:** first verify entity identity and effective-state
-   read-back without moving hardware; then verify one motor group at a time with
-   an abort path; then replace the groundstation URL and prove only the new source
-   advances; finally configure Home Assistant's standard MJPEG integration and
-   observe one feed. Stop and restore the released artifact and configuration on
-   any safety, lifecycle, identity or privacy threshold breach.
-5. **Evidence:** record only scrubbed outcomes and aggregate counters. Raw frames,
-   credentials, addresses, host identity and invented transcripts do not enter
-   the repository.
+1. **Deterministic motor acceptance:** drive every REQ-093 and REQ-094 scenario
+   through fake SDK scheduling, transition failures, controller faults and
+   terminal lifecycle boundaries.
+2. **Deterministic source acceptance:** drive every REQ-095 scenario through
+   injected validation, durable-storage, construction, close and late-publication
+   seams.
+3. **Deterministic feed acceptance:** drive every REQ-096–098 scenario through
+   fake session cardinality and frame revisions, then verify protocol framing and
+   cancellation over a marked in-process HTTP transport.
+4. **Staged live verification:** verify the four entities without motion first,
+   proceed one motor group at a time with an abort path, replace the groundstation,
+   then configure the standard MJPEG integration. Restore the released artifact
+   and configuration on any predeclared threshold breach.
+5. **Evidence:** apply REQ-098 and the repository's runbook scrubbing convention
+   to every recorded outcome; leave unrun hardware steps marked pending.
 
 ## Open Questions
 
