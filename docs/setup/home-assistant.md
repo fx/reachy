@@ -449,8 +449,18 @@ What to expect once it is added, and what each behaviour is:
 
 The picture is the newest frame rather than a smooth recording: one frame is held
 for the whole service and each new one replaces it, so a viewer that falls behind
-skips forward instead of playing a backlog. Nothing is recorded, on the
-groundstation or anywhere else.
+skips forward instead of playing a backlog.
+
+**The groundstation records nothing** — it holds that one frame in memory, writes
+no frame to disk, has no volume to write one to, and marks every response
+`no-store`. What it cannot do is bind the far end. **Home Assistant is a separate
+recipient**, and what it and your browser do with frames they have been given is
+theirs to decide: a `no-store` header is a request, not an enforcement. If you
+add recording, snapshots or a camera-history integration in front of this camera,
+those frames are retained by Home Assistant on Home Assistant's terms — check
+that before pointing anything at it, because
+[the groundstation runbook](groundstation.md#8-look-at-what-the-robot-is-sending)
+describes bounds that end at the response.
 
 **If you run two robots against one groundstation**, this camera is not the
 feature to use — the feed refuses ambiguity rather than picking a robot by

@@ -501,9 +501,19 @@ open and then closed does not cost anything. Home Assistant is one viewer.
 
 **Latest only, never a backlog.** One frame is held for the whole service, and a
 new one replaces it. A viewer that reads slowly gets the current frame next
-rather than working through the ones it missed, and nothing is written to disk,
-cached or recorded — `cache-control: no-store` on every response is part of that,
-and the container has no writable filesystem to record to in any case.
+rather than working through the ones it missed.
+
+**The service keeps nothing, and that is a claim about the service.** It holds
+that one frame in memory, writes no frame to disk, and has no volume to write one
+to — the container's root filesystem is read-only and its only writable path is a
+16 MiB `tmpfs` on `/tmp` that nothing here writes a frame into. Every response is
+`cache-control: no-store`, which asks a cache, a proxy or a browser not to retain
+one. **Asking is all it is.** Once a frame has been sent, what the recipient does
+with it is outside this boundary: Home Assistant, a browser and anything between
+them are free to buffer, cache or record what they were given, and no header
+stops them. That is the reason [step 9](#9-decide-what-the-network-may-reach) is a
+decision — who can reach this port is the last control you have over where these
+frames end up.
 
 ## 9. Decide what the network may reach
 
