@@ -94,8 +94,9 @@ not restated here. What implementing them requires of this change:
   three switch entities.
 - The second implementation pull request MUST align every URL surface to one
   255-character validation contract, add the legacy-overlong refusal, and route
-  the settings page and entity through one serialized replacement and compensation
-  owner before making the URL writable at run time.
+  the settings page and entity through one stable replacement owner for source
+  construction, serialization, compensation and bounded reconstruction before
+  making the URL writable at run time.
 - The third implementation pull request MUST add an explicit JPEG-format gate
   before the feed observer and MUST complete operator documentation, requirement
   traces, Markdown registration, snapshot regeneration and final status/count
@@ -156,14 +157,29 @@ retires the old generation, starts the candidate, and only then uses the store's
 atomic file replacement as the commit point. It publishes the candidate after
 that commit.
 
-Every earlier failure leaves the old durable file untouched and restores or keeps
-one old-generation source. A commit failure closes the candidate and rebuilds the
-old source from the preserved resolution. If source reconstruction itself fails,
-the publication gate admits neither generation, the old URL remains both durable
-and the entity's effective read-back, remote health is unavailable, and the
-existing bounded supervisor retries that source. This is a compensating state
-machine, not an atomic transaction across filesystem and network. The local-only
-composition uses the same durable path without manufacturing a remote instance.
+The replacement owner is stable even when no `RemotePerception` exists. It retains
+the source factory, preceding resolution, optional current source, generation and
+optional reconstruction task. Every earlier failure leaves the old durable file
+untouched and restores or keeps at most one old-generation source. A commit failure
+closes the candidate and attempts to rebuild the old source from the retained
+factory and resolution.
+
+Construction failure belongs to that owner because the connectivity supervisor
+cannot supervise an object that does not exist. The owner starts one bounded,
+capped and cancellable reconstruction retry state; it closes any partial source
+before the next attempt and keeps every failed generation ineligible. Once
+construction succeeds, it installs exactly one source and hands that object to the
+existing connectivity supervisor for ordinary connect/reconnect behavior. Retry
+exhaustion records the terminal reconstruction outcome whose effective URL,
+health and fallback behavior are owned by REQ-095.
+
+A later operator write acquires the same serialization boundary, cancels and
+awaits reconstruction, advances generation and only then prepares its candidate.
+Shutdown cancels and awaits reconstruction before source cleanup. Generation
+checks reject a factory result racing with cancellation, so neither supersession
+nor shutdown can install a late client. This is a compensating state machine, not
+an atomic transaction across filesystem and network. The local-only composition
+uses the same owner and durable path without manufacturing a remote instance.
 
 #### Bounded MJPEG feed
 
@@ -220,14 +236,16 @@ Only commands and output actually observed are transcribed.
     impossible.
   - **Alternatives considered:** Truncation, a shorter entity-only limit, hashing,
     or omitting the entity when the current value is too long.
-- **Decision:** Replace the entire remote source before an atomic durable commit,
-  with explicit compensation to the preserved source and value.
+- **Decision:** Give one stable replacement owner the source factory, serialized
+  transition, atomic durable commit, compensation and bounded reconstruction
+  retry state.
   - **Why:** Persisting first can make restart select a candidate that runtime
-    adoption rejected, while mutating a client conflates sequence, agreement,
-    reconnect and cached-result identity across destinations.
-  - **Alternatives considered:** Persist-before-adopt, an asserted atomic
-    filesystem/network transaction, restart-only adoption, in-place URL mutation,
-    or overlapping clients.
+    adoption rejected, while a connectivity supervisor cannot reconstruct an
+    object that failed before it existed. One owner prevents construction,
+    cancellation and generation eligibility from racing.
+  - **Alternatives considered:** Persist-before-adopt, delegating construction to
+    the existing connectivity supervisor, unbounded retry, an asserted atomic
+    filesystem/network transaction, in-place URL mutation, or overlapping clients.
 - **Decision:** Reuse one global latest-only original payload after explicit JPEG
   signature validation and successful decode.
   - **Why:** The robot already spent the capture and compression cost, and the
@@ -324,17 +342,26 @@ Only commands and output actually observed are transcribed.
         without truncation, naming their source and actionable replace/remove path
   - [ ] Add the stable Configuration text entity using the shared session-URL
         validator and settings store
-  - [ ] Route both the settings page and entity through one serialized replacement
-        owner with preserved preceding resolution, source and generation
+  - [ ] Route both the settings page and entity through one stable serialized
+        replacement owner retaining the source factory, preceding resolution,
+        optional source, generation and optional reconstruction task
   - [ ] Prepare and start the candidate before atomic durable commit, publish only
         after commit, and compensate every failure to one preceding effective URL
         and at most one eligible source
+  - [ ] Own bounded, capped and cancellable reconstruction retries above the
+        connectivity supervisor; close partial sources and hand off exactly one
+        successfully constructed source for ordinary reconnect behavior
+  - [ ] Serialize a later operator write with cancellation and awaiting of prior
+        reconstruction, and cancel/await the same state during shutdown so no late
+        factory result installs a client
   - [ ] Preserve single-client reconnect, staleness and local-fallback behavior
-        across successful, refused, compensated and cancelled replacements
+        across successful, refused, compensated, exhausted and cancelled recovery
   - [ ] Cover boundary lengths 255/256/512, both legacy sources, no truncation,
-        preparation/close/start/commit/compensation failures, rapid writes, late
-        results, restart/runtime agreement and both UI read-backs without sockets
-        or a Home Assistant instance
+        preparation/close/start/commit failures, repeated reconstruction failures
+        followed by success, retry exhaustion, partial-source cleanup, operator
+        supersession, shutdown cancellation, late factory results, rapid writes,
+        restart/runtime agreement and both UI read-backs without sockets or a Home
+        Assistant instance
   - [ ] Update configuration and operator documentation for the new limit,
         migration refusal, transaction ordering and remediation
   - [ ] Run the focused satellite suites and repository checks required above
@@ -377,8 +404,10 @@ Only commands and output actually observed are transcribed.
    controller faults and terminal lifecycle boundaries.
 2. **Deterministic source acceptance:** drive every REQ-095 scenario at the
    255/256/512 boundaries and through both legacy sources, candidate preparation,
-   source close/start, atomic file commit, compensation and late-publication
-   seams, asserting runtime/restart/read-back agreement after each outcome.
+   source close/start, atomic file commit, repeated reconstruction failure then
+   success, exhaustion, partial cleanup, operator supersession, shutdown
+   cancellation and late factory completion, asserting runtime/restart/read-back
+   agreement, local fallback and zero client overlap after each outcome.
 3. **Deterministic feed acceptance:** drive every REQ-096–098 scenario with actual
    JPEG, malformed JPEG and decodable non-JPEG fixtures through fake session
    cardinality and frame revisions, then verify protocol framing and cancellation

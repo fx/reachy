@@ -136,8 +136,8 @@ refuses a legacy overlong value with actionable remediation, and changes an
 accepted URL immediately through a compensating transition in which the durable
 value, sole eligible remote source and effective read-back advance together only
 after adoption succeeds or remain together on the preceding value after any
-failure, while preserving local fallback and bounded reconnection and excluding
-overlap and late results.
+failure, while making source restoration bounded and cancellable, preserving
+local fallback and bounded reconnection, and excluding overlap and late results.
 
 #### Scenario: Either configuration surface changes groundstations
 
@@ -156,6 +156,30 @@ overlap and late results.
 - **THEN** compensation leaves the preceding URL as both restart and runtime
   configuration and effective read-back, restores at most its one remote source,
   and reports remote health unavailable if that source cannot yet be rebuilt
+
+#### Scenario: Repeated source restoration fails and later succeeds
+
+- **GIVEN** compensation preserved the preceding effective URL but could not
+  construct its remote source
+- **WHEN** bounded restoration attempts fail repeatedly and a later attempt
+  succeeds
+- **THEN** the satellite remains disconnected with local fallback available until
+  exactly one restored source resumes the existing reconnect behavior
+
+#### Scenario: Source restoration reaches its bound
+
+- **GIVEN** compensation cannot reconstruct the preceding remote source
+- **WHEN** every bounded restoration attempt fails
+- **THEN** the effective URL remains the preceding durable value, remote health
+  remains unavailable, local fallback remains available and no unbounded recovery
+  work or overlapping client continues
+
+#### Scenario: Source restoration is superseded or shut down
+
+- **GIVEN** source restoration is waiting or attempting construction
+- **WHEN** a later operator request begins or application shutdown starts
+- **THEN** the pending restoration is cancelled before the new transition or
+  shutdown completes and cannot publish a late source afterwards
 
 #### Scenario: A legacy overlong URL is loaded
 
@@ -322,16 +346,30 @@ the other shared half of the URL contract. Existing 256–512-character environm
 or persisted values are rejected at startup with source-specific remediation;
 none is truncated or silently hidden from Home Assistant.
 
-The settings page and Home Assistant entity call one serialized replacement
-operation. It validates and prepares a candidate while preserving the preceding
-durable value and source, retires the preceding source, starts the candidate, and
-only then atomically replaces the durable settings file and publishes the new
-effective value. Failure before durable replacement leaves that file untouched.
-Failure during its atomic replacement closes the candidate and reconstructs the
-preceding sole source from the preserved value. Compensation failure closes all
-remote publication and reports unavailable rather than allowing runtime and
-restart configuration to disagree. This is explicit ordering and compensation,
-not a claim of an atomic filesystem-and-network transaction.
+The settings page and Home Assistant entity call one long-lived replacement owner.
+It retains the source factory, preceding effective configuration, optional current
+source, transition generation and at most one reconstruction task. A serialized
+operation validates and prepares a candidate, retires the preceding source, starts the
+candidate, and only then atomically replaces the durable settings file and
+publishes the new effective value. Failure before durable replacement leaves that
+file untouched.
+
+Failure during durable replacement closes the candidate and asks the same owner
+to reconstruct the preceding source from its retained factory and configuration.
+If construction fails before a `RemotePerception` exists, the owner — not the
+connectivity supervisor — enters a bounded, cancellable reconstruction state.
+Each failed partial object is closed before another attempt; no generation becomes
+eligible until one complete source is installed. Successful construction hands
+that source to its ordinary connectivity supervisor, which then owns connection
+and reconnection rather than construction.
+
+A later operator command serializes through the owner, cancels and awaits the old
+reconstruction state, then starts its own transition. Shutdown does the same
+cancellation without starting another source. Exhaustion leaves the preceding URL
+as durable and effective read-back, remote health unavailable and local fallback
+available; a later command or restart may begin a new bounded attempt. This is
+explicit ordering and compensation, not a claim of an atomic filesystem-and-
+network transaction.
 
 ### MJPEG feed
 
