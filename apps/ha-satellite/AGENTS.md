@@ -3,8 +3,10 @@
 The robot-side ESPHome voice satellite for Home Assistant. Distribution
 `reachy-mini-ha-satellite`, import name `reachy_mini_ha_satellite`.
 
-**Specs:** [ha-satellite](../../docs/specs/ha-satellite/) and
-[gaze-control](../../docs/specs/gaze-control/).
+**Specs:** [ha-satellite](../../docs/specs/ha-satellite/),
+[gaze-control](../../docs/specs/gaze-control/) and the proposed
+[Home Assistant Configuration and Camera Feed](../../docs/specs/home-assistant-configuration-and-camera-feed/)
+contract.
 **Fills these in:**
 [0011](../../docs/changes/0011-satellite-esphome-vendoring.md) (done),
 [0012](../../docs/changes/0012-satellite-ports-and-adapters.md) (done),
@@ -15,10 +17,21 @@ audible across a room, and that change's own Outcome section records the
 levels), and
 [0019](../../docs/changes/0019-predictive-gaze-and-coordinated-motion.md) (done,
 including deterministic acceptance evidence and the scrubbed staged-rollout
-outcome). Body motion remains restart-bound, false by default and a provisional
-opt-in because the rollout did not settle calibration or its shipping default.
-Both specs are registered in `.duvet/config.toml`; repository traceability covers
-all nine specs and all 92 requirements.
+outcome). The app is also one side of
+[0020](../../docs/changes/0020-home-assistant-configuration-and-camera-feed.md)
+(draft), which proposes live motor-group and groundstation entities plus the
+robot half of the camera-feed contract. Its motor switches are gated on a
+correlated daemon acknowledgement and physical read-back for every motor in a
+group; the current fire-and-forget SDK surface is not sufficient and no switch is
+exposed without that prerequisite and an initial confirmation. The existing
+switch wire remains Boolean: later failures retain the last-confirmed value and
+surface bounded diagnostics rather than inventing a third state. Body motion
+remains restart-bound, false by default and a provisional opt-in because the
+rollout did not settle calibration
+or its shipping default. The two implemented specs are registered in
+`.duvet/config.toml`; repository traceability covers all nine implemented specs
+and all 92 implemented requirements. The proposed spec remains unregistered
+until 0020 completes REQ-093–098.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.

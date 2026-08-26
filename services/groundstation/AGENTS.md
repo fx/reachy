@@ -3,14 +3,21 @@
 The off-robot service that hosts heavy computation as pluggable capabilities.
 Distribution `reachy-groundstation`, import name `reachy_groundstation`.
 
-**Spec:** [groundstation](../../docs/specs/groundstation/), with
-[perception](../../docs/specs/perception/) for the first capability.
+**Specs:** [groundstation](../../docs/specs/groundstation/), with
+[perception](../../docs/specs/perception/) for the first capability and the
+proposed
+[Home Assistant Configuration and Camera Feed](../../docs/specs/home-assistant-configuration-and-camera-feed/)
+contract for its operator video surface.
 **Filled in by:** [0004](../../docs/changes/0004-groundstation-session.md) —
 transport, session layer, capability registry, pipeline and observability —
 [0005](../../docs/changes/0005-perception-capability.md), which added the model
 runtime, the pinned model store and the perception capabilities, and
 [0006](../../docs/changes/0006-groundstation-images.md), which added the
-container image, its verification and the standalone deployment.
+container image, its verification and the standalone deployment. The proposed
+[0020](../../docs/changes/0020-home-assistant-configuration-and-camera-feed.md)
+(draft) adds one global latest-only MJPEG value for the sole authenticated
+session after explicit JPEG-format validation and successful decode; it does not
+change the robot-link wire contract.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.

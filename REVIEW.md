@@ -4,6 +4,12 @@
 
 ### Known false positives — do NOT report these
 
+**Spec and change statuses use different vocabularies.** Specs are `active` or
+`deprecated`; changes are `draft`, `in-progress` or `complete`. A proposed,
+unimplemented spec is correctly `active` while its sequencing change is `draft`.
+Do not report those values as contradictory or suggest a change-only status for a
+spec.
+
 **Wrapped list continuations are not code blocks.** Task lists in
 `docs/changes/` wrap at 80 columns with the continuation indented to 8 spaces.
 This renders as normal text — verified against GitHub's own renderer, which
@@ -11,15 +17,20 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** All nine specs and
-all 92 requirements are now registered in `.duvet/config.toml`, so `duvet report
---ci` and `duvet query -c implementation` check the complete requirement set.
-The distinction still matters: duvet also loads any specification an annotation
-points at before registration, which is why an older snapshot could contain more
-requirement text than the gate covered. That historical mismatch ended when 0015
-registered architecture and 0019 registered gaze-control with its final safety,
-diagnostics and deterministic acceptance evidence in place. Regeneration is
-byte-identical, and a green run is now evidence about all nine specs. See
+**`.duvet/snapshot.txt` records annotations, not coverage.** All nine
+implemented specs and all 92 implemented requirements are registered in
+`.duvet/config.toml`, so `duvet report --ci` and `duvet query -c implementation`
+check the complete implemented requirement set. The proposed Home Assistant
+configuration and camera-feed spec adds REQ-093–098 but is deliberately absent
+from both registration and snapshot until change 0020's final implementation
+pull request supplies its traces; do not report that proposal sequencing as a
+coverage defect. The distinction still matters: duvet also loads any
+specification an annotation points at before registration, which is why an older
+snapshot could contain more requirement text than the gate covered. That
+historical mismatch ended when 0015 registered architecture and 0019 registered
+gaze-control with its final safety, diagnostics and deterministic acceptance
+evidence in place. Regeneration is byte-identical for the registered corpus, and
+a green run is evidence about all nine implemented specs. See
 `.duvet/config.toml` for each registration rationale and for why annotations are
 written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
 
