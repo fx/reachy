@@ -61,6 +61,8 @@ if TYPE_CHECKING:
     from pyfakefs.fake_filesystem import FakeFilesystem
     from starlette.applications import Starlette
 
+    from reachy_mini_ha_satellite.web import OverrideMerge
+
 # Every character that changes shape when something escapes it. Never anybody's
 # — see the root AGENTS.md on what may enter a tracked file in a public
 # repository.
@@ -88,6 +90,9 @@ class RecordingHost:
         self.submitted: list[Mapping[str, str]] = []
         self.refusal: ConfigurationError | None = None
         self.live: Resolution | None = None
+        # What the other surface commits between the request arriving and the
+        # write beginning, or `None` for a write nothing raced.
+        self.interleaved: Mapping[str, str] | None = None
         self.stops = 0
         self.events: tuple[dict[str, object], ...] = (
             public_controller_diagnostic_event(),
@@ -124,17 +129,18 @@ class RecordingHost:
         """
         return self.live
 
-    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
         """Persist and adopt the way an application with no address owner does.
 
         The real application routes this through
         `groundstation_url.GroundstationUrlOwner`, which is covered by
         `test_satellite_groundstation_url.py`. What this page owes is that it
-        hands the whole submission to whatever the application says the order
-        is, which this records.
+        hands the *computation* to whatever the application says the order is,
+        and that the file it computes from is the one the write finds — which
+        is what `interleaved` makes checkable.
 
         Args:
-            wanted: The complete set of overrides to store.
+            merge: What to make of the stored overrides.
 
         Returns:
             The settings in effect afterwards.
@@ -144,12 +150,20 @@ class RecordingHost:
                 a replacement the real owner refused or compensated. Nothing is
                 written in that case, which is what the durable file records.
         """
+        store = _store()
+        if self.interleaved is not None:
+            # Home Assistant's own control, committing between the request
+            # arriving and this write beginning. The real owner's lock is what
+            # orders the two; here it is simply written first, so a merge
+            # computed from a pre-lock snapshot would not have seen it.
+            store.save(self.interleaved)
+        wanted = merge(store.load())
         self.submitted.append(dict(wanted))
         if self.refusal is not None:
             raise self.refusal
         return apply_settings_change(
             wanted,
-            store=_store(),
+            store=store,
             environ=self.environ,
             apply_live=self.apply_live,
         )
@@ -1531,6 +1545,95 @@ class TestTheGroundstationAddressOnThePage:
         assert _store().load() == {}
         assert host.owner.effective_url == ENVIRONMENT[f"{ENV_PREFIX}GROUNDSTATION_URL"]
 
+    @pytest.mark.asyncio
+    async def test_a_write_that_lands_first_is_merged_against_not_over(self) -> None:
+        """The page's map is computed from the file the write finds, not the request.
+
+        Home Assistant's control writes the same file. A map computed when the
+        POST arrived would be a map from before that write, and committing it
+        would silently drop whatever it had pinned — here a credential the page
+        never retyped and therefore carries over from the stored overrides.
+        """
+        host = RecordingHost()
+        host.interleaved = {"groundstation_credential": "rotated-elsewhere"}
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app(host)) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, idle_seconds="9.0"),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 303
+        assert host.submitted == [
+            {"groundstation_credential": "rotated-elsewhere", "idle_seconds": "9.0"},
+        ]
+        assert _store().load()["groundstation_credential"] == "rotated-elsewhere"
+
+
+class TestAPageWithNothingBehindIt:
+    """`create_app(application=None)` is supported, and is not a way round the owner."""
+
+    @pytest.mark.asyncio
+    async def test_an_address_change_is_refused_rather_than_persisted(self) -> None:
+        """Persisting one nothing adopted is what the next start would read.
+
+        There is no running source here to open a session at the new address,
+        and `apply_settings_change` persists first — which for this one setting
+        is exactly the ordering `groundstation_url` exists to remove. Writing it
+        anyway would be a second write path around the owner.
+        """
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app()) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(
+                    settings,
+                    groundstation_url="ws://192.0.2.30:8080/v1/session",
+                ),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 400
+        assert "cannot be changed from here" in response.text
+        assert _store().load() == {}
+
+    @pytest.mark.asyncio
+    async def test_every_other_setting_still_saves(self) -> None:
+        """The refusal is about the one setting, not about the mode."""
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app()) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, idle_seconds="9.0"),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 303
+        assert _store().load() == {"idle_seconds": "9.0"}
+
+    @pytest.mark.asyncio
+    async def test_resubmitting_the_address_unchanged_is_not_a_change(self) -> None:
+        """An ordinary save carries every field, this one included, and still saves."""
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app()) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(
+                    settings,
+                    groundstation_url=ENVIRONMENT[f"{ENV_PREFIX}GROUNDSTATION_URL"],
+                    idle_seconds="9.0",
+                ),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 303
+        assert _store().load() == {"idle_seconds": "9.0"}
+
 
 class _OwnedHost(RecordingHost):
     """A host whose submissions go through a real `GroundstationUrlOwner`.
@@ -1554,17 +1657,16 @@ class _OwnedHost(RecordingHost):
             apply_live=self.apply_live,
         )
 
-    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
-        """Hand the submission to the owner, as the application does.
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
+        """Hand the computation to the owner, as the application does.
 
         Args:
-            wanted: The complete set of overrides to store.
+            merge: What to make of the stored overrides.
 
         Returns:
             The settings in effect afterwards.
         """
-        self.submitted.append(dict(wanted))
-        return await self.owner.submit(wanted)
+        return await self.owner.submit_merged(merge)
 
 
 async def _no_remote_source(settings: Settings) -> None:

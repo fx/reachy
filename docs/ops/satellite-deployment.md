@@ -378,6 +378,14 @@ remote health reads unavailable and local detection keeps working. The next
 submission tries the close once more; when it succeeds, that submission proceeds
 normally.
 
+**The address is changeable only while the application is running.** The
+settings interface can also be served with nothing behind it, and in that mode
+it refuses an address change rather than persisting one that nothing has opened
+a session at — the next start would read a value no running application ever
+accepted. Every other setting still saves. Set
+`REACHY_SATELLITE_GROUNDSTATION_URL` in the drop-in instead, or change it from
+the running satellite.
+
 **A submission that would leave no groundstation source at all is refused.**
 Whether a session exists is decided by `REACHY_SATELLITE_FACE_TRACKING_ENABLED`
 and `REACHY_SATELLITE_DETECTION_SOURCE`, both of which take effect at the next

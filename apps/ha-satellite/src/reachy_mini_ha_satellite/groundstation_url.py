@@ -37,6 +37,16 @@ to start a client, write the durable file and publish an address after the
 application had begun releasing the chain. Losing the check compensates —
 closing whatever was built — rather than proceeding.
 
+**And the condition each check asks about is invalidated before the await, not
+after.** A check placed after an await is worth nothing if nothing could have
+made it true by then, and cancellation is exactly that case: `cancel` requests
+and does not compel, so a restoration that swallowed its own `CancelledError`
+would run on and find the generation it started under still current — the
+canceller being still inside the very await that would have advanced it.
+`_cancel_restoration` therefore advances the generation *first*. The structural
+half is `_unwanted`, which also refuses to install over a delegate that already
+exists, because installing replaces and would strand a live client.
+
 **An unconfirmed close is unavailability, not retirement.** A source whose
 `aclose` raised may still hold a session, so it is recorded as outstanding and
 nothing else is built or installed until it is gone. One further close is
@@ -54,11 +64,13 @@ off the factory's own answer — no candidate while one is running — rather th
 off a list of the settings that produce it, which is a list that goes stale
 without anything noticing.
 
-**One lock, and the merge happens inside it.** The settings page submits a whole
-form and Home Assistant's control submits one setting, so the control's merge
-against the stored file is performed here rather than by the caller: two writers
-computing a merge from a copy read before the lock is how one of them silently
-drops the other's setting.
+**One lock, and every read of the durable file happens inside it.** The settings
+page submits a whole form and Home Assistant's control submits one setting, and
+*neither* computes what to store before this owner has the lock: the page hands
+over a merge (`submit_merged`) and the control hands over an address
+(`submit_url`), and the file is read here in both cases. Two writers computing a
+map from a copy read before the lock is how one of them silently drops the
+other's setting, whichever commits first.
 
 This is compensation, not a transaction. A filesystem and a network cannot be
 committed together, and claiming they can is how the claim stops being checked.
@@ -420,12 +432,42 @@ class GroundstationUrlOwner:
                 with contextlib.suppress(Exception):
                     self._publish()
 
-    async def submit(self, wanted: Mapping[str, str]) -> Resolution:
-        """Apply one complete set of overrides, in the one order that is safe.
+    async def submit_merged(
+        self,
+        merge: Callable[[Mapping[str, str]], Mapping[str, str]],
+    ) -> Resolution:
+        """Apply whatever `merge` makes of the overrides, read under the lock.
 
-        The settings page's write path. Serialized against every other
-        submission and against shutdown, so rapid successive writes queue rather
-        than interleave.
+        The settings page's write path. It hands over the *computation* rather
+        than its result because a complete set of overrides computed from a copy
+        of the file read before the lock is a set that silently drops whatever
+        the other surface committed in between — and both surfaces write this
+        one file now. Reading here is what makes the read, the merge and the
+        commit one serialized operation.
+
+        Args:
+            merge: What to make of the stored overrides. Called once, with the
+                file as it is at the moment this operation begins.
+
+        Returns:
+            The settings in effect after the change.
+
+        Raises:
+            ConfigurationError: For everything `submit` raises, and for stored
+                overrides that no longer parse.
+        """
+        async with self._lock:
+            if self._closed:
+                raise ConfigurationError(_OVERTAKEN_MESSAGE)
+            return await self._apply(merge(self._store.load()))
+
+    async def submit(self, wanted: Mapping[str, str]) -> Resolution:
+        """Apply one complete set of overrides that depend on nothing stored.
+
+        Serialized against every other submission and against shutdown, so
+        rapid successive writes queue rather than interleave. A caller whose set
+        is derived from the stored overrides uses `submit_merged` instead —
+        this one is for a set that is already complete on its own terms.
 
         Args:
             wanted: The complete set of overrides to store, by setting name.
@@ -533,22 +575,33 @@ class GroundstationUrlOwner:
         same backoff — and it starts by cancelling whatever is already running,
         so repeated saves cannot accumulate reconstruction states.
         """
-        if self.remote_available:
+        if self._unable_to_restore():
             return
         await self._cancel_restoration()
-        # The same post-await checks `_replace` makes, for the same reason.
-        # `_superseded` against the current generation is the "has shutdown
-        # begun" question here: no later write can be in flight, because this
-        # runs with the lock held.
-        if self._superseded(self._generation):
+        # Re-asked, not asked once at the top. Both awaits below can change the
+        # answer: cancelling awaits the restoration task, and settling awaits a
+        # close, and a source can be installed while either runs. Building
+        # another one then would be a second client with nothing having retired
+        # the first — the invariant this owner exists to hold.
+        if self._unable_to_restore():
             return
         if self._outstanding and not await self._settle_outstanding():
             self._report_outstanding()
             return
-        if self._superseded(self._generation):
+        if self._unable_to_restore():
             return
         self._generation += 1
         await self._restore_preceding(self._generation)
+
+    def _unable_to_restore(self) -> bool:
+        """Whether beginning a restoration would be wrong right now.
+
+        Returns:
+            True when shutdown has begun, or when a source is already installed
+            — which is what a restoration is for, so one that exists is the
+            answer rather than a reason to build another.
+        """
+        return self._superseded(self._generation) or self.remote_available
 
     async def _replace(
         self,
@@ -822,11 +875,11 @@ class GroundstationUrlOwner:
                 # and there is none now, which is not a failure to retry.
                 return True
             self._partial = source
-            if self._superseded(generation):
+            if self._unwanted(generation):
                 return await self._abandon(source)
             if self._source.started:
                 await source.start()
-            if self._superseded(generation):
+            if self._unwanted(generation):
                 return await self._abandon(source)
             self._source.install(source)
             self._partial = None
@@ -847,6 +900,24 @@ class GroundstationUrlOwner:
                 return True
             return False
         return True
+
+    def _unwanted(self, generation: int) -> bool:
+        """Whether a rebuilt source must not become the one the chain answers from.
+
+        Wider than `_superseded` by one term, and the term is the structural
+        half of the guarantee: `ReplaceableRemoteSource.install` replaces its
+        delegate outright, so installing over a live one would detach a client
+        nothing then closes. Every restoration runs after the preceding source
+        was detached, so a delegate appearing while an attempt builds means
+        something else installed one — and this attempt is not it.
+
+        Args:
+            generation: The transition the attempt belongs to.
+
+        Returns:
+            True when the source must be closed rather than installed.
+        """
+        return self._superseded(generation) or self._source.delegate is not None
 
     def _superseded(self, generation: int) -> bool:
         """Whether a later write or shutdown has overtaken this attempt.
@@ -936,7 +1007,23 @@ class GroundstationUrlOwner:
         )
 
     async def _cancel_restoration(self) -> None:
-        """Stop reconstruction and close whatever it had already built."""
+        """Stop reconstruction and close whatever it had already built.
+
+        **The generation is advanced before the cancelled task is awaited**, and
+        the order is the point. `cancel` requests; it does not compel. A
+        restoration whose factory or start caught its own cancellation and
+        returned would run on to `_superseded` and find the generation it was
+        started under still current — because nothing had yet superseded it —
+        and the check meant to exclude that late source would start and install
+        it instead. Advancing first makes such a result stale *by construction*:
+        there is no window in which a resisted cancellation is still valid.
+
+        Every caller therefore gets the invalidation for free, which is what
+        makes this the class rather than three call sites: `_replace` claims a
+        further generation of its own afterwards, `_restore_if_unavailable`
+        does the same, and `aclose` needs no bump at all.
+        """
+        self._generation += 1
         restoration, self._restoration = self._restoration, None
         if restoration is not None:
             restoration.cancel()
@@ -970,7 +1057,9 @@ class GroundstationUrlOwner:
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 await requested
         async with self._lock:
-            self._generation += 1
+            # No generation bump of its own: `_cancel_restoration` advances it
+            # before it awaits anything, which is what makes a cancellation a
+            # source cannot resist.
             await self._cancel_restoration()
             # One last bounded attempt at whatever refused to close, so an
             # ordinary shutdown does not leave a session behind. Reported and

@@ -15,6 +15,7 @@ the workspace — see the root `AGENTS.md`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -38,7 +39,7 @@ from reachy_mini_ha_satellite.groundstation_url import (
 from reachy_mini_ha_satellite.ports import Detections, DetectionSource, SourceSelection
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from pyfakefs.fake_filesystem import FakeFilesystem
 
@@ -199,6 +200,55 @@ class GatedFactory(FakeFactory):
         """
         if len(self.asked) + 1 >= self.gate_from:
             await self.gate.wait()
+        return await super().__call__(settings)
+
+
+class ResistantFactory(FakeFactory):
+    """A factory whose cancellation, from one call on, does not stop it.
+
+    Not hypothetical. Anything a factory awaits may swallow `CancelledError` —
+    a client that cleans up on cancel and returns, a `wait_for` around a
+    shield — and the attempt then runs on with a live source in hand. It is the
+    case a post-await check cannot catch on its own, because at the moment it
+    asks "was I superseded?" nothing has yet superseded it: the canceller is
+    still inside the very await that would advance the generation.
+    """
+
+    def __init__(
+        self,
+        *results: FakeSource | Exception | None,
+        resist_on: int,
+    ) -> None:
+        """Queue what each call produces, and say which one resists.
+
+        Args:
+            results: As `FakeFactory` takes them.
+            resist_on: Which single call parks and survives its cancellation,
+                counting from one. Exactly one, because the call after it is
+                the *canceller's* own — the transition that is replacing this
+                attempt — and parking that one would hang the very write whose
+                behaviour is under test.
+        """
+        super().__init__(*results)
+        self.resist_on = resist_on
+        self.reached = asyncio.Event()
+
+    async def __call__(self, settings: Settings) -> FakeSource | None:
+        """Produce the next result, having survived any cancellation.
+
+        Args:
+            settings: The candidate configuration.
+
+        Returns:
+            The queued source, or `None`.
+        """
+        if len(self.asked) + 1 == self.resist_on:
+            self.reached.set()
+            # Never completes on its own, and swallows the cancellation that
+            # would otherwise end it. What follows is the source arriving after
+            # the canceller believed the attempt was over.
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
         return await super().__call__(settings)
 
 
@@ -1040,9 +1090,15 @@ class TestSupersessionAndShutdown:
         )
         await owner.aclose()
 
+        seen: list[Mapping[str, str]] = []
         with pytest.raises(ConfigurationError, match="shutting down"):
             await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        with pytest.raises(ConfigurationError, match="shutting down"):
+            # The page's path refuses before the file is even read: a merge run
+            # now would be one nothing could commit.
+            await owner.submit_merged(_records_and_adds(seen, idle_seconds="9.0"))
         assert owner.reserve_submission(SECOND_URL) is False
+        assert seen == []
         assert factory.asked == []
         assert stored(store) == {}
 
@@ -1351,6 +1407,197 @@ class TestShutdownDuringATransition:
         assert factory.asked == []
         assert owner._outstanding == []
         assert source.delegate is None
+
+
+class TestCancellationIsNotARequest:
+    """`cancel` asks; it does not compel, and the guard must not assume it does.
+
+    A restoration whose factory or start swallows its own `CancelledError` runs
+    on holding a live source. Checking `_superseded` after the await is not
+    enough on its own, because the canceller is *inside* that await: nothing has
+    superseded the attempt yet, so the check meant to exclude the late source
+    waves it through. The generation is therefore advanced before the
+    cancellation is awaited, which makes such a result stale by construction.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_write_discards_a_source_that_survived_its_cancellation(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The later write installs its own source and the late one is closed.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL, start_error=RuntimeError("refused"))
+        late = FakeSource(FIRST_URL)
+        third = FakeSource(THIRD_URL)
+        factory = ResistantFactory(
+            candidate,
+            RuntimeError("down"),
+            late,
+            third,
+            # The retry state's own attempt, which is the one a later write
+            # cancels — and the one that does not stop when it is told to.
+            resist_on=3,
+        )
+        owner, source, store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+            attempts=9,
+        )
+
+        with pytest.raises(ConfigurationError):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        # Yielded to rather than waited on: the attempt has to reach the factory
+        # before the cancellation can be the one it survives.
+        await _spin()
+        assert factory.reached.is_set()
+
+        await owner.submit({GROUNDSTATION_URL_SETTING: THIRD_URL})
+
+        assert late.starts == 0
+        assert late.closes == 1
+        assert source.delegate is third
+        assert owner.effective_url == THIRD_URL
+        assert stored(store)[GROUNDSTATION_URL_SETTING] == THIRD_URL
+
+    @pytest.mark.asyncio
+    async def test_shutdown_discards_a_source_that_survived_its_cancellation(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The same, from the terminal path, where nothing installs afterwards.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL, start_error=RuntimeError("refused"))
+        late = FakeSource(FIRST_URL)
+        factory = ResistantFactory(
+            candidate,
+            RuntimeError("down"),
+            late,
+            resist_on=3,
+        )
+        owner, source, store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+            attempts=9,
+        )
+
+        with pytest.raises(ConfigurationError):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        # Yielded to rather than waited on: the attempt has to reach the factory
+        # before the cancellation can be the one it survives.
+        await _spin()
+        assert factory.reached.is_set()
+
+        await owner.aclose()
+
+        assert late.starts == 0
+        assert late.closes == 1
+        assert source.delegate is None
+        assert stored(store) == {}
+
+    @pytest.mark.asyncio
+    async def test_a_rebuild_never_installs_over_a_live_source(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The structural half: installing replaces, so it must not replace a live one.
+
+        `ReplaceableRemoteSource.install` swaps its delegate outright, and a
+        delegate that appeared while an attempt was building means something
+        else installed one. Installing over it would detach a client nothing
+        then closes — two clients, by the one route no generation check sees.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        running = FakeSource(FIRST_URL)
+        late = FakeSource(FIRST_URL)
+        factory = FakeFactory(late)
+        owner, source, _store = build_owner(factory=factory, initial=running)
+
+        settled = await owner._install_fresh(
+            owner.resolution.settings,
+            owner._generation,
+        )
+
+        assert settled is True
+        assert source.delegate is running
+        assert running.closes == 0
+        assert late.starts == 0
+        assert late.closes == 1
+
+    @pytest.mark.asyncio
+    async def test_a_source_installed_while_cancelling_stops_a_second_rebuild(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """A resubmission's rebuild re-asks after every await, not once at the top.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        installed = FakeSource(FIRST_URL)
+        factory = FakeFactory(FakeSource(FIRST_URL))
+        owner, source, _store = build_owner(factory=factory, initial=None)
+
+        async def _installs_when_cancelled() -> None:
+            """Stand in for a restoration that outlives its own cancellation."""
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+            source.install(installed)
+
+        # Assigned rather than produced by a failed write: what is under test is
+        # what the resubmission does on finding a source, not how one got there.
+        owner._restoration = asyncio.get_running_loop().create_task(
+            _installs_when_cancelled(),
+        )
+        await _spin()
+
+        await owner._restore_if_unavailable()
+
+        assert factory.asked == []
+        assert source.delegate is installed
+
+    @pytest.mark.asyncio
+    async def test_a_source_installed_while_retrying_a_close_stops_a_rebuild(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """And after the other await too, which is a close that can take a while.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        stuck = FakeSource(FIRST_URL, close_error=RuntimeError("stuck"))
+        installed = FakeSource(FIRST_URL)
+        factory = FakeFactory(FakeSource(FIRST_URL))
+        owner, source, _store = build_owner(factory=factory, initial=None)
+        assert await owner._discard(stuck) is not None
+        stuck.close_error = None
+        stuck.close_gate = asyncio.Event()
+
+        retry = asyncio.get_running_loop().create_task(
+            owner._restore_if_unavailable(),
+        )
+        await _spin()
+        source.install(installed)
+        stuck.close_gate.set()
+        await retry
+
+        assert factory.asked == []
+        assert source.delegate is installed
+        assert owner._outstanding == []
 
 
 class TestAnUnconfirmedClose:
@@ -1709,6 +1956,60 @@ class TestOneWriterAtATime:
         assert source.delegate is third
 
     @pytest.mark.asyncio
+    async def test_an_interleaved_entity_write_survives_the_pages_save(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The other ordering: the entity commits first and the page merges after.
+
+        Here the entity's transition holds the lock, suspended closing the
+        source it retired, while the page's save arrives. The page's map must be
+        computed from the file the entity is about to leave behind, not from the
+        one it found on arrival — which is why the owner is handed the
+        computation rather than its result.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        running = FakeSource(FIRST_URL)
+        gate = asyncio.Event()
+        running.close_gate = gate
+        second = FakeSource(SECOND_URL)
+        owner, source, store = build_owner(
+            factory=FakeFactory(second),
+            initial=running,
+        )
+        store.save({"speaker_boost_percent": "150"})
+        seen: list[Mapping[str, str]] = []
+
+        assert owner.reserve_submission(SECOND_URL) is True
+        await _spin()
+        page = asyncio.get_running_loop().create_task(
+            owner.submit_merged(_records_and_adds(seen, idle_seconds="9.0")),
+        )
+        await _spin()
+        gate.set()
+        await page
+        await _drain(owner)
+
+        # What the page's merge was given: the entity's committed address, not
+        # the file as it stood when the save arrived.
+        assert seen == [
+            {
+                "speaker_boost_percent": "150",
+                GROUNDSTATION_URL_SETTING: SECOND_URL,
+            },
+        ]
+        assert stored(store) == {
+            "speaker_boost_percent": "150",
+            GROUNDSTATION_URL_SETTING: SECOND_URL,
+            "idle_seconds": "9.0",
+        }
+        assert owner.effective_url == SECOND_URL
+        assert source.delegate is second
+
+    @pytest.mark.asyncio
     async def test_resubmitting_the_effective_address_rebuilds_from_the_page(
         self,
         fs: FakeFilesystem,
@@ -2043,6 +2344,37 @@ async def _drain(owner: GroundstationUrlOwner) -> None:
     """
     for requested in tuple(owner._requested):
         await requested
+
+
+def _records_and_adds(
+    seen: list[Mapping[str, str]],
+    **changes: str,
+) -> Callable[[Mapping[str, str]], Mapping[str, str]]:
+    """Build a merge that records what it was given and adds to it.
+
+    Args:
+        seen: Where to record the stored overrides the merge was handed. What
+            it holds afterwards is the whole assertion: it is the file as of
+            the lock the write commits under.
+        changes: What the submission changes.
+
+    Returns:
+        The merge.
+    """
+
+    def _merge(previous: Mapping[str, str]) -> Mapping[str, str]:
+        """Record and extend one set of stored overrides.
+
+        Args:
+            previous: What the file held when the write began.
+
+        Returns:
+            The complete set to store.
+        """
+        seen.append(dict(previous))
+        return {**previous, **changes}
+
+    return _merge
 
 
 async def _spin(times: int = 6) -> None:

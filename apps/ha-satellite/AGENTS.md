@@ -184,22 +184,31 @@ deployment can get irreversibly wrong.
   the connectivity supervisor cannot supervise an object that does not exist.
   Anything that reaches around it, or a second `RemotePerception` alongside
   `ReplaceableRemoteSource`'s one delegate, is the overlap this ordering exists
-  to exclude. Four rules keep that true and each is enforced in the owner
+  to exclude. Five rules keep that true and each is enforced in the owner
   rather than at its call sites. **Every await inside the transition is
   followed by a validity check** before the next externally visible act, because
   `aclose` marks the owner closed before it takes the lock and shutdown
   therefore lands between two statements; losing the check closes what was built
-  rather than proceeding. **An unconfirmed close is unavailability, not
-  retirement** — a source whose `aclose` raised may still hold a session, so it
-  is recorded as outstanding, one further close is attempted at the next
-  transition, and nothing is built or installed until it is gone. **A candidate
-  that opens no session while one is running is refused**, decided from the
-  factory's answer rather than from a list of the settings that produce it, so a
-  save changing the address together with a restart-bound detection setting
-  cannot retire the running source into nothing and report success. And **the
-  entity's merge against the stored overrides happens under the owner's lock**,
-  because two surfaces write that file and a merge computed before the lock
-  drops whatever the other committed in between.
+  rather than proceeding. **And the condition each check asks about is
+  invalidated before the await, not after** — `cancel` requests rather than
+  compels, so `_cancel_restoration` advances the generation *first* and a
+  restoration that swallowed its own cancellation is stale by construction
+  instead of by a check that ran too early; `_unwanted` adds the structural
+  half, refusing to install over a delegate that already exists. **An
+  unconfirmed close is unavailability, not retirement** — a source whose
+  `aclose` raised may still hold a session, so it is recorded as outstanding,
+  one further close is attempted at the next transition, and nothing is built or
+  installed until it is gone. **A candidate that opens no session while one is
+  running is refused**, decided from the factory's answer rather than from a
+  list of the settings that produce it, so a save changing the address together
+  with a restart-bound detection setting cannot retire the running source into
+  nothing and report success. And **every read of the durable file happens under
+  the owner's lock**: the page hands over a merge (`submit_merged`) and the
+  entity hands over an address (`submit_url`), because two surfaces write that
+  file and a map computed before the lock drops whatever the other committed in
+  between — in whichever order they arrive. A page assembled with no owner
+  (`create_app(application=None)`) refuses an address change rather than
+  persisting one nothing adopted; every other setting still writes.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys
   a device on what it announces, so a derived default would be correct on a

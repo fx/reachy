@@ -3508,9 +3508,17 @@ class TestTheApplicationsSettingsPath:
         owner = _RecordingOwner()
         application.attach_groundstation(cast("Any", owner))
 
-        await application.apply_settings({"idle_seconds": "9.0"})
+        # A value already in the file, so the assertion below is about the merge
+        # having seen it rather than about the submission on its own.
+        owner.stored = {"speaker_boost_percent": "150"}
 
-        assert owner.submitted == [{"idle_seconds": "9.0"}]
+        await application.apply_settings(
+            lambda previous: {**previous, "idle_seconds": "9.0"},
+        )
+
+        assert owner.submitted == [
+            {"speaker_boost_percent": "150", "idle_seconds": "9.0"},
+        ]
 
     @pytest.mark.asyncio
     async def test_an_application_with_no_owner_refuses_rather_than_writing(
@@ -3524,7 +3532,7 @@ class TestTheApplicationsSettingsPath:
         )
 
         with pytest.raises(ConfigurationError, match="no settings owner"):
-            await application.apply_settings({"idle_seconds": "9.0"})
+            await application.apply_settings(lambda previous: dict(previous))
 
     @pytest.mark.asyncio
     async def test_shutdown_closes_the_owner_before_the_perception_chain(
@@ -3583,16 +3591,23 @@ class _RecordingOwner:
             order: Where to record being closed, for the ordering assertion.
         """
         self.submitted: list[Mapping[str, str]] = []
+        # What the merge is handed. The real owner reads this from the durable
+        # file under its own lock, which is the property that stops one surface
+        # committing a map computed before the other's write landed.
+        self.stored: Mapping[str, str] = {}
         self.order = order
         self.failure: Exception | None = None
 
-    async def submit(self, wanted: Mapping[str, str]) -> None:
-        """Record one submission.
+    async def submit_merged(
+        self,
+        merge: Callable[[Mapping[str, str]], Mapping[str, str]],
+    ) -> None:
+        """Record what one submission makes of the stored overrides.
 
         Args:
-            wanted: The complete set of overrides.
+            merge: What to make of them.
         """
-        self.submitted.append(dict(wanted))
+        self.submitted.append(dict(merge(self.stored)))
 
     async def aclose(self) -> None:
         """Record being closed, or fail as instructed.

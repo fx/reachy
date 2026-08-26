@@ -136,7 +136,7 @@ from reachy_mini_ha_satellite.ports import (
     SourceSelection,
 )
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
-from reachy_mini_ha_satellite.web import create_app
+from reachy_mini_ha_satellite.web import OverrideMerge, create_app
 from reachy_session_client import DEFAULT_BACKOFF, Backoff, Credential, SessionClient
 
 if TYPE_CHECKING:
@@ -731,17 +731,19 @@ class SatelliteApplication:
         owner = self._groundstation
         return None if owner is None else owner.resolution
 
-    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
-        """Apply one complete set of overrides, however they were submitted.
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
+        """Apply what a submission makes of the stored overrides.
 
         The settings page's one write path. It goes through the address owner
         rather than calling `config.apply_settings_change` directly, because a
         submission that changes the groundstation address must adopt before it
         persists — see that function's docstring for why, and
-        `groundstation_url` for the order.
+        `groundstation_url` for the order. The owner reads the file and applies
+        the merge inside its own lock, so a submission cannot commit a set of
+        overrides computed from a snapshot older than that lock.
 
         Args:
-            wanted: The complete set of overrides to store, by setting name.
+            merge: What to make of the stored overrides.
 
         Returns:
             The settings in effect after the change.
@@ -756,7 +758,7 @@ class SatelliteApplication:
         if owner is None:
             message = "this application has no settings owner attached"
             raise ConfigurationError(message)
-        return await owner.submit(wanted)
+        return await owner.submit_merged(merge)
 
     @property
     def services(self) -> tuple[Service, ...]:

@@ -69,6 +69,7 @@ from reachy_mini_ha_satellite.config import (
     apply_settings_change,
     canonical_string,
     configuration_report,
+    load_settings,
     resolved_configuration,
     setting_names,
     variable_for,
@@ -76,14 +77,24 @@ from reachy_mini_ha_satellite.config import (
 from reachy_mini_ha_satellite.web.render import CLEAR_PREFIX, render_settings_page
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from starlette.requests import Request
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from reachy_mini_ha_satellite.config import OverrideStore
 
-__all__ = ["SettingsHost", "base_form_values", "create_app"]
+__all__ = ["OverrideMerge", "SettingsHost", "base_form_values", "create_app"]
+
+# What a write hands to whoever owns the order: the overrides as they are when
+# the write begins, in; the complete set to store, out. A function rather than a
+# ready-made mapping because the read has to happen inside the operation that
+# commits, and this is the only shape that lets the page decide *what* to write
+# while the application decides *when* the file is read.
+#
+# A `type` statement rather than an assignment: `Callable` is imported for type
+# checking only, and an assigned alias would evaluate it at import time.
+type OverrideMerge = Callable[[Mapping[str, str]], Mapping[str, str]]
 
 # What a form submission is allowed to be. A settings page is not an upload
 # endpoint, and a body larger than this is either a mistake or an attempt.
@@ -94,6 +105,18 @@ _MAX_BODY_BYTES: Final = 64 * 1024
 # reliable half of the check below; `none` is what a typed address or a bookmark
 # produces.
 _OWN_ORIGIN: Final[frozenset[str]] = frozenset({"same-origin", "none"})
+
+# What a page serving with no application behind it says to an address change.
+# Every other setting still writes: what is missing is not the file but the
+# thing that adopts a new address before it is persisted, and persisting one
+# without that is how a robot restarts into a groundstation nothing accepted.
+_NO_OWNER_MESSAGE: Final = (
+    "the groundstation address cannot be changed from here: nothing is running "
+    "behind this page to open a session at the new address, and persisting one "
+    "that was never adopted would be what the next start read. Nothing was "
+    "written. Change it from the running application, or set "
+    "REACHY_SATELLITE_GROUNDSTATION_URL and start it."
+)
 
 
 class SettingsHost(Protocol):
@@ -134,8 +157,8 @@ class SettingsHost(Protocol):
         """
         ...
 
-    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
-        """Persist and adopt one complete set of overrides.
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
+        """Persist and adopt what `merge` makes of the stored overrides.
 
         Asked of the application rather than performed here, because the order
         depends on what changed: the groundstation address has to be adopted
@@ -144,8 +167,15 @@ class SettingsHost(Protocol):
         `config.apply_settings_change` instead, which is that same path for
         every setting whose adoption builds nothing.
 
+        **The computation is handed over, not its result.** Home Assistant's
+        own control writes the same file, so a set of overrides computed here
+        from a copy read before the application took its lock is a set that
+        drops whatever that control committed in between. The application reads
+        and merges inside the operation it commits under.
+
         Args:
-            wanted: The complete set of overrides to store, by setting name.
+            merge: What to make of the stored overrides, called once with the
+                file as it is when the write begins.
 
         Returns:
             The settings in effect after the change.
@@ -342,24 +372,43 @@ def create_app(
                 return live
         return current.resolution
 
-    async def _write(wanted: Mapping[str, str]) -> Resolution:
+    async def _write(merge: OverrideMerge) -> Resolution:
         """Persist and adopt one submission, through whoever owns the order.
 
         Resolved here rather than at each of the two writing paths:
         `application` is a parameter and cannot change, so the two would only
         ever be the same answer written twice.
 
+        The merge rather than its result, because the read has to happen inside
+        whatever serializes the write: Home Assistant's control writes the same
+        file, and a map computed from a snapshot older than the lock it commits
+        under drops whatever landed in between.
+
         Args:
-            wanted: The complete set of overrides to store.
+            merge: What to make of the stored overrides.
 
         Returns:
             The settings in effect afterwards.
+
+        Raises:
+            ConfigurationError: If the address would change with no application
+                behind the page to adopt it first.
         """
         if application is None:
-            # A page with nothing behind it. There is no running source to
-            # replace, so the released order is the whole of what a write is.
+            # A page with nothing behind it, and therefore nothing that could
+            # build a session for a new address. `apply_settings_change`
+            # persists first, which for this one setting is the ordering
+            # `groundstation_url.GroundstationUrlOwner` exists to remove: the
+            # next start would adopt an address nothing had ever accepted. So
+            # this path stays open for every other setting and refuses that one
+            # rather than becoming a second write path around the owner.
+            wanted = merge(store.load())
+            if load_settings(source, wanted).settings.groundstation_url != (
+                _resolved().settings.groundstation_url
+            ):
+                raise ConfigurationError(_NO_OWNER_MESSAGE)
             return apply_settings_change(wanted, store=store, environ=source)
-        return await application.apply_settings(wanted)
+        return await application.apply_settings(merge)
 
     async def index(request: Request) -> Response:
         """Serve the settings page.
@@ -399,10 +448,25 @@ def create_app(
         fields = _submitted(body)
 
         base = base_form_values(source)
+        previous: Mapping[str, str] = {}
+        wanted: Mapping[str, str] = {}
+
+        def _merge(stored: Mapping[str, str]) -> Mapping[str, str]:
+            """Work out what to store, from the file as the write found it.
+
+            Args:
+                stored: The overrides currently in the file.
+
+            Returns:
+                The complete set to write.
+            """
+            nonlocal previous, wanted
+            previous = stored
+            wanted = _overrides_from(fields, base=base, previous=stored)
+            return wanted
+
         try:
-            previous = store.load()
-            wanted = _overrides_from(fields, base=base, previous=previous)
-            resolved = await _write(wanted)
+            resolved = await _write(_merge)
         except ConfigurationError as error:
             # Every way this can refuse ends here, and every one of them ends
             # with the operator reading why rather than a traceback. A file that
@@ -436,19 +500,33 @@ def create_app(
         """
         if not _from_this_page(request):
             return _refuse_cross_site()
+        discarded: Mapping[str, str] = {}
+
+        def _discard_everything(stored: Mapping[str, str]) -> Mapping[str, str]:
+            """Keep nothing, and remember what there was to say what changed.
+
+            Args:
+                stored: The overrides currently in the file.
+
+            Returns:
+                The empty set.
+            """
+            nonlocal discarded
+            discarded = stored
+            return {}
+
         try:
-            previous = store.load()
             # Through the same owner, because discarding an override for the
             # groundstation address is a replacement too — the environment's
             # value becomes effective, and it has its own source to build.
-            resolved = await _write({})
+            resolved = await _write(_discard_everything)
         except ConfigurationError as error:
             return HTMLResponse(
                 _page(_resolved(), store, application, error=str(error)),
                 status_code=400,
             )
         current.resolution = resolved
-        return _redirect_after(tuple(sorted(previous)))
+        return _redirect_after(tuple(sorted(discarded)))
 
     async def stop(request: Request) -> Response:
         """Stop the application, so a restart-required change takes effect.
