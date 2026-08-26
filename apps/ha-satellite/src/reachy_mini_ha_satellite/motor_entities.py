@@ -23,7 +23,6 @@ if TYPE_CHECKING:
     from google.protobuf import message
 
     from reachy_mini_ha_satellite.esphome.api_server import APIServer
-    from reachy_mini_ha_satellite.esphome.models import ServerState
 
 __all__ = ["MOTOR_ENTITY_METADATA", "MotorSwitchEntity"]
 
@@ -41,7 +40,6 @@ class MotorSwitchEntity(ESPHomeEntity):
     def __init__(
         self,
         *,
-        state: ServerState,
         coordinator: MotorGroupCoordinator,
         group: MotorGroup,
         key: int,
@@ -51,7 +49,6 @@ class MotorSwitchEntity(ESPHomeEntity):
         ESPHomeEntity.__init__(self, cast("APIServer", server))
         if coordinator.last_confirmed(group) is None:
             raise ValueError("an unconfirmed motor group cannot have an entity")
-        self._state = state
         self._coordinator = coordinator
         self._group = group
         self.key = key
@@ -62,18 +59,6 @@ class MotorSwitchEntity(ESPHomeEntity):
         if confirmed is None:
             raise RuntimeError("a registered motor group lost its confirmed value")
         return SwitchStateResponse(key=self.key, state=confirmed)
-
-    def refresh(self) -> bool:
-        """Read independent physical state and publish only fresh complete evidence."""
-        actual = self._coordinator.refresh(self._group)
-        if actual is None:
-            return False
-        self.publish()
-        return True
-
-    def publish(self) -> None:
-        """Push the current confirmed state to every connected client."""
-        self._state.broadcast([self.state_message()])
 
     def handle_message(self, msg: message.Message) -> Iterable[message.Message]:
         """Announce, subscribe or apply one confirmed torque request."""
@@ -87,9 +72,15 @@ class MotorSwitchEntity(ESPHomeEntity):
                 icon=icon,
             )
         elif isinstance(msg, SubscribeHomeAssistantStatesRequest):
+            # One bounded independent sample per reconnect. It can update the
+            # retained Boolean, but `refresh` never opens a command gate.
+            self._coordinator.refresh(self._group)
             yield self.state_message()
         elif isinstance(msg, SwitchCommandRequest) and msg.key == self.key:
             # A complete physical contradiction is a new confirmed value. Missing,
-            # late, failed or partial evidence yields only the retained read-back.
-            self._coordinator.transition(self._group, bool(msg.state))
+            # late, failed or partial command evidence gets one independent read;
+            # if that is incomplete too, this yields only the retained Boolean.
+            actual = self._coordinator.transition(self._group, bool(msg.state))
+            if actual is None:
+                self._coordinator.refresh(self._group)
             yield self.state_message()

@@ -39,6 +39,14 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import httpx
 import numpy as np
 import pytest
+
+# pylint: disable=no-name-in-module
+from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message classes inside
+    ListEntitiesRequest,
+    SubscribeHomeAssistantStatesRequest,
+    SwitchCommandRequest,
+    SwitchStateResponse,
+)
 from satellite_support import (
     FakeAudio,
     FakeCapture,
@@ -108,7 +116,15 @@ from reachy_mini_ha_satellite.main import (
     load_preferences,
     run,
 )
-from reachy_mini_ha_satellite.motor_control import MotorConfirmation
+from reachy_mini_ha_satellite.motor_control import (
+    ANTENNA_MOTOR_IDS,
+    BODY_MOTOR_IDS,
+    HEAD_MOTOR_IDS,
+    MotorConfirmation,
+    MotorConfirmationOutcome,
+    MotorEvidence,
+    MotorGroup,
+)
 from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
@@ -213,6 +229,18 @@ def _settings(**overrides: str) -> Settings:
         The settings.
     """
     return load_settings(_ENVIRONMENT, dict(overrides)).settings
+
+
+def _motor_confirmation(
+    names: tuple[str, ...],
+    enabled: bool,
+) -> MotorConfirmation:
+    """Build complete grouped physical evidence for composition tests."""
+    return MotorConfirmation(
+        True,
+        MotorConfirmationOutcome.CONFIRMED,
+        tuple(MotorEvidence(name=name, enabled=enabled) for name in names),
+    )
 
 
 class RecordingService:
@@ -3597,6 +3625,28 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
     told to contain rather than what the wheel carries.
     """
 
+    @staticmethod
+    def _composed_head_switch(
+        robot: FakeRobot,
+    ) -> tuple[SatelliteApplication, ServerState, MotorSwitchEntity]:
+        """Assemble production wiring and return its registered head control."""
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        control = next(
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+        )
+        return application, esphome._state, control
+
     def test_the_server_state_announces_the_configured_identity(self) -> None:
         """REQ-040, at the place the announcement is actually assembled."""
         state = build_server_state(
@@ -3763,6 +3813,209 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         motion = cast("ReachyMotion", application._motion)
         assert application.motor_groups is motion._coordinator
         assert "motors" in application.status()
+
+    def test_composed_reconnect_refreshes_once_without_list_reads_or_broadcast(
+        self,
+    ) -> None:
+        """Reconnect is the bounded production path for later independent evidence."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+            ]
+        )
+        application, state, control = self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        clients = connected(state, 2)
+        before = len(robot.motor_requests)
+
+        listed = list(control.handle_message(ListEntitiesRequest()))
+
+        assert len(listed) == 1
+        assert len(robot.motor_requests) == before
+        assert all(client.sent == [] for client in clients)
+
+        first = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert first == [SwitchStateResponse(key=control.key, state=False)]
+        assert robot.motor_requests[before:] == [("read", HEAD_MOTOR_IDS)]
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(client.sent == [] for client in clients)
+
+        second = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert second == [SwitchStateResponse(key=control.key, state=True)]
+        assert robot.motor_requests[before:] == [
+            ("read", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is True
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(client.sent == [] for client in clients)
+
+    def test_composed_failed_command_refreshes_once_and_yields_fresh_readback(
+        self,
+    ) -> None:
+        """A failed command gets one read and never publishes the request itself."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+            ],
+            motor_disables_confirmed=[MotorConfirmation.failed()],
+        )
+        application, state, control = self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        clients = connected(state, 2)
+        before = len(robot.motor_requests)
+
+        responses = list(
+            control.handle_message(
+                SwitchCommandRequest(key=control.key, state=False),
+            )
+        )
+
+        assert responses == [SwitchStateResponse(key=control.key, state=False)]
+        assert robot.motor_requests[before:] == [
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(client.sent == [] for client in clients)
+
+    def test_composed_incomplete_refresh_retains_until_one_later_attempt(self) -> None:
+        """Incomplete recovery stays closed; another request gets one later attempt."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                MotorConfirmation.failed(),
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+            ],
+            motor_disables_confirmed=[
+                MotorConfirmation.failed(),
+                MotorConfirmation.failed(),
+            ],
+        )
+        application, state, control = self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        clients = connected(state, 2)
+        before = len(robot.motor_requests)
+
+        retained = list(
+            control.handle_message(
+                SwitchCommandRequest(key=control.key, state=False),
+            )
+        )
+
+        assert retained == [SwitchStateResponse(key=control.key, state=True)]
+        assert robot.motor_requests[before:] == [
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is True
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(client.sent == [] for client in clients)
+
+        updated = list(
+            control.handle_message(
+                SwitchCommandRequest(key=control.key, state=False),
+            )
+        )
+
+        assert updated == [SwitchStateResponse(key=control.key, state=False)]
+        assert robot.motor_requests[before:] == [
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(client.sent == [] for client in clients)
+
+    def test_composed_body_refresh_true_keeps_policy_quiesced_and_gate_closed(
+        self,
+    ) -> None:
+        """Independent truth cannot restore automatic yaw or reopen body producers."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+            ],
+            motor_disables_confirmed=[MotorConfirmation.failed()],
+        )
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        controls = [
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+        ]
+        body = controls[1]
+        groups = application.motor_groups
+        assert groups is not None
+        reconnect_requests = len(robot.motor_requests)
+        reconnect_policy = len(robot.automatic_body_yaw)
+
+        reconnect = list(body.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert reconnect == [SwitchStateResponse(key=body.key, state=True)]
+        assert robot.motor_requests[reconnect_requests:] == [("read", BODY_MOTOR_IDS)]
+        assert robot.automatic_body_yaw[reconnect_policy:] == [False, True]
+        assert groups.gate_open(MotorGroup.BODY)
+
+        before_requests = len(robot.motor_requests)
+        before_policy = len(robot.automatic_body_yaw)
+        responses = list(
+            body.handle_message(SwitchCommandRequest(key=body.key, state=False))
+        )
+
+        assert responses == [SwitchStateResponse(key=body.key, state=True)]
+        assert robot.motor_requests[before_requests:] == [
+            ("disable", BODY_MOTOR_IDS),
+            ("read", BODY_MOTOR_IDS),
+        ]
+        assert robot.automatic_body_yaw[before_policy:] == [False]
+        assert groups.last_confirmed(MotorGroup.BODY) is True
+        assert not groups.gate_open(MotorGroup.BODY)
+
+    def test_composed_terminal_reconnect_performs_no_hardware_read(self) -> None:
+        """A reconnect racing shutdown reports retained state without new work."""
+        robot = FakeRobot()
+        application, _state, control = self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        groups.terminal()
+        before = len(robot.motor_requests)
+
+        responses = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert responses == [SwitchStateResponse(key=control.key, state=True)]
+        assert len(robot.motor_requests) == before
+        assert not groups.gate_open(MotorGroup.HEAD)
 
     def test_unconfirmed_motor_groups_register_no_operable_switch(self) -> None:
         """Compatibility with the released SDK gates entities closed, not optimistic."""

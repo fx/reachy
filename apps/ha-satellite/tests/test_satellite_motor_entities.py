@@ -15,7 +15,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated p
     SwitchStateResponse,
 )
 from aioesphomeapi.model import EntityCategory
-from satellite_support import FakeRobot, ManualClock, connected, vendored_server_state
+from satellite_support import FakeRobot, ManualClock
 
 from reachy_mini_ha_satellite.motor_control import (
     HEAD_MOTOR_IDS,
@@ -45,14 +45,12 @@ def complete(enabled: bool, *, contradicted: bool = False) -> MotorConfirmation:
 def entity(
     robot: FakeRobot | None = None,
 ) -> tuple[MotorSwitchEntity, MotorGroupCoordinator, FakeRobot]:
-    """Build a registered head switch over a real vendored server state."""
+    """Build a registered head switch over deterministic daemon evidence."""
     handle = robot or FakeRobot()
     groups = MotorGroupCoordinator(handle, clock=ManualClock())
     assert MotorGroup.HEAD in groups.initialize()
-    state = vendored_server_state()
     return (
         MotorSwitchEntity(
-            state=state,
             coordinator=groups,
             group=MotorGroup.HEAD,
             key=7,
@@ -64,10 +62,12 @@ def entity(
 
 def test_entity_has_stable_configuration_identity_and_reconnect_state() -> None:
     """The same object ID and physical Boolean survive every protocol listing."""
-    control, _groups, _robot = entity()
+    control, _groups, robot = entity()
+    before = len(robot.motor_requests)
 
     first = list(control.handle_message(ListEntitiesRequest()))
     second = list(control.handle_message(ListEntitiesRequest()))
+    assert len(robot.motor_requests) == before
     reconnect = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
 
     assert first == second
@@ -76,6 +76,7 @@ def test_entity_has_stable_configuration_identity_and_reconnect_state() -> None:
     assert listing.name == "Head Motors"
     assert listing.entity_category == EntityCategory.CONFIG
     assert reconnect == [SwitchStateResponse(key=7, state=True)]
+    assert robot.motor_requests[before:] == [("read", HEAD_MOTOR_IDS)]
 
 
 def test_agreeing_command_replies_with_confirmed_physical_boolean() -> None:
@@ -93,12 +94,18 @@ def test_failed_command_replies_only_with_retained_boolean() -> None:
     """Missing confirmation snaps Home Assistant back to the last known value."""
     control, groups, robot = entity()
     robot.motor_disables_confirmed.append(MotorConfirmation.failed())
+    robot.motor_reads.append(MotorConfirmation.failed())
+    before = len(robot.motor_requests)
 
     responses = list(control.handle_message(SwitchCommandRequest(key=7, state=False)))
 
     assert responses == [SwitchStateResponse(key=7, state=True)]
     assert groups.last_confirmed(MotorGroup.HEAD) is True
     assert not groups.gate_open(MotorGroup.HEAD)
+    assert robot.motor_requests[before:] == [
+        ("disable", HEAD_MOTOR_IDS),
+        ("read", HEAD_MOTOR_IDS),
+    ]
 
 
 def test_mixed_success_and_error_never_publishes_requested_state() -> None:
@@ -111,9 +118,13 @@ def test_mixed_success_and_error_never_publishes_requested_state() -> None:
             error=MotorEvidenceError.READ_FAILED,
         ),
     )
-    robot.motor_disables_confirmed.append(
-        MotorConfirmation(True, MotorConfirmationOutcome.CONFIRMED, evidence)
+    incomplete = MotorConfirmation(
+        True,
+        MotorConfirmationOutcome.CONFIRMED,
+        evidence,
     )
+    robot.motor_disables_confirmed.append(incomplete)
+    robot.motor_reads.append(incomplete)
 
     responses = list(control.handle_message(SwitchCommandRequest(key=7, state=False)))
 
@@ -133,20 +144,21 @@ def test_contradiction_replies_with_actual_readback_and_closes_gate() -> None:
     assert not groups.gate_open(MotorGroup.HEAD)
 
 
-def test_later_independent_read_publishes_to_every_connection() -> None:
-    """Fresh evidence after a failure can advance state without replaying a request."""
+def test_failed_command_performs_one_refresh_and_yields_fresh_state() -> None:
+    """The bounded recovery read advances state without an optimistic response."""
     control, groups, robot = entity()
-    clients = connected(
-        control._state, 2
-    )  # exercise the entity's actual vendored broadcast owner
     robot.motor_disables_confirmed.append(MotorConfirmation.failed())
-    list(control.handle_message(SwitchCommandRequest(key=7, state=False)))
     robot.motor_reads.append(complete(False))
+    before = len(robot.motor_requests)
 
-    assert control.refresh()
+    responses = list(control.handle_message(SwitchCommandRequest(key=7, state=False)))
+
+    assert responses == [SwitchStateResponse(key=7, state=False)]
     assert groups.last_confirmed(MotorGroup.HEAD) is False
-    for client in clients:
-        assert client.sent == [SwitchStateResponse(key=7, state=False)]
+    assert robot.motor_requests[before:] == [
+        ("disable", HEAD_MOTOR_IDS),
+        ("read", HEAD_MOTOR_IDS),
+    ]
 
 
 def test_wrong_key_does_not_touch_torque_or_reply() -> None:
@@ -163,11 +175,9 @@ def test_unconfirmed_group_cannot_construct_an_operable_entity() -> None:
     robot = FakeRobot(motor_reads=[MotorConfirmation.unavailable()])
     groups = MotorGroupCoordinator(robot, clock=ManualClock())
     assert MotorGroup.HEAD not in groups.initialize()
-    state = vendored_server_state()
 
     with pytest.raises(ValueError, match="unconfirmed"):
         MotorSwitchEntity(
-            state=state,
             coordinator=groups,
             group=MotorGroup.HEAD,
             key=7,

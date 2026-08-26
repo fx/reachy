@@ -2234,7 +2234,6 @@ def build_application(
     for group in registered_motor_groups:
         state.entities.append(
             MotorSwitchEntity(
-                state=state,
                 coordinator=motor_groups,
                 group=group,
                 key=len(state.entities),

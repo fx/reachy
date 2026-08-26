@@ -566,6 +566,38 @@ def test_antenna_reenable_seeds_both_measured_joints_as_one_group() -> None:
     assert antennas == AntennaPose(right=0.3, left=-0.4)
 
 
+@pytest.mark.parametrize("phase", ["prepare", "read", "restore"])
+def test_cancelled_independent_refresh_closes_gate_and_retains_state(
+    phase: str,
+) -> None:
+    """Cancellation at every refresh phase cannot strand an open producer gate."""
+    robot = FakeRobot()
+    groups = coordinator(robot)
+
+    def _prepare() -> bool:
+        if phase == "prepare":
+            raise asyncio.CancelledError
+        return True
+
+    def _restore(_policy: bool) -> None:
+        if phase == "restore":
+            raise asyncio.CancelledError
+
+    groups.set_hooks(
+        MotorGroup.BODY,
+        prepare=_prepare,
+        restore=_restore,
+    )
+    if phase == "read":
+        robot.motor_reads.append(asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        groups.refresh(MotorGroup.BODY)
+
+    assert groups.last_confirmed(MotorGroup.BODY) is True
+    assert not groups.gate_open(MotorGroup.BODY)
+
+
 def test_terminal_release_is_idempotent_and_blocks_all_later_producers() -> None:
     """Shutdown and racing commands share one irreversible closed-gate path."""
     robot = FakeRobot()

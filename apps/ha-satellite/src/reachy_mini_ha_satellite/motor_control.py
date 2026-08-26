@@ -447,12 +447,32 @@ class MotorGroupCoordinator:
             return actual
 
     def refresh(self, group: MotorGroup) -> bool | None:
-        """Apply a later independent physical read without replaying a request."""
+        """Apply one independent read without replaying or reopening a request."""
         with self._lock:
             state = self._groups[group]
             if self._terminal:
                 return None
-            confirmation = self._read(group)
+            hooks = self._hooks[group]
+            gate_was_open = state.gate_open
+            prepared_policy = False
+            if hooks.prepare is not None and state.body_policy is None:
+                try:
+                    state.body_policy = hooks.prepare()
+                    prepared_policy = True
+                except asyncio.CancelledError:
+                    state.gate_open = False
+                    self._record(group, None, MotorConfirmation.failed(), None, False)
+                    raise
+                except Exception:
+                    state.gate_open = False
+                    self._record(group, None, MotorConfirmation.failed(), None, False)
+                    return None
+            try:
+                confirmation = self._read(group)
+            except asyncio.CancelledError:
+                state.gate_open = False
+                self._record(group, None, MotorConfirmation.failed(), None, False)
+                raise
             actual = confirmation.physical_value(
                 MOTOR_GROUPS[group],
                 allow_contradiction=False,
@@ -466,6 +486,34 @@ class MotorGroupCoordinator:
             state.confirmed_at = self._now()
             if not actual:
                 state.gate_open = False
+            elif prepared_policy and gate_was_open:
+                policy = state.body_policy
+                if hooks.restore is not None and policy is not None:
+                    try:
+                        hooks.restore(policy)
+                    except asyncio.CancelledError:
+                        state.gate_open = False
+                        self._record(
+                            group,
+                            None,
+                            confirmation,
+                            actual,
+                            True,
+                            changed=changed,
+                        )
+                        raise
+                    except Exception:
+                        state.gate_open = False
+                        self._record(
+                            group,
+                            None,
+                            confirmation,
+                            actual,
+                            True,
+                            changed=changed,
+                        )
+                        return actual
+                state.body_policy = None
             self._record(
                 group,
                 None,
