@@ -296,8 +296,15 @@ def immediately(work: Callable[[], None]) -> None:
 #: waited for lost. Generous, because these wait across a thread and how many
 #: turns that takes is a property of how loaded the machine is. A ceiling all
 #: the same: a yield loop that cannot end hangs the suite rather than failing
-#: it, and a zero-delay yield spends no wall time, so exhausting the whole
-#: budget still costs a fraction of a second.
+#: it, and a named failure after a known number of turns is worth having in
+#: place of an indefinite wait.
+#:
+#: **What is bounded is scheduling turns, not elapsed time.** A zero-delay yield
+#: schedules no timer, but each one still waits for the event loop to come round
+#: and for this process to be scheduled, so what exhausting this budget costs in
+#: seconds depends on the load — and a loaded runner is exactly the situation in
+#: which something hangs and the ceiling is reached at all. Timing it on an idle
+#: machine measures that machine; it does not bound this.
 YIELD_TURNS: Final = 100_000
 
 
@@ -314,6 +321,13 @@ async def until(condition: Callable[[], bool], what: str) -> int:
     A budget is still right where the turns are the measurement rather than a
     stand-in for an ordering: "the loop ran ten more turns" is a fact about the
     loop, not a race.
+
+    **This bounds the wait; it does not create the ordering.** What establishes
+    one is the condition being the thing the later assertion actually depends
+    on, and being irreversible once true. Waiting on something merely correlated
+    with it — a flag set nearby, a count that usually gets there first — makes
+    the race rarer rather than absent, which is the failure this replaces
+    wearing a longer wait.
 
     Args:
         condition: What is being waited for. Polled, so it must be cheap.
