@@ -43,6 +43,8 @@ import pytest
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message classes inside
     ListEntitiesRequest,
+    NumberCommandRequest,
+    NumberStateResponse,
     SubscribeHomeAssistantStatesRequest,
     SwitchCommandRequest,
     SwitchStateResponse,
@@ -4033,6 +4035,70 @@ class TestWritingABoostChosenFromHomeAssistant:
 
         assert adopted == []
         assert "the speaker boost could not be saved" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_the_push_carries_the_chosen_value_and_the_reply_does_not(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The push is not a duplicate of the reply, and deleting it would break.
+
+        It once was a duplicate, while the setter persisted and adopted before
+        `handle_message` yielded. Reserving the write ended that: the reply is
+        built from the getter before the write lands, so it carries the
+        preceding value and the push is the only message carrying the chosen
+        one. `SpeakerBoostNumberEntity`'s docstring says so, and a reader who
+        deleted the push as redundant would leave Home Assistant's slider on the
+        old number until the next reconnect — so the claim is pinned here rather
+        than left to be believed.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+        owner = _boost_owner(store, adopted)
+        state = vendored_server_state()
+        in_effect = DEFAULT_BOOST_PERCENT
+        entity = SpeakerBoostNumberEntity(
+            state=state,
+            key=len(state.entities),
+            get_percent=lambda: in_effect,
+            set_percent=satellite_main.build_boost_setter(owner),
+        )
+        state.entities.append(entity)
+
+        def _adopt(settings: Settings) -> None:
+            """Stand in for `apply_live`: adopt, then push, as it does.
+
+            Args:
+                settings: The newly resolved settings.
+            """
+            nonlocal in_effect
+            in_effect = settings.speaker_boost_percent
+            adopted.append(settings)
+            entity.publish()
+
+        owner._apply_live = _adopt
+        client = connected(state)[0]
+
+        reply = next(
+            message.state
+            for message in entity.handle_message(
+                NumberCommandRequest(key=entity.key, state=150.0),
+            )
+            if isinstance(message, NumberStateResponse)
+        )
+        await _drain_reserved(owner)
+
+        # The reply went out before the reserved write landed, so it carries
+        # what was in effect when Home Assistant asked.
+        assert reply == pytest.approx(DEFAULT_BOOST_PERCENT)
+        assert reply != pytest.approx(150.0)
+        # And the push is the only message carrying the number that was chosen.
+        assert pushed_numbers(client, entity.key) == pytest.approx([150.0])
+        assert store.load() == {"speaker_boost_percent": "150.0"}
 
     @pytest.mark.asyncio
     async def test_a_boost_set_after_shutdown_began_is_reported_not_written(

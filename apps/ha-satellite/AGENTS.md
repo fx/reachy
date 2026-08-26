@@ -245,6 +245,18 @@ deployment can get irreversibly wrong.
   every `store.save`, `apply_settings_change` and `load_settings` call site and
   write the sentence from what that list says — including the exceptions,
   named by their cause, so the sentence survives the next writer.
+- **Changing *how* something happens invalidates docstrings in modules you did
+  not touch.** The same three passes produced a fourth instance one level down:
+  making the boost write asynchronous falsified `audio_entities.py`, which was
+  not in the diff and therefore was not swept — and the sentence it falsified
+  was the recorded reason the push beside it is *not* redundant, so a reader
+  trusting it would have deleted the message that corrects Home Assistant's
+  slider. Sweeping the files you edited is not sweeping the change. After
+  altering timing, ordering, or who performs an operation, grep the package for
+  the callers and collaborators of what you changed and ask of each docstring
+  "was this written against the old behaviour?" — a claim that something is
+  redundant, immediate, or a duplicate is the kind that rots silently, and the
+  kind whose rotting deletes code.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys
   a device on what it announces, so a derived default would be correct on a

@@ -937,12 +937,17 @@ class SatelliteApplication:
         serve both the settings page and the Home Assistant control, whichever
         of the two chose the number.
 
-        **Being one path is also why the push goes out from here.** A boost
-        chosen on the settings page changes what the robot sounds like at once;
-        a Home Assistant slider still showing the previous number until the next
-        reconnect is the control this application offers being wrong about
-        itself. `publish_live_changes` is what the composition root registers,
-        and it is called below whichever surface started the change.
+        **Being one path is also why the push goes out from here**, and it is
+        needed whichever surface chose the number. A boost chosen on the settings
+        page changes what the robot sounds like at once, with Home Assistant
+        never having been told. A boost chosen *from* Home Assistant is reserved
+        rather than performed — `build_boost_setter` cannot await inside the
+        protocol's message loop — so the reply to that request went out carrying
+        the preceding value, and this push is what corrects it. Either way a
+        slider still showing the previous number until the next reconnect is the
+        control this application offers being wrong about itself.
+        `publish_live_changes` is what the composition root registers, and it is
+        called below whichever surface started the change.
 
         Args:
             settings: The newly resolved settings.
@@ -2188,8 +2193,11 @@ def build_boost_setter(owner: GroundstationUrlOwner) -> Callable[[float], None]:
     message loop is synchronous and cannot take an asynchronous lock — the same
     arrangement `reserve_submission` uses for the address. The reply the entity
     sends therefore carries the value in effect *before* the write lands, and
-    `apply_live`'s push corrects it a moment later. That is what "the response
-    carries a read-back, not an echo" already promised.
+    `apply_live`'s push corrects it a moment later. `SpeakerBoostNumberEntity`
+    records that on its own side, because it is the side a reader deleting the
+    push would be looking at: the push stopped being a duplicate of the reply
+    when this became a reservation, and it is now the only message carrying the
+    chosen value.
 
     **It always writes an override, even for a value equal to the environment's**
     — unlike `web/app.py`'s `_overrides_from`, which drops one matching the layer
