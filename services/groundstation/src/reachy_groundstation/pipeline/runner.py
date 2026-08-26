@@ -9,6 +9,13 @@ A capability that fails or overruns costs its own answer and nothing else: the
 error is reported against the frame it concerns and the remaining capabilities
 still answer. A capability that finds nothing has produced a successful result,
 so it is delivered and no error counter moves.
+
+The operator feed is fed from here and from nowhere else. A frame that both
+carries a JPEG signature and decoded is offered to the feed registry, which
+retains at most one of them for the whole process; a frame that fails either test
+is not, and either way the capabilities go on exactly as they did. Offering it
+costs a reference assignment, adds no decode and cannot block: the feed is a
+value that gets replaced, not a queue anything waits on.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from opentelemetry.trace import Status, StatusCode
 
 from reachy_contracts import ErrorCode, ResultEnvelope, SessionError
 from reachy_groundstation.faults import describe_fault
+from reachy_groundstation.feed import FeedRegistry
 from reachy_groundstation.obs import (
     STAGE_DECODE,
     STAGE_EMIT,
@@ -30,7 +38,7 @@ from reachy_groundstation.obs import (
     frame_exemplar,
     get_logger,
 )
-from reachy_groundstation.pipeline.decode import DecodeError, decode_jpeg
+from reachy_groundstation.pipeline.decode import DecodeError, decode_jpeg, is_jpeg
 from reachy_groundstation.pipeline.queue import QueueClosedError
 from reachy_groundstation.ports import DecodedFrame
 from reachy_groundstation.session.framing import MessageKind
@@ -64,6 +72,7 @@ class FramePipeline:
         settings: Settings,
         obs: Observability,
         session_id: str,
+        feed: FeedRegistry | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Create a pipeline for one session.
@@ -76,6 +85,10 @@ class FramePipeline:
             settings: The settings in effect.
             obs: Where timings, spans and log lines go.
             session_id: The session these frames belong to.
+            feed: Where a validated frame is offered for the operator stream.
+                The composition root hands the same one to every session; a
+                pipeline built by hand gets one of its own, so one test's frames
+                cannot reach another's.
             clock: A monotonic source, injected so timing is testable without
                 sleeping. Purely local — it is never compared with a frame's
                 capture token.
@@ -85,6 +98,7 @@ class FramePipeline:
         self._settings = settings
         self._obs = obs
         self._session_id = session_id
+        self._feed = FeedRegistry() if feed is None else feed
         self._clock = clock
 
     async def run(self, queue: FrameQueue) -> None:
@@ -178,6 +192,13 @@ class FramePipeline:
         Args:
             frame: The frame taken off the queue.
 
+        The feed is offered the original payload here, once both of the checks
+        it requires have passed: the format gate beside the decoder says the
+        bytes are JPEG, and the decode that just happened says they are
+        well-formed. A payload that fails either is simply not offered — the
+        feed goes on showing what it already had, and the error handling below
+        is unchanged by the feed existing at all.
+
         Returns:
             The decoded frame, or `None` when the payload was not decodable —
             in which case the client has already been told.
@@ -199,6 +220,8 @@ class FramePipeline:
                     self._clock() - started,
                     exemplar=self._exemplar(frame.header.sequence),
                 )
+        if is_jpeg(frame.payload):
+            self._feed.publish(frame.payload)
         return DecodedFrame(header=frame.header, image=image)
 
     #:= docs/specs/robot-link/index.md#req-016-results-return-the-capture-timestamp-unaltered

@@ -1,6 +1,6 @@
-"""The HTTP and WebSocket surface: sessions, health, metrics and configuration.
+"""The HTTP and WebSocket surface: sessions, health, metrics, configuration, video.
 
-Five endpoints, and the distinctions between them are the point.
+Six endpoints, and the distinctions between them are the point.
 
 `/livez` answers whether the process is alive. `/readyz` answers whether it is
 ready to be sent work, which is a different question with a different answer
@@ -13,6 +13,10 @@ than looking merely smaller than expected.
 set rather than by value. It renders through `resolved_configuration`, which is
 also what the boot log emits, because a redaction applied in two places is a
 redaction that will be forgotten in one of them.
+
+`/stream.mjpg` shows the frame the sole authenticated session most recently sent,
+and `api/mjpeg.py` holds it — the framing, the three refusals and the viewer
+bound are enough of a subject to be read on their own.
 
 The registry arrives from the composition root and this module never learns what
 is in it. Nothing here imports `reachy_groundstation.capabilities`, and
@@ -29,8 +33,10 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 
+from reachy_groundstation.api.mjpeg import STREAM_PATH, stream_response
 from reachy_groundstation.api.websocket import WebSocketTransport
 from reachy_groundstation.config import resolved_configuration
+from reachy_groundstation.feed import FeedRegistry
 from reachy_groundstation.obs import (
     get_logger,
     render_metrics,
@@ -49,7 +55,7 @@ if TYPE_CHECKING:
     from reachy_groundstation.obs import Observability
     from reachy_groundstation.ports import CapabilityHealth, CapabilityRegistryPort
 
-__all__ = ["SESSION_PATH", "create_app"]
+__all__ = ["SESSION_PATH", "STREAM_PATH", "create_app"]
 
 # The path the robot link spec's topology diagram names.
 SESSION_PATH = "/v1/session"
@@ -83,6 +89,7 @@ def create_app(
     settings: Settings,
     registry: CapabilityRegistryPort,
     obs: Observability,
+    feed: FeedRegistry | None = None,
     warm_up: Callable[[], Coroutine[Any, Any, None]] | None = None,
     shutdown: Callable[[], Coroutine[Any, Any, None]] | None = None,
 ) -> Starlette:
@@ -92,6 +99,11 @@ def create_app(
         settings: The settings in effect.
         registry: What sessions negotiate against and route into.
         obs: Where timings, spans and log lines go.
+        feed: What counts authenticated sessions and holds the one live frame
+            `/stream.mjpg` serves. The composition root builds it and hands the
+            same one to the sessions this application starts; an application
+            composed by hand gets one of its own, so one test's frames cannot
+            reach another's.
         warm_up: What to run in the background at startup. Running it as a task
             rather than awaiting it is what lets `/readyz` answer "not yet"
             while it is happening.
@@ -102,6 +114,7 @@ def create_app(
     Returns:
         The application, ready to be served.
     """
+    live_feed = FeedRegistry() if feed is None else feed
 
     def _publish_capability_health() -> tuple[CapabilityHealth, ...]:
         """Read the registry's health and publish it as gauges.
@@ -214,6 +227,21 @@ def create_app(
         del request
         return JSONResponse(resolved_configuration(settings))
 
+    async def stream(request: Request) -> Response:
+        """Serve the sole authenticated session's newest frame, or say why not.
+
+        Args:
+            request: The incoming request. Only its method is read: the
+                endpoint takes no parameter, because there is nothing to select
+                among and a query naming a session would be the selection the
+                spec refuses to make.
+
+        Returns:
+            The multipart stream, or one of the three refusals `api/mjpeg.py`
+            describes.
+        """
+        return stream_response(live_feed, request.method)
+
     #:= docs/specs/robot-link/index.md#req-010-the-robot-is-a-client-only
     #:% The robot MUST open the session outbound to the groundstation, and the
     #:% groundstation MUST NOT require any inbound listener on the robot.
@@ -231,6 +259,7 @@ def create_app(
             settings=settings,
             obs=obs,
             session_id=session_id,
+            feed=live_feed,
         )
         outcome = await runner.run()
         _logger.info(
@@ -258,6 +287,10 @@ def create_app(
         try:
             yield
         finally:
+            # Before the capabilities, and synchronously: closing the feed
+            # discards the retained frame and finishes every viewer, so nothing
+            # is left waiting on a value the process is about to stop producing.
+            live_feed.close()
             if task is not None:
                 task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -272,6 +305,7 @@ def create_app(
             Route("/capabilities", capabilities, methods=["GET"]),
             Route("/metrics", metrics, methods=["GET"]),
             Route("/config", configuration, methods=["GET"]),
+            Route(STREAM_PATH, stream, methods=["GET"]),
             WebSocketRoute(SESSION_PATH, session),
         ],
         lifespan=lifespan,

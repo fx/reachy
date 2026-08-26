@@ -25,6 +25,7 @@ from reachy_groundstation.config import (
     ConfigurationError,
     load_settings,
 )
+from reachy_groundstation.feed import FeedRegistry
 from reachy_groundstation.obs import (
     build_observability,
     configure_logging,
@@ -64,10 +65,15 @@ def build_application(
         keeps it only in order to inspect it.
     """
     registry = CapabilityRegistry(settings, factories)
+    # One for the whole process, which is what makes "exactly one authenticated
+    # session" a question the operator feed can answer: a registry per session
+    # or per request would count to one every time and show whichever robot
+    # happened to be asking.
     app = create_app(
         settings=settings,
         registry=registry,
         obs=obs,
+        feed=FeedRegistry(),
         warm_up=registry.warm_up,
         shutdown=registry.aclose,
     )

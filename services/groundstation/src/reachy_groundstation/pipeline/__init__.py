@@ -7,7 +7,7 @@ agreed on and runs each of them over the same decoded frame.
 
 from __future__ import annotations
 
-from reachy_groundstation.pipeline.decode import DecodeError, decode_jpeg
+from reachy_groundstation.pipeline.decode import DecodeError, decode_jpeg, is_jpeg
 from reachy_groundstation.pipeline.queue import (
     FrameQueue,
     QueueClosedError,
@@ -23,4 +23,5 @@ __all__ = [
     "QueueClosedError",
     "QueuedFrame",
     "decode_jpeg",
+    "is_jpeg",
 ]

@@ -34,6 +34,7 @@ from reachy_contracts import (
     negotiate,
 )
 from reachy_groundstation.faults import validation_summary
+from reachy_groundstation.feed import FeedRegistry
 from reachy_groundstation.obs import frame_exemplar, get_logger, session_context
 
 # The module rather than the class, and that is what breaks an import cycle
@@ -147,6 +148,7 @@ class SessionRunner:
         settings: Settings,
         obs: Observability,
         session_id: str | None = None,
+        feed: FeedRegistry | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Create a runner for one connection.
@@ -157,6 +159,11 @@ class SessionRunner:
             settings: The settings in effect.
             obs: Where timings, spans and log lines go.
             session_id: The identifier to use, minted when not supplied.
+            feed: What counts authenticated sessions and holds the operator
+                stream's one live frame. The composition root hands the same one
+                to every session, which is what makes "exactly one session"
+                answerable; a runner built by hand gets one of its own, so one
+                test's sessions cannot make another's ambiguous.
             clock: A monotonic source, injected so the arrival ordering the
                 queue depends on is testable without sleeping.
         """
@@ -165,6 +172,7 @@ class SessionRunner:
         self._settings = settings
         self._obs = obs
         self._session_id = session_id or new_session_id()
+        self._feed = FeedRegistry() if feed is None else feed
         self._clock = clock
         self._frames_received = 0
         self._frames_dropped = 0
@@ -204,8 +212,15 @@ class SessionRunner:
                 return self._finish(CloseReason.PROTOCOL_ERROR, agreed)
             if not await self._authenticate(offer):
                 return self._finish(CloseReason.UNAUTHENTICATED, agreed)
-            capabilities, agreed = await self._agree(offer)
-            reason = await self._pump(capabilities)
+            # Authentication succeeding is what makes this session one of the
+            # ones the operator feed counts, and the context manager is what
+            # makes it stop being one however this session ends — a clean close,
+            # a disconnection, a fault or cancellation all leave through the
+            # same `finally`. A client refused above never gets here, so a
+            # stream of wrong credentials cannot make the feed ambiguous.
+            with self._feed.authenticated_session():
+                capabilities, agreed = await self._agree(offer)
+                reason = await self._pump(capabilities)
         except TransportClosedError:
             # The client vanished. That is ordinary: it reconnects and
             # negotiates again, against whatever this service offers by then.
@@ -419,6 +434,7 @@ class SessionRunner:
             settings=self._settings,
             obs=self._obs,
             session_id=self._session_id,
+            feed=self._feed,
             clock=self._clock,
         )
         worker = asyncio.create_task(pipeline.run(queue), name="pipeline")

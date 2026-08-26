@@ -1,9 +1,11 @@
 """Observability: what the boot log says, what a metric carries, what a span is.
 
-The test that matters most here is the pair at the end. The boot log and the
-configuration endpoint are two surfaces reporting the same thing, and the way
-that goes wrong is that one of them is updated and the other is not. They are
-therefore checked against the same credential, in the same test.
+Two tests matter most, and they are both about something not being there. The
+boot log and the configuration endpoint are two surfaces reporting the same
+thing, and the way that goes wrong is that one of them is updated and the other
+is not — so they are checked against the same credential, in the same test. And
+a camera frame must reach none of these surfaces at all, so a real frame is
+driven through a real pipeline and then looked for in every one of them.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`. Nothing here touches a socket, a clock or a file.
@@ -16,14 +18,19 @@ import pytest
 import structlog
 from groundstation_support import (
     CREDENTIAL,
+    EchoCapability,
     StaticRegistry,
+    agreed,
     build_observability,
     captured_logs,
+    jpeg_bytes,
+    make_header,
     make_settings,
 )
 
 from reachy_groundstation.api.app import create_app
 from reachy_groundstation.config import REDACTED_SET, Settings, resolved_configuration
+from reachy_groundstation.feed import FeedRegistry
 from reachy_groundstation.obs import (
     STAGE_DECODE,
     build_metrics,
@@ -39,6 +46,8 @@ from reachy_groundstation.obs import (
 from reachy_groundstation.obs import (
     build_observability as build_service_observability,
 )
+from reachy_groundstation.pipeline.queue import QueuedFrame
+from reachy_groundstation.pipeline.runner import FramePipeline
 
 OTHER_CREDENTIAL = "a-different-example-credential"
 
@@ -198,6 +207,71 @@ async def test_a_credential_is_redacted_on_both_self_reporting_surfaces() -> Non
     assert response.json()["credential"] == REDACTED_SET
     assert OTHER_CREDENTIAL not in response.text
     assert CREDENTIAL not in response.text
+
+
+@pytest.mark.asyncio
+async def test_no_camera_frame_reaches_a_log_a_metric_or_a_span() -> None:
+    """The feed retains a frame; nothing that records what happened may.
+
+    Everything an operator can read afterwards is checked at once, because the
+    way this goes wrong is that a payload is added to one surface — an error
+    detail, a span attribute, an exemplar — while the other two stay clean and
+    the test that only looked at logs stays green.
+
+    The malformed frame is here for the same reason: the report that a payload
+    would not decode is the message most likely to quote it back.
+    """
+    payload = jpeg_bytes()
+    malformed = b"\xff\xd8\xff\xe0 truncated"
+    feed = FeedRegistry()
+    obs, exporter = build_observability()
+    delivered: list[object] = []
+
+    async def _deliver(kind: object, message: object) -> None:
+        delivered.append((kind, message))
+
+    pipeline = FramePipeline(
+        capabilities=[agreed(EchoCapability())],
+        deliver=_deliver,
+        settings=make_settings(),
+        obs=obs,
+        session_id="0123456789abcdef",
+        feed=feed,
+        clock=lambda: 0.0,
+    )
+
+    with captured_logs() as logs, feed.authenticated_session():
+        for sequence, frame in enumerate((payload, malformed)):
+            await pipeline.process(
+                QueuedFrame(
+                    header=make_header(sequence),
+                    payload=frame,
+                    received_at=0.0,
+                ),
+            )
+        retained = await feed.next_frame(after=0)
+
+    exposition, _content_type = render_metrics(
+        obs.metrics,
+        "application/openmetrics-text; version=1.0.0",
+    )
+    spans = repr([span.attributes for span in exporter.get_finished_spans()])
+    surfaces = (
+        repr(logs).encode("utf-8", "surrogateescape"),
+        exposition,
+        spans.encode("utf-8", "surrogateescape"),
+        repr(delivered).encode("utf-8", "surrogateescape"),
+    )
+
+    # The feed did its job, so the absence below is about what was recorded and
+    # not about a frame that never arrived.
+    assert retained is not None
+    assert retained.payload == payload
+    for surface in surfaces:
+        assert payload not in surface
+        assert payload[:16] not in surface
+        assert malformed not in surface
+        assert b"truncated" not in surface
 
 
 def test_the_two_surfaces_render_through_the_same_function() -> None:

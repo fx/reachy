@@ -26,7 +26,7 @@ that apply here.
 
 ```
 src/reachy_groundstation/
-├─ api/            # the session endpoint and the operator surface
+├─ api/            # the session endpoint, the operator surface, the MJPEG feed
 ├─ session/        # authentication, framing, negotiation, routing
 ├─ pipeline/       # the bounded queue, the single decode, result assembly
 ├─ capabilities/   # the interface, the registry, and the capabilities
@@ -35,6 +35,7 @@ src/reachy_groundstation/
 ├─ runtime/        # model-runtime sessions: providers, thread bounds, warm-up
 ├─ obs/            # structured logging, metrics, tracing
 ├─ ports.py        # the seam: the decoded frame and the two interfaces
+├─ feed.py         # one live JPEG for the sole session, and the viewer bound
 ├─ config.py       # settings, read once by a function the entry point calls
 └─ service.py      # the composition root
 
@@ -53,7 +54,15 @@ deploy/
   they hold a `CapabilityRegistryPort` handed to them by `service.py`, which is
   the only module outside `capabilities/` that names it.
   `just lint-capability-boundary` proves that rule fires against a committed
-  fixture and then runs it over the tree; it is part of `just lint`.
+  fixture and then runs it over the tree; it is part of `just lint`. `feed.py`
+  sits beside `ports.py` for the same reason those ports do: all three of those
+  packages hold one, so it cannot live inside any of them.
+- **The operator feed retains one frame and validates it twice.** `feed.py` holds
+  a single optional payload for the whole process, never one per session, and
+  `pipeline/runner.py` is its only writer — a payload is offered to it just when
+  `is_jpeg` accepts the bytes *and* the decode that frame needed anyway
+  succeeded. A frame reaches no log line, metric, span or error message, and
+  `/stream.mjpg` labels only what passed both checks `image/jpeg`.
 - **A capability is an interface plus a registration.** Implement
   `ports.CapabilityPort` — `CapabilityBase` gives you the two lifecycle hooks
   defaulted — and decorate a factory with `capabilities.register`. That, plus
