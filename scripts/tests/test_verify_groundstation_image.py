@@ -9,6 +9,13 @@ cannot derive an endpoint from, reading the frame without re-encoding it, giving
 up on readiness rather than waiting for ever, and reading a feed answer that is
 not the one it was hoping for.
 
+Deriving the *feed* connection is here for the same reason as deriving the
+session endpoint: the base URL's scheme decides it, and it is the one of the
+three code paths that opens its socket by hand. A replaced `open_connection`
+records the host, the port and the TLS context it was asked for, which is what
+makes "`https://` is supported by all of this script" checkable without a
+certificate.
+
 `drive_session` itself is exercised for real rather than here: `just
 image-verify` runs it against the built image on a network with no route off the
 host, which is the only place it can prove anything — and the feed part it reads
@@ -23,6 +30,7 @@ opened and no wall time is spent.
 from __future__ import annotations
 
 import asyncio
+import ssl
 import urllib.error
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -192,39 +200,73 @@ class _FakeWriter:
         """Accept a wait for a close that already happened."""
 
 
+class _FakeConnection:
+    """Records how the connection was opened, and answers with canned bytes.
+
+    How it was opened is half of what the feed reader decides: the host and the
+    port come from the base URL, and whether there is a TLS context at all is
+    the difference between reaching an `https://` deployment and failing to.
+
+    Attributes:
+        writer: What the request was written to.
+        opened: The positional and keyword arguments the connection was asked
+            for, or `None` until it has been.
+    """
+
+    def __init__(self, response: bytes) -> None:
+        """Start with nothing opened.
+
+        Args:
+            response: The bytes the service is pretending to send.
+        """
+        self.writer = _FakeWriter()
+        self.opened: tuple[tuple[object, ...], dict[str, object]] | None = None
+        self._response = response
+
+    async def connect(
+        self,
+        *args: object,
+        **kwargs: object,
+    ) -> tuple[asyncio.StreamReader, _FakeWriter]:
+        """Stand in for `asyncio.open_connection`.
+
+        Args:
+            args: The host and port it was asked for.
+            kwargs: Everything else, `ssl` included.
+
+        Returns:
+            A reader holding the canned response, and the recording writer.
+        """
+        self.opened = (args, kwargs)
+        reader = asyncio.StreamReader()
+        reader.feed_data(self._response)
+        reader.feed_eof()
+        return reader, self.writer
+
+
 def _answering(
     monkeypatch: pytest.MonkeyPatch,
     response: bytes,
-) -> _FakeWriter:
+) -> _FakeConnection:
     """Make the next connection deliver a canned response.
 
     A `StreamReader` fed in memory rather than a socket: what is under test is
-    the parsing, and a real listener would add input and output for nothing.
+    the parsing and the connection's own parameters, and a real listener would
+    add input and output for nothing — a TLS one would add a certificate too.
 
     Args:
         monkeypatch: How the connection is replaced.
         response: The bytes the service is pretending to send.
 
     Returns:
-        The writer the request will be recorded on.
+        The connection, which records how it was opened and what was written.
     """
-    writer = _FakeWriter()
-
-    async def _connect(
-        host: object,
-        port: object,
-    ) -> tuple[asyncio.StreamReader, _FakeWriter]:
-        del host, port
-        reader = asyncio.StreamReader()
-        reader.feed_data(response)
-        reader.feed_eof()
-        return reader, writer
-
+    connection = _FakeConnection(response)
     monkeypatch.setattr(
         "verify_groundstation_image.asyncio.open_connection",
-        _connect,
+        connection.connect,
     )
-    return writer
+    return connection
 
 
 def _stream_response(body: bytes, status: bytes = b"200 OK") -> bytes:
@@ -258,14 +300,14 @@ async def test_one_part_is_read_off_the_feed_by_its_declared_length(
         monkeypatch: How the connection is replaced.
     """
     payload = b"\xff\xd8\xff" + bytes(range(64))
-    writer = _answering(monkeypatch, _stream_response(payload))
+    connection = _answering(monkeypatch, _stream_response(payload))
 
     headers, body = await read_feed_part(_BASE)
 
     assert body == payload
     assert headers["content-type"] == "image/jpeg"
-    assert f"GET {STREAM_PATH} HTTP/1.0".encode("ascii") in writer.written
-    assert b"Host: groundstation:8080" in writer.written
+    assert f"GET {STREAM_PATH} HTTP/1.0".encode("ascii") in connection.writer.written
+    assert b"Host: groundstation:8080" in connection.writer.written
 
 
 @pytest.mark.asyncio
@@ -329,3 +371,71 @@ async def test_something_that_is_not_an_http_response_is_reported(
     _answering(monkeypatch, b"not an http server\r\n\r\n")
     with pytest.raises(VerificationError, match="not an HTTP response"):
         await read_feed_part(_BASE)
+
+
+@pytest.mark.parametrize(
+    ("base", "host", "port", "secure"),
+    [
+        ("http://groundstation:8080", "groundstation", 8080, False),
+        ("http://groundstation", "groundstation", 80, False),
+        ("https://groundstation", "groundstation", 443, True),
+        ("https://groundstation:8443/", "groundstation", 8443, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_feed_connection_follows_the_scheme_of_the_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+    base: str,
+    host: str,
+    port: int,
+    secure: bool,
+) -> None:
+    """`https://` is a supported base URL, and this is the third path that reads it.
+
+    `session_url` maps it to `wss://` and readiness reaches it through urllib, so
+    a feed reader that opened a plaintext socket on port 80 would fail against
+    the deployment the rest of the script supports — and fail as though the
+    service were broken.
+
+    Args:
+        monkeypatch: How the connection is replaced.
+        base: The base URL the script is given.
+        host: The host it should connect to.
+        port: The port it should connect to.
+        secure: Whether that connection should be wrapped in TLS.
+    """
+    connection = _answering(monkeypatch, _stream_response(b"\xff\xd8\xff"))
+
+    await read_feed_part(base)
+
+    assert connection.opened is not None
+    args, kwargs = connection.opened
+    assert args == (host, port)
+    assert isinstance(kwargs["ssl"], ssl.SSLContext) is secure
+
+
+@pytest.mark.asyncio
+async def test_an_https_feed_connection_verifies_the_certificate_it_is_given() -> None:
+    """Encrypted is not the point; reaching the intended host is.
+
+    A context that accepted any certificate would let a misdirected connection
+    verify an image, which is the failure this whole script exists to catch.
+    """
+    endpoint = verify_groundstation_image._feed_endpoint("https://groundstation")
+    assert endpoint.tls is not None
+    assert endpoint.tls.verify_mode is ssl.CERT_REQUIRED
+    assert endpoint.tls.check_hostname is True
+
+
+@pytest.mark.parametrize("base", ["groundstation:8080", "ftp://example.invalid", ""])
+@pytest.mark.asyncio
+async def test_the_feed_refuses_the_base_urls_the_session_endpoint_refuses(
+    base: str,
+) -> None:
+    """One scheme rule for the whole script, not one per code path.
+
+    Args:
+        base: A base URL no part of this script speaks.
+    """
+    with pytest.raises(VerificationError, match="http or https"):
+        await read_feed_part(base)

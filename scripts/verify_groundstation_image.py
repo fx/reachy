@@ -36,6 +36,12 @@ before the result is sent — one multipart part is read off the endpoint and
 compared with the fixture's own bytes. Reading it takes no second session and no
 second client: it is an ordinary HTTP request, made with the standard library
 over the same isolated network.
+
+All three things this does with `--base-url` read its scheme the same way. The
+session endpoint becomes `ws://` or `wss://`, readiness goes through urllib, and
+the feed connection is plaintext or TLS on the port that scheme implies. An
+`https://` base URL is a supported invocation, and one that half of the script
+understood would fail in a way that reads as the service being broken.
 """
 
 from __future__ import annotations
@@ -43,13 +49,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from reachy_contracts import FACE_CAPABILITY, Capability
@@ -224,6 +233,63 @@ def wait_until_ready(base_url: str, deadline_seconds: float) -> object:
     raise VerificationError(message)
 
 
+# What a scheme means when a URL names no port, and the whole set of schemes this
+# script speaks. `session_url` maps the same two onto `ws://` and `wss://` and
+# readiness reaches them through urllib, so a third code path understanding only
+# one of them is what makes `--base-url https://…` half-work.
+_DEFAULT_PORTS: Final[Mapping[str, int]] = MappingProxyType({"http": 80, "https": 443})
+
+
+@dataclass(frozen=True, slots=True)
+class _FeedEndpoint:
+    """Where to open the feed connection, and whether to wrap it in TLS.
+
+    Attributes:
+        host: What to connect to.
+        port: Which port, defaulted from the scheme when the URL named none.
+        netloc: What to send as `Host`, exactly as the caller wrote it.
+        tls: The context to negotiate with, or `None` for a plaintext
+            connection. It is `create_default_context`, so an `https://` base
+            URL is verified rather than merely encrypted — a verifier that
+            accepted any certificate would report a misdirected connection as a
+            working one.
+    """
+
+    host: str
+    port: int
+    netloc: str
+    tls: ssl.SSLContext | None
+
+
+def _feed_endpoint(base_url: str) -> _FeedEndpoint:
+    """Work out how to reach the feed from the service's base URL.
+
+    Args:
+        base_url: Where the service is listening.
+
+    Returns:
+        The connection to open.
+
+    Raises:
+        VerificationError: If the URL names no scheme this script speaks, or no
+            host. Both are the caller's mistake, and connecting anyway would
+            report one as the service being broken.
+    """
+    split = urllib.parse.urlsplit(base_url.rstrip("/"))
+    if split.scheme not in _DEFAULT_PORTS:
+        message = f"--base-url must be an http or https URL, got {base_url!r}"
+        raise VerificationError(message)
+    if split.hostname is None:
+        message = f"--base-url names no host: {base_url!r}"
+        raise VerificationError(message)
+    return _FeedEndpoint(
+        host=split.hostname,
+        port=split.port or _DEFAULT_PORTS[split.scheme],
+        netloc=split.netloc,
+        tls=ssl.create_default_context() if split.scheme == "https" else None,
+    )
+
+
 def _parse_status(line: bytes) -> int:
     """Read the status code out of an HTTP status line.
 
@@ -309,24 +375,35 @@ async def read_feed_part(base_url: str) -> tuple[Mapping[str, str], bytes]:
     Args:
         base_url: Where the service is listening.
 
+    The scheme decides the transport, the same way it decides the WebSocket
+    scheme in `session_url`: an `https://` base URL is reached over TLS and on
+    443 unless the URL names a port. This connection is opened by hand rather
+    than through urllib because the response never ends, so `https://` has to be
+    honoured here too — a plaintext socket on port 80 would fail against exactly
+    the deployment the other two code paths support.
+
+    Args:
+        base_url: Where the service is listening.
+
     Returns:
         The part's headers and its body, the body taken by the length the part
         declared rather than by searching for the next boundary.
 
     Raises:
-        VerificationError: If the endpoint refused, answered as something other
-            than a multipart stream, or sent a part this cannot read.
+        VerificationError: If the base URL names no scheme this script speaks or
+            no host, or the endpoint refused, answered as something other than a
+            multipart stream, or sent a part this cannot read.
     """
-    split = urllib.parse.urlsplit(base_url.rstrip("/"))
-    if split.hostname is None:
-        message = f"--base-url names no host: {base_url!r}"
-        raise VerificationError(message)
-
-    reader, writer = await asyncio.open_connection(split.hostname, split.port or 80)
+    endpoint = _feed_endpoint(base_url)
+    reader, writer = await asyncio.open_connection(
+        endpoint.host,
+        endpoint.port,
+        ssl=endpoint.tls,
+    )
     buffer = bytearray()
     try:
         writer.write(
-            f"GET {STREAM_PATH} HTTP/1.0\r\nHost: {split.netloc}\r\n\r\n".encode(
+            f"GET {STREAM_PATH} HTTP/1.0\r\nHost: {endpoint.netloc}\r\n\r\n".encode(
                 "latin-1",
             ),
         )
