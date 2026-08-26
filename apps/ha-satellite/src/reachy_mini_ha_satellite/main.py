@@ -114,6 +114,13 @@ from reachy_mini_ha_satellite.esphome.wake_word import (
 )
 from reachy_mini_ha_satellite.esphome.webrtc import WebRTCProcessor
 from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
+from reachy_mini_ha_satellite.groundstation_entities import (
+    GroundstationUrlTextEntity,
+)
+from reachy_mini_ha_satellite.groundstation_url import (
+    GroundstationUrlOwner,
+    ReplaceableRemoteSource,
+)
 from reachy_mini_ha_satellite.motor_control import (
     MotorGroup,
     MotorGroupCoordinator,
@@ -143,6 +150,7 @@ if TYPE_CHECKING:
         Offload,
         RobotHandle,
     )
+    from reachy_mini_ha_satellite.adapters.perception_source import ConnectableSource
     from reachy_mini_ha_satellite.behaviour import MotionIntent, PipelineEvent
     from reachy_mini_ha_satellite.ports import (
         AudioPort,
@@ -166,6 +174,7 @@ __all__ = [
     "build_application",
     "build_boost_setter",
     "build_perception_source",
+    "build_remote_source",
     "build_server_state",
     "configure_logging",
     "run",
@@ -656,6 +665,10 @@ class SatelliteApplication:
         # Nothing until `publish_live_changes` is called, which is what an
         # application built without the speaker-boost control stays at.
         self._publish: Callable[[], None] = _publish_nothing
+        # What every settings submission passes through once the composition
+        # root has attached it. Separate from the constructor because it needs
+        # `apply_live`, which is this object's own method.
+        self._groundstation: GroundstationUrlOwner | None = None
         self._stop: asyncio.Event | None = None
         self._last_tick_at: float | None = None
         self._closed = False
@@ -689,6 +702,61 @@ class SatelliteApplication:
                 entity shows — out of it.
         """
         self._publish = publish
+
+    def attach_groundstation(self, owner: GroundstationUrlOwner) -> None:
+        """Hand over the owner every settings submission goes through.
+
+        Separate from the constructor for the same reason `attach` and
+        `publish_live_changes` are: the owner adopts a resolved configuration
+        through `apply_live`, which is a method of the application it would have
+        to be constructed before.
+
+        Args:
+            owner: What holds the groundstation address, its source and the
+                order a replacement happens in.
+        """
+        self._groundstation = owner
+
+    def current_resolution(self) -> Resolution | None:
+        """Report the configuration in effect, from the owner that tracks it.
+
+        The settings page renders this rather than its own record of the last
+        submission it made, because Home Assistant can change the groundstation
+        address with nobody on that page.
+
+        Returns:
+            What is in effect, or `None` for an application assembled without an
+            owner — in which case nothing here has changed since startup.
+        """
+        owner = self._groundstation
+        return None if owner is None else owner.resolution
+
+    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
+        """Apply one complete set of overrides, however they were submitted.
+
+        The settings page's one write path. It goes through the address owner
+        rather than calling `config.apply_settings_change` directly, because a
+        submission that changes the groundstation address must adopt before it
+        persists — see that function's docstring for why, and
+        `groundstation_url` for the order.
+
+        Args:
+            wanted: The complete set of overrides to store, by setting name.
+
+        Returns:
+            The settings in effect after the change.
+
+        Raises:
+            ConfigurationError: If the submission was refused, or if no owner is
+                attached — an application assembled without one has no path that
+                could write the address safely, and inventing one here would be
+                the persist-first ordering this change removed.
+        """
+        owner = self._groundstation
+        if owner is None:
+            message = "this application has no settings owner attached"
+            raise ConfigurationError(message)
+        return await owner.submit(wanted)
 
     @property
     def services(self) -> tuple[Service, ...]:
@@ -949,6 +1017,19 @@ class SatelliteApplication:
                 _LOGGER.error("motor confirmation failed to stop cleanly")
         _guard("motion", self._motion.release)
         _guard("the media interface", self._audio.stop)
+
+        # Before the services and before the perception chain, which is what
+        # closes the remote source: a reconstruction attempt still running then
+        # could install a client into a chain about to be released.
+        groundstation = self._groundstation
+        if groundstation is not None:
+            try:
+                await groundstation.aclose()
+            except asyncio.CancelledError as error:
+                if cancelled is None:
+                    cancelled = error
+            except Exception:
+                _LOGGER.error("the groundstation owner failed to stop cleanly")
 
         for service in reversed(self._services):
             try:
@@ -1958,15 +2039,62 @@ def build_server_state(
     )
 
 
+def build_remote_source(
+    settings: Settings,
+    media: MediaInterface,
+) -> RemotePerception | None:
+    """Build one groundstation source for one configuration, and start nothing.
+
+    Its own function because it is what `GroundstationUrlOwner` calls again for
+    every replacement and every rebuild: the owner retains this as its factory,
+    so a candidate address is turned into a source by the same code the
+    composition root used, rather than by a second construction free to differ
+    from it.
+
+    Args:
+        settings: The configuration to build from — the one in effect at
+            startup, a candidate an operator submitted, or the preceding one a
+            compensation is restoring.
+        media: The daemon's media interface, which frames come off.
+
+    Returns:
+        The source, or `None` when this configuration opens no session at all:
+        face tracking switched off, or the robot's own detector selected.
+    """
+    if not settings.face_tracking_enabled:
+        return None
+    if settings.detection_source is _ROBOT_ONLY:
+        return None
+    return RemotePerception(
+        media,
+        SessionClient(
+            url=settings.groundstation_url,
+            credential=Credential(
+                settings.groundstation_credential.get_secret_value(),
+            ),
+            capabilities=(Capability(name=FACE_CAPABILITY, version=1),),
+        ),
+        frame_interval=settings.frame_interval_seconds,
+        staleness_seconds=settings.staleness_seconds,
+    )
+
+
 def build_perception_source(
     settings: Settings,
     media: MediaInterface,
+    *,
+    remote: ConnectableSource | None = None,
 ) -> PerceptionPort | None:
     """Assemble the detector an operator asked for, or none at all.
 
     Args:
         settings: The settings in effect.
         media: The daemon's media interface, which frames come off.
+        remote: The groundstation source to compose, when the caller owns one
+            already. `build_application` passes the `ReplaceableRemoteSource`
+            the address owner swaps behind, so the composed chain keeps one
+            reference across every replacement; `None` builds a source for this
+            configuration and composes it directly.
 
     Returns:
         The source to hand the behaviour layer, or `None` when face tracking is
@@ -1976,20 +2104,7 @@ def build_perception_source(
     if not settings.face_tracking_enabled:
         return None
 
-    remote = None
-    if settings.detection_source is not _ROBOT_ONLY:
-        remote = RemotePerception(
-            media,
-            SessionClient(
-                url=settings.groundstation_url,
-                credential=Credential(
-                    settings.groundstation_credential.get_secret_value(),
-                ),
-                capabilities=(Capability(name=FACE_CAPABILITY, version=1),),
-            ),
-            frame_interval=settings.frame_interval_seconds,
-            staleness_seconds=settings.staleness_seconds,
-        )
+    remote = remote if remote is not None else build_remote_source(settings, media)
 
     local = None
     if settings.detection_source is not SourceSelection.REMOTE:
@@ -2190,8 +2305,13 @@ async def build_application(
         coordinator=motor_groups,
         tick_seconds=settings.behaviour_tick_seconds,
     )
+    # One reference the composed chain keeps for the life of the application,
+    # whatever the address becomes. It starts empty for a composition that opens
+    # no session, and the owner never manufactures one for it.
+    remote = ReplaceableRemoteSource(build_remote_source(settings, handle.media))
     perception: PerceptionPort = (
-        build_perception_source(settings, handle.media) or _NoPerception()
+        build_perception_source(settings, handle.media, remote=remote)
+        or _NoPerception()
     )
     behaviour = SatelliteBehaviour(
         idle_seconds=settings.idle_seconds,
@@ -2267,6 +2387,27 @@ async def build_application(
     # branch that decides whether that interface is served at all.
     store = OverrideStore(state_dir / OVERRIDES_FILENAME)
 
+    async def _remote_factory(candidate: Settings) -> ConnectableSource | None:
+        """Build a groundstation source for a candidate configuration.
+
+        Args:
+            candidate: What an operator submitted, or the preceding
+                configuration a compensation is restoring.
+
+        Returns:
+            The source, or `None` for a configuration that opens no session.
+        """
+        return build_remote_source(candidate, handle.media)
+
+    groundstation = GroundstationUrlOwner(
+        store=store,
+        resolution=resolution,
+        source=remote,
+        factory=_remote_factory,
+        apply_live=application.apply_live,
+    )
+    application.attach_groundstation(groundstation)
+
     # Appended before any connection exists, which is safe because the vendored
     # protocol layer's three de-duplication branches match its *own* classes by
     # `isinstance` and never touch these. The keys stay unique because that layer
@@ -2295,6 +2436,16 @@ async def build_application(
                 key=len(state.entities),
             )
         )
+    # Announced whatever the detection source is: the address is configuration
+    # an operator changes before selecting a groundstation, not a report of one
+    # that is currently connected.
+    address = GroundstationUrlTextEntity(
+        state=state,
+        owner=groundstation,
+        key=len(state.entities),
+    )
+    state.entities.append(address)
+    groundstation.publish_changes(address.publish)
     # The other direction, and the reason the boost control needs one where the
     # volume control does not: the settings page can change this value without
     # Home Assistant having asked. `apply_live` is what every change of it

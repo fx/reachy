@@ -120,6 +120,38 @@ class SettingsHost(Protocol):
         """
         ...
 
+    def current_resolution(self) -> Resolution | None:
+        """The configuration in effect, when the application tracks one itself.
+
+        Home Assistant can change the groundstation address without this page
+        having been opened, so the page's own record of the last submission it
+        made is not the last change that happened. An application that owns a
+        live resolution reports it here and the page renders that; `None` means
+        the page's own record is still the whole story.
+
+        Returns:
+            What is in effect, or `None`.
+        """
+        ...
+
+    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
+        """Persist and adopt one complete set of overrides.
+
+        Asked of the application rather than performed here, because the order
+        depends on what changed: the groundstation address has to be adopted
+        before it is persisted, and only the application holds the source that
+        adoption replaces. A page with nothing behind it writes through
+        `config.apply_settings_change` instead, which is that same path for
+        every setting whose adoption builds nothing.
+
+        Args:
+            wanted: The complete set of overrides to store, by setting name.
+
+        Returns:
+            The settings in effect after the change.
+        """
+        ...
+
     def request_stop(self) -> None:
         """Ask the application to shut down. It is not started again from here."""
         ...
@@ -292,11 +324,42 @@ def create_app(
         The application, ready to be served.
     """
     source: Mapping[str, str] = os.environ if environ is None else environ
-    # Resolved once rather than at each of the two writing paths: `application`
-    # is a parameter and cannot change, so the two would only ever be the same
-    # answer written twice.
-    adopt = None if application is None else application.apply_live
     current = _Current(resolution)
+
+    def _resolved() -> Resolution:
+        """Say what is in effect, preferring the application's own record.
+
+        Returns:
+            The application's live resolution when it keeps one, and otherwise
+            the last one this page resolved. Home Assistant can change the
+            groundstation address with nobody on this page, so rendering only
+            what this page last wrote would report a value that stopped being
+            in effect.
+        """
+        if application is not None:
+            live = application.current_resolution()
+            if live is not None:
+                return live
+        return current.resolution
+
+    async def _write(wanted: Mapping[str, str]) -> Resolution:
+        """Persist and adopt one submission, through whoever owns the order.
+
+        Resolved here rather than at each of the two writing paths:
+        `application` is a parameter and cannot change, so the two would only
+        ever be the same answer written twice.
+
+        Args:
+            wanted: The complete set of overrides to store.
+
+        Returns:
+            The settings in effect afterwards.
+        """
+        if application is None:
+            # A page with nothing behind it. There is no running source to
+            # replace, so the released order is the whole of what a write is.
+            return apply_settings_change(wanted, store=store, environ=source)
+        return await application.apply_settings(wanted)
 
     async def index(request: Request) -> Response:
         """Serve the settings page.
@@ -311,7 +374,7 @@ def create_app(
         query = request.url.query
         return HTMLResponse(
             _page(
-                current.resolution,
+                _resolved(),
                 store,
                 application,
                 saved=_names_from(query, "saved"),
@@ -339,19 +402,14 @@ def create_app(
         try:
             previous = store.load()
             wanted = _overrides_from(fields, base=base, previous=previous)
-            resolved = apply_settings_change(
-                wanted,
-                store=store,
-                environ=source,
-                apply_live=adopt,
-            )
+            resolved = await _write(wanted)
         except ConfigurationError as error:
             # Every way this can refuse ends here, and every one of them ends
             # with the operator reading why rather than a traceback. A file that
             # cannot be written is the one worth naming: a change that appears
             # to have been accepted and was not is the worst outcome available.
             return HTMLResponse(
-                _page(current.resolution, store, application, error=str(error)),
+                _page(_resolved(), store, application, error=str(error)),
                 status_code=400,
             )
 
@@ -380,15 +438,13 @@ def create_app(
             return _refuse_cross_site()
         try:
             previous = store.load()
-            resolved = apply_settings_change(
-                {},
-                store=store,
-                environ=source,
-                apply_live=adopt,
-            )
+            # Through the same owner, because discarding an override for the
+            # groundstation address is a replacement too — the environment's
+            # value becomes effective, and it has its own source to build.
+            resolved = await _write({})
         except ConfigurationError as error:
             return HTMLResponse(
-                _page(current.resolution, store, application, error=str(error)),
+                _page(_resolved(), store, application, error=str(error)),
                 status_code=400,
             )
         current.resolution = resolved
@@ -426,7 +482,7 @@ def create_app(
             The same rendering the boot log emits, as JSON.
         """
         del request
-        resolved = current.resolution
+        resolved = _resolved()
         return JSONResponse(
             {
                 "settings": resolved_configuration(resolved.settings),

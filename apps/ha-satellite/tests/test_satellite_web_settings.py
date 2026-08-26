@@ -37,9 +37,14 @@ from satellite_support import (
 from reachy_mini_ha_satellite.config import (
     COMPATIBILITY_SETTINGS,
     ENV_PREFIX,
+    GROUNDSTATION_URL_MAX_LENGTH,
+    GROUNDSTATION_URL_SETTING,
     SECRET_SETTINGS,
+    ConfigurationError,
     OverrideStore,
+    Resolution,
     Settings,
+    apply_settings_change,
     declared_elsewhere,
     load_settings,
     setting_names,
@@ -75,6 +80,10 @@ class RecordingHost:
     def __init__(self) -> None:
         """Start having been asked for nothing."""
         self.applied: list[Settings] = []
+        self.environ: Mapping[str, str] = ENVIRONMENT
+        self.submitted: list[Mapping[str, str]] = []
+        self.refusal: ConfigurationError | None = None
+        self.live: Resolution | None = None
         self.stops = 0
         self.events: tuple[dict[str, object], ...] = (
             public_controller_diagnostic_event(),
@@ -101,6 +110,45 @@ class RecordingHost:
             settings: What the page resolved.
         """
         self.applied.append(settings)
+
+    def current_resolution(self) -> Resolution | None:
+        """Report a configuration changed from somewhere other than this page.
+
+        Returns:
+            Whatever a test set, and `None` — the ordinary case — for a page
+            whose own record is still the whole story.
+        """
+        return self.live
+
+    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
+        """Persist and adopt the way an application with no address owner does.
+
+        The real application routes this through
+        `groundstation_url.GroundstationUrlOwner`, which is covered by
+        `test_satellite_groundstation_url.py`. What this page owes is that it
+        hands the whole submission to whatever the application says the order
+        is, which this records.
+
+        Args:
+            wanted: The complete set of overrides to store.
+
+        Returns:
+            The settings in effect afterwards.
+
+        Raises:
+            ConfigurationError: Whatever `refusal` was set to, standing in for
+                a replacement the real owner refused or compensated. Nothing is
+                written in that case, which is what the durable file records.
+        """
+        self.submitted.append(dict(wanted))
+        if self.refusal is not None:
+            raise self.refusal
+        return apply_settings_change(
+            wanted,
+            store=_store(),
+            environ=self.environ,
+            apply_live=self.apply_live,
+        )
 
     def request_stop(self) -> None:
         """Record a restart request."""
@@ -141,6 +189,8 @@ def _app(
         The ASGI application.
     """
     source = ENVIRONMENT if environ is None else environ
+    if host is not None:
+        host.environ = source
     store = _store()
     return create_app(
         resolution=load_settings(source, store.load()),
@@ -1350,3 +1400,98 @@ class TestThePageIsTheStructureItSays:
     def test_the_checker_accepts_a_void_element_without_a_closing_tag(self) -> None:
         """Otherwise every `<input>` on the page would read as unclosed."""
         assert _nesting_faults('<p>text<br><input type="text"></p>') == []
+
+
+class TestTheGroundstationAddressOnThePage:
+    """REQ-095's other configuration surface: one bound, one read-back."""
+
+    @pytest.mark.asyncio
+    async def test_the_field_carries_the_shared_maximum(self) -> None:
+        """The browser stops an over-long address before the model has to."""
+        async with _client(_app(RecordingHost())) as client:
+            page = (await client.get("/")).text
+
+        field = page.split(f'name="{GROUNDSTATION_URL_SETTING}"')[1].split(">")[0]
+        assert f'maxlength="{GROUNDSTATION_URL_MAX_LENGTH}"' in field
+
+    @pytest.mark.asyncio
+    async def test_the_page_says_the_address_applies_at_once(self) -> None:
+        """It no longer needs a restart, and the page must not say it does."""
+        async with _client(_app(RecordingHost())) as client:
+            page = (await client.get("/")).text
+
+        row = page.split(f'name="{GROUNDSTATION_URL_SETTING}"')[1].split("</tr>")[0]
+        assert "applies at once" in row
+        assert "needs a restart" not in row
+
+    @pytest.mark.asyncio
+    async def test_a_submission_goes_through_the_application_s_own_order(
+        self,
+    ) -> None:
+        """The page hands the whole submission over rather than writing first.
+
+        Which order that is belongs to the application — see
+        `test_satellite_groundstation_url.py` — and what this asserts is that
+        the page asks rather than deciding.
+        """
+        host = RecordingHost()
+        settings = load_settings(ENVIRONMENT, {}).settings
+        replacement = "ws://192.0.2.30:8080/v1/session"
+
+        async with _client(_app(host)) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, groundstation_url=replacement),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 303
+        assert host.submitted == [{GROUNDSTATION_URL_SETTING: replacement}]
+        assert _store().load() == {GROUNDSTATION_URL_SETTING: replacement}
+
+    @pytest.mark.asyncio
+    async def test_a_change_made_from_home_assistant_shows_on_the_page(
+        self,
+    ) -> None:
+        """Rendering only what this page last wrote would report a stale address.
+
+        Home Assistant's own control changes the address with nobody here, so
+        the page renders the application's live resolution when it keeps one.
+        """
+        host = RecordingHost()
+        elsewhere = "ws://192.0.2.40:8080/v1/session"
+        host.live = load_settings(
+            ENVIRONMENT,
+            {GROUNDSTATION_URL_SETTING: elsewhere},
+        )
+
+        async with _client(_app(host)) as client:
+            page = (await client.get("/")).text
+            reported = (await client.get("/config")).json()
+
+        assert elsewhere in page
+        assert reported["settings"][GROUNDSTATION_URL_SETTING] == elsewhere
+
+    @pytest.mark.asyncio
+    async def test_a_refused_submission_leaves_the_page_reporting_the_old_value(
+        self,
+    ) -> None:
+        """The read-back is the effective address, never the requested one."""
+        host = RecordingHost()
+        host.refusal = ConfigurationError("the replacement could not be started")
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app(host)) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(
+                    settings,
+                    groundstation_url="ws://192.0.2.30:8080/v1/session",
+                ),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 400
+        assert "could not be started" in response.text
+        assert ENVIRONMENT[f"{ENV_PREFIX}GROUNDSTATION_URL"] in response.text
+        assert _store().load() == {}

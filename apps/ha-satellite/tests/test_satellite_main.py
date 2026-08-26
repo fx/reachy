@@ -103,6 +103,7 @@ from reachy_mini_ha_satellite.config import (
 from reachy_mini_ha_satellite.esphome.models import Preferences, ServerState
 from reachy_mini_ha_satellite.esphome.peripheral_api import LVAEvent
 from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
+from reachy_mini_ha_satellite.groundstation_url import ReplaceableRemoteSource
 from reachy_mini_ha_satellite.main import (
     _THREAD_JOIN_SECONDS,
     AdvertisementService,
@@ -116,6 +117,7 @@ from reachy_mini_ha_satellite.main import (
     apply_intents,
     build_application,
     build_perception_source,
+    build_remote_source,
     build_server_state,
     configure_logging,
     load_preferences,
@@ -149,7 +151,7 @@ from reachy_mini_ha_satellite.wake_word import WakeWordDetector
 from reachy_session_client import Backoff
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
     from queue import Queue
 
     from pyfakefs.fake_filesystem import FakeFilesystem
@@ -3455,6 +3457,153 @@ class TestBuildingThePerceptionSource:
         )
 
         assert isinstance(source, FallbackPerception)
+
+    def test_a_supplied_remote_is_composed_rather_than_a_fresh_one(self) -> None:
+        """`build_application` passes the source the address owner swaps behind.
+
+        A chain composed over a freshly built `RemotePerception` would hold the
+        retired object after the first replacement.
+        """
+        stable = ReplaceableRemoteSource(None)
+
+        source = build_perception_source(
+            _settings(),
+            FakeRobot().media,
+            remote=stable,
+        )
+
+        assert source is stable
+
+    def test_the_remote_factory_builds_nothing_for_a_local_composition(self) -> None:
+        """The owner never manufactures a session client nobody asked for."""
+        media = FakeRobot().media
+
+        assert build_remote_source(_settings(face_tracking_enabled="false"), media) is (
+            None
+        )
+        assert (
+            build_remote_source(
+                _settings(
+                    detection_source=_ROBOT_ONLY.value,
+                    local_model_path="/models/face.onnx",
+                ),
+                media,
+            )
+            is None
+        )
+        assert isinstance(build_remote_source(_settings(), media), RemotePerception)
+
+
+class TestTheApplicationsSettingsPath:
+    """Every submission goes through the owner, and shutdown finishes it first."""
+
+    @pytest.mark.asyncio
+    async def test_a_submission_is_handed_to_the_attached_owner(self) -> None:
+        """The settings page asks the application; the application asks the owner."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+        owner = _RecordingOwner()
+        application.attach_groundstation(cast("Any", owner))
+
+        await application.apply_settings({"idle_seconds": "9.0"})
+
+        assert owner.submitted == [{"idle_seconds": "9.0"}]
+
+    @pytest.mark.asyncio
+    async def test_an_application_with_no_owner_refuses_rather_than_writing(
+        self,
+    ) -> None:
+        """Inventing a write here would be the persist-first order, restored."""
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=FakePerception(),
+        )
+
+        with pytest.raises(ConfigurationError, match="no settings owner"):
+            await application.apply_settings({"idle_seconds": "9.0"})
+
+    @pytest.mark.asyncio
+    async def test_shutdown_closes_the_owner_before_the_perception_chain(
+        self,
+    ) -> None:
+        """A restoration still running could install a client into a released chain."""
+        order: list[str] = []
+        perception = FakePerception()
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=perception,
+        )
+        owner = _RecordingOwner(order)
+        application.attach_groundstation(cast("Any", owner))
+        original = perception.aclose
+
+        async def _record_close() -> None:
+            """Record that the chain was released, then release it."""
+            order.append("perception")
+            await original()
+
+        perception.aclose = _record_close  # type: ignore[method-assign]  # the fake's own close is replaced to record ordering, which is the whole assertion
+
+        await application.aclose()
+
+        assert order == ["owner", "perception"]
+
+    @pytest.mark.asyncio
+    async def test_an_owner_that_will_not_close_does_not_stop_shutdown(
+        self,
+    ) -> None:
+        """Every shutdown step is guarded; the media layer is the reason why."""
+        perception = FakePerception()
+        application, _stop = _application(
+            audio=FakeAudio(),
+            motion=FakeMotion(),
+            perception=perception,
+        )
+        owner = _RecordingOwner()
+        owner.failure = RuntimeError("stuck")
+        application.attach_groundstation(cast("Any", owner))
+
+        await application.aclose()
+
+        assert perception.closed
+
+
+class _RecordingOwner:
+    """Stands in for the address owner, which has tests of its own."""
+
+    def __init__(self, order: list[str] | None = None) -> None:
+        """Start having been asked for nothing.
+
+        Args:
+            order: Where to record being closed, for the ordering assertion.
+        """
+        self.submitted: list[Mapping[str, str]] = []
+        self.order = order
+        self.failure: Exception | None = None
+
+    async def submit(self, wanted: Mapping[str, str]) -> None:
+        """Record one submission.
+
+        Args:
+            wanted: The complete set of overrides.
+        """
+        self.submitted.append(dict(wanted))
+
+    async def aclose(self) -> None:
+        """Record being closed, or fail as instructed.
+
+        Raises:
+            Exception: Whatever `failure` was set to.
+        """
+        if self.order is not None:
+            self.order.append("owner")
+        if self.failure is not None:
+            raise self.failure
 
 
 class TestPreferences:

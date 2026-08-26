@@ -101,6 +101,7 @@ __all__ = [
     "FakeWakeWordFeatures",
     "ManualClock",
     "ManualDetach",
+    "address_of_length",
     "assert_public_controller_diagnostic_event",
     "assert_public_controller_diagnostics_response",
     "available_wake_word",
@@ -124,6 +125,36 @@ __all__ = [
 # A placeholder credential. Not anybody's — see the root AGENTS.md on what may
 # enter a tracked file in a public repository.
 CREDENTIAL: Final = "example-credential"
+
+# What every groundstation address in the suite is built from. The RFC 5737
+# documentation range, for the same reason.
+_ADDRESS_PREFIX: Final = "ws://192.0.2.10:8080/v1/session/"
+
+
+def address_of_length(length: int) -> str:
+    """Build a valid groundstation address of exactly this many characters.
+
+    Valid in every respect but its length — the scheme is one a session client
+    accepts and it carries no user information, query or fragment — so a refusal
+    of one of these is a refusal of the length and of nothing else. Shared,
+    because the settings model, the replacement owner and the Home Assistant
+    control are all tested at the same boundary and a second builder would be
+    free to produce an address that fails for a second reason.
+
+    Args:
+        length: How long the address must be.
+
+    Returns:
+        The address, padded in its path.
+
+    Raises:
+        ValueError: If the requested length cannot hold the fixed prefix.
+    """
+    if length < len(_ADDRESS_PREFIX):
+        message = f"an address of {length} characters cannot hold {_ADDRESS_PREFIX!r}"
+        raise ValueError(message)
+    return _ADDRESS_PREFIX + "a" * (length - len(_ADDRESS_PREFIX))
+
 
 # The controller diagnostics endpoint is deliberately unversioned. This exact
 # allowlist is therefore its public version boundary: adding a key is an API and

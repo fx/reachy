@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from satellite_support import address_of_length
 
 from reachy_contracts.settings import SESSION_URL_MAX_LENGTH
 from reachy_mini_ha_satellite.config import (
@@ -1045,23 +1046,6 @@ class TestRenderingAValueBackToAString:
         )
 
 
-def _address_of_length(length: int) -> str:
-    """Build a valid session address of exactly this many characters.
-
-    Valid in every respect but its length, so a refusal below is a refusal of
-    the length and of nothing else. The address is from the RFC 5737
-    documentation range.
-
-    Args:
-        length: How long it must be.
-
-    Returns:
-        The address, padded in its path.
-    """
-    prefix = "ws://192.0.2.10:8080/v1/session/"
-    return prefix + "a" * (length - len(prefix))
-
-
 # The smallest environment that resolves *and* opens a session, which is what
 # makes the address below load-bearing rather than unread.
 _TRACKING = {
@@ -1083,7 +1067,7 @@ class TestTheGroundstationAddressBound:
 
     def test_the_boundary_length_resolves(self) -> None:
         """255 is the limit, so 255 is a value that starts the application."""
-        url = _address_of_length(GROUNDSTATION_URL_MAX_LENGTH)
+        url = address_of_length(GROUNDSTATION_URL_MAX_LENGTH)
 
         resolution = load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
 
@@ -1096,7 +1080,7 @@ class TestTheGroundstationAddressBound:
         Args:
             length: How long the released address is.
         """
-        url = _address_of_length(length)
+        url = address_of_length(length)
 
         with pytest.raises(ConfigurationError) as raised:
             load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
@@ -1122,7 +1106,7 @@ class TestTheGroundstationAddressBound:
         with pytest.raises(ConfigurationError) as raised:
             load_settings(
                 environ,
-                {GROUNDSTATION_URL_SETTING: _address_of_length(length)},
+                {GROUNDSTATION_URL_SETTING: address_of_length(length)},
             )
 
         message = str(raised.value)
@@ -1136,7 +1120,7 @@ class TestTheGroundstationAddressBound:
         A refusal that quoted it would put a value nothing can represent into
         the boot log, which is the one place an operator is certain to paste.
         """
-        url = _address_of_length(400)
+        url = address_of_length(400)
 
         with pytest.raises(ConfigurationError) as raised:
             load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
@@ -1167,7 +1151,7 @@ class TestTheGroundstationAddressBound:
         Args:
             length: How long the submitted address is.
         """
-        url = _address_of_length(length)
+        url = address_of_length(length)
 
         with pytest.raises(ConfigurationError) as raised:
             validate_groundstation_url_length(url)
