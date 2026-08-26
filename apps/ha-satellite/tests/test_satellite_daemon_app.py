@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from satellite_support import FakeRobot
+from satellite_support import FakeRobot, ManualClock
 
 from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.config import (
@@ -36,6 +36,12 @@ from reachy_mini_ha_satellite.config import (
     Settings,
     overrides_path,
     variable_for,
+)
+from reachy_mini_ha_satellite.motor_control import (
+    HEAD_MOTOR_IDS,
+    MOTOR_IDENTIFIERS,
+    MotorGroup,
+    MotorGroupCoordinator,
 )
 
 if TYPE_CHECKING:
@@ -601,11 +607,11 @@ class TestConfirmedTorqueBoundary:
         assert not result.acknowledged
         assert result.evidence == ()
 
-    def test_canary_result_is_translated_without_request_or_numeric_ids(
+    def test_canary_result_retains_only_ids_needed_for_internal_validation(
         self,
         daemon_app: ModuleType,
     ) -> None:
-        """Correlation proves terminality but its identifiers never leave the seam."""
+        """Correlation IDs disappear while motor IDs remain available for matching."""
         raw = SimpleNamespace(
             read_motor_torque=lambda ids: SimpleNamespace(
                 request_id=uuid4(),
@@ -618,8 +624,92 @@ class TestConfirmedTorqueBoundary:
                 states=[
                     SimpleNamespace(
                         name=name,
-                        motor_id=index + 10,
+                        motor_id=MOTOR_IDENTIFIERS[name],
                         enabled=True,
+                        error=None,
+                    )
+                    for name in ids
+                ],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        result = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert result.physical_value(HEAD_MOTOR_IDS) is True
+        assert not hasattr(result, "request_id")
+        assert [item.motor_id for item in result.evidence] == [
+            MOTOR_IDENTIFIERS[name] for name in HEAD_MOTOR_IDS
+        ]
+
+    @pytest.mark.parametrize(
+        ("outcome", "acknowledged", "terminal"),
+        [
+            (outcome, acknowledged, terminal)
+            for outcome in ("confirmed", "contradicted", "partial", "failed")
+            for acknowledged in (False, True)
+            for terminal in (False, True)
+        ],
+    )
+    def test_every_outcome_acknowledgement_and_terminal_combination_fails_closed(
+        self,
+        daemon_app: ModuleType,
+        outcome: str,
+        acknowledged: bool,
+        terminal: bool,
+    ) -> None:
+        """Only terminal acknowledged confirmed reads can register or open a gate."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda ids: SimpleNamespace(
+                request_id=uuid4(),
+                operation=SimpleNamespace(value="read"),
+                requested_names=list(ids),
+                requested_enabled=None,
+                acknowledged=acknowledged,
+                terminal=terminal,
+                outcome=SimpleNamespace(value=outcome),
+                states=[
+                    SimpleNamespace(
+                        name=name,
+                        motor_id=MOTOR_IDENTIFIERS[name],
+                        enabled=True,
+                        error=None,
+                    )
+                    for name in ids
+                ],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+        robot = FakeRobot(motor_reads=[translated])
+        groups = MotorGroupCoordinator(robot, clock=ManualClock())
+
+        registered = groups.initialize()
+
+        accepted = outcome == "confirmed" and acknowledged and terminal
+        assert (MotorGroup.HEAD in registered) is accepted
+        assert groups.gate_open(MotorGroup.HEAD) is accepted
+        assert groups.last_confirmed(MotorGroup.HEAD) is (True if accepted else None)
+
+    def test_absent_per_motor_boolean_fails_closed(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """A named motor with neither a physical value nor error is incomplete."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda ids: SimpleNamespace(
+                request_id=uuid4(),
+                operation=SimpleNamespace(value="read"),
+                requested_names=list(ids),
+                requested_enabled=None,
+                acknowledged=True,
+                terminal=True,
+                outcome=SimpleNamespace(value="confirmed"),
+                states=[
+                    SimpleNamespace(
+                        name=name,
+                        motor_id=MOTOR_IDENTIFIERS[name],
+                        enabled=None if index == 0 else True,
                         error=None,
                     )
                     for index, name in enumerate(ids)
@@ -628,11 +718,10 @@ class TestConfirmedTorqueBoundary:
         )
         bridge = daemon_app._ConfirmedRobotHandle(raw)
 
-        result = bridge.read_motor_torque(["one", "two"])
+        result = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
 
-        assert result.physical_value(("one", "two")) is True
-        assert not hasattr(result, "request_id")
-        assert all(not hasattr(item, "motor_id") for item in result.evidence)
+        assert result.outcome.value == "failed"
+        assert result.physical_value(HEAD_MOTOR_IDS) is None
 
     def test_malformed_or_unexpected_sdk_evidence_fails_closed(
         self,

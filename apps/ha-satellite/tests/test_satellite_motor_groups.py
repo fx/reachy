@@ -22,9 +22,11 @@ from reachy_mini_ha_satellite.motor_control import (
     ANTENNA_MOTOR_IDS,
     BODY_MOTOR_IDS,
     HEAD_MOTOR_IDS,
+    MOTOR_IDENTIFIERS,
     MotorConfirmation,
     MotorConfirmationOutcome,
     MotorEvidence,
+    MotorEvidenceError,
     MotorGroup,
     MotorGroupCoordinator,
 )
@@ -101,6 +103,132 @@ def test_initial_absent_partial_or_contradictory_evidence_keeps_group_closed(
     assert not groups.gate_open(MotorGroup.HEAD)
     head = cast("dict[str, object]", groups.status()["groups"])["head"]
     assert cast("dict[str, object]", head)["last_confirmed"] is None
+
+
+@pytest.mark.parametrize("error", list(MotorEvidenceError))
+def test_any_per_motor_error_makes_initial_group_incomplete(
+    error: MotorEvidenceError,
+) -> None:
+    """No bounded per-motor error may be filtered out before agreement."""
+    evidence = (
+        *(MotorEvidence(name=name, enabled=True) for name in HEAD_MOTOR_IDS[:-1]),
+        MotorEvidence(name=HEAD_MOTOR_IDS[-1], error=error),
+    )
+    robot = FakeRobot(
+        motor_reads=[
+            MotorConfirmation(True, MotorConfirmationOutcome.CONFIRMED, evidence)
+        ]
+    )
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+
+    assert MotorGroup.HEAD not in groups.initialize()
+    assert groups.last_confirmed(MotorGroup.HEAD) is None
+    assert not groups.gate_open(MotorGroup.HEAD)
+
+
+_INCOMPLETE_EVIDENCE = [
+    (
+        "mixed-success-error",
+        (
+            *(MotorEvidence(name=name, enabled=True) for name in HEAD_MOTOR_IDS[:-1]),
+            MotorEvidence(
+                name=HEAD_MOTOR_IDS[-1],
+                error=MotorEvidenceError.READ_FAILED,
+            ),
+        ),
+    ),
+    (
+        "duplicate-missing-substitution",
+        (
+            *(MotorEvidence(name=name, enabled=True) for name in HEAD_MOTOR_IDS[:-1]),
+            MotorEvidence(name=HEAD_MOTOR_IDS[0], enabled=True),
+        ),
+    ),
+    (
+        "extra-evidence",
+        (
+            *(MotorEvidence(name=name, enabled=True) for name in HEAD_MOTOR_IDS),
+            MotorEvidence(name=BODY_MOTOR_IDS[0], enabled=True),
+        ),
+    ),
+    (
+        "wrong-group-member",
+        (
+            *(MotorEvidence(name=name, enabled=True) for name in HEAD_MOTOR_IDS[:-1]),
+            MotorEvidence(name=BODY_MOTOR_IDS[0], enabled=True),
+        ),
+    ),
+    (
+        "mismatched-name-id",
+        (
+            MotorEvidence(
+                name=HEAD_MOTOR_IDS[0],
+                motor_id=MOTOR_IDENTIFIERS[HEAD_MOTOR_IDS[1]],
+                enabled=True,
+            ),
+            *(
+                MotorEvidence(
+                    name=name,
+                    motor_id=MOTOR_IDENTIFIERS[name],
+                    enabled=True,
+                )
+                for name in HEAD_MOTOR_IDS[1:]
+            ),
+        ),
+    ),
+    (
+        "partial-ids",
+        (
+            MotorEvidence(
+                name=HEAD_MOTOR_IDS[0],
+                motor_id=MOTOR_IDENTIFIERS[HEAD_MOTOR_IDS[0]],
+                enabled=True,
+            ),
+            *(MotorEvidence(name=name, enabled=True) for name in HEAD_MOTOR_IDS[1:]),
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [case[1] for case in _INCOMPLETE_EVIDENCE],
+    ids=[case[0] for case in _INCOMPLETE_EVIDENCE],
+)
+def test_incomplete_evidence_fails_initial_transition_and_refresh_closed(
+    evidence: tuple[MotorEvidence, ...],
+) -> None:
+    """Every confirmation path requires exact one-to-one complete agreement."""
+    incomplete = MotorConfirmation(
+        True,
+        MotorConfirmationOutcome.CONFIRMED,
+        evidence,
+    )
+
+    initial_robot = FakeRobot(motor_reads=[incomplete])
+    initial = MotorGroupCoordinator(initial_robot, clock=ManualClock())
+    assert MotorGroup.HEAD not in initial.initialize()
+    assert initial.last_confirmed(MotorGroup.HEAD) is None
+    assert not initial.gate_open(MotorGroup.HEAD)
+
+    transition_robot = FakeRobot(motor_disables_confirmed=[incomplete])
+    transition = coordinator(transition_robot)
+    assert transition.transition(MotorGroup.HEAD, False) is None
+    assert transition.last_confirmed(MotorGroup.HEAD) is True
+    assert not transition.gate_open(MotorGroup.HEAD)
+
+    refresh_robot = FakeRobot(
+        motor_reads=[
+            confirmation(HEAD_MOTOR_IDS, True),
+            confirmation(BODY_MOTOR_IDS, True),
+            confirmation(ANTENNA_MOTOR_IDS, True),
+            incomplete,
+        ]
+    )
+    refreshed = coordinator(refresh_robot)
+    assert refreshed.refresh(MotorGroup.HEAD) is None
+    assert refreshed.last_confirmed(MotorGroup.HEAD) is True
+    assert not refreshed.gate_open(MotorGroup.HEAD)
 
 
 def test_missing_confirmed_api_gates_every_group_closed() -> None:

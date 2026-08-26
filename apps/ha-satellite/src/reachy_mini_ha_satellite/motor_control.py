@@ -26,6 +26,7 @@ __all__ = [
     "BODY_MOTOR_IDS",
     "HEAD_MOTOR_IDS",
     "MOTOR_GROUPS",
+    "MOTOR_IDENTIFIERS",
     "MotorConfirmation",
     "MotorConfirmationOutcome",
     "MotorEvidence",
@@ -38,6 +39,12 @@ __all__ = [
 HEAD_MOTOR_IDS: Final = tuple(f"stewart_{index}" for index in range(1, 7))
 BODY_MOTOR_IDS: Final = ("body_rotation",)
 ANTENNA_MOTOR_IDS: Final = ("right_antenna", "left_antenna")
+MOTOR_IDENTIFIERS: Final[Mapping[str, int]] = {
+    "body_rotation": 10,
+    **{f"stewart_{index}": index + 10 for index in range(1, 7)},
+    "right_antenna": 17,
+    "left_antenna": 18,
+}
 
 
 class MotorGroup(StrEnum):
@@ -81,13 +88,18 @@ class MotorEvidence:
     """Physical evidence for one locally requested motor name."""
 
     name: str
+    motor_id: int | None = None
     enabled: bool | None = None
     error: MotorEvidenceError | None = None
 
     def __post_init__(self) -> None:
-        """Require exactly one physical value or bounded error."""
+        """Require a valid optional ID and exactly one value or bounded error."""
         if not self.name:
             raise ValueError("motor evidence requires a name")
+        if self.motor_id is not None and (
+            type(self.motor_id) is not int or self.motor_id < 0
+        ):
+            raise ValueError("motor evidence ID must be a non-negative integer")
         if (self.enabled is None) == (self.error is None):
             raise ValueError("motor evidence requires exactly one value or error")
 
@@ -130,7 +142,20 @@ class MotorConfirmation:
             or len(expected) != len(frozenset(expected))
         ):
             return None
-        values = {item.enabled for item in by_name.values() if item.error is None}
+        ids_present = {item.motor_id is not None for item in by_name.values()}
+        if len(ids_present) != 1:
+            return None
+        values: set[bool] = set()
+        for name in expected:
+            item = by_name[name]
+            if item.error is not None or type(item.enabled) is not bool:
+                return None
+            expected_id = MOTOR_IDENTIFIERS.get(name)
+            if expected_id is None or (
+                item.motor_id is not None and item.motor_id != expected_id
+            ):
+                return None
+            values.add(item.enabled)
         if len(values) != 1:
             return None
         return values.pop()
@@ -433,6 +458,7 @@ class MotorGroupCoordinator:
                 allow_contradiction=False,
             )
             if actual is None:
+                state.gate_open = False
                 self._record(group, None, confirmation, None, False)
                 return None
             changed = state.last_confirmed is not actual

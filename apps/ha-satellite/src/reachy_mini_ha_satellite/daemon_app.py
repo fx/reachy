@@ -185,17 +185,24 @@ class _ConfirmedRobotHandle:
         expected_names = frozenset(expected)
         for state in states:
             name = getattr(state, "name", None)
+            motor_id = getattr(state, "motor_id", None)
             enabled = getattr(state, "enabled", None)
             error_value = getattr(state, "error", None)
-            if not isinstance(name, str) or name not in expected_names:
+            if (
+                not isinstance(name, str)
+                or name not in expected_names
+                or (motor_id is not None and type(motor_id) is not int)
+            ):
                 return MotorConfirmation.failed()
             if type(enabled) is bool and error_value is None:
-                translated.append(MotorEvidence(name=name, enabled=enabled))
+                translated.append(
+                    MotorEvidence(name=name, motor_id=motor_id, enabled=enabled)
+                )
                 continue
             error = _TORQUE_ERRORS.get(_enum_value(error_value))
             if enabled is not None or error is None:
                 return MotorConfirmation.failed()
-            translated.append(MotorEvidence(name=name, error=error))
+            translated.append(MotorEvidence(name=name, motor_id=motor_id, error=error))
         return MotorConfirmation(acknowledged, outcome, tuple(translated))
 
     def wake_up(self) -> None:

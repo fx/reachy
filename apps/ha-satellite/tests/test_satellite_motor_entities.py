@@ -22,6 +22,7 @@ from reachy_mini_ha_satellite.motor_control import (
     MotorConfirmation,
     MotorConfirmationOutcome,
     MotorEvidence,
+    MotorEvidenceError,
     MotorGroup,
     MotorGroupCoordinator,
 )
@@ -92,6 +93,27 @@ def test_failed_command_replies_only_with_retained_boolean() -> None:
     """Missing confirmation snaps Home Assistant back to the last known value."""
     control, groups, robot = entity()
     robot.motor_disables_confirmed.append(MotorConfirmation.failed())
+
+    responses = list(control.handle_message(SwitchCommandRequest(key=7, state=False)))
+
+    assert responses == [SwitchStateResponse(key=7, state=True)]
+    assert groups.last_confirmed(MotorGroup.HEAD) is True
+    assert not groups.gate_open(MotorGroup.HEAD)
+
+
+def test_mixed_success_and_error_never_publishes_requested_state() -> None:
+    """One errored motor invalidates otherwise agreeing physical evidence."""
+    control, groups, robot = entity()
+    evidence = (
+        *(MotorEvidence(name=name, enabled=False) for name in HEAD_MOTOR_IDS[:-1]),
+        MotorEvidence(
+            name=HEAD_MOTOR_IDS[-1],
+            error=MotorEvidenceError.READ_FAILED,
+        ),
+    )
+    robot.motor_disables_confirmed.append(
+        MotorConfirmation(True, MotorConfirmationOutcome.CONFIRMED, evidence)
+    )
 
     responses = list(control.handle_message(SwitchCommandRequest(key=7, state=False)))
 
