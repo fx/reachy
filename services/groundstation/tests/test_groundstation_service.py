@@ -19,28 +19,57 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import signal
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
+import httpx
 import pytest
+import uvicorn
 from groundstation_support import (
     CREDENTIAL,
     ECHO,
     EchoCapability,
+    jpeg_bytes,
     make_settings,
 )
 
 import reachy_groundstation
+from reachy_groundstation.api.app import STREAM_PATH
 from reachy_groundstation.config import ENV_PREFIX, REDACTED_SET, Settings
+from reachy_groundstation.feed import FeedRegistry
 from reachy_groundstation.obs import build_observability
-from reachy_groundstation.service import build_application, main
+from reachy_groundstation.service import (
+    FeedClosingServer,
+    build_application,
+    build_server,
+    main,
+)
 
 if TYPE_CHECKING:
+    from starlette.types import ASGIApp
+
     from reachy_groundstation.ports import CapabilityPort
 
 _PACKAGE_ROOT = Path(reachy_groundstation.__file__).parent
 _GUARDED = ("api", "session", "pipeline")
 _FORBIDDEN = "reachy_groundstation.capabilities"
+
+
+async def _unserved(scope: object, receive: object, send: object) -> None:
+    """Stand in for an application nothing will ever call.
+
+    Args:
+        scope: The ASGI scope, never supplied.
+        receive: The ASGI receive channel, never supplied.
+        send: The ASGI send channel, never supplied.
+
+    Raises:
+        AssertionError: If anything does call it after all.
+    """
+    del scope, receive, send
+    message = "the unserved application was called"
+    raise AssertionError(message)
 
 
 def _echo(settings: Settings) -> CapabilityPort:
@@ -191,17 +220,17 @@ def test_startup_emits_the_resolved_configuration_before_serving(
     monkeypatch.setenv(f"{ENV_PREFIX}PORT", "9443")
     served: list[dict[str, object]] = []
 
-    def _run(app: object, **kwargs: object) -> None:
+    def _run(server: uvicorn.Server) -> None:
         """Record that the server would have started, without starting it.
 
         Args:
-            app: The application, unused.
-            kwargs: How it would have been served.
+            server: The server `main` built, read for how it was configured.
         """
-        del app
-        served.append(dict(kwargs))
+        served.append({"host": server.config.host, "port": server.config.port})
 
-    monkeypatch.setattr("reachy_groundstation.service.uvicorn.run", _run)
+    # The base class rather than the subclass, because what this stops short of
+    # is serving and every server this package builds inherits that from here.
+    monkeypatch.setattr(uvicorn.Server, "run", _run)
     assert main([]) == 0
 
     lines = [
@@ -241,3 +270,58 @@ async def test_the_composition_root_wires_capability_shutdown() -> None:
     async with app.router.lifespan_context(app):
         assert registry.health()
     assert closed == ["echo"]
+
+
+def test_a_shutdown_signal_closes_the_feed_before_the_server_starts_stopping() -> None:
+    """The order is the fix: uvicorn waits for viewers before it says shutdown.
+
+    A `handle_exit` that only delegated would leave the feed to the lifespan,
+    which uvicorn sends after it has waited for every open response — and a
+    viewer parked on the feed is one of those.
+    """
+    feed = FeedRegistry()
+    # An application that is never served, because what is under test happens
+    # before serving starts. `log_config=None` for the same reason production
+    # passes it: uvicorn would otherwise reconfigure this process's logging.
+    config = uvicorn.Config(_unserved, log_config=None)
+    server = FeedClosingServer(config, feed=feed)
+
+    server.handle_exit(signal.SIGTERM, None)
+
+    assert server.should_exit is True
+    with feed.authenticated_session():
+        assert feed.publish(jpeg_bytes()) is False
+    # A second signal reaches a feed that is already closed and asks uvicorn to
+    # stop waiting; neither step minds the other having happened.
+    server.handle_exit(signal.SIGTERM, None)
+    assert server.should_exit is True
+
+
+@pytest.mark.asyncio
+async def test_the_server_and_the_application_are_composed_around_one_feed() -> None:
+    """Two feeds would close the wrong viewers and look exactly like one.
+
+    Both halves are checked against the same session and the same frame, which
+    is what makes the answer discriminating: `/stream.mjpg` says 200 only if the
+    application is reading this feed, and it says 503 afterwards — with the
+    session still open and the frame still published — only if the signal
+    reached this feed too.
+    """
+    settings = make_settings()
+    feed = FeedRegistry()
+    server = build_server(settings, build_observability(settings), [_echo], feed=feed)
+
+    # `uvicorn.Config` types its application widely enough to include a string;
+    # this one is the Starlette instance `build_application` just returned.
+    app = cast("ASGIApp", server.config.app)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://groundstation.invalid",
+    ) as client:
+        with feed.authenticated_session():
+            feed.publish(jpeg_bytes())
+            assert (await client.head(STREAM_PATH)).status_code == 200
+
+            server.handle_exit(signal.SIGTERM, None)
+
+            assert (await client.head(STREAM_PATH)).status_code == 503

@@ -290,6 +290,12 @@ def create_app(
             # Before the capabilities, and synchronously: closing the feed
             # discards the retained frame and finishes every viewer, so nothing
             # is left waiting on a value the process is about to stop producing.
+            # Under a real server this has usually happened already —
+            # `service.FeedClosingServer` closes the feed when the signal
+            # arrives, because a lifespan shutdown is sent only after uvicorn
+            # has waited for the open responses a viewer is one of. This is the
+            # backstop for every other way a lifespan unwinds, and closing is
+            # idempotent so the two never conflict.
             live_feed.close()
             if task is not None:
                 task.cancel()

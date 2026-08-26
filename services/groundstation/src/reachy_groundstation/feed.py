@@ -262,9 +262,12 @@ class FeedRegistry:
     def close(self) -> None:
         """Discard the payload and finish every viewer.
 
-        Called from the application's lifespan, which is the only notice this
-        layer gets that the process is stopping. Idempotent, because a lifespan
-        that unwinds twice is not worth a second failure mode.
+        Called twice over on the way out, and deliberately. `service.py`'s
+        server calls it the moment a shutdown signal arrives, which is before
+        uvicorn starts waiting for open responses to finish and therefore the
+        only point at which waking a parked viewer still makes that wait end;
+        the application's lifespan calls it again for every other way a process
+        can stop. Idempotent, so neither has to know whether the other ran.
         """
         self._closed = True
         self._payload = None

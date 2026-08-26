@@ -18,6 +18,12 @@ in-memory client that buffers a whole response can show. So the feed's viewers
 are real HTTP clients reading a real socket while a real robot session feeds it,
 and its eligibility rules are unit-tested in `test_groundstation_feed.py`.
 
+Shutting the server down is part of what is under test rather than a fixture
+detail, which is why every test here stops it the way a container does — the
+composition root's own server class, a real `SIGTERM`, and no graceful-shutdown
+timeout to bound the wait. A harness that differed from the composed service on
+any of those three would be unable to see a stream that stops it from stopping.
+
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
 """
@@ -27,6 +33,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import signal
 from typing import TYPE_CHECKING
 
 import httpx
@@ -53,11 +61,12 @@ from reachy_contracts import SessionAgreement, SessionClose
 from reachy_groundstation.api.app import SESSION_PATH, STREAM_PATH, create_app
 from reachy_groundstation.api.mjpeg import BOUNDARY
 from reachy_groundstation.feed import MAX_VIEWERS, FeedRegistry
+from reachy_groundstation.service import FeedClosingServer
 from reachy_groundstation.session.framing import MessageKind, decode_control
 from reachy_groundstation.session.transport import CLOSE_POLICY_VIOLATION
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
 
     from starlette.applications import Starlette
     from websockets.asyncio.client import ClientConnection
@@ -72,11 +81,26 @@ STAMP = "17352.884"
 # fails the suite rather than stalling it.
 _TIMEOUT = 10.0
 
-# How long the server may spend waiting for open responses on the way out. The
-# feed's whole purpose is a response that stays open, so an unbounded graceful
-# shutdown would turn a viewer this test forgot to close into a suite that hangs
-# instead of one that fails.
-_SHUTDOWN_TIMEOUT = 5
+
+@contextlib.contextmanager
+def _shutdown_signal_absorbed() -> Iterator[None]:
+    """Keep the signal these tests stop the server with from ending the run.
+
+    Uvicorn restores the handlers it replaced and then re-raises whatever signal
+    it caught, so that a process which asked to stop still stops. Here the
+    handler that re-raise reaches is pytest's, and the suite would end at the
+    first server it shut down. This is the one part of the path these tests
+    replace: the delivery, uvicorn's own handler and everything its shutdown
+    does are real.
+
+    Yields:
+        Nothing; the absorbing is the point.
+    """
+    previous = signal.signal(signal.SIGTERM, lambda *_: None)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 class _Harness:
@@ -89,20 +113,30 @@ class _Harness:
         feed: The live frame the application serves `/stream.mjpg` from, so a
             test can read the viewer count back rather than inferring it from
             what the endpoint answered.
+        serving: The task running the server, so a test about stopping can wait
+            for it to stop rather than assume it did.
     """
 
-    def __init__(self, port: int, obs: Observability, feed: FeedRegistry) -> None:
+    def __init__(
+        self,
+        port: int,
+        obs: Observability,
+        feed: FeedRegistry,
+        serving: asyncio.Task[None],
+    ) -> None:
         """Record where the server ended up.
 
         Args:
             port: The ephemeral port it bound.
             obs: The reporting bundle it writes to.
             feed: The live frame it serves.
+            serving: The task running it.
         """
         self.port = port
         self.url = f"ws://127.0.0.1:{port}{SESSION_PATH}"
         self.obs = obs
         self.feed = feed
+        self.serving = serving
 
     def sample(self, name: str) -> float:
         """Read one metric back.
@@ -123,6 +157,13 @@ async def _serving(
     **overrides: object,
 ) -> AsyncIterator[_Harness]:
     """Run the real application on a real socket for the duration of a test.
+
+    The server is the composition root's own `FeedClosingServer`, configured the
+    way `service.main` configures it and stopped the way a container stops it —
+    including leaving `timeout_graceful_shutdown` unset. A harness that bounded
+    the graceful shutdown where production does not would be compensating for
+    the one defect this file is best placed to catch: an open stream that makes
+    the drain wait for the very close it is waiting to be told about.
 
     Args:
         registry: What the application is composed around.
@@ -149,28 +190,34 @@ async def _serving(
         # what these tests drive is what a robot will meet.
         ws_max_size=make_settings(**overrides).max_message_bytes,
         lifespan="on",
-        timeout_graceful_shutdown=_SHUTDOWN_TIMEOUT,
     )
-    server = uvicorn.Server(config)
-    task = asyncio.create_task(server.serve(), name="uvicorn")
-    try:
-        # Bounded rather than open-ended: a server that failed to start would
-        # otherwise hang the suite instead of failing it.
-        deadline = asyncio.get_running_loop().time() + _TIMEOUT
-        while not server.started:
-            if task.done():
-                await task
-                message = "the server stopped before it started"
-                raise AssertionError(message)
-            if asyncio.get_running_loop().time() > deadline:
-                message = "the server did not start"
-                raise AssertionError(message)
-            await asyncio.sleep(0.005)
-        port = server.servers[0].sockets[0].getsockname()[1]
-        yield _Harness(port, obs, feed)
-    finally:
-        server.should_exit = True
-        await asyncio.wait_for(task, timeout=_TIMEOUT)
+    server = FeedClosingServer(config, feed=feed)
+    # Installed before the server is, because uvicorn records the handlers it
+    # displaces as it starts serving and restores those on the way out.
+    with _shutdown_signal_absorbed():
+        task = asyncio.create_task(server.serve(), name="uvicorn")
+        try:
+            # Bounded rather than open-ended: a server that failed to start
+            # would otherwise hang the suite instead of failing it.
+            deadline = asyncio.get_running_loop().time() + _TIMEOUT
+            while not server.started:
+                if task.done():
+                    await task
+                    message = "the server stopped before it started"
+                    raise AssertionError(message)
+                if asyncio.get_running_loop().time() > deadline:
+                    message = "the server did not start"
+                    raise AssertionError(message)
+                await asyncio.sleep(0.005)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            yield _Harness(port, obs, feed, task)
+        finally:
+            # `handle_exit` and not `should_exit`, because `handle_exit` is what
+            # a signal reaches and it is where the feed is closed. Setting the
+            # flag would skip that and hang here on any test that left a viewer
+            # open — which is exactly what the composed service used to do.
+            server.handle_exit(signal.SIGTERM, None)
+            await asyncio.wait_for(task, timeout=_TIMEOUT)
 
 
 async def _receive(connection: ClientConnection) -> tuple[MessageKind, bytes]:
@@ -634,3 +681,41 @@ async def test_an_unauthenticated_client_never_makes_the_feed_ambiguous() -> Non
         await refused.send(offer_message(ECHO, credential="the-wrong-one"))
         await refused.wait_closed()
         assert await _stream_status(harness.port) == 200
+
+
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_a_shutdown_signal_ends_an_attached_viewer_and_stops_the_server() -> None:
+    """A stream is the one response that would otherwise never end by itself.
+
+    Every part of this is the composed service's: the server class, the way it
+    is configured, the signal a container sends, and uvicorn's own shutdown
+    sequence with its graceful timeout left at the unbounded default. Driving
+    the lifespan hook directly instead would prove nothing, because the whole
+    defect is that uvicorn does not reach that hook until the viewers it is
+    waiting for have gone.
+
+    The session stays open and the frame stays retained across the signal, on
+    purpose: the viewer has to end because the process is stopping rather than
+    because the feed stopped being eligible, which is the only reading under
+    which this is evidence. And the frame is published straight into the feed
+    rather than through a robot, so the single connection the drain has to wait
+    for is the viewer's.
+    """
+    async with _serving(StaticRegistry(EchoCapability())) as harness:
+        with harness.feed.authenticated_session():
+            harness.feed.publish(jpeg_bytes())
+            async with _viewing(harness.port) as viewer:
+                await viewer.part()
+                assert harness.feed.viewers == 1
+
+                os.kill(os.getpid(), signal.SIGTERM)
+
+                assert await viewer.ended() is True
+                # Shielded, so a server that has not stopped fails this test
+                # rather than being cancelled into looking as if it had.
+                await asyncio.wait_for(
+                    asyncio.shield(harness.serving),
+                    timeout=_TIMEOUT,
+                )
+            assert harness.feed.viewers == 0

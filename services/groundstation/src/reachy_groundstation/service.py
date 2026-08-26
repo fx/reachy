@@ -35,6 +35,7 @@ from reachy_groundstation.obs import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from types import FrameType
 
     from starlette.applications import Starlette
 
@@ -42,15 +43,79 @@ if TYPE_CHECKING:
     from reachy_groundstation.config import Settings
     from reachy_groundstation.obs import Observability
 
-__all__ = ["build_application", "main"]
+__all__ = ["FeedClosingServer", "build_application", "build_server", "main"]
 
 _logger = get_logger(__name__)
+
+
+class FeedClosingServer(uvicorn.Server):
+    """A server that finishes the feed's viewers before it drains connections.
+
+    Shutdown has a fixed order and the feed sits on the wrong side of it. When a
+    signal arrives uvicorn stops listening, asks every open connection to finish,
+    waits for the ones that have not, and only then sends the lifespan shutdown
+    event on which the application closes its feed. A viewer parked in
+    `next_frame` is one of the connections being waited for, and the close it is
+    waiting to be told about is the one thing that would end it — so with the
+    default unlimited graceful timeout that wait is unbounded, and the process
+    stops whenever the last viewer happens to go away rather than when it was
+    asked to.
+
+    `handle_exit` runs before all of that: uvicorn's signal handler calls it, and
+    the drain begins only once the serving loop notices `should_exit`. Closing
+    the feed there means every viewer's response ends of its own accord during
+    the drain and gives its slot back exactly as a disconnect does, so the drain
+    has nothing left to wait for.
+
+    A viewer is only ever parked while exactly one session is authenticated, so
+    the drain would also free it *eventually* — by closing that session's socket
+    and letting the count fall to zero. That is the dependency being removed
+    rather than the reason there is nothing to fix: it makes stopping wait on how
+    fast one session's teardown propagates through the runner, and a session that
+    is slow to unwind, or wedged, is a shutdown that does not happen at all.
+
+    A bounded `timeout_graceful_shutdown` is the other way to stop the wait and a
+    worse one: it bounds every connection rather than the ones holding a stream
+    open, it turns an orderly end into a cancelled task, and it spends the whole
+    timeout on every shutdown that happens to have a viewer attached instead of
+    finishing at once.
+
+    It is a class rather than a signal handler installed around `uvicorn.run`
+    because uvicorn replaces the handlers for its own signals while it serves.
+    A handler registered outside would be the one it displaced.
+    """
+
+    def __init__(self, config: uvicorn.Config, feed: FeedRegistry) -> None:
+        """Serve one application and remember the feed its viewers read from.
+
+        Args:
+            config: What to serve, and how.
+            feed: The live frame `/stream.mjpg` is served from. It has to be the
+                one the application was composed with, or the viewers this
+                closes are not the viewers that are waiting.
+        """
+        super().__init__(config)
+        self._feed = feed
+
+    def handle_exit(self, sig: int, frame: FrameType | None) -> None:
+        """Finish every viewer, then let uvicorn start stopping.
+
+        Args:
+            sig: The signal that arrived.
+            frame: The interrupted stack frame, which is uvicorn's to interpret.
+        """
+        # Closing is idempotent, which is what makes a second signal harmless:
+        # it reaches a feed that is already closed and asks uvicorn to force the
+        # exit, and neither step is troubled by the other having happened.
+        self._feed.close()
+        super().handle_exit(sig, frame)
 
 
 def build_application(
     settings: Settings,
     obs: Observability,
     factories: Sequence[CapabilityFactory] | None = None,
+    feed: FeedRegistry | None = None,
 ) -> tuple[Starlette, CapabilityRegistry]:
     """Wire the capabilities into an application.
 
@@ -58,6 +123,14 @@ def build_application(
         settings: The settings in effect.
         obs: Where timings, spans and log lines go.
         factories: What to build. Defaults to everything registered.
+        feed: The live frame to serve `/stream.mjpg` from. One for the whole
+            process, which is what makes "exactly one authenticated session" a
+            question the operator feed can answer — a feed per session or per
+            request would count to one every time and show whichever robot
+            happened to be asking. It is a parameter so that `main` can hand the
+            same one to the server, which has to be able to finish its viewers
+            before uvicorn waits for them; a caller with no such need leaves it
+            off and gets one of its own.
 
     Returns:
         The application, and the registry it was built around. Closing the
@@ -65,19 +138,63 @@ def build_application(
         keeps it only in order to inspect it.
     """
     registry = CapabilityRegistry(settings, factories)
-    # One for the whole process, which is what makes "exactly one authenticated
-    # session" a question the operator feed can answer: a registry per session
-    # or per request would count to one every time and show whichever robot
-    # happened to be asking.
     app = create_app(
         settings=settings,
         registry=registry,
         obs=obs,
-        feed=FeedRegistry(),
+        feed=FeedRegistry() if feed is None else feed,
         warm_up=registry.warm_up,
         shutdown=registry.aclose,
     )
     return app, registry
+
+
+def build_server(
+    settings: Settings,
+    obs: Observability,
+    factories: Sequence[CapabilityFactory] | None = None,
+    feed: FeedRegistry | None = None,
+) -> FeedClosingServer:
+    """Compose the application and the server that serves it around one feed.
+
+    A function rather than three statements inside `main` because the one thing
+    worth checking about it is not visible from outside otherwise: that the feed
+    `/stream.mjpg` reads and the feed the server closes on the way out are the
+    same object. Two of them would look exactly like one until a shutdown left
+    the real viewers parked.
+
+    Args:
+        settings: The settings in effect.
+        obs: Where timings, spans and log lines go.
+        factories: What capabilities to build. Defaults to everything
+            registered.
+        feed: The live frame to compose both halves around. One is built when
+            none is given.
+
+    Returns:
+        The server, not yet running.
+    """
+    live_feed = FeedRegistry() if feed is None else feed
+    app, _registry = build_application(settings, obs, factories, feed=live_feed)
+    config = uvicorn.Config(
+        app,
+        host=settings.host,
+        port=settings.port,
+        log_config=None,
+        # The sans-io implementation, named explicitly: uvicorn's older
+        # `websockets` integration is deprecated and warns on import, and
+        # "auto" would let the choice drift with the dependency.
+        ws="websockets-sansio",
+        # The same bound the session checks, enforced a layer lower so an
+        # oversize message is refused as it arrives rather than after the whole
+        # of it has been assembled in memory. The session's own check is what
+        # holds for a transport that does not offer one.
+        ws_max_size=settings.max_message_bytes,
+        # `timeout_graceful_shutdown` is deliberately left unset. Bounding the
+        # drain is not what stops a stream from holding it up — closing the feed
+        # is, and `FeedClosingServer` does that before the drain starts.
+    )
+    return FeedClosingServer(config, feed=live_feed)
 
 
 #:= docs/specs/architecture/index.md#req-009-configuration-is-validated-and-self-reporting
@@ -113,22 +230,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     log_resolved_configuration(settings)
 
     obs = build_observability(settings)
-    app, _registry = build_application(settings, obs)
+    server = build_server(settings, obs)
 
     _logger.info("service.starting", host=settings.host, port=settings.port)
-    uvicorn.run(
-        app,
-        host=settings.host,
-        port=settings.port,
-        log_config=None,
-        # The sans-io implementation, named explicitly: uvicorn's older
-        # `websockets` integration is deprecated and warns on import, and
-        # "auto" would let the choice drift with the dependency.
-        ws="websockets-sansio",
-        # The same bound the session checks, enforced a layer lower so an
-        # oversize message is refused as it arrives rather than after the whole
-        # of it has been assembled in memory. The session's own check is what
-        # holds for a transport that does not offer one.
-        ws_max_size=settings.max_message_bytes,
-    )
+    server.run()
     return 0
