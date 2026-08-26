@@ -111,6 +111,7 @@ _TORQUE_OUTCOMES: Final = {
     if outcome is not MotorConfirmationOutcome.UNAVAILABLE
 }
 _TORQUE_ERRORS: Final = {error.value: error for error in MotorEvidenceError}
+_MISSING: Final = object()
 
 
 def _enum_value(value: object) -> str:
@@ -165,22 +166,49 @@ class _ConfirmedRobotHandle:
         expected_operation: str,
         expected_enabled: bool | None,
     ) -> MotorConfirmation:
-        outcome = _TORQUE_OUTCOMES.get(_enum_value(getattr(result, "outcome", None)))
-        acknowledged = getattr(result, "acknowledged", None)
-        states = getattr(result, "states", None)
-        requested_names = getattr(result, "requested_names", None)
-        requested_enabled = getattr(result, "requested_enabled", None)
+        """Validate the complete SDK envelope before constructing local evidence."""
+        request_id = getattr(result, "request_id", _MISSING)
+        operation_value = getattr(result, "operation", _MISSING)
+        requested_names = getattr(result, "requested_names", _MISSING)
+        requested_enabled = getattr(result, "requested_enabled", _MISSING)
+        acknowledged = getattr(result, "acknowledged", _MISSING)
+        terminal = getattr(result, "terminal", _MISSING)
+        outcome_value = getattr(result, "outcome", _MISSING)
+        states = getattr(result, "states", _MISSING)
+        missing_names = getattr(result, "missing_names", _MISSING)
+        result_error = getattr(result, "error", _MISSING)
+        outcome = _TORQUE_OUTCOMES.get(_enum_value(outcome_value))
         if (
-            outcome is None
-            or type(acknowledged) is not bool
-            or not isinstance(states, (list, tuple))
-            or getattr(result, "terminal", None) is not True
-            or not isinstance(getattr(result, "request_id", None), UUID)
-            or _enum_value(getattr(result, "operation", None)) != expected_operation
+            not isinstance(request_id, UUID)
+            or _enum_value(operation_value) != expected_operation
+            or not isinstance(requested_names, list)
             or requested_names != expected
+            or len(requested_names) != len(frozenset(requested_names))
             or requested_enabled is not expected_enabled
+            or acknowledged is not True
+            or terminal is not True
+            or outcome is None
+            or not isinstance(states, list)
+            or not isinstance(missing_names, list)
+            or missing_names
+            or result_error is not None
         ):
             return MotorConfirmation.failed()
+        if expected_operation == "read":
+            if (
+                expected_enabled is not None
+                or outcome is not MotorConfirmationOutcome.CONFIRMED
+            ):
+                return MotorConfirmation.failed()
+        elif expected_operation == "set":
+            if type(expected_enabled) is not bool or outcome not in {
+                MotorConfirmationOutcome.CONFIRMED,
+                MotorConfirmationOutcome.CONTRADICTED,
+            }:
+                return MotorConfirmation.failed()
+        else:
+            return MotorConfirmation.failed()
+
         translated: list[MotorEvidence] = []
         expected_names = frozenset(expected)
         for state in states:
@@ -203,7 +231,20 @@ class _ConfirmedRobotHandle:
             if enabled is not None or error is None:
                 return MotorConfirmation.failed()
             translated.append(MotorEvidence(name=name, motor_id=motor_id, error=error))
-        return MotorConfirmation(acknowledged, outcome, tuple(translated))
+
+        confirmation = MotorConfirmation(True, outcome, tuple(translated))
+        actual = confirmation.physical_value(
+            expected,
+            allow_contradiction=expected_operation == "set",
+        )
+        if actual is None:
+            return MotorConfirmation.failed()
+        if expected_operation == "set" and (
+            (outcome is MotorConfirmationOutcome.CONFIRMED)
+            != (actual is expected_enabled)
+        ):
+            return MotorConfirmation.failed()
+        return confirmation
 
     def wake_up(self) -> None:
         self._raw.wake_up()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import cast
 
 import pytest
@@ -62,6 +63,15 @@ def coordinator(
     result = MotorGroupCoordinator(robot, clock=clock or ManualClock())
     result.initialize()
     return result
+
+
+def group_status(
+    groups: MotorGroupCoordinator,
+    group: MotorGroup,
+) -> dict[str, object]:
+    """Read one group's bounded public coordinator status."""
+    status_groups = cast("dict[str, object]", groups.status()["groups"])
+    return cast("dict[str, object]", status_groups[group.value])
 
 
 @pytest.mark.parametrize(
@@ -564,6 +574,229 @@ def test_antenna_reenable_seeds_both_measured_joints_as_one_group() -> None:
     assert head is None
     assert body is None
     assert antennas == AntennaPose(right=0.3, left=-0.4)
+
+
+@pytest.mark.parametrize("phase", ["prepare", "read", "restore"])
+def test_reentrant_terminal_wins_every_initialize_callback_phase(phase: str) -> None:
+    """Initialization stops at the callback that requested terminal state."""
+    robot = FakeRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    motion = ReachyMotion(robot, coordinator=groups)
+    events: list[str] = []
+
+    def _prepare() -> bool:
+        policy = motion.quiesce_body()
+        events.append("prepare")
+        if phase == "prepare":
+            groups.terminal()
+        return policy
+
+    def _restore(_policy: bool) -> None:
+        events.append("restore")
+        if phase == "restore":
+            groups.terminal()
+
+    groups.set_hooks(MotorGroup.BODY, prepare=_prepare, restore=_restore)
+    original_read = robot.read_motor_torque
+
+    def _read(ids: list[str]) -> MotorConfirmation:
+        result = original_read(ids)
+        events.append("read")
+        if phase == "read" and tuple(ids) == HEAD_MOTOR_IDS:
+            groups.terminal()
+        return result
+
+    robot.read_motor_torque = _read  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
+
+    registered = groups.initialize()
+
+    assert registered == ()
+    assert all(not groups.gate_open(group) for group in MotorGroup)
+    assert all(
+        group_status(groups, group)["transition"] == "terminal" for group in MotorGroup
+    )
+    assert robot.automatic_body_yaw.count(True) == 0
+    if phase == "prepare":
+        assert events == ["read", "prepare"]
+    elif phase == "read":
+        assert events == ["read"]
+    else:
+        assert events == ["read", "prepare", "read", "restore"]
+
+
+@pytest.mark.parametrize("phase", ["prepare", "set", "reseed", "restore"])
+def test_reentrant_terminal_wins_every_transition_callback_phase(phase: str) -> None:
+    """A stale transition never advances state or restores policy after terminal."""
+    robot = FakeRobot()
+    groups = coordinator(robot)
+    motion = ReachyMotion(robot, coordinator=groups)
+    events: list[str] = []
+
+    if phase in {"reseed", "restore"}:
+        groups.set_hooks(
+            MotorGroup.BODY,
+            prepare=motion.quiesce_body,
+            restore=motion.restore_body_policy,
+        )
+        assert groups.transition(MotorGroup.BODY, False) is False
+
+    def _prepare() -> bool:
+        policy = motion.quiesce_body()
+        events.append("prepare")
+        if phase == "prepare":
+            groups.terminal()
+        return policy
+
+    def _reseed() -> None:
+        events.append("reseed")
+        if phase == "reseed":
+            groups.terminal()
+
+    def _restore(_policy: bool) -> None:
+        events.append("restore")
+        if phase == "restore":
+            groups.terminal()
+
+    groups.set_hooks(
+        MotorGroup.BODY,
+        prepare=_prepare,
+        reseed=_reseed,
+        restore=_restore,
+    )
+    requested = phase in {"reseed", "restore"}
+    original_set = (
+        robot.enable_motors_confirmed if requested else robot.disable_motors_confirmed
+    )
+
+    def _set(ids: list[str]) -> MotorConfirmation:
+        result = original_set(ids)
+        events.append("set")
+        if phase == "set":
+            groups.terminal()
+        return result
+
+    if requested:
+        robot.enable_motors_confirmed = _set  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
+    else:
+        robot.disable_motors_confirmed = _set  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
+    before = groups.last_confirmed(MotorGroup.BODY)
+
+    assert groups.transition(MotorGroup.BODY, requested) is None
+    assert groups.last_confirmed(MotorGroup.BODY) is before
+    assert not groups.gate_open(MotorGroup.BODY)
+    assert group_status(groups, MotorGroup.BODY)["transition"] == "terminal"
+    assert robot.automatic_body_yaw[-1] is False
+    if phase == "prepare":
+        assert events == ["prepare"]
+    elif phase == "set":
+        assert events == ["prepare", "set"]
+    elif phase == "reseed":
+        assert events == ["prepare", "set", "reseed"]
+    else:
+        assert events == ["prepare", "set", "reseed", "restore"]
+
+
+@pytest.mark.parametrize("phase", ["prepare", "read", "restore"])
+def test_reentrant_terminal_wins_every_refresh_callback_phase(phase: str) -> None:
+    """A stale independent read cannot advance or restore after terminal."""
+    robot = FakeRobot()
+    groups = coordinator(robot)
+    motion = ReachyMotion(robot, coordinator=groups)
+    events: list[str] = []
+
+    def _prepare() -> bool:
+        policy = motion.quiesce_body()
+        events.append("prepare")
+        if phase == "prepare":
+            groups.terminal()
+        return policy
+
+    def _restore(_policy: bool) -> None:
+        events.append("restore")
+        if phase == "restore":
+            groups.terminal()
+
+    groups.set_hooks(MotorGroup.BODY, prepare=_prepare, restore=_restore)
+    original_read = robot.read_motor_torque
+
+    def _read(ids: list[str]) -> MotorConfirmation:
+        result = original_read(ids)
+        events.append("read")
+        if phase == "read":
+            groups.terminal()
+        return result
+
+    robot.read_motor_torque = _read  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
+    before = groups.last_confirmed(MotorGroup.BODY)
+
+    assert groups.refresh(MotorGroup.BODY) is None
+    assert groups.last_confirmed(MotorGroup.BODY) is before
+    assert not groups.gate_open(MotorGroup.BODY)
+    assert group_status(groups, MotorGroup.BODY)["transition"] == "terminal"
+    assert robot.automatic_body_yaw[-1] is False
+    if phase == "prepare":
+        assert events == ["prepare"]
+    elif phase == "read":
+        assert events == ["prepare", "read"]
+    else:
+        assert events == ["prepare", "read", "restore"]
+
+
+def test_reentrant_terminal_from_clock_wins_before_state_promotion() -> None:
+    """The injected clock is another callback boundary before publication."""
+    robot = FakeRobot()
+    groups = coordinator(robot)
+    before = groups.last_confirmed(MotorGroup.HEAD)
+
+    def _clock() -> float:
+        groups.terminal()
+        return 1001.0
+
+    groups._clock = _clock
+
+    assert groups.transition(MotorGroup.HEAD, False) is None
+    assert groups.last_confirmed(MotorGroup.HEAD) is before
+    assert not groups.gate_open(MotorGroup.HEAD)
+    assert group_status(groups, MotorGroup.HEAD)["transition"] == "terminal"
+
+
+def test_concurrent_terminal_request_wins_before_transition_publication() -> None:
+    """The lock defers terminal's caller while its request still stops stale work."""
+    robot = FakeRobot()
+    groups = coordinator(robot)
+    begin_terminal = threading.Event()
+    terminal_requested = threading.Event()
+    terminal_completed = threading.Event()
+    original_disable = robot.disable_motors_confirmed
+
+    def _terminal() -> None:
+        begin_terminal.wait()
+        groups._terminal_requested.set()  # exercise the signal visible while the coordinator lock is held
+        terminal_requested.set()
+        groups.terminal()
+        terminal_completed.set()
+
+    worker = threading.Thread(target=_terminal)
+    worker.start()
+
+    def _disable(ids: list[str]) -> MotorConfirmation:
+        result = original_disable(ids)
+        begin_terminal.set()
+        terminal_requested.wait()
+        assert not terminal_completed.is_set()
+        return result
+
+    robot.disable_motors_confirmed = _disable  # type: ignore[method-assign]  # hold the exact in-flight daemon callback boundary
+    before = groups.last_confirmed(MotorGroup.HEAD)
+
+    result = groups.transition(MotorGroup.HEAD, False)
+    worker.join()
+
+    assert result is None
+    assert terminal_completed.is_set()
+    assert groups.last_confirmed(MotorGroup.HEAD) is before
+    assert not groups.gate_open(MotorGroup.HEAD)
+    assert group_status(groups, MotorGroup.HEAD)["transition"] == "terminal"
 
 
 @pytest.mark.parametrize("phase", ["prepare", "read", "restore"])

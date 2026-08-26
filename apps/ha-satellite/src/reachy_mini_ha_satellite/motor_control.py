@@ -178,6 +178,7 @@ class _GroupState:
     gate_open: bool = False
     transition: MotorTransition = MotorTransition.IDLE
     body_policy: bool | None = None
+    policy_capture_pending: bool = False
     diagnostics: deque[dict[str, object]] = field(
         default_factory=lambda: deque(maxlen=_DIAGNOSTIC_CAPACITY)
     )
@@ -208,6 +209,7 @@ class MotorGroupCoordinator:
         self._lock = threading.RLock()
         self._groups = {group: _GroupState() for group in MotorGroup}
         self._hooks = {group: _Hooks() for group in MotorGroup}
+        self._terminal_requested = threading.Event()
         self._terminal = False
 
     def set_hooks(
@@ -226,13 +228,35 @@ class MotorGroupCoordinator:
         """Read every exact group and open only completely confirmed gates."""
         registered: list[MotorGroup] = []
         with self._lock:
+            if self._terminal_observed():
+                return ()
             for group in MotorGroup:
+                if self._terminal_observed():
+                    return ()
                 state = self._groups[group]
                 hooks = self._hooks[group]
+                captured_policy: bool | None = None
                 if hooks.prepare is not None:
+                    state.policy_capture_pending = True
                     try:
-                        state.body_policy = hooks.prepare()
+                        captured_policy = hooks.prepare()
+                    except asyncio.CancelledError:
+                        if self._terminal_observed():
+                            return ()
+                        state.policy_capture_pending = False
+                        state.gate_open = False
+                        self._record(
+                            group,
+                            None,
+                            MotorConfirmation.failed(),
+                            None,
+                            False,
+                        )
+                        raise
                     except Exception:
+                        if self._terminal_observed():
+                            return ()
+                        state.policy_capture_pending = False
                         state.gate_open = False
                         self._record(
                             group,
@@ -242,7 +266,28 @@ class MotorGroupCoordinator:
                             False,
                         )
                         continue
-                confirmation = self._read(group)
+                    if self._terminal_observed():
+                        return ()
+                    state.body_policy = captured_policy
+                    state.policy_capture_pending = False
+                if self._terminal_observed():
+                    return ()
+                try:
+                    confirmation = self._read(group)
+                except asyncio.CancelledError:
+                    if self._terminal_observed():
+                        return ()
+                    state.gate_open = False
+                    self._record(
+                        group,
+                        None,
+                        MotorConfirmation.failed(),
+                        None,
+                        False,
+                    )
+                    raise
+                if self._terminal_observed():
+                    return ()
                 actual = confirmation.physical_value(
                     MOTOR_GROUPS[group],
                     allow_contradiction=False,
@@ -251,20 +296,24 @@ class MotorGroupCoordinator:
                     state.gate_open = False
                     self._record(group, None, confirmation, None, False)
                     continue
-                changed = state.last_confirmed is not actual
-                state.last_confirmed = actual
-                state.confirmed_at = self._now()
-                state.gate_open = actual
-                if (
-                    actual
-                    and hooks.restore is not None
-                    and state.body_policy is not None
-                ):
+                if actual and hooks.restore is not None and captured_policy is not None:
                     try:
-                        hooks.restore(state.body_policy)
+                        hooks.restore(captured_policy)
+                    except asyncio.CancelledError:
+                        if self._terminal_observed():
+                            return ()
+                        state.gate_open = False
+                        self._record(
+                            group,
+                            None,
+                            MotorConfirmation.failed(),
+                            None,
+                            False,
+                        )
+                        raise
                     except Exception:
-                        state.last_confirmed = None
-                        state.confirmed_at = None
+                        if self._terminal_observed():
+                            return ()
                         state.gate_open = False
                         self._record(
                             group,
@@ -274,7 +323,12 @@ class MotorGroupCoordinator:
                             False,
                         )
                         continue
+                    if self._terminal_observed():
+                        return ()
                     state.body_policy = None
+                changed = state.last_confirmed is not actual
+                if not self._promote(state, actual, gate_open=actual):
+                    return ()
                 self._record(
                     group,
                     None,
@@ -284,27 +338,28 @@ class MotorGroupCoordinator:
                     changed=changed,
                 )
                 registered.append(group)
-        return tuple(registered)
+            return tuple(registered)
 
     def last_confirmed(self, group: MotorGroup) -> bool | None:
         """Return the retained switch Boolean independently of evidence freshness."""
         with self._lock:
+            self._terminal_observed()
             return self._groups[group].last_confirmed
 
     def gate_open(self, group: MotorGroup) -> bool:
         """Return whether a producer may command this group now."""
         with self._lock:
-            return not self._terminal and self._groups[group].gate_open
+            return not self._terminal_observed() and self._groups[group].gate_open
 
     def command(self, groups: Sequence[MotorGroup], action: Callable[[], None]) -> bool:
         """Run one producer atomically only while every required gate is open."""
         with self._lock:
-            if self._terminal or any(
+            if self._terminal_observed() or any(
                 not self._groups[group].gate_open for group in groups
             ):
                 return False
             action()
-            return not self._terminal
+            return not self._terminal_observed()
 
     def transition(self, group: MotorGroup, requested: bool) -> bool | None:
         """Quiesce, confirm and conditionally reseed one complete motor group.
@@ -314,27 +369,40 @@ class MotorGroupCoordinator:
         """
         with self._lock:
             state = self._groups[group]
-            if self._terminal:
+            if self._terminal_observed():
                 return None
             state.transition = MotorTransition.QUIESCING
             hooks = self._hooks[group]
             prior_policy = state.body_policy
             try:
-                prepared_policy = hooks.prepare() if hooks.prepare is not None else None
-                if prior_policy is None:
-                    prior_policy = prepared_policy
-                    state.body_policy = prepared_policy
+                if hooks.prepare is not None:
+                    state.policy_capture_pending = True
+                    prepared_policy = hooks.prepare()
+                    if self._terminal_observed():
+                        return None
+                    if prior_policy is None:
+                        prior_policy = prepared_policy
+                        state.body_policy = prepared_policy
+                    state.policy_capture_pending = False
             except asyncio.CancelledError:
+                if self._terminal_observed():
+                    return None
+                state.policy_capture_pending = False
                 state.gate_open = False
                 state.transition = MotorTransition.IDLE
                 self._record(group, requested, MotorConfirmation.failed(), None, False)
                 raise
             except Exception:
+                if self._terminal_observed():
+                    return None
+                state.policy_capture_pending = False
                 state.gate_open = False
                 state.transition = MotorTransition.IDLE
                 self._record(group, requested, MotorConfirmation.failed(), None, False)
                 return None
 
+            if self._terminal_observed():
+                return None
             # The lock has excluded every application producer since before
             # quiescing. Close the persistent gate before the daemon torque call.
             state.gate_open = False
@@ -342,9 +410,13 @@ class MotorGroupCoordinator:
             try:
                 confirmation = self._set(group, requested)
             except asyncio.CancelledError:
+                if self._terminal_observed():
+                    return None
                 state.transition = MotorTransition.IDLE
                 self._record(group, requested, MotorConfirmation.failed(), None, False)
                 raise
+            if self._terminal_observed():
+                return None
             actual = confirmation.physical_value(MOTOR_GROUPS[group])
             if actual is None:
                 state.transition = MotorTransition.IDLE
@@ -352,9 +424,9 @@ class MotorGroupCoordinator:
                 return None
 
             changed = state.last_confirmed is not actual
-            state.last_confirmed = actual
-            state.confirmed_at = self._now()
-            if actual is not requested:
+            if actual is not requested or not actual:
+                if not self._promote(state, actual, gate_open=False):
+                    return None
                 state.transition = MotorTransition.IDLE
                 self._record(
                     group,
@@ -365,22 +437,16 @@ class MotorGroupCoordinator:
                     changed=changed,
                 )
                 return actual
-            if not actual:
-                state.transition = MotorTransition.IDLE
-                self._record(
-                    group,
-                    requested,
-                    confirmation,
-                    actual,
-                    True,
-                    changed=changed,
-                )
-                return actual
+
             state.transition = MotorTransition.RESEEDING
             try:
                 if hooks.reseed is not None:
                     hooks.reseed()
             except asyncio.CancelledError:
+                if self._terminal_observed():
+                    return None
+                if not self._promote(state, actual, gate_open=False):
+                    return None
                 state.transition = MotorTransition.IDLE
                 self._record(
                     group,
@@ -392,6 +458,10 @@ class MotorGroupCoordinator:
                 )
                 raise
             except Exception:
+                if self._terminal_observed():
+                    return None
+                if not self._promote(state, actual, gate_open=False):
+                    return None
                 state.transition = MotorTransition.IDLE
                 self._record(
                     group,
@@ -402,16 +472,17 @@ class MotorGroupCoordinator:
                     changed=changed,
                 )
                 return actual
+            if self._terminal_observed():
+                return None
 
-            if self._is_terminal():
-                state.transition = MotorTransition.TERMINAL
-                return actual
-            state.gate_open = True
             if hooks.restore is not None and prior_policy is not None:
                 try:
                     hooks.restore(prior_policy)
                 except asyncio.CancelledError:
-                    state.gate_open = False
+                    if self._terminal_observed():
+                        return None
+                    if not self._promote(state, actual, gate_open=False):
+                        return None
                     state.transition = MotorTransition.IDLE
                     self._record(
                         group,
@@ -423,7 +494,10 @@ class MotorGroupCoordinator:
                     )
                     raise
                 except Exception:
-                    state.gate_open = False
+                    if self._terminal_observed():
+                        return None
+                    if not self._promote(state, actual, gate_open=False):
+                        return None
                     state.transition = MotorTransition.IDLE
                     self._record(
                         group,
@@ -434,6 +508,10 @@ class MotorGroupCoordinator:
                         changed=changed,
                     )
                     return actual
+                if self._terminal_observed():
+                    return None
+            if not self._promote(state, actual, gate_open=True):
+                return None
             state.body_policy = None
             state.transition = MotorTransition.IDLE
             self._record(
@@ -450,29 +528,46 @@ class MotorGroupCoordinator:
         """Apply one independent read without replaying or reopening a request."""
         with self._lock:
             state = self._groups[group]
-            if self._terminal:
+            if self._terminal_observed():
                 return None
             hooks = self._hooks[group]
             gate_was_open = state.gate_open
             prepared_policy = False
             if hooks.prepare is not None and state.body_policy is None:
+                state.policy_capture_pending = True
                 try:
-                    state.body_policy = hooks.prepare()
-                    prepared_policy = True
+                    captured_policy = hooks.prepare()
                 except asyncio.CancelledError:
+                    if self._terminal_observed():
+                        return None
+                    state.policy_capture_pending = False
                     state.gate_open = False
                     self._record(group, None, MotorConfirmation.failed(), None, False)
                     raise
                 except Exception:
+                    if self._terminal_observed():
+                        return None
+                    state.policy_capture_pending = False
                     state.gate_open = False
                     self._record(group, None, MotorConfirmation.failed(), None, False)
                     return None
+                if self._terminal_observed():
+                    return None
+                state.body_policy = captured_policy
+                state.policy_capture_pending = False
+                prepared_policy = True
+            if self._terminal_observed():
+                return None
             try:
                 confirmation = self._read(group)
             except asyncio.CancelledError:
+                if self._terminal_observed():
+                    return None
                 state.gate_open = False
                 self._record(group, None, MotorConfirmation.failed(), None, False)
                 raise
+            if self._terminal_observed():
+                return None
             actual = confirmation.physical_value(
                 MOTOR_GROUPS[group],
                 allow_contradiction=False,
@@ -482,17 +577,16 @@ class MotorGroupCoordinator:
                 self._record(group, None, confirmation, None, False)
                 return None
             changed = state.last_confirmed is not actual
-            state.last_confirmed = actual
-            state.confirmed_at = self._now()
-            if not actual:
-                state.gate_open = False
-            elif prepared_policy and gate_was_open:
+            if actual and prepared_policy and gate_was_open:
                 policy = state.body_policy
                 if hooks.restore is not None and policy is not None:
                     try:
                         hooks.restore(policy)
                     except asyncio.CancelledError:
-                        state.gate_open = False
+                        if self._terminal_observed():
+                            return None
+                        if not self._promote(state, actual, gate_open=False):
+                            return None
                         self._record(
                             group,
                             None,
@@ -503,7 +597,10 @@ class MotorGroupCoordinator:
                         )
                         raise
                     except Exception:
-                        state.gate_open = False
+                        if self._terminal_observed():
+                            return None
+                        if not self._promote(state, actual, gate_open=False):
+                            return None
                         self._record(
                             group,
                             None,
@@ -513,7 +610,15 @@ class MotorGroupCoordinator:
                             changed=changed,
                         )
                         return actual
+                    if self._terminal_observed():
+                        return None
                 state.body_policy = None
+            if not self._promote(
+                state,
+                actual,
+                gate_open=False if not actual else None,
+            ):
+                return None
             self._record(
                 group,
                 None,
@@ -525,29 +630,29 @@ class MotorGroupCoordinator:
             return actual
 
     def terminal(self) -> None:
-        """Close every gate once; racing and later producers remain inert."""
+        """Request terminal state immediately, then close every gate under lock."""
+        self._terminal_requested.set()
         with self._lock:
-            if self._terminal:
-                return
-            self._terminal = True
-            for state in self._groups.values():
-                state.gate_open = False
-                state.transition = MotorTransition.TERMINAL
+            self._terminal_observed()
 
     def safe_to_restore_body_policy(self) -> bool:
         """Return whether ordinary release may restore daemon automatic yaw."""
         with self._lock:
+            self._terminal_observed()
             body = self._groups[MotorGroup.BODY]
             return (
                 body.last_confirmed is True
                 and body.transition in {MotorTransition.IDLE, MotorTransition.TERMINAL}
                 and body.body_policy is None
+                and not body.policy_capture_pending
             )
 
     def status(self) -> dict[str, object]:
         """Return bounded identifier-free group state and confirmation evidence."""
         with self._lock:
+            self._terminal_observed()
             now = self._now()
+            self._terminal_observed()
             groups: dict[str, object] = {}
             events: list[dict[str, object]] = []
             for group, state in self._groups.items():
@@ -585,6 +690,11 @@ class MotorGroupCoordinator:
         *,
         changed: bool = False,
     ) -> None:
+        if self._terminal_observed():
+            return
+        now = self._now()
+        if self._terminal_observed():
+            return
         state = self._groups[group]
         state.diagnostics.append(
             {
@@ -608,7 +718,7 @@ class MotorGroupCoordinator:
                 ),
                 "fresh": fresh,
                 "changed": changed,
-                "confirmation_age": self._age(state.confirmed_at, self._now()),
+                "confirmation_age": self._age(state.confirmed_at, now),
             }
         )
 
@@ -618,9 +728,42 @@ class MotorGroupCoordinator:
             return None
         return max(0.0, now - confirmed_at)
 
-    def _is_terminal(self) -> bool:
-        """Re-read terminal state across lifecycle callbacks."""
-        return self._terminal
+    def _terminal_observed(self) -> bool:
+        """Promote a reentrant or concurrent request and preserve terminal state."""
+        if not self._terminal and not self._terminal_requested.is_set():
+            return False
+        if not self._terminal:
+            self._terminal = True
+            for state in self._groups.values():
+                state.gate_open = False
+                state.transition = MotorTransition.TERMINAL
+        return True
+
+    def _promote(
+        self,
+        state: _GroupState,
+        actual: bool,
+        *,
+        gate_open: bool | None,
+    ) -> bool:
+        """Commit fresh state only while terminal has not won concurrently."""
+        if self._terminal_observed():
+            return False
+        confirmed_at = self._now()
+        if self._terminal_observed():
+            return False
+        previous_confirmed = state.last_confirmed
+        previous_at = state.confirmed_at
+        state.last_confirmed = actual
+        state.confirmed_at = confirmed_at
+        if gate_open is not None:
+            state.gate_open = gate_open
+        if self._terminal_observed():
+            state.last_confirmed = previous_confirmed
+            state.confirmed_at = previous_at
+            state.gate_open = False
+            return False
+        return True
 
     def _now(self) -> float:
         now = self._clock()
