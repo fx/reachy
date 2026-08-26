@@ -362,9 +362,30 @@ is true after it stops:
   `REACHY_SATELLITE_DETECTION_SOURCE` selects a fallback;
 - no unbounded recovery work and no second, overlapping client is left behind.
 
-A later submission, or a restart, begins a fresh attempt. A submission that
-arrives while a restoration is pending cancels and awaits it first, and shutdown
-does the same, so a source built too late is closed rather than installed.
+**Recovering from that state without a restart:** submit the address again from
+either surface. Submitting the address that is already in effect writes nothing
+— there is nothing to write — but where there is no source behind it, it begins
+one fresh bounded restoration, which is the natural thing to do once the
+groundstation is back. A submission that arrives while a restoration is pending
+cancels and awaits it first, and shutdown does the same, so a source built too
+late is closed rather than installed.
+
+**A source that will not close is not treated as retired.** If closing the
+preceding source raises, nothing knows whether the session behind it is gone, so
+the owner refuses to build or install another one rather than risk two clients.
+The transition is refused, the preceding address stays durable and effective,
+remote health reads unavailable and local detection keeps working. The next
+submission tries the close once more; when it succeeds, that submission proceeds
+normally.
+
+**A submission that would leave no groundstation source at all is refused.**
+Whether a session exists is decided by `REACHY_SATELLITE_FACE_TRACKING_ENABLED`
+and `REACHY_SATELLITE_DETECTION_SOURCE`, both of which take effect at the next
+start. Changing one of them on its own is stored and badged "needs a restart",
+and the running source is untouched. Changing one of them **together with the
+address** would retire the running source into nothing, so it is refused with a
+message saying to submit them without the address. Nothing is written and the
+running source keeps answering.
 
 This is compensation rather than a transaction: a filesystem and a network
 cannot be committed together. What holds after every outcome is that the durable

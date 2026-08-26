@@ -29,6 +29,37 @@ is closed rather than installed. That is what excludes two clients existing at
 once, which is the failure this ordering exists to prevent and the one a
 compensating state machine can otherwise produce.
 
+**Every await in the transition is followed by a validity check**, because
+`aclose` marks the owner closed *before* it takes the lock: shutdown therefore
+becomes true between two statements of a transition already under way, not only
+at its start. Without the checks, a submission that had begun first would go on
+to start a client, write the durable file and publish an address after the
+application had begun releasing the chain. Losing the check compensates —
+closing whatever was built — rather than proceeding.
+
+**An unconfirmed close is unavailability, not retirement.** A source whose
+`aclose` raised may still hold a session, so it is recorded as outstanding and
+nothing else is built or installed until it is gone. One further close is
+attempted at the next transition, which is where the ordinary cause — a
+groundstation that went away mid-close — resolves; a source that still refuses
+leaves remote health unavailable with the preceding address durable and local
+detection working, which is the honest state rather than a second client
+alongside a first that may be alive.
+
+**A transition that would leave no source at all is refused.** Whether a session
+exists is decided by settings that take effect at the next start, so a
+submission changing one of them together with the address would close the
+running source, install nothing, commit and report success. The decision is read
+off the factory's own answer — no candidate while one is running — rather than
+off a list of the settings that produce it, which is a list that goes stale
+without anything noticing.
+
+**One lock, and the merge happens inside it.** The settings page submits a whole
+form and Home Assistant's control submits one setting, so the control's merge
+against the stored file is performed here rather than by the caller: two writers
+computing a merge from a copy read before the lock is how one of them silently
+drops the other's setting.
+
 This is compensation, not a transaction. A filesystem and a network cannot be
 committed together, and claiming they can is how the claim stops being checked.
 What is guaranteed is narrower and testable: after every outcome the durable
@@ -76,6 +107,33 @@ _LOGGER: Final = logging.getLogger(__name__)
 # delays are the session client's own backoff, so "how long between attempts"
 # has one answer on this robot rather than two.
 DEFAULT_RESTORE_ATTEMPTS: Final = 5
+
+# What a transition says when shutdown overtook it. One sentence for every
+# awaiting point, because the operator's question is the same at all of them and
+# the answer is too: the durable file holds what it held before.
+_OVERTAKEN_MESSAGE: Final = "the application is shutting down; nothing was changed"
+
+# What a transition says when a preceding source has still not closed. Refused
+# rather than performed: building another one is the overlap this owner exists
+# to exclude, and the operator can retry once the groundstation has let go.
+_OUTSTANDING_MESSAGE: Final = (
+    "a preceding groundstation source has not closed, so no replacement was "
+    "built; the address in effect is unchanged"
+)
+
+# What a transition says when the submission would leave the robot with no
+# groundstation source at all while one is running. The settings that decide
+# whether a session exists take effect at the next start, so a save that changes
+# one of them *and* the address would retire the running source into nothing —
+# and the page would report success over a satellite that had stopped seeing.
+# The message names no setting: which ones they are is the factory's business,
+# and a list here is one that goes stale silently.
+_RETIRES_INTO_NOTHING_MESSAGE: Final = (
+    "the submitted configuration opens no groundstation session while one is "
+    "running, so the address was not changed. The settings that decide whether "
+    "a session exists at all take effect at the next start; submit them without "
+    "the address."
+)
 
 # What builds a remote source from a candidate configuration. Asynchronous
 # because the interesting failure is a result that arrives *after* the request
@@ -248,6 +306,11 @@ class GroundstationUrlOwner:
         # cancelled, so the canceller closes this instead — which is what stops
         # a cancelled attempt leaking the client it had just built.
         self._partial: ConnectableSource | None = None
+        # Sources whose close raised, so nothing knows whether the session
+        # behind them is gone. Retained rather than forgotten: one of them may
+        # still be a live client, and building another alongside it is exactly
+        # what this owner promises never to do.
+        self._outstanding: list[ConnectableSource] = []
         # Submissions reserved from the protocol's message loop, which cannot
         # await one. Retained so shutdown finishes them rather than leaving a
         # transition running against a chain that is being released.
@@ -341,34 +404,28 @@ class GroundstationUrlOwner:
             url: The address, already known to be short enough.
         """
         try:
-            previous = self._store.load()
-            wanted = {**previous, GROUNDSTATION_URL_SETTING: url}
-            if wanted == previous:
-                # The stored overrides already say this, so the address in
-                # effect already is this. Re-resolving and rewriting the file
-                # would spend an erase cycle on the robot's card to arrive at
-                # what is there — the same write `build_boost_setter` and the
-                # vendored `ServerState.persist_volume` both decline.
-                return
-            await self.submit(wanted)
+            await self.submit_url(url)
         except ConfigurationError as error:
             # `OverrideStore.load` raises this for a file somebody hand-edited
             # into invalid JSON, which is exactly when a control is likeliest to
             # be reached for, and `submit` raises it for everything it refused
             # or compensated. Neither may escape into the loop.
             _LOGGER.error("the groundstation address could not be changed: %s", error)
-            # A success has already pushed the committed address from `submit`,
+            # A success has already pushed the committed address from `_apply`,
             # which is the one call site for that. This is the other outcome: a
             # control that optimistically moved is told the preceding address is
-            # still the one in effect.
-            with contextlib.suppress(Exception):
-                self._publish()
+            # still the one in effect — unless the refusal *is* shutdown, when
+            # pushing into a protocol layer being released helps nobody.
+            if not self._closed:
+                with contextlib.suppress(Exception):
+                    self._publish()
 
     async def submit(self, wanted: Mapping[str, str]) -> Resolution:
         """Apply one complete set of overrides, in the one order that is safe.
 
-        Serialized against every other submission and against shutdown, so
-        rapid successive writes queue rather than interleave.
+        The settings page's write path. Serialized against every other
+        submission and against shutdown, so rapid successive writes queue rather
+        than interleave.
 
         Args:
             wanted: The complete set of overrides to store, by setting name.
@@ -379,27 +436,119 @@ class GroundstationUrlOwner:
         Raises:
             ConfigurationError: If the overrides do not resolve, if the
                 replacement could not be prepared, retired, started or
-                committed, or if the owner is closed. Every failure before the
-                commit leaves the durable file untouched and the preceding
-                address effective.
+                committed, if a preceding source is still outstanding, or if
+                the owner is closed. Every failure before the commit leaves the
+                durable file untouched and the preceding address effective.
+        """
+        async with self._lock:
+            return await self._apply(wanted)
+
+    async def submit_url(self, url: str) -> Resolution | None:
+        """Change one address, merging it into whatever else is stored.
+
+        Home Assistant's control owns one setting, so it submits one rather than
+        a whole form — and the merge that turns it into a complete set of
+        overrides happens **under the lock**, after the stored file is read
+        there. Two surfaces write that file now; a merge computed from a copy
+        read before the lock silently drops whichever setting the other surface
+        committed in between.
+
+        Args:
+            url: The address, already known to be short enough.
+
+        Returns:
+            The settings in effect afterwards, or `None` when the stored
+            overrides already said this and nothing was written.
+
+        Raises:
+            ConfigurationError: For everything `submit` raises, and for stored
+                overrides that no longer parse.
         """
         async with self._lock:
             if self._closed:
-                message = "the application is shutting down; nothing was changed"
-                raise ConfigurationError(message)
-            resolved = load_settings(self._environ, wanted)
-            if resolved.settings.groundstation_url == self.effective_url:
-                # Nothing to retire or start, so the released order is the right
-                # one and this is the one definition of it.
-                applied = apply_settings_change(
-                    wanted,
-                    store=self._store,
-                    environ=self._environ,
-                    apply_live=self._apply_live,
-                )
-                self._resolution = applied
-                return applied
-            return await self._replace(wanted, resolved)
+                raise ConfigurationError(_OVERTAKEN_MESSAGE)
+            previous = self._store.load()
+            wanted = {**previous, GROUNDSTATION_URL_SETTING: url}
+            if wanted == previous:
+                # The stored overrides already say this, so the address in
+                # effect already is this. Re-resolving and rewriting the file
+                # would spend an erase cycle on the robot's card to arrive at
+                # what is there — the same write `build_boost_setter` and the
+                # vendored `ServerState.persist_volume` both decline.
+                await self._restore_if_unavailable()
+                return None
+            return await self._apply(wanted)
+
+    async def _apply(self, wanted: Mapping[str, str]) -> Resolution:
+        """Apply one complete set of overrides, with the lock already held.
+
+        Args:
+            wanted: The complete set of overrides to store, by setting name.
+
+        Returns:
+            The settings in effect after the change.
+
+        Raises:
+            ConfigurationError: As `submit` describes.
+        """
+        if self._closed:
+            raise ConfigurationError(_OVERTAKEN_MESSAGE)
+        submitted = wanted.get(GROUNDSTATION_URL_SETTING)
+        if submitted is not None:
+            # Before `load_settings`, which has a length check of its own — but
+            # that one is the **startup migration**, and it tells an operator to
+            # remove an entry from a file this submission has not written and to
+            # restart an application that is running. This is the runtime
+            # refusal, and putting it here is what makes it the first thing both
+            # surfaces reach: the entity path runs it earlier still, without a
+            # loop, because `reserve_submission` cannot await.
+            validate_groundstation_url_length(submitted)
+        resolved = load_settings(self._environ, wanted)
+        if resolved.settings.groundstation_url == self.effective_url:
+            # Nothing to retire or start, so the released order is the right
+            # one and this is the one definition of it.
+            applied = apply_settings_change(
+                wanted,
+                store=self._store,
+                environ=self._environ,
+                apply_live=self._apply_live,
+            )
+            self._resolution = applied
+            await self._restore_if_unavailable()
+            return applied
+        return await self._replace(wanted, resolved)
+
+    async def _restore_if_unavailable(self) -> None:
+        """Begin one fresh restoration for a submission that changed no address.
+
+        Resubmitting the address already in effect is what an operator does once
+        a groundstation they were told is unreachable comes back, and short of a
+        restart it is the only recovery there is: the branch above returns
+        before the factory is ever asked, so without this the page would answer
+        "saved" over a satellite that stays disconnected.
+        `docs/ops/satellite-deployment.md` records that a later submission
+        begins a fresh attempt, and this is where that becomes true.
+
+        Bounded like every other restoration — the same attempt count and the
+        same backoff — and it starts by cancelling whatever is already running,
+        so repeated saves cannot accumulate reconstruction states.
+        """
+        if self.remote_available:
+            return
+        await self._cancel_restoration()
+        # The same post-await checks `_replace` makes, for the same reason.
+        # `_superseded` against the current generation is the "has shutdown
+        # begun" question here: no later write can be in flight, because this
+        # runs with the lock held.
+        if self._superseded(self._generation):
+            return
+        if self._outstanding and not await self._settle_outstanding():
+            self._report_outstanding()
+            return
+        if self._superseded(self._generation):
+            return
+        self._generation += 1
+        await self._restore_preceding(self._generation)
 
     async def _replace(
         self,
@@ -416,10 +565,23 @@ class GroundstationUrlOwner:
             The resolution now in effect.
 
         Raises:
-            ConfigurationError: If any step failed. The preceding address
-                remains durable, effective and the read-back.
+            ConfigurationError: If any step failed, if shutdown overtook the
+                transition, or if a preceding source is still outstanding. The
+                preceding address remains durable, effective and the read-back.
         """
         await self._cancel_restoration()
+        # The first of the checks that follow every await here. Cancelling the
+        # restoration awaits a task, and `aclose` marks the owner closed before
+        # it takes the lock this call holds, so shutdown lands *between*
+        # statements rather than only before the first one.
+        await self._abort_if_overtaken(self._generation, None)
+        if self._outstanding and not await self._settle_outstanding():
+            # A source that may still hold a session is outstanding, so nothing
+            # is built: the durable value stays effective and the operator can
+            # submit again once the groundstation has let go.
+            self._report_outstanding()
+            raise ConfigurationError(_OUTSTANDING_MESSAGE)
+        await self._abort_if_overtaken(self._generation, None)
         self._generation += 1
         generation = self._generation
 
@@ -432,30 +594,56 @@ class GroundstationUrlOwner:
                 f"the replacement groundstation source could not be prepared: {error}"
             )
             raise ConfigurationError(message) from error
+        # A factory result that arrives after shutdown is the case this owner's
+        # asynchronous factory exists to make representable. Nothing has been
+        # retired, so closing the candidate is the whole compensation.
+        await self._abort_if_overtaken(generation, candidate)
+
+        if candidate is None and self._source.delegate is not None:
+            # The submitted configuration opens no session while one is running.
+            # Retiring into nothing would close the live source, install
+            # nothing, commit and report success — a satellite that has stopped
+            # seeing, with no surface saying so. Refused instead, and decided
+            # from the factory's own answer rather than from a list of the
+            # settings that produce it, so it keeps holding when that list
+            # grows.
+            raise ConfigurationError(_RETIRES_INTO_NOTHING_MESSAGE)
 
         retired = self._source.detach()
         if retired is not None:
-            try:
-                await retired.aclose()
-            except Exception as error:
-                # The retired source's state is now unknown, so it is not kept:
-                # keeping it risks two clients, and this owner promises at most
-                # one. Compensation rebuilds a fresh one from the retained
-                # factory and resolution instead.
-                await self._compensate(candidate, generation)
+            refused = await self._discard(retired)
+            if refused is not None:
+                # The retired source's close neither returned nor is known to
+                # have finished, so it may still be a live client. Rebuilding
+                # the preceding address now would put a second one beside it,
+                # so nothing is rebuilt: the durable value stays effective,
+                # remote health reads unavailable and local detection is
+                # unaffected until a later transition settles the outstanding
+                # one.
+                await self._discard(candidate)
+                self._report_outstanding()
                 message = (
-                    f"the preceding groundstation source could not be retired: {error}"
+                    "the preceding groundstation source could not be retired: "
+                    f"{refused}"
                 )
-                raise ConfigurationError(message) from error
+                raise ConfigurationError(message) from refused
+            await self._abort_if_overtaken(generation, candidate)
 
         try:
-            await self._start_and_install(candidate)
+            await self._start_prepared(candidate)
         except Exception as error:
             await self._compensate(candidate, generation)
             message = (
                 f"the replacement groundstation source could not be started: {error}"
             )
             raise ConfigurationError(message) from error
+        # Starting opened the session; installing is what makes the chain answer
+        # from it, and committing is what makes the address survive a restart.
+        # Shutdown arriving between the start and those two stops here, with the
+        # started candidate closed rather than published.
+        await self._abort_if_overtaken(generation, candidate)
+        if candidate is not None:
+            self._source.install(candidate)
 
         try:
             self._store.save(wanted)
@@ -468,6 +656,8 @@ class GroundstationUrlOwner:
             await self._compensate(candidate, generation)
             raise
 
+        # Nothing below suspends, so no further check is possible or needed: the
+        # commit and everything the operator sees of it happen together.
         self._resolution = resolved
         if self._apply_live is not None:
             self._apply_live(resolved.settings)
@@ -476,11 +666,11 @@ class GroundstationUrlOwner:
             self._publish()
         return resolved
 
-    async def _start_and_install(self, source: ConnectableSource | None) -> None:
-        """Make a prepared source the one the perception chain answers from.
+    async def _start_prepared(self, source: ConnectableSource | None) -> None:
+        """Start a prepared source, if there is one and the chain is running.
 
         `None` is the composition that opens no session, which reaches here so
-        that "there is nothing to install" is one branch rather than a condition
+        that "there is nothing to start" is one branch rather than a condition
         repeated at each call site.
 
         Args:
@@ -493,7 +683,32 @@ class GroundstationUrlOwner:
         # because the chain's own `start` reaches whatever is installed.
         if self._source.started:
             await source.start()
-        self._source.install(source)
+
+    async def _abort_if_overtaken(
+        self,
+        generation: int,
+        candidate: ConnectableSource | None,
+    ) -> None:
+        """Stop a transition shutdown or a later write has overtaken.
+
+        Called after every await in `_replace`, before the next act anything
+        outside this owner could observe. Losing the race compensates rather
+        than proceeding: whatever had been built is closed here, because the
+        ordinary compensation rebuilds the preceding source and must not run
+        into a chain that is being released.
+
+        Args:
+            generation: The transition being carried out.
+            candidate: The replacement built so far, or `None` when nothing has
+                been built yet.
+
+        Raises:
+            ConfigurationError: If the transition was overtaken.
+        """
+        if not self._superseded(generation):
+            return
+        await self._discard(candidate)
+        raise ConfigurationError(_OVERTAKEN_MESSAGE)
 
     async def _compensate(
         self,
@@ -506,7 +721,17 @@ class GroundstationUrlOwner:
             candidate: The replacement nothing is going to use.
             generation: The transition this compensation belongs to.
         """
-        await self._discard(candidate)
+        if await self._discard(candidate) is not None:
+            # The candidate's close is unconfirmed, so it may still hold a
+            # session and a rebuilt preceding source would be the second client.
+            # Nothing is rebuilt; the caller's refusal still leaves the
+            # preceding address durable and effective.
+            self._report_outstanding()
+            return
+        if self._superseded(generation):
+            # Shutdown landed while the candidate was closing. Restoring now
+            # would install a client into a chain that is being released.
+            return
         await self._restore_preceding(generation)
 
     async def _restore_preceding(self, generation: int) -> None:
@@ -524,6 +749,11 @@ class GroundstationUrlOwner:
         """
         settings = self._resolution.settings
         if await self._install_fresh(settings, generation):
+            return
+        if self._superseded(generation):
+            # The attempt failed and shutdown landed while it did. A retry state
+            # created now is one `aclose` has already passed the point of
+            # cancelling, so it would be the late client this owner excludes.
             return
         if self._attempts <= 1:
             # The whole budget was the inline attempt, so there is nothing for a
@@ -570,9 +800,20 @@ class GroundstationUrlOwner:
 
         Returns:
             True when the attempt settled the matter — a source was installed,
-            the composition has no remote source to build, or the attempt was
-            superseded. False when it failed and another may be made.
+            the composition has no remote source to build, the attempt was
+            superseded, or a preceding source is outstanding. False when it
+            failed and another may be made.
         """
+        if self._outstanding:
+            if not await self._settle_outstanding():
+                # A source whose close was never confirmed may still hold a
+                # session, and another one beside it is the overlap this owner
+                # excludes. Settled rather than failed: retrying would spend the
+                # budget on an attempt that cannot be allowed to succeed.
+                self._report_outstanding()
+                return True
+            if self._superseded(generation):
+                return True
         source: ConnectableSource | None = None
         try:
             source = await self._factory(settings)
@@ -596,8 +837,14 @@ class GroundstationUrlOwner:
             raise
         except Exception:
             _LOGGER.exception("rebuilding the groundstation source failed")
-            await self._discard(source)
+            refused = await self._discard(source)
             self._partial = None
+            if refused is not None:
+                # The failed attempt's own source will not close. Another
+                # attempt would build a second client beside it, so this one
+                # settles as unavailable instead.
+                self._report_outstanding()
+                return True
             return False
         return True
 
@@ -619,25 +866,74 @@ class GroundstationUrlOwner:
             source: What the factory produced.
 
         Returns:
-            True: the attempt is settled, and not by failing.
+            True: the attempt is settled, and not by failing. A close that
+            refused settles it too — the source is outstanding rather than
+            retired, and the record of that is what stops a successor.
         """
-        await self._discard(source)
+        if await self._discard(source) is not None:
+            self._report_outstanding()
         self._partial = None
         return True
 
-    @staticmethod
-    async def _discard(source: ConnectableSource | None) -> None:
-        """Close a source nothing is going to use.
+    async def _discard(self, source: ConnectableSource | None) -> Exception | None:
+        """Close a source nothing is going to use, and say whether it is gone.
+
+        An unconfirmed close is **not** a retirement. The object may still hold
+        a session, so it is recorded as outstanding rather than forgotten and
+        every caller stops short of building or installing another one.
 
         Args:
-            source: The partially built or superseded source, or `None`.
+            source: The retired, partially built or superseded source, or
+                `None`.
+
+        Returns:
+            `None` when the close was confirmed, or the exception it raised —
+            which the caller reports as the reason it went no further.
         """
         if source is None:
-            return
+            return None
         try:
             await source.aclose()
-        except Exception:
+        except Exception as error:
             _LOGGER.exception("an unused groundstation source would not close")
+            self._outstanding.append(source)
+            return error
+        return None
+
+    async def _settle_outstanding(self) -> bool:
+        """Try once more to close whatever refused, and say what is left.
+
+        One further attempt per transition rather than a loop: these sources
+        have already refused once, and a robot spending its remaining cores
+        re-closing them is the unbounded work REQ-095 forbids. The retry is
+        worth making at all because the ordinary cause — a groundstation that
+        went away while its session was being torn down — is one the next
+        attempt against the same object resolves.
+
+        Returns:
+            True when nothing is outstanding any more, so a successor may be
+            built.
+        """
+        # Taken rather than iterated: `aclose` suspends, and the reconstruction
+        # task can record another outstanding source while this one runs.
+        pending, self._outstanding = self._outstanding, []
+        for source in pending:
+            try:
+                await source.aclose()
+            except Exception:
+                _LOGGER.exception("a groundstation source still will not close")
+                self._outstanding.append(source)
+        return not self._outstanding
+
+    def _report_outstanding(self) -> None:
+        """Say what a source that will not close leaves true."""
+        _LOGGER.error(
+            "%d groundstation source(s) would not close; the address in effect "
+            "is unchanged, no replacement is built or installed while one is "
+            "outstanding, remote health is unavailable and local detection "
+            "remains available",
+            len(self._outstanding),
+        )
 
     async def _cancel_restoration(self) -> None:
         """Stop reconstruction and close whatever it had already built."""
@@ -650,7 +946,11 @@ class GroundstationUrlOwner:
             with contextlib.suppress(Exception, asyncio.CancelledError):
                 await restoration
         partial, self._partial = self._partial, None
-        await self._discard(partial)
+        if await self._discard(partial) is not None:
+            # Reported rather than raised: this runs from a write and from
+            # shutdown, and neither may fail here. The write refuses at its own
+            # outstanding check a moment later; shutdown has nothing to install.
+            self._report_outstanding()
 
     async def aclose(self) -> None:
         """Cancel and await reconstruction before anything closes the source.
@@ -672,6 +972,12 @@ class GroundstationUrlOwner:
         async with self._lock:
             self._generation += 1
             await self._cancel_restoration()
+            # One last bounded attempt at whatever refused to close, so an
+            # ordinary shutdown does not leave a session behind. Reported and
+            # not raised: a shutdown that failed here is a shutdown that wedges,
+            # and there is nothing left for an outstanding source to overlap.
+            if not await self._settle_outstanding():
+                self._report_outstanding()
 
 
 def _publish_nothing() -> None:

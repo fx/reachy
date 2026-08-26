@@ -42,6 +42,8 @@ if TYPE_CHECKING:
 
     from pyfakefs.fake_filesystem import FakeFilesystem
 
+    from reachy_mini_ha_satellite.config import Resolution
+
 FIRST_URL: Final = "ws://192.0.2.10:8080/v1/session"
 SECOND_URL: Final = "ws://192.0.2.20:8080/v1/session"
 THIRD_URL: Final = "ws://192.0.2.30:8080/v1/session"
@@ -78,8 +80,11 @@ class FakeSource:
         self.closes = 0
         self.connected = False
         self.start_gate: asyncio.Event | None = None
+        self.close_gate: asyncio.Event | None = None
+        # Public so a test can clear it between two closes, which is how the
+        # owner's one bounded retry of a refused close is driven.
+        self.close_error = close_error
         self._start_error = start_error
-        self._close_error = close_error
 
     async def start(self) -> None:
         """Begin, after any gate a test installed, or fail as instructed.
@@ -108,15 +113,17 @@ class FakeSource:
         )
 
     async def aclose(self) -> None:
-        """Stop, or fail as instructed.
+        """Stop, after any gate a test installed, or fail as instructed.
 
         Raises:
-            Exception: Whatever `close_error` was given.
+            Exception: Whatever `close_error` currently holds.
         """
+        if self.close_gate is not None:
+            await self.close_gate.wait()
         self.closes += 1
         self.connected = False
-        if self._close_error is not None:
-            raise self._close_error
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class FakeFactory:
@@ -151,6 +158,42 @@ class FakeFactory:
         if isinstance(result, Exception):
             raise result
         return result
+
+
+class GatedFactory(FakeFactory):
+    """A factory that waits at a gate before it produces anything.
+
+    Which is where a transition suspends with nothing retired yet, and so where
+    shutdown has to be seen by the check that follows the await rather than by
+    the one before it.
+    """
+
+    def __init__(
+        self,
+        *results: FakeSource | Exception | None,
+        gate: asyncio.Event,
+    ) -> None:
+        """Queue what each call produces, behind one gate.
+
+        Args:
+            results: As `FakeFactory` takes them.
+            gate: What every call waits on. It stays open once a test opens it,
+                so a compensation's own rebuild is not gated a second time.
+        """
+        super().__init__(*results)
+        self.gate = gate
+
+    async def __call__(self, settings: Settings) -> FakeSource | None:
+        """Wait at the gate, then produce the next queued result.
+
+        Args:
+            settings: The candidate configuration.
+
+        Returns:
+            The queued source, or `None`.
+        """
+        await self.gate.wait()
+        return await super().__call__(settings)
 
 
 class RecordingSleep:
@@ -272,6 +315,14 @@ class TestOneSharedBound:
 
         message = str(raised.value)
         assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+        assert str(length) in message
+        assert "Nothing was changed." in message
+        # The runtime refusal, not the startup migration's. That one says to
+        # remove an entry from the overrides file and start the application
+        # again — a remedy for a released value, and wrong for a submission:
+        # nothing was written, there is no entry, and the robot is running.
+        assert "overrides file" not in message
+        assert "start the application again" not in message
         assert "192.0.2.10" not in message
         assert owner.effective_url == FIRST_URL
         assert stored(store) == {}
@@ -380,33 +431,56 @@ class TestEitherSurfaceChangesGroundstations:
         assert [settings.idle_seconds for settings in adopted] == [9.0]
 
     @pytest.mark.asyncio
-    async def test_a_source_that_will_not_close_does_not_end_a_compensation(
+    async def test_a_candidate_that_opens_no_session_keeps_the_running_source(
         self,
         fs: FakeFilesystem,
     ) -> None:
-        """Discarding an unused source is a best effort, reported and continued.
+        """Retiring a live source into nothing is refused, not reported as done.
+
+        Whether a session exists at all is decided by settings that take effect
+        at the next start, so a submission changing one of them together with
+        the address would close the running source, install nothing, commit and
+        answer "saved" over a satellite that had stopped seeing.
 
         Args:
             fs: The in-memory filesystem.
         """
         del fs
-        candidate = FakeSource(
-            SECOND_URL,
-            start_error=RuntimeError("refused"),
-            close_error=RuntimeError("will not close"),
-        )
-        rebuilt = FakeSource(FIRST_URL)
-        owner, source, store = build_owner(
-            factory=FakeFactory(candidate, rebuilt),
-            initial=FakeSource(FIRST_URL),
-        )
+        running = FakeSource(FIRST_URL)
+        factory = FakeFactory(None)
+        owner, source, store = build_owner(factory=factory, initial=running)
+        pushed: list[str] = []
+        owner.publish_changes(lambda: pushed.append(owner.effective_url))
 
-        with pytest.raises(ConfigurationError, match="could not be started"):
+        with pytest.raises(ConfigurationError, match="opens no groundstation session"):
             await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
 
-        assert candidate.closes == 1
-        assert source.delegate is rebuilt
+        assert owner.effective_url == FIRST_URL
         assert stored(store) == {}
+        assert source.delegate is running
+        assert source.latest().sequence == len(FIRST_URL)
+        assert running.closes == 0
+        assert pushed == []
+
+    @pytest.mark.asyncio
+    async def test_a_local_only_composition_is_not_refused_for_building_nothing(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The refusal is about retiring a live source, not about building none.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        factory = FakeFactory(None)
+        owner, source, store = build_owner(factory=factory, initial=None)
+
+        await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+
+        assert owner.effective_url == SECOND_URL
+        assert stored(store)[GROUNDSTATION_URL_SETTING] == SECOND_URL
+        assert source.delegate is None
 
     @pytest.mark.asyncio
     async def test_detections_come_only_from_the_replacement(
@@ -542,11 +616,15 @@ class TestFailureBeforeDurableCommit:
         assert running.closes == 0
 
     @pytest.mark.asyncio
-    async def test_retirement_failure_rebuilds_the_preceding_source(
+    async def test_retirement_failure_builds_no_second_source(
         self,
         fs: FakeFilesystem,
     ) -> None:
-        """A source that would not close is replaced, never kept alongside.
+        """An unconfirmed close is unavailability, not retirement.
+
+        Nothing knows whether the session behind a source whose `aclose` raised
+        is gone, so rebuilding the preceding address would be the second client
+        this owner promises never to allow.
 
         Args:
             fs: The in-memory filesystem.
@@ -557,15 +635,22 @@ class TestFailureBeforeDurableCommit:
         rebuilt = FakeSource(FIRST_URL)
         factory = FakeFactory(candidate, rebuilt)
         owner, source, store = build_owner(factory=factory, initial=running)
+        local = _LocalSource()
+        chain = FallbackPerception(source, local)
 
         with pytest.raises(ConfigurationError, match="could not be retired"):
             await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
 
         assert owner.effective_url == FIRST_URL
         assert stored(store) == {}
-        assert source.delegate is rebuilt
+        assert source.delegate is None
+        assert owner.remote_available is False
         assert candidate.closes == 1
-        assert factory.asked == [SECOND_URL, FIRST_URL]
+        assert factory.asked == [SECOND_URL]
+        assert rebuilt.starts == 0
+        assert owner._outstanding == [running]
+        await chain.check()
+        assert chain.falling_back is True
 
     @pytest.mark.asyncio
     async def test_startup_failure_closes_the_candidate_and_restores(
@@ -1032,6 +1117,504 @@ class TestSupersessionAndShutdown:
         await owner.aclose()
 
 
+class TestShutdownDuringATransition:
+    """Shutdown at each awaiting point of REQ-095's superseded-or-shut-down scenario.
+
+    `aclose` marks the owner closed *before* it takes the lock, so a transition
+    already under way sees shutdown between two of its own statements. Each of
+    these pauses a submission at one await, begins shutdown, and then asserts
+    the three things a late transition would otherwise have done: written the
+    durable file, published an address, and installed a client.
+    """
+
+    @pytest.mark.asyncio
+    async def test_shutdown_while_the_replacement_is_being_built(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Nothing was retired yet, so the running source keeps answering.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        running = FakeSource(FIRST_URL)
+        candidate = FakeSource(SECOND_URL)
+        gate = asyncio.Event()
+        owner, source, store = build_owner(
+            factory=GatedFactory(candidate, gate=gate),
+            initial=running,
+        )
+        pushed: list[str] = []
+        owner.publish_changes(lambda: pushed.append(owner.effective_url))
+
+        refusal = await _shutdown_at(owner, _submitting(owner, SECOND_URL), gate)
+
+        assert "shutting down" in str(refusal)
+        assert stored(store) == {}
+        assert pushed == []
+        assert candidate.starts == 0
+        assert candidate.closes == 1
+        assert source.delegate is running
+
+    @pytest.mark.asyncio
+    async def test_shutdown_while_the_preceding_source_is_closing(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The candidate is closed rather than started, installed and committed.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        running = FakeSource(FIRST_URL)
+        gate = asyncio.Event()
+        running.close_gate = gate
+        candidate = FakeSource(SECOND_URL)
+        owner, source, store = build_owner(
+            factory=FakeFactory(candidate),
+            initial=running,
+        )
+        pushed: list[str] = []
+        owner.publish_changes(lambda: pushed.append(owner.effective_url))
+
+        refusal = await _shutdown_at(owner, _submitting(owner, SECOND_URL), gate)
+
+        assert "shutting down" in str(refusal)
+        assert stored(store) == {}
+        assert pushed == []
+        assert running.closes == 1
+        assert candidate.starts == 0
+        assert candidate.closes == 1
+        assert source.delegate is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_while_the_replacement_is_starting(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """A started candidate is closed rather than published.
+
+        The session it opened is the one thing that exists at this point, and
+        installing it would leave the chain answering from a client the
+        application has already begun releasing.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL)
+        gate = asyncio.Event()
+        candidate.start_gate = gate
+        owner, source, store = build_owner(
+            factory=FakeFactory(candidate),
+            initial=FakeSource(FIRST_URL),
+        )
+        pushed: list[str] = []
+        owner.publish_changes(lambda: pushed.append(owner.effective_url))
+
+        refusal = await _shutdown_at(owner, _submitting(owner, SECOND_URL), gate)
+
+        assert "shutting down" in str(refusal)
+        assert stored(store) == {}
+        assert pushed == []
+        assert candidate.starts == 1
+        assert candidate.closes == 1
+        assert source.delegate is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_while_a_failed_candidate_is_closing(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Compensation stops rather than rebuilding into a chain being released.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL, start_error=RuntimeError("refused"))
+        gate = asyncio.Event()
+        candidate.close_gate = gate
+        rebuilt = FakeSource(FIRST_URL)
+        factory = FakeFactory(candidate, rebuilt)
+        owner, source, store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+        )
+
+        refusal = await _shutdown_at(owner, _submitting(owner, SECOND_URL), gate)
+
+        assert "could not be started" in str(refusal)
+        assert stored(store) == {}
+        assert factory.asked == [SECOND_URL]
+        assert rebuilt.starts == 0
+        assert owner._restoration is None
+        assert source.delegate is None
+
+
+class TestAnUnconfirmedClose:
+    """A source whose `aclose` raised is outstanding, and blocks a successor.
+
+    Nothing knows whether the session behind it is gone, so every path that
+    would otherwise go on to build or install another one stops instead: the
+    preceding address stays durable and effective, remote health reads
+    unavailable, and local detection is unaffected. One further close is
+    attempted at the next transition, which is where the ordinary cause — a
+    groundstation that went away mid-close — resolves.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_candidate_that_will_not_close_stops_the_compensation(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The compensation's own discard: no rebuild beside a possibly-live one.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(
+            SECOND_URL,
+            start_error=RuntimeError("refused"),
+            close_error=RuntimeError("will not close"),
+        )
+        rebuilt = FakeSource(FIRST_URL)
+        factory = FakeFactory(candidate, rebuilt)
+        owner, source, store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+        )
+        local = _LocalSource()
+        chain = FallbackPerception(source, local)
+
+        with pytest.raises(ConfigurationError, match="could not be started"):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+
+        assert owner.effective_url == FIRST_URL
+        assert stored(store) == {}
+        assert factory.asked == [SECOND_URL]
+        assert rebuilt.starts == 0
+        assert source.delegate is None
+        assert owner.remote_available is False
+        assert owner._outstanding == [candidate]
+        await chain.check()
+        assert chain.falling_back is True
+
+    @pytest.mark.asyncio
+    async def test_a_rebuild_that_will_not_close_ends_the_attempts(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The retry path's own discard: settled as unavailable, not retried.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL, start_error=RuntimeError("refused"))
+        partial = FakeSource(
+            FIRST_URL,
+            start_error=RuntimeError("refused"),
+            close_error=RuntimeError("will not close"),
+        )
+        rebuilt = FakeSource(FIRST_URL)
+        factory = FakeFactory(candidate, partial, rebuilt)
+        owner, _source, _store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+            attempts=5,
+        )
+
+        with pytest.raises(ConfigurationError):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        await _settle(owner)
+
+        assert factory.asked == [SECOND_URL, FIRST_URL]
+        assert rebuilt.starts == 0
+        assert owner._restoration is None
+        assert owner.remote_available is False
+        assert owner._outstanding == [partial]
+
+    @pytest.mark.asyncio
+    async def test_a_superseded_source_that_will_not_close_blocks_a_successor(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The abandon path's own discard, and the write that follows it.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        late = FakeSource(FIRST_URL, close_error=RuntimeError("will not close"))
+        successor = FakeSource(SECOND_URL)
+        owner, source, store = build_owner(
+            factory=FakeFactory(late, successor),
+            initial=FakeSource(FIRST_URL),
+        )
+        source.detach()
+
+        # One attempt is the unit here, as it is for the stale-generation test
+        # above: driving it through a public write would hide which check
+        # rejected the result.
+        settled = await owner._install_fresh(
+            owner.resolution.settings,
+            owner._generation - 1,
+        )
+
+        assert settled is True
+        assert owner._outstanding == [late]
+        with pytest.raises(ConfigurationError, match="has not closed"):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        assert stored(store) == {}
+        assert successor.starts == 0
+        assert source.delegate is None
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_partial_that_will_not_close_blocks_the_next_write(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The cancellation path's own discard, from a later operator write.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL, start_error=RuntimeError("refused"))
+        late = FakeSource(FIRST_URL, close_error=RuntimeError("will not close"))
+        late.start_gate = asyncio.Event()
+        third = FakeSource(THIRD_URL)
+        owner, source, store = build_owner(
+            factory=FakeFactory(candidate, RuntimeError("down"), late, third),
+            initial=FakeSource(FIRST_URL),
+            attempts=9,
+        )
+
+        with pytest.raises(ConfigurationError):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        # Let the retry state reach the gate inside the late source's start.
+        await _spin()
+
+        with pytest.raises(ConfigurationError, match="has not closed"):
+            await owner.submit({GROUNDSTATION_URL_SETTING: THIRD_URL})
+
+        assert owner.effective_url == FIRST_URL
+        assert stored(store) == {}
+        assert third.starts == 0
+        assert source.delegate is None
+        assert owner._outstanding == [late]
+
+    @pytest.mark.asyncio
+    async def test_a_source_that_closes_on_the_retry_lets_the_next_write_through(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The bounded retry, which is the whole recovery from an outstanding one.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        running = FakeSource(FIRST_URL, close_error=RuntimeError("stuck"))
+        replacement = FakeSource(SECOND_URL)
+        owner, source, store = build_owner(
+            factory=FakeFactory(FakeSource(SECOND_URL), replacement),
+            initial=running,
+        )
+
+        with pytest.raises(ConfigurationError, match="could not be retired"):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        # The groundstation let go, so the next close returns.
+        running.close_error = None
+
+        await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+
+        assert running.closes == 2
+        assert owner._outstanding == []
+        assert owner.effective_url == SECOND_URL
+        assert stored(store)[GROUNDSTATION_URL_SETTING] == SECOND_URL
+        assert source.delegate is replacement
+
+    @pytest.mark.asyncio
+    async def test_shutdown_completes_with_a_source_that_will_not_close(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Nothing wedges shutdown, however badly a source misbehaves.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(
+            SECOND_URL,
+            start_error=RuntimeError("refused"),
+            close_error=RuntimeError("will not close"),
+        )
+        owner, _source, _store = build_owner(
+            factory=FakeFactory(candidate),
+            initial=FakeSource(FIRST_URL),
+        )
+
+        with pytest.raises(ConfigurationError):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+
+        await owner.aclose()
+
+        # Twice: the discard that recorded it, and shutdown's one last attempt.
+        assert candidate.closes == 2
+        assert owner._outstanding == [candidate]
+
+
+class TestOneWriterAtATime:
+    """Both surfaces write one file, and resubmitting is how recovery is asked for."""
+
+    @pytest.mark.asyncio
+    async def test_an_interleaved_entity_write_keeps_the_pages_other_override(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The entity's merge is computed under the lock, so it loses nothing.
+
+        The page's submission suspends inside the transition, closing the source
+        it retired. A merge the entity computed before the lock would be a merge
+        against a file the page is about to rewrite, and the page's other
+        override would vanish when the entity committed over it.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        running = FakeSource(FIRST_URL)
+        gate = asyncio.Event()
+        running.close_gate = gate
+        second = FakeSource(SECOND_URL)
+        third = FakeSource(THIRD_URL)
+        owner, source, store = build_owner(
+            factory=FakeFactory(second, third),
+            initial=running,
+        )
+
+        page = asyncio.get_running_loop().create_task(
+            owner.submit(
+                {
+                    GROUNDSTATION_URL_SETTING: SECOND_URL,
+                    "speaker_boost_percent": "150",
+                },
+            ),
+        )
+        await _spin()
+        assert owner.reserve_submission(THIRD_URL) is True
+        await _spin()
+        gate.set()
+        await page
+        await _drain(owner)
+
+        assert stored(store) == {
+            GROUNDSTATION_URL_SETTING: THIRD_URL,
+            "speaker_boost_percent": "150",
+        }
+        assert owner.effective_url == THIRD_URL
+        assert source.delegate is third
+
+    @pytest.mark.asyncio
+    async def test_resubmitting_the_effective_address_rebuilds_from_the_page(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The runbook's "a later submission begins a fresh attempt", from the page.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL, start_error=RuntimeError("refused"))
+        rebuilt = FakeSource(FIRST_URL)
+        factory = FakeFactory(candidate, RuntimeError("down"), rebuilt)
+        owner, source, _store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+            attempts=1,
+        )
+
+        with pytest.raises(ConfigurationError):
+            await owner.submit({GROUNDSTATION_URL_SETTING: SECOND_URL})
+        exhausted = owner.remote_available
+
+        await owner.submit({GROUNDSTATION_URL_SETTING: FIRST_URL})
+
+        assert exhausted is False
+        assert owner.remote_available is True
+        assert source.delegate is rebuilt
+        assert rebuilt.starts == 1
+        assert owner.effective_url == FIRST_URL
+
+    @pytest.mark.asyncio
+    async def test_resending_the_stored_address_rebuilds_without_writing(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The same recovery from Home Assistant, which writes nothing to reach it.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        rebuilt = FakeSource(FIRST_URL)
+        factory = FakeFactory(RuntimeError("down"), rebuilt)
+        owner, source, store = build_owner(
+            factory=factory,
+            initial=None,
+            attempts=1,
+        )
+
+        assert owner.reserve_submission(FIRST_URL) is True
+        await _drain(owner)
+        first_attempt = owner.remote_available
+        writes = _CountingStore(store.path)
+        owner._store = writes
+
+        assert owner.reserve_submission(FIRST_URL) is True
+        await _drain(owner)
+
+        assert first_attempt is False
+        assert writes.saves == 0
+        assert factory.asked == [FIRST_URL, FIRST_URL]
+        assert owner.remote_available is True
+        assert source.delegate is rebuilt
+
+    @pytest.mark.asyncio
+    async def test_a_repeated_resubmission_leaves_one_restoration_state(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Saving twice cannot accumulate reconstruction, however often it is done.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        owner, _source, _store = build_owner(
+            factory=FakeFactory(RuntimeError("down")),
+            initial=None,
+            attempts=4,
+        )
+
+        await owner.submit({GROUNDSTATION_URL_SETTING: FIRST_URL})
+        first = owner._restoration
+        await owner.submit({GROUNDSTATION_URL_SETTING: FIRST_URL})
+
+        assert first is not None
+        assert first.done()
+        assert owner._restoration is not first
+        await _settle(owner)
+        assert owner.remote_available is False
+
+
 class TestRestartAgreement:
     """REQ-095's restart scenario, and the local-only composition."""
 
@@ -1273,6 +1856,68 @@ async def _drain(owner: GroundstationUrlOwner) -> None:
     """
     for requested in tuple(owner._requested):
         await requested
+
+
+async def _spin(times: int = 6) -> None:
+    """Let every ready task run, without spending a moment of wall-clock time.
+
+    Yielding is not sleeping: `asyncio.sleep(0)` reschedules immediately, so a
+    transition advances to its next suspension without a timer. More than one
+    yield because a transition reaches a gate through several awaits.
+
+    Args:
+        times: How many times to yield the loop.
+    """
+    for _ in range(times):
+        await asyncio.sleep(0)
+
+
+def _submitting(owner: GroundstationUrlOwner, url: str) -> asyncio.Task[Resolution]:
+    """Begin one submission as a task, so a test can interleave with it.
+
+    Args:
+        owner: Whose transition to begin.
+        url: The address to submit.
+
+    Returns:
+        The running transition.
+    """
+    return asyncio.get_running_loop().create_task(
+        owner.submit({GROUNDSTATION_URL_SETTING: url}),
+    )
+
+
+async def _shutdown_at(
+    owner: GroundstationUrlOwner,
+    submission: asyncio.Task[Resolution],
+    gate: asyncio.Event,
+) -> ConfigurationError:
+    """Begin shutdown while a transition waits at `gate`, then release it.
+
+    `aclose` marks the owner closed before it takes the lock, so this is what
+    makes shutdown true *between* two statements of a transition already under
+    way — which is the only way to reach the check after each await rather than
+    the one at the top.
+
+    Args:
+        owner: Whose shutdown to begin.
+        submission: The transition, paused at the gate.
+        gate: What is holding it there.
+
+    Returns:
+        What the submission refused with.
+    """
+    await _spin()
+    assert not submission.done()
+    closing = asyncio.get_running_loop().create_task(owner.aclose())
+    # Enough for `aclose` to mark the owner closed and block on the lock the
+    # paused transition is holding.
+    await _spin()
+    gate.set()
+    with pytest.raises(ConfigurationError) as raised:
+        await submission
+    await closing
+    return raised.value
 
 
 async def _settle(owner: GroundstationUrlOwner) -> None:

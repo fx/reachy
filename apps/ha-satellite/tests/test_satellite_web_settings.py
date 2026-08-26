@@ -49,6 +49,10 @@ from reachy_mini_ha_satellite.config import (
     load_settings,
     setting_names,
 )
+from reachy_mini_ha_satellite.groundstation_url import (
+    GroundstationUrlOwner,
+    ReplaceableRemoteSource,
+)
 from reachy_mini_ha_satellite.web import CLEAR_PREFIX, create_app, form_value
 
 if TYPE_CHECKING:
@@ -1495,3 +1499,82 @@ class TestTheGroundstationAddressOnThePage:
         assert "could not be started" in response.text
         assert ENVIRONMENT[f"{ENV_PREFIX}GROUNDSTATION_URL"] in response.text
         assert _store().load() == {}
+
+    @pytest.mark.asyncio
+    async def test_an_overlong_submission_is_refused_with_the_runtime_remedy(
+        self,
+    ) -> None:
+        """The page reaches the runtime check, not the startup migration's.
+
+        The two refuse the same length and offer different remedies. The
+        migration's tells an operator to remove an entry from the overrides file
+        and start the application again — and here nothing was written, there is
+        no entry, and the robot is running. So this one drives the real owner
+        rather than the recording stand-in: the wording an operator acts on is
+        decided by which of the two checks the page's submission reaches first.
+        """
+        host = _OwnedHost()
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app(host)) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, groundstation_url="ws://" + "a" * 300),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 400
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in response.text
+        assert "Nothing was changed." in response.text
+        assert "overrides file" not in response.text
+        assert "start the application again" not in response.text
+        assert _store().load() == {}
+        assert host.owner.effective_url == ENVIRONMENT[f"{ENV_PREFIX}GROUNDSTATION_URL"]
+
+
+class _OwnedHost(RecordingHost):
+    """A host whose submissions go through a real `GroundstationUrlOwner`.
+
+    The stand-in above records what the page handed over, which is what most of
+    these tests are about. This one is for the cases where *which* refusal the
+    operator reads is the thing under test, and that is decided inside the owner
+    rather than by the page.
+    """
+
+    def __init__(self) -> None:
+        """Assemble an owner over the same store the page writes through."""
+        super().__init__()
+        store = _store()
+        self.owner = GroundstationUrlOwner(
+            store=store,
+            resolution=load_settings(ENVIRONMENT, store.load()),
+            source=ReplaceableRemoteSource(),
+            factory=_no_remote_source,
+            environ=ENVIRONMENT,
+            apply_live=self.apply_live,
+        )
+
+    async def apply_settings(self, wanted: Mapping[str, str]) -> Resolution:
+        """Hand the submission to the owner, as the application does.
+
+        Args:
+            wanted: The complete set of overrides to store.
+
+        Returns:
+            The settings in effect afterwards.
+        """
+        self.submitted.append(dict(wanted))
+        return await self.owner.submit(wanted)
+
+
+async def _no_remote_source(settings: Settings) -> None:
+    """Build no session, which is what a page test has no need of.
+
+    Args:
+        settings: The candidate configuration, unread.
+
+    Returns:
+        `None`, the local-only composition — so nothing here opens a socket.
+    """
+    del settings
+    return

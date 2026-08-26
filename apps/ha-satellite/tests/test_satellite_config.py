@@ -1134,7 +1134,7 @@ class TestTheGroundstationAddressBound:
         self,
         length: int,
     ) -> None:
-        """The check both submission paths run first, on the values it passes.
+        """The check both paths reach through the owner, on the values it passes.
 
         Args:
             length: How long the submitted address is.

@@ -184,7 +184,22 @@ deployment can get irreversibly wrong.
   the connectivity supervisor cannot supervise an object that does not exist.
   Anything that reaches around it, or a second `RemotePerception` alongside
   `ReplaceableRemoteSource`'s one delegate, is the overlap this ordering exists
-  to exclude.
+  to exclude. Four rules keep that true and each is enforced in the owner
+  rather than at its call sites. **Every await inside the transition is
+  followed by a validity check** before the next externally visible act, because
+  `aclose` marks the owner closed before it takes the lock and shutdown
+  therefore lands between two statements; losing the check closes what was built
+  rather than proceeding. **An unconfirmed close is unavailability, not
+  retirement** — a source whose `aclose` raised may still hold a session, so it
+  is recorded as outstanding, one further close is attempted at the next
+  transition, and nothing is built or installed until it is gone. **A candidate
+  that opens no session while one is running is refused**, decided from the
+  factory's answer rather than from a list of the settings that produce it, so a
+  save changing the address together with a restart-bound detection setting
+  cannot retire the running source into nothing and report success. And **the
+  entity's merge against the stored overrides happens under the owner's lock**,
+  because two surfaces write that file and a merge computed before the lock
+  drops whatever the other committed in between.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys
   a device on what it announces, so a derived default would be correct on a

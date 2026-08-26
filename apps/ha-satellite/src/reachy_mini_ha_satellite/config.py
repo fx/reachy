@@ -48,8 +48,10 @@ A secret's raw value does still travel, and it is worth saying where rather than
 claiming it never leaves this module. Three paths carry it and none of them is a
 rendering: `canonical_string` hands it back unchanged so a submission can be
 *compared* against it, `OverrideStore.save` writes it to a file owner-only, and
-`main.build_perception_source` reveals it once into a `Credential`, which is the
-type that will not print itself. Everywhere else it is read only to be tested for
+`main.build_remote_source` reveals it once into a `Credential`, which is the
+type that will not print itself — and it is the one reveal site because it is
+also the one place a session client is constructed, at startup and for every
+later replacement alike. Everywhere else it is read only to be tested for
 emptiness and discarded — `resolved_configuration` choosing between `<set>` and
 `<unset>`, and the coherence check refusing a session with no credential.
 `test_satellite_config.py` and `test_satellite_web_settings.py` assert that a
@@ -757,10 +759,17 @@ def _check_url_length(
 def validate_groundstation_url_length(url: str) -> None:
     """Refuse a runtime submission before anything is built or written.
 
-    Both submission paths call this first — the settings page through
-    `load_settings`, the Home Assistant entity directly — so an overlong address
-    never reaches source construction or the durable file, and the preceding
-    effective value stays the read-back.
+    Both submission paths call this first, and both reach it through
+    `groundstation_url.GroundstationUrlOwner`: the settings page inside the
+    serialized transition, the Home Assistant entity from `reserve_submission`
+    before one is even scheduled. So an overlong address never reaches source
+    construction or the durable file, and the preceding effective value stays
+    the read-back.
+
+    **Not `_check_url_length`**, which refuses the same length at startup and
+    says to edit the overrides file and restart. That remedy is right for a
+    released value being migrated and wrong for a submission: nothing has been
+    written, there is no entry to remove, and the application is running.
 
     Args:
         url: What was submitted.
