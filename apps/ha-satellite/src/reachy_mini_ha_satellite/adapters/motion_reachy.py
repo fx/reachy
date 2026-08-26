@@ -9,6 +9,7 @@ returns an absolute world-gaze anchor to the pure behavior layer.
 from __future__ import annotations
 
 import math
+import threading
 from collections import deque
 from dataclasses import dataclass
 from itertools import pairwise
@@ -22,7 +23,11 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     HeadMeasurement,
 )
 from reachy_mini_ha_satellite.motion_validation import SampleFault, validate_gaze_sample
-from reachy_mini_ha_satellite.motor_control import MotorGroup, MotorGroupCoordinator
+from reachy_mini_ha_satellite.motor_control import (
+    MotorGroup,
+    MotorGroupCoordinator,
+    MotorGroupLifecycle,
+)
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -72,6 +77,26 @@ class _PoseSample:
 
     at: float
     rotation: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class _MotionReseedSample:
+    """Immutable measured hardware input carried from worker to event loop."""
+
+    group: MotorGroup
+    at: float
+    pose: np.ndarray | None
+    head: HeadMeasurement | None
+    body: BodyMeasurement | None
+    antennas: AntennaPose | None
+
+
+@dataclass(frozen=True, slots=True)
+class _BodyPolicySnapshot:
+    """Generation-stamped loop ownership captured before daemon quiescence."""
+
+    generation: int
+    automatic_yaw: bool
 
 
 class _MeasuredPoseError(ValueError):
@@ -379,7 +404,10 @@ class ReachyMotion:
         self._cache: dict[DetectionSource, tuple[tuple[int, int], GazeCalibration]] = {}
         self._deferred: dict[DetectionSource, tuple[int, int]] = {}
         self._acquired = False
+        self._temporary_ownership = False
         self._released = False
+        self._state_lock = threading.RLock()
+        self._generation = 0
         self._last_head_measurement: tuple[float, float, float] | None = None
         self._last_body_measurement: tuple[float, float] | None = None
         self._head_fault = MotionFault.NONE
@@ -396,33 +424,44 @@ class ReachyMotion:
         return self._released
 
     def acquire(self, now: float) -> MotionMeasurement:
-        """Disable competing body yaw and return measured acquisition state."""
-        if self._released or self._acquired:
-            return self._measurement()
-        self._acquired = True
-        try:
-            self._handle.set_automatic_body_yaw(False)
-        except Exception:
-            if not self._released:
-                self._acquired = False
-            raise
+        """Disable competing body yaw and invalidate every older lifecycle snapshot."""
+        with self._state_lock:
+            if self._released:
+                return self._measurement()
+            if self._acquired and not self._temporary_ownership:
+                return self._measurement()
+            needs_daemon_quiesce = not self._acquired
+            self._acquired = True
+            self._temporary_ownership = False
+            self._generation += 1
+            generation = self._generation
+        if needs_daemon_quiesce:
+            try:
+                self._handle.set_automatic_body_yaw(False)
+            except Exception:
+                with self._state_lock:
+                    if self._generation == generation:
+                        self._acquired = False
+                        self._generation += 1
+                raise
         return self.observe(now) if not self._terminal() else self._measurement()
 
     def quiesce_body(self) -> bool:
-        """Capture daemon automatic-yaw policy and establish exclusive ownership."""
-        if self._released:
-            raise RuntimeError("motion has been released")
-        prior = not self._acquired
+        """Synchronously establish exclusive ownership for direct unit composition."""
+        snapshot = self._begin_lifecycle()
         self._handle.set_automatic_body_yaw(False)
-        self._acquired = True
-        return prior
+        if self._commit_quiesce(snapshot) is None:
+            raise RuntimeError("newer motion ownership superseded body quiesce")
+        return snapshot.automatic_yaw
 
     def restore_body_policy(self, automatic_yaw: bool) -> None:
-        """Restore only the automatic-yaw policy captured before a safe transition."""
-        if self._released:
-            return
-        self._handle.set_automatic_body_yaw(automatic_yaw)
-        self._acquired = not automatic_yaw
+        """Synchronously restore policy only while its generation stays current."""
+        with self._state_lock:
+            if self._released:
+                return
+            generation = self._generation
+        restored = self._restore_policy_worker(generation, automatic_yaw)
+        self._commit_restore(generation, automatic_yaw, restored)
 
     def _measurement(self) -> MotionMeasurement:
         """Return only currently valid typed measurements, retaining cache privately."""
@@ -477,11 +516,18 @@ class ReachyMotion:
 
     def calibrate(self, directive: GazeDirective, now: float) -> GazeCalibration:
         """Calibrate one new actionable face identity, with bounded retry/reject."""
-        if self._released or not directive.actionable or directive.face is None:
+        if self._terminal() or not directive.actionable or directive.face is None:
             return GazeCalibration(
                 CalibrationStatus.REJECTED,
                 fault=MotionFault.CALIBRATION,
             )
+        with self._state_lock:
+            if self._released:
+                return GazeCalibration(
+                    CalibrationStatus.REJECTED,
+                    fault=MotionFault.CALIBRATION,
+                )
+            self._generation += 1
         identity = directive.identity
         if (
             identity is None
@@ -694,33 +740,43 @@ class ReachyMotion:
             return True
         return coordinator.command(groups, action)
 
+    def motor_lifecycle(
+        self,
+        group: MotorGroup,
+        clock: Callable[[], float],
+        finalize: Callable[
+            [HeadMeasurement | None, BodyMeasurement | None, AntennaPose | None],
+            None,
+        ],
+    ) -> MotorGroupLifecycle:
+        """Create one generation-stamped loop/worker lifecycle for a motor group."""
+        return _ReachyMotionLifecycle(self, group, clock, finalize)
+
     def reseed(
         self,
         group: MotorGroup,
         now: float,
     ) -> tuple[HeadMeasurement | None, BodyMeasurement | None, AntennaPose | None]:
-        """Reacquire fresh measured state after confirmed physical torque-on."""
+        """Synchronously sample and commit fresh state for direct unit composition."""
+        with self._state_lock:
+            generation = self._generation
+        sample = self._sample_reseed(group, now)
+        result = self._commit_reseed(sample, generation)
+        if result is None:
+            raise RuntimeError("motion changed while reseed sampling was in flight")
+        return sample.head, sample.body, sample.antennas
+
+    def _sample_reseed(self, group: MotorGroup, now: float) -> _MotionReseedSample:
+        """Read and validate hardware without mutating loop-owned adapter state."""
+        pose: np.ndarray | None = None
         head: HeadMeasurement | None = None
         body: BodyMeasurement | None = None
         antennas: AntennaPose | None = None
         if group in {MotorGroup.HEAD, MotorGroup.BODY}:
-            pose = self._handle.get_current_head_pose()
-            rotation = _pose_rotation(pose, measured=True)
-            world_yaw, world_elevation = _direction_angles(rotation)
-            self._history = TimedPoseHistory(
-                maximum_age=self._config.staleness_seconds,
-                maximum_samples=(
-                    math.ceil(
-                        self._config.staleness_seconds / MIN_BEHAVIOUR_TICK_SECONDS
-                    )
-                    + _HISTORY_ENDPOINT_SAMPLES
-                ),
-            )
-            self._history.append(now, pose)
-            self._cache.clear()
-            self._deferred.clear()
-            self._last_head_measurement = (world_yaw, world_elevation, now)
-            self._head_fault = MotionFault.NONE
+            measured_pose = self._handle.get_current_head_pose()
+            pose = project_measured_pose(measured_pose)
+            pose.setflags(write=False)
+            world_yaw, world_elevation = _direction_angles(pose[:3, :3])
             head = HeadMeasurement(world_yaw, world_elevation, now)
         if group is MotorGroup.BODY or (
             group is MotorGroup.HEAD and self._config.body_enabled
@@ -728,10 +784,7 @@ class ReachyMotion:
             head_joints, _antenna_joints = self._handle.get_current_joint_positions()
             if len(head_joints) != 7 or not math.isfinite(float(head_joints[0])):
                 raise ValueError("body reseed requires one complete finite joint read")
-            body_yaw = float(head_joints[0])
-            self._last_body_measurement = (body_yaw, now)
-            self._body_fault = MotionFault.NONE
-            body = BodyMeasurement(body_yaw, now)
+            body = BodyMeasurement(float(head_joints[0]), now)
         if group is MotorGroup.ANTENNAS:
             _head_joints, antenna_joints = self._handle.get_current_joint_positions()
             if len(antenna_joints) != 2 or not all(
@@ -742,17 +795,100 @@ class ReachyMotion:
                 right=float(antenna_joints[0]),
                 left=float(antenna_joints[1]),
             )
-        return head, body, antennas
+        return _MotionReseedSample(group, now, pose, head, body, antennas)
+
+    def _commit_reseed(
+        self,
+        sample: _MotionReseedSample,
+        expected_generation: int,
+    ) -> int | None:
+        """Commit a measured sample only if no newer loop-owned motion won."""
+        with self._state_lock:
+            if self._released or self._generation != expected_generation:
+                return None
+            if sample.pose is not None and sample.head is not None:
+                self._history = TimedPoseHistory(
+                    maximum_age=self._config.staleness_seconds,
+                    maximum_samples=(
+                        math.ceil(
+                            self._config.staleness_seconds / MIN_BEHAVIOUR_TICK_SECONDS
+                        )
+                        + _HISTORY_ENDPOINT_SAMPLES
+                    ),
+                )
+                self._history.append(sample.at, sample.pose)
+                self._cache.clear()
+                self._deferred.clear()
+                self._last_head_measurement = (
+                    sample.head.world_yaw,
+                    sample.head.world_elevation,
+                    sample.at,
+                )
+                self._head_fault = MotionFault.NONE
+            if sample.body is not None:
+                self._last_body_measurement = (sample.body.yaw, sample.at)
+                self._body_fault = MotionFault.NONE
+            self._generation += 1
+            return self._generation
+
+    def _begin_lifecycle(self) -> _BodyPolicySnapshot:
+        with self._state_lock:
+            return _BodyPolicySnapshot(self._generation, not self._acquired)
+
+    def _commit_quiesce(self, snapshot: _BodyPolicySnapshot) -> int | None:
+        with self._state_lock:
+            if self._released or self._generation != snapshot.generation:
+                return None
+            self._acquired = True
+            self._temporary_ownership = True
+            self._generation += 1
+            return self._generation
+
+    def _restore_policy_worker(
+        self,
+        expected_generation: int,
+        automatic_yaw: bool,
+    ) -> bool:
+        with self._state_lock:
+            if self._released or self._generation != expected_generation:
+                return False
+        self._handle.set_automatic_body_yaw(automatic_yaw)
+        with self._state_lock:
+            current = self._generation == expected_generation
+        if not current and automatic_yaw:
+            self._handle.set_automatic_body_yaw(False)
+        return current
+
+    def _commit_restore(
+        self,
+        expected_generation: int,
+        automatic_yaw: bool,
+        restored: bool,
+    ) -> int | None:
+        with self._state_lock:
+            if (
+                not restored
+                or self._released
+                or self._generation != expected_generation
+            ):
+                return None
+            self._acquired = not automatic_yaw
+            self._temporary_ownership = False
+            self._generation += 1
+            return self._generation
 
     def release(self) -> None:
-        """Become terminal first and restore automatic yaw only from known torque."""
-        if self._released:
-            return
+        """Become terminal first and restore only after all reservations drain."""
         coordinator = self._coordinator
         if coordinator is not None:
             coordinator.terminal()
-        self._released = True
-        if self._acquired and (
+        with self._state_lock:
+            if self._released:
+                return
+            acquired = self._acquired
+            self._released = True
+            self._generation += 1
+        if acquired and (
             coordinator is None or coordinator.safe_to_restore_body_policy()
         ):
             self._handle.set_automatic_body_yaw(True)
@@ -775,3 +911,91 @@ class ReachyMotion:
         self._cache[source] = ((generation, sequence), result)
         self._deferred.pop(source, None)
         return result
+
+
+class _ReachyMotionLifecycle(MotorGroupLifecycle):
+    """Generation-check motion state around blocking daemon and sampling calls."""
+
+    def __init__(
+        self,
+        motion: ReachyMotion,
+        group: MotorGroup,
+        clock: Callable[[], float],
+        finalize: Callable[
+            [HeadMeasurement | None, BodyMeasurement | None, AntennaPose | None],
+            None,
+        ],
+    ) -> None:
+        self._motion = motion
+        self._group = group
+        self._clock = clock
+        self._finalize = finalize
+        self._expected_generation: int | None = None
+
+    def prepare_is_blocking(self) -> bool:
+        return self._group is MotorGroup.BODY
+
+    def prepare_worker(self) -> object:
+        if self._group is not MotorGroup.BODY:
+            return None
+        snapshot = self._motion._begin_lifecycle()
+        self._motion._handle.set_automatic_body_yaw(False)
+        return snapshot
+
+    def prepare_loop(self, prepared: object) -> None:
+        if self._group is not MotorGroup.BODY:
+            with self._motion._state_lock:
+                if self._motion._released:
+                    raise RuntimeError("motion was released before motor preparation")
+                self._expected_generation = self._motion._generation
+            return
+        if not isinstance(prepared, _BodyPolicySnapshot):
+            raise RuntimeError("body quiesce produced no policy snapshot")
+        generation = self._motion._commit_quiesce(prepared)
+        if generation is None:
+            raise RuntimeError("newer motion ownership superseded body quiesce")
+        self._expected_generation = generation
+
+    def captured_policy(self, prepared: object) -> bool | None:
+        if isinstance(prepared, _BodyPolicySnapshot):
+            return prepared.automatic_yaw
+        return None
+
+    def sample_worker(self) -> object:
+        return self._motion._sample_reseed(self._group, self._clock())
+
+    def sample_loop(self, sample: object) -> None:
+        expected = self._expected_generation
+        if not isinstance(sample, _MotionReseedSample) or expected is None:
+            raise RuntimeError("motor reseed has no current generation")
+        generation = self._motion._commit_reseed(sample, expected)
+        if generation is None:
+            raise RuntimeError("newer motion state superseded measured reseed")
+        self._expected_generation = generation
+        self._finalize(sample.head, sample.body, sample.antennas)
+
+    def restore_worker(self, policy: bool | None) -> object:
+        expected = self._expected_generation
+        if self._group is not MotorGroup.BODY or policy is None:
+            return None
+        if expected is None:
+            raise RuntimeError("body restore has no current generation")
+        restored = self._motion._restore_policy_worker(expected, policy)
+        return (expected, policy, restored)
+
+    def restore_loop(self, restored: object) -> None:
+        if self._group is not MotorGroup.BODY:
+            return
+        if not (
+            isinstance(restored, tuple)
+            and len(restored) == 3
+            and type(restored[0]) is int
+            and type(restored[1]) is bool
+            and type(restored[2]) is bool
+        ):
+            raise RuntimeError("body restore produced no generation result")
+        expected, policy, succeeded = restored
+        generation = self._motion._commit_restore(expected, policy, succeeded)
+        if generation is None:
+            raise RuntimeError("newer motion ownership superseded body restore")
+        self._expected_generation = generation

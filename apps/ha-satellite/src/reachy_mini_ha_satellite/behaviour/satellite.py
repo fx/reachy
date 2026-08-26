@@ -151,6 +151,7 @@ class SatelliteBehaviour:
         self._pending_command_step: ControllerStep | None = None
         self._pending_observation_age: float | None = None
         self._pending_handoff = False
+        self._motion_generation = 0
 
     @property
     def state(self) -> PipelineState:
@@ -161,6 +162,11 @@ class SatelliteBehaviour:
     def controller_state(self) -> ControllerState:
         """Return immutable predictive controller state for status and tests."""
         return self._controller
+
+    @property
+    def motion_generation(self) -> int:
+        """Return the loop-owned hidden-target generation for reseed commits."""
+        return self._motion_generation
 
     def controller_diagnostics(self) -> tuple[dict[str, DiagnosticScalar], ...]:
         """Return a bounded identifier-free snapshot of controller evidence."""
@@ -185,12 +191,19 @@ class SatelliteBehaviour:
         head: HeadMeasurement | None = None,
         body: BodyMeasurement | None = None,
         antennas: AntennaPose | None = None,
-    ) -> None:
-        """Discard hidden targets and seed fresh measured state after torque-on."""
+        expected_generation: int | None = None,
+    ) -> bool:
+        """Discard hidden targets only if no newer expression generation won."""
+        if (
+            expected_generation is not None
+            and self._motion_generation != expected_generation
+        ):
+            return False
         if antennas is not None:
             self._last_antennas = antennas
         if head is None:
-            return
+            self._motion_generation += 1
+            return True
         seeded = step_controller(
             initial_controller_state(self._config),
             None,
@@ -212,6 +225,8 @@ class SatelliteBehaviour:
         self._pending_command_step = None
         self._pending_observation_age = None
         self._pending_handoff = False
+        self._motion_generation += 1
+        return True
 
     def status(self, now: float) -> BehaviourStatus:
         """Report pipeline and predictive ownership without inferring from motion."""
@@ -457,4 +472,6 @@ class SatelliteBehaviour:
         ):
             self._last_head = wanted.head
             intents.append(MoveHead(wanted.head))
+        if intents:
+            self._motion_generation += 1
         return tuple(intents)

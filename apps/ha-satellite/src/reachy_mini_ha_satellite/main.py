@@ -114,9 +114,14 @@ from reachy_mini_ha_satellite.esphome.wake_word import (
 )
 from reachy_mini_ha_satellite.esphome.webrtc import WebRTCProcessor
 from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
-from reachy_mini_ha_satellite.motor_control import MotorGroup, MotorGroupCoordinator
+from reachy_mini_ha_satellite.motor_control import (
+    MotorGroup,
+    MotorGroupCoordinator,
+    MotorGroupLifecycle,
+)
 from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
+    AntennaPose,
     CalibrationStatus,
     Detections,
     MotionCommandResult,
@@ -2172,29 +2177,30 @@ def build_application(
         now=time.monotonic(),
     )
 
-    def _reseed(group: MotorGroup) -> Callable[[], None]:
-        """Read hardware on the worker and return loop-only state finalization."""
-        head, body, antennas = motion.reseed(group, time.monotonic())
+    def _motor_lifecycle(group: MotorGroup) -> MotorGroupLifecycle:
+        """Capture loop generations before any blocking motor lifecycle phase."""
+        behaviour_generation = behaviour.motion_generation
 
-        def _finalize() -> None:
-            behaviour.reseed_motion(head=head, body=body, antennas=antennas)
+        def _finalize(
+            head: HeadMeasurement | None,
+            body: BodyMeasurement | None,
+            antennas: AntennaPose | None,
+        ) -> None:
+            if not behaviour.reseed_motion(
+                head=head,
+                body=body,
+                antennas=antennas,
+                expected_generation=behaviour_generation,
+            ):
+                raise RuntimeError("newer expression state superseded motor reseed")
 
-        return _finalize
+        return motion.motor_lifecycle(group, time.monotonic, _finalize)
 
-    motor_groups.set_hooks(
-        MotorGroup.HEAD,
-        reseed=functools.partial(_reseed, MotorGroup.HEAD),
-    )
-    motor_groups.set_hooks(
-        MotorGroup.BODY,
-        prepare=motion.quiesce_body,
-        reseed=functools.partial(_reseed, MotorGroup.BODY),
-        restore=motion.restore_body_policy,
-    )
-    motor_groups.set_hooks(
-        MotorGroup.ANTENNAS,
-        reseed=functools.partial(_reseed, MotorGroup.ANTENNAS),
-    )
+    for group in MotorGroup:
+        motor_groups.set_hooks(
+            group,
+            lifecycle=functools.partial(_motor_lifecycle, group),
+        )
     registered_motor_groups = motor_groups.initialize()
 
     state = build_server_state(

@@ -7,7 +7,7 @@ import threading
 from typing import cast
 
 import pytest
-from satellite_support import FakeRobot, ManualClock
+from satellite_support import FakeRobot, ManualClock, face
 
 from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
 from reachy_mini_ha_satellite.adapters.motion_reachy import (
@@ -15,10 +15,14 @@ from reachy_mini_ha_satellite.adapters.motion_reachy import (
     head_pose_matrix,
 )
 from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    BodyMeasurement,
     ControllerConfig,
     ControllerFault,
+    HeadMeasurement,
 )
+from reachy_mini_ha_satellite.behaviour.pipeline import PipelineEvent
 from reachy_mini_ha_satellite.behaviour.satellite import SatelliteBehaviour
+from reachy_mini_ha_satellite.behaviour.tracking import GazeSelector
 from reachy_mini_ha_satellite.motor_control import (
     ANTENNA_MOTOR_IDS,
     BODY_MOTOR_IDS,
@@ -30,10 +34,12 @@ from reachy_mini_ha_satellite.motor_control import (
     MotorEvidenceError,
     MotorGroup,
     MotorGroupCoordinator,
+    MotorGroupLifecycle,
 )
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     Detections,
+    DetectionSource,
     GazeSample,
     HeadPose,
     MotionCommandStatus,
@@ -274,6 +280,95 @@ def test_initial_reads_use_the_three_exact_independent_motor_sets() -> None:
         ("read", BODY_MOTOR_IDS),
         ("read", ANTENNA_MOTOR_IDS),
     ]
+
+
+_STARTUP_LIFECYCLE_PHASES = (
+    "prepare_worker",
+    "prepare_loop",
+    "sample_worker",
+    "sample_loop",
+    "restore_worker",
+    "restore_loop",
+)
+
+
+class _ScriptedStartupLifecycle(MotorGroupLifecycle):
+    """Inject one failure, cancellation or terminal request at an exact phase."""
+
+    def __init__(
+        self,
+        groups: MotorGroupCoordinator,
+        phase: str,
+        outcome: str,
+        events: list[str],
+    ) -> None:
+        self._groups = groups
+        self._phase = phase
+        self._outcome = outcome
+        self._events = events
+
+    def _run(self, phase: str) -> None:
+        self._events.append(phase)
+        if self._phase != phase:
+            return
+        if self._outcome == "failure":
+            raise RuntimeError("bounded startup failure")
+        if self._outcome == "cancel":
+            raise asyncio.CancelledError
+        self._groups.terminal()
+
+    def prepare_worker(self) -> object:
+        self._run("prepare_worker")
+        return None
+
+    def prepare_loop(self, prepared: object) -> None:
+        del prepared
+        self._run("prepare_loop")
+
+    def sample_worker(self) -> object:
+        self._run("sample_worker")
+        return None
+
+    def sample_loop(self, sample: object) -> None:
+        del sample
+        self._run("sample_loop")
+
+    def restore_worker(self, policy: bool | None) -> object:
+        del policy
+        self._run("restore_worker")
+        return None
+
+    def restore_loop(self, restored: object) -> None:
+        del restored
+        self._run("restore_loop")
+
+
+@pytest.mark.parametrize("phase", _STARTUP_LIFECYCLE_PHASES)
+@pytest.mark.parametrize("outcome", ["failure", "cancel", "terminal"])
+def test_each_enabled_startup_phase_fails_closed(
+    phase: str,
+    outcome: str,
+) -> None:
+    """No failed, cancelled or terminal reseed generation registers or opens."""
+    robot = FakeRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    events: list[str] = []
+    groups.set_hooks(
+        MotorGroup.HEAD,
+        lifecycle=lambda: _ScriptedStartupLifecycle(groups, phase, outcome, events),
+    )
+
+    if outcome == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            groups.initialize()
+    else:
+        assert MotorGroup.HEAD not in groups.initialize()
+
+    assert not groups.gate_open(MotorGroup.HEAD)
+    assert groups.last_confirmed(MotorGroup.HEAD) is None
+    assert phase in events
+    if outcome == "terminal":
+        assert all(not groups.gate_open(group) for group in MotorGroup)
 
 
 def test_initial_enabled_body_is_read_under_exclusive_ownership_then_restored() -> None:
@@ -584,6 +679,121 @@ def test_antenna_reenable_seeds_both_measured_joints_as_one_group() -> None:
     assert antennas == AntennaPose(right=0.3, left=-0.4)
 
 
+def test_first_face_acquire_supersedes_inflight_body_policy_restore() -> None:
+    """Temporary transition ownership cannot overwrite newer gaze ownership."""
+    robot = FakeRobot()
+    config = ControllerConfig(body_enabled=True)
+    motion = ReachyMotion(robot, controller_config=config)
+    behaviour = SatelliteBehaviour(controller_config=config)
+    generation = behaviour.motion_generation
+
+    def _finalize(
+        head: HeadMeasurement | None,
+        body: BodyMeasurement | None,
+        antennas: AntennaPose | None,
+    ) -> None:
+        assert behaviour.reseed_motion(
+            head=head,
+            body=body,
+            antennas=antennas,
+            expected_generation=generation,
+        )
+
+    lifecycle = motion.motor_lifecycle(MotorGroup.BODY, lambda: 2.0, _finalize)
+    prepared = lifecycle.prepare_worker()
+    lifecycle.prepare_loop(prepared)
+    sample = lifecycle.sample_worker()
+    lifecycle.sample_loop(sample)
+
+    motion.acquire(3.0)
+    restored = lifecycle.restore_worker(lifecycle.captured_policy(prepared))
+
+    with pytest.raises(RuntimeError, match="superseded"):
+        lifecycle.restore_loop(restored)
+    assert robot.automatic_body_yaw == [False]
+    assert motion._acquired
+    assert not motion._temporary_ownership
+
+
+def test_calibration_repopulation_supersedes_inflight_head_reseed() -> None:
+    """A sample cannot clear cache state created by newer loop calibration."""
+    robot = FakeRobot()
+    motion = ReachyMotion(robot)
+    behaviour = SatelliteBehaviour()
+    motion.observe(1.0)
+    generation = behaviour.motion_generation
+
+    def _finalize(
+        head: HeadMeasurement | None,
+        body: BodyMeasurement | None,
+        antennas: AntennaPose | None,
+    ) -> None:
+        assert behaviour.reseed_motion(
+            head=head,
+            body=body,
+            antennas=antennas,
+            expected_generation=generation,
+        )
+
+    lifecycle = motion.motor_lifecycle(MotorGroup.HEAD, lambda: 2.0, _finalize)
+    prepared = lifecycle.prepare_worker()
+    lifecycle.prepare_loop(prepared)
+    sample = lifecycle.sample_worker()
+    directive = GazeSelector().select(
+        Detections(
+            faces=(face(0.2, 0.0),),
+            fresh=True,
+            source=DetectionSource.REMOTE,
+            generation=1,
+            sequence=1,
+            captured_at=1.0,
+            received_at=1.1,
+        )
+    )
+
+    assert motion.calibrate(directive, 2.1).state.value == "accepted"
+    cached = dict(motion._cache)
+    with pytest.raises(RuntimeError, match="superseded"):
+        lifecycle.sample_loop(sample)
+
+    assert motion._cache == cached
+
+
+def test_new_pipeline_expression_supersedes_inflight_antenna_reseed() -> None:
+    """Measured antenna data cannot resurrect over a newer pipeline target."""
+    robot = FakeRobot(
+        measured_joints=[([0.0] * 7, [0.3, -0.4])],
+    )
+    motion = ReachyMotion(robot)
+    behaviour = SatelliteBehaviour()
+    generation = behaviour.motion_generation
+
+    def _finalize(
+        head: HeadMeasurement | None,
+        body: BodyMeasurement | None,
+        antennas: AntennaPose | None,
+    ) -> None:
+        if not behaviour.reseed_motion(
+            head=head,
+            body=body,
+            antennas=antennas,
+            expected_generation=generation,
+        ):
+            raise RuntimeError("newer expression state superseded motor reseed")
+
+    lifecycle = motion.motor_lifecycle(MotorGroup.ANTENNAS, lambda: 2.0, _finalize)
+    prepared = lifecycle.prepare_worker()
+    lifecycle.prepare_loop(prepared)
+    sample = lifecycle.sample_worker()
+    behaviour.handle(PipelineEvent.WAKE_WORD_DETECTED, 1.0)
+    current = behaviour._last_antennas
+
+    with pytest.raises(RuntimeError, match="newer expression"):
+        lifecycle.sample_loop(sample)
+    assert behaviour._last_antennas == current
+    assert current != AntennaPose(right=0.3, left=-0.4)
+
+
 @pytest.mark.parametrize("phase", ["prepare", "read", "restore"])
 def test_reentrant_terminal_wins_every_initialize_callback_phase(phase: str) -> None:
     """Initialization stops at the callback that requested terminal state."""
@@ -837,6 +1047,48 @@ def test_cancelled_independent_refresh_closes_gate_and_retains_state(
 
     assert groups.last_confirmed(MotorGroup.BODY) is True
     assert not groups.gate_open(MotorGroup.BODY)
+
+
+@pytest.mark.asyncio
+async def test_terminal_drain_is_responsive_cancellation_safe_and_leak_free() -> None:
+    """Shutdown closes now but awaits a reserved external-thread target to return."""
+    robot = FakeRobot()
+    groups = coordinator(robot)
+    started = threading.Event()
+    release = threading.Event()
+    completed: list[bool] = []
+
+    def _producer() -> None:
+        def _target() -> None:
+            started.set()
+            release.wait()
+
+        completed.append(groups.command((MotorGroup.HEAD,), _target))
+
+    worker = threading.Thread(target=_producer, name="paused-motor-producer")
+    worker.start()
+    started.wait()
+
+    groups.terminal()
+    assert not groups.gate_open(MotorGroup.HEAD)
+    assert not groups.command((MotorGroup.HEAD,), lambda: None)
+    assert not groups.safe_to_restore_body_policy()
+    closing = asyncio.create_task(groups.aclose())
+    await asyncio.sleep(0)
+    assert not closing.done()
+
+    closing.cancel()
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release.set()
+    worker.join()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert completed == [False]
+    assert not any(
+        thread.name == "satellite-motors" for thread in threading.enumerate()
+    )
 
 
 def test_terminal_release_is_idempotent_and_blocks_all_later_producers() -> None:

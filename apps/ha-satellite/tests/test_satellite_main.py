@@ -67,7 +67,10 @@ from satellite_support import (
 
 from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
-from reachy_mini_ha_satellite.adapters.motion_reachy import ReachyMotion
+from reachy_mini_ha_satellite.adapters.motion_reachy import (
+    ReachyMotion,
+    head_pose_matrix,
+)
 from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
@@ -3682,6 +3685,61 @@ async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault(
     assert published == []
 
 
+@pytest.mark.asyncio
+async def test_application_shutdown_drains_reserved_target_before_motion_release() -> (
+    None
+):
+    """Terminal is responsive but cleanup cannot release beneath an active target."""
+    events: list[str] = []
+    started = threading.Event()
+    release_target = threading.Event()
+    robot = FakeRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    groups.initialize()
+
+    class RecordingMotion(FakeMotion):
+        def release(self) -> None:
+            events.append("motion.release")
+            super().release()
+
+    motion = RecordingMotion()
+    application, _stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=FakePerception(),
+        motor_groups=groups,
+    )
+
+    def _target() -> None:
+        events.append("target.start")
+        started.set()
+        release_target.wait()
+        events.append("target.finish")
+
+    producer = threading.Thread(
+        target=lambda: groups.command((MotorGroup.HEAD,), _target),
+        name="paused-application-target",
+    )
+    producer.start()
+    started.wait()
+
+    closing = asyncio.create_task(application.aclose())
+    await asyncio.sleep(0)
+    assert events == ["target.start"]
+    assert not motion.released
+    assert not groups.command((MotorGroup.HEAD,), lambda: None)
+
+    closing.cancel()
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release_target.set()
+    producer.join()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert events == ["target.start", "target.finish", "motion.release"]
+
+
 @pytest.mark.filesystem
 class TestTheWiringAgainstTheWheelsOwnAssets:
     """The assembly, reading the wake-word models and sounds the wheel ships.
@@ -3856,6 +3914,14 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
 
         assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
 
+
+class TestMotorComposition:
+    """Production motor wiring exercised entirely through deterministic fakes."""
+
+    _composed_head_switch = staticmethod(
+        TestTheWiringAgainstTheWheelsOwnAssets._composed_head_switch
+    )
+
     def test_confirmed_motor_switches_are_composed_after_stable_audio_entities(
         self,
     ) -> None:
@@ -3880,6 +3946,97 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         motion = cast("ReachyMotion", application._motion)
         assert application.motor_groups is motion._coordinator
         assert "motors" in application.status()
+
+    def test_enabled_startup_reseeds_measured_targets_before_policy_and_registration(
+        self,
+    ) -> None:
+        """All enabled groups start from hardware with no hidden target jump."""
+        measured_head = head_pose_matrix(HeadPose(yaw=0.4, pitch=0.2))
+        measured_joints = ([0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.3, -0.4])
+        robot = FakeRobot(
+            measured_head_poses=[measured_head, measured_head],
+            measured_joints=[measured_joints, measured_joints, measured_joints],
+        )
+        application = build_application(
+            load_settings(_ENVIRONMENT, {"body_motion_enabled": "true"}),
+            robot,
+            identity=_identity(),
+        )
+        groups = application.motor_groups
+        assert groups is not None
+        motion = cast("ReachyMotion", application._motion)
+        behaviour = application._behaviour
+
+        head_read = robot.events.index("motors.read")
+        first_pose = robot.events.index("motion.pose", head_read)
+        body_quiesce = robot.events.index("motion.auto_yaw.false", first_pose)
+        body_read = robot.events.index("motors.read", body_quiesce)
+        body_pose = robot.events.index("motion.pose", body_read)
+        body_joints = robot.events.index("motion.joints", body_pose)
+        body_restore = robot.events.index("motion.auto_yaw.true", body_joints)
+        antenna_read = robot.events.index("motors.read", body_restore)
+        antenna_joints = robot.events.index("motion.joints", antenna_read)
+
+        assert (
+            head_read
+            < first_pose
+            < body_quiesce
+            < body_read
+            < body_pose
+            < body_joints
+            < body_restore
+            < antenna_read
+            < antenna_joints
+        )
+        assert all(groups.gate_open(group) for group in MotorGroup)
+        assert behaviour._last_head is not None
+        assert behaviour._last_head.yaw == pytest.approx(0.3)
+        assert behaviour._last_head.pitch == pytest.approx(0.2)
+        assert behaviour._last_head.roll == 0.0
+        assert behaviour._last_antennas == AntennaPose(right=0.3, left=-0.4)
+        controller = behaviour.controller_state
+        assert controller.world_yaw.position == pytest.approx(0.4)
+        assert controller.elevation.position == pytest.approx(0.2)
+        assert controller.body_yaw.position == pytest.approx(0.1)
+        assert motion._cache == {}
+        assert motion._deferred == {}
+        assert robot.targets == []
+
+    def test_confirmed_disabled_startup_registers_false_without_movement_reseed(
+        self,
+    ) -> None:
+        """A physically off group is truthful and closed without sampling its target."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+            ]
+        )
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        head = next(
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+            and entity._group is MotorGroup.HEAD
+        )
+        groups = application.motor_groups
+        assert groups is not None
+
+        assert head.state_message() == SwitchStateResponse(key=head.key, state=False)
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert robot.events[:2] == ["motors.read", "motion.auto_yaw.false"]
+        assert robot.targets == []
 
     @pytest.mark.asyncio
     async def test_composed_reconnect_refreshes_once_without_list_reads_or_broadcast(
@@ -4144,6 +4301,11 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
                 cast("dict[str, object]", application.status()["motors"])["groups"],
             ).values()
         )
+
+
+@pytest.mark.filesystem
+class TestRemainingWheelAssembly:
+    """Composition checks that intentionally load committed wheel assets."""
 
     def test_the_whole_application_assembles_over_a_fake_robot(self) -> None:
         """Ports to adapters, the behaviour layer, and the services it owns."""
