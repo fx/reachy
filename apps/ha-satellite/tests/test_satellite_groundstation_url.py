@@ -172,19 +172,24 @@ class GatedFactory(FakeFactory):
         self,
         *results: FakeSource | Exception | None,
         gate: asyncio.Event,
+        gate_from: int = 1,
     ) -> None:
         """Queue what each call produces, behind one gate.
 
         Args:
             results: As `FakeFactory` takes them.
-            gate: What every call waits on. It stays open once a test opens it,
-                so a compensation's own rebuild is not gated a second time.
+            gate: What the gated calls wait on. It stays open once a test opens
+                it, so a compensation's own rebuild is not gated a second time.
+            gate_from: Which call first waits, counting from one. A rebuild is
+                the second call, and pausing there rather than at the first is
+                how a transition is suspended inside its own compensation.
         """
         super().__init__(*results)
         self.gate = gate
+        self.gate_from = gate_from
 
     async def __call__(self, settings: Settings) -> FakeSource | None:
-        """Wait at the gate, then produce the next queued result.
+        """Wait at the gate if this call is one of the gated ones.
 
         Args:
             settings: The candidate configuration.
@@ -192,7 +197,8 @@ class GatedFactory(FakeFactory):
         Returns:
             The queued source, or `None`.
         """
-        await self.gate.wait()
+        if len(self.asked) + 1 >= self.gate_from:
+            await self.gate.wait()
         return await super().__call__(settings)
 
 
@@ -1253,6 +1259,99 @@ class TestShutdownDuringATransition:
         assert owner._restoration is None
         assert source.delegate is None
 
+    @pytest.mark.asyncio
+    async def test_shutdown_while_a_rebuild_is_being_built(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """A failed rebuild hands nothing to a retry state once shutdown began.
+
+        The task would be one `aclose` has already passed the point of
+        cancelling, so it is the one place a late source could still be built
+        after everything else had been released.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        candidate = FakeSource(SECOND_URL, start_error=RuntimeError("refused"))
+        gate = asyncio.Event()
+        factory = GatedFactory(
+            candidate,
+            RuntimeError("down"),
+            gate=gate,
+            # The rebuild, not the candidate: this pauses the transition inside
+            # its own compensation.
+            gate_from=2,
+        )
+        owner, source, store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+            attempts=9,
+        )
+
+        refusal = await _shutdown_at(owner, _submitting(owner, SECOND_URL), gate)
+
+        assert "could not be started" in str(refusal)
+        assert stored(store) == {}
+        assert factory.asked == [SECOND_URL, FIRST_URL]
+        assert owner._restoration is None
+        assert source.delegate is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_stops_a_resubmissions_rebuild(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The recovery a resubmitted address begins is a transition too.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        factory = FakeFactory(FakeSource(FIRST_URL))
+        owner, source, _store = build_owner(factory=factory, initial=None)
+        # Set directly: the state under test is shutdown having begun while the
+        # lock this runs under is held, which no public call can arrange.
+        owner._closed = True
+
+        await owner._restore_if_unavailable()
+
+        assert factory.asked == []
+        assert source.delegate is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_during_the_close_retry_stops_a_rebuild(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Even a close that finally succeeds does not license a late source.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        stuck = FakeSource(FIRST_URL, close_error=RuntimeError("stuck"))
+        factory = FakeFactory(FakeSource(FIRST_URL))
+        owner, source, _store = build_owner(factory=factory, initial=None)
+        assert await owner._discard(stuck) is not None
+        # The groundstation lets go, but only after shutdown has begun.
+        stuck.close_error = None
+        stuck.close_gate = asyncio.Event()
+
+        loop = asyncio.get_running_loop()
+        retry = loop.create_task(owner._restore_if_unavailable())
+        await _spin()
+        closing = loop.create_task(owner.aclose())
+        await _spin()
+        stuck.close_gate.set()
+        await retry
+        await closing
+
+        assert factory.asked == []
+        assert owner._outstanding == []
+        assert source.delegate is None
+
 
 class TestAnUnconfirmedClose:
     """A source whose `aclose` raised is outstanding, and blocks a successor.
@@ -1468,6 +1567,94 @@ class TestAnUnconfirmedClose:
         # Twice: the discard that recorded it, and shutdown's one last attempt.
         assert candidate.closes == 2
         assert owner._outstanding == [candidate]
+
+    @pytest.mark.asyncio
+    async def test_a_rebuild_attempt_settles_while_a_source_is_outstanding(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """A retry that could not be allowed to succeed does not spend a budget.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        stuck = FakeSource(FIRST_URL, close_error=RuntimeError("will not close"))
+        late = FakeSource(FIRST_URL)
+        factory = FakeFactory(late)
+        owner, source, _store = build_owner(factory=factory, initial=None)
+        assert await owner._discard(stuck) is not None
+
+        # One attempt is the unit here, as it is for the stale-generation tests:
+        # a public write refuses before it ever reaches this.
+        settled = await owner._install_fresh(
+            owner.resolution.settings,
+            owner._generation,
+        )
+
+        assert settled is True
+        assert factory.asked == []
+        assert late.starts == 0
+        assert source.delegate is None
+        # Twice: the discard that recorded it, and this attempt's one retry.
+        assert stuck.closes == 2
+        assert owner._outstanding == [stuck]
+
+    @pytest.mark.asyncio
+    async def test_a_settled_outstanding_source_still_yields_to_a_later_write(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Closing it at last does not resurrect an attempt already overtaken.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        stuck = FakeSource(FIRST_URL, close_error=RuntimeError("stuck"))
+        late = FakeSource(FIRST_URL)
+        factory = FakeFactory(late)
+        owner, source, _store = build_owner(factory=factory, initial=None)
+        assert await owner._discard(stuck) is not None
+        stuck.close_error = None
+
+        settled = await owner._install_fresh(
+            owner.resolution.settings,
+            # A generation a later write has already advanced past.
+            owner._generation - 1,
+        )
+
+        assert settled is True
+        assert owner._outstanding == []
+        assert factory.asked == []
+        assert late.starts == 0
+        assert source.delegate is None
+
+    @pytest.mark.asyncio
+    async def test_a_resubmission_builds_nothing_while_a_source_is_outstanding(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The recovery a resubmitted address begins waits for the close too.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        stuck = FakeSource(FIRST_URL, close_error=RuntimeError("will not close"))
+        factory = FakeFactory(FakeSource(FIRST_URL))
+        owner, source, store = build_owner(factory=factory, initial=None)
+        assert await owner._discard(stuck) is not None
+
+        await owner.submit({GROUNDSTATION_URL_SETTING: FIRST_URL})
+
+        assert factory.asked == []
+        assert owner.remote_available is False
+        assert owner._outstanding == [stuck]
+        assert source.delegate is None
+        # The address did not change, so the write itself is not refused — only
+        # the rebuild behind it waits.
+        assert stored(store)[GROUNDSTATION_URL_SETTING] == FIRST_URL
 
 
 class TestOneWriterAtATime:
