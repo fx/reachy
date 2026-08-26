@@ -15,6 +15,7 @@ import pytest
 
 from reachy_contracts import (
     ROBOT_SETTINGS,
+    SESSION_URL_MAX_LENGTH,
     Setting,
     SettingError,
     SettingKind,
@@ -238,3 +239,60 @@ def test_a_real_number_setting_refuses_what_is_not_a_number() -> None:
     """The other branch of the same parse, kept separate from the integer one."""
     with pytest.raises(SettingError, match=STALENESS):
         validate_setting(STALENESS, "soon")
+
+
+def _url_of_length(length: int) -> str:
+    """Build a session address of exactly this many characters.
+
+    Args:
+        length: How long it must be.
+
+    Returns:
+        An address matching the declared pattern, padded in its path. From the
+        RFC 5737 documentation range.
+    """
+    prefix = "ws://192.0.2.10:8080/v1/session/"
+    return prefix + "a" * (length - len(prefix))
+
+
+def test_the_session_address_declares_the_shared_maximum_length() -> None:
+    """One declaration, so the tool and the robot cannot disagree about it.
+
+    The number is Home Assistant's: an ESPHome text state carries at most 255
+    characters, and the satellite announces the address as one.
+    """
+    assert setting_for(URL).maximum_length == SESSION_URL_MAX_LENGTH
+    assert str(SESSION_URL_MAX_LENGTH) in setting_for(URL).constraint()
+
+
+def test_a_session_address_at_the_maximum_length_is_accepted() -> None:
+    """255 is the limit, so 255 is a value `reachyctl config` will send."""
+    url = _url_of_length(SESSION_URL_MAX_LENGTH)
+
+    assert validate_setting(URL, url) == url
+
+
+def test_a_longer_session_address_is_refused_without_quoting_it() -> None:
+    """A setting is where a credential ends up, so no refusal repeats a value."""
+    url = _url_of_length(SESSION_URL_MAX_LENGTH + 1)
+
+    with pytest.raises(SettingError) as raised:
+        validate_setting(URL, url)
+
+    message = str(raised.value)
+    assert URL in message
+    assert str(SESSION_URL_MAX_LENGTH) in message
+    assert url not in message
+
+
+def test_an_unbounded_text_setting_still_accepts_any_length() -> None:
+    """The bound is one setting's, not a new rule for the vocabulary."""
+    setting = Setting(
+        name="REACHY_EXAMPLE_NOTE",
+        kind=SettingKind.TEXT,
+        description="An example, declared by this test.",
+    )
+    long_value = "a" * (SESSION_URL_MAX_LENGTH + 100)
+
+    assert setting.validate(long_value) == long_value
+    assert "at most" not in setting.constraint()

@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ROBOT_SETTINGS",
+    "SESSION_URL_MAX_LENGTH",
     "Setting",
     "SettingError",
     "SettingKind",
@@ -96,6 +97,16 @@ _CONTROL_CHARACTERS: Final = re.compile(r"[\x00-\x1f\x7f]")
 _TRUE: Final = frozenset({"true", "yes", "on", "1"})
 _FALSE: Final = frozenset({"false", "no", "off", "0"})
 
+# How long a groundstation session URL may be, everywhere it is accepted.
+#
+# The number is Home Assistant's rather than this repository's: an ESPHome text
+# entity carries at most 255 characters, so a longer value is one the satellite's
+# Home Assistant control could not report truthfully. Declaring it here is what
+# keeps `reachyctl config`, the provisioning declaration and the satellite's own
+# settings model agreeing about the same bound — the same argument the rest of
+# this module makes for the vocabulary as a whole.
+SESSION_URL_MAX_LENGTH: Final = 255
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Setting:
@@ -108,6 +119,8 @@ class Setting:
         description: One line for an operator reading `config` output.
         pattern: For `TEXT`, a regular expression the whole value must match.
             Empty when any text will do.
+        maximum_length: For `TEXT`, the most characters the value may have.
+            `None` when the length is unconstrained.
         minimum: For `INTEGER` and `NUMBER`, the lowest acceptable value.
         maximum: For `INTEGER` and `NUMBER`, the highest acceptable value.
         choices: For `CHOICE`, the acceptable names, in the order to show them.
@@ -120,6 +133,7 @@ class Setting:
     kind: SettingKind
     description: str
     pattern: str = ""
+    maximum_length: int | None = None
     minimum: float | None = None
     maximum: float | None = None
     choices: tuple[str, ...] = ()
@@ -137,9 +151,16 @@ class Setting:
         if self.kind is SettingKind.BOOLEAN:
             return f"{', '.join(sorted(_TRUE))} or {', '.join(sorted(_FALSE))}"
         if self.kind is SettingKind.TEXT:
+            length = (
+                f" of at most {self.maximum_length} characters"
+                if self.maximum_length is not None
+                else ""
+            )
             return (
-                f"text matching {self.pattern}" if self.pattern else "any text"
-            ) + " with no control characters"
+                (f"text matching {self.pattern}" if self.pattern else "any text")
+                + " with no control characters"
+                + length
+            )
         bounds = _bounds(self.minimum, self.maximum)
         noun = "a whole number" if self.kind is SettingKind.INTEGER else "a number"
         return f"{noun}{bounds}"
@@ -195,9 +216,13 @@ class Setting:
 
         Raises:
             SettingError: If a pattern is declared and the value does not match
-                the whole of it.
+                the whole of it, or if a maximum length is declared and the
+                value is longer. Neither refusal quotes the value: the length is
+                a property of it and the value is where a credential ends up.
         """
         if self.pattern and not re.fullmatch(self.pattern, value):
+            raise SettingError(self._refusal())
+        if self.maximum_length is not None and len(value) > self.maximum_length:
             raise SettingError(self._refusal())
         return value
 
@@ -290,6 +315,7 @@ ROBOT_SETTINGS: Final[tuple[Setting, ...]] = (
         kind=SettingKind.TEXT,
         description="The groundstation's session endpoint the robot opens.",
         pattern=r"wss?://\S+",
+        maximum_length=SESSION_URL_MAX_LENGTH,
     ),
     Setting(
         name="REACHY_GROUNDSTATION_CREDENTIAL",

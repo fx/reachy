@@ -35,6 +35,7 @@ from reachy_contracts.session import (
 )
 from reachy_contracts.settings import (
     ROBOT_SETTINGS,
+    SESSION_URL_MAX_LENGTH,
     Setting,
     SettingError,
     SettingKind,
@@ -68,6 +69,7 @@ __all__ = [
     "FIXTURES",
     "GESTURE_CAPABILITY",
     "ROBOT_SETTINGS",
+    "SESSION_URL_MAX_LENGTH",
     "VERSION",
     "Capability",
     "CapabilityName",
