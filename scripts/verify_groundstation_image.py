@@ -27,6 +27,15 @@ Run it as a script:
 The default frame is a committed perception fixture with one face in it, so a
 successful run is evidence that the model baked into the image loaded and ran,
 not merely that a WebSocket opened.
+
+The operator feed is verified in the same run and from inside the same session,
+because that is the only state in which it can be: `/stream.mjpg` serves a frame
+only while exactly one authenticated session has supplied one. So after the
+result comes back — the frame is offered to the feed as it is decoded, which is
+before the result is sent — one multipart part is read off the endpoint and
+compared with the fixture's own bytes. Reading it takes no second session and no
+second client: it is an ordinary HTTP request, made with the standard library
+over the same isolated network.
 """
 
 from __future__ import annotations
@@ -37,22 +46,25 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from reachy_contracts import FACE_CAPABILITY, Capability
-from reachy_groundstation.api.app import SESSION_PATH
+from reachy_groundstation.api.app import SESSION_PATH, STREAM_PATH
 from reachy_session_client import Credential, FrameResult, SessionClient
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 __all__ = [
     "VerificationError",
     "drive_session",
     "frame_bytes",
     "main",
+    "read_feed_part",
     "readiness",
     "session_url",
     "wait_until_ready",
@@ -212,26 +224,188 @@ def wait_until_ready(base_url: str, deadline_seconds: float) -> object:
     raise VerificationError(message)
 
 
-async def drive_session(url: str, credential: str, payload: bytes) -> FrameResult:
-    """Negotiate a session, send one frame, and read the answer back.
+def _parse_status(line: bytes) -> int:
+    """Read the status code out of an HTTP status line.
+
+    Args:
+        line: The first line of the response, without its line ending.
+
+    Returns:
+        The status code.
+
+    Raises:
+        VerificationError: If the line is not an HTTP status line. Something
+            other than the service answering is worth a message that says so.
+    """
+    fields = line.split(maxsplit=2)
+    if len(fields) < 2 or not fields[0].startswith(b"HTTP/"):
+        message = f"the feed answered with {line!r}, which is not an HTTP response"
+        raise VerificationError(message)
+    try:
+        return int(fields[1])
+    except ValueError as error:
+        message = f"the feed answered with {line!r}, which names no status code"
+        raise VerificationError(message) from error
+
+
+def _parse_headers(block: bytes) -> dict[str, str]:
+    """Read a header block into a mapping keyed by lower-cased name.
+
+    Args:
+        block: The header lines, without the blank line that ends them and
+            without the status or boundary line above them.
+
+    Returns:
+        Header name to value.
+    """
+    headers: dict[str, str] = {}
+    for line in block.split(b"\r\n"):
+        name, separator, value = line.partition(b":")
+        if separator:
+            headers[name.decode("latin-1").strip().lower()] = value.decode(
+                "latin-1",
+            ).strip()
+    return headers
+
+
+async def _read_until(
+    reader: asyncio.StreamReader,
+    buffer: bytearray,
+    marker: bytes,
+) -> bytes:
+    """Read until a marker has arrived, and take everything before it.
+
+    Args:
+        reader: Where the bytes come from.
+        buffer: What has already been read and not yet consumed.
+        marker: The separator to stop at.
+
+    Returns:
+        The bytes before the marker, which are removed from `buffer` along with
+        the marker itself.
+
+    Raises:
+        VerificationError: If the connection ended before the marker arrived.
+    """
+    while marker not in buffer:
+        chunk = await reader.read(65536)
+        if not chunk:
+            message = f"the feed closed before sending {marker!r}"
+            raise VerificationError(message)
+        buffer += chunk
+    head, _, rest = bytes(buffer).partition(marker)
+    buffer[:] = rest
+    return head
+
+
+async def read_feed_part(base_url: str) -> tuple[Mapping[str, str], bytes]:
+    """Read exactly one multipart part off the operator feed.
+
+    The request is HTTP/1.0 on purpose: the response is an endless stream, and
+    HTTP/1.0 framing means the parts arrive as they were written rather than
+    inside a chunked encoding this would then have to unwrap. What is being
+    checked is the multipart framing, not a transfer encoding.
+
+    Args:
+        base_url: Where the service is listening.
+
+    Returns:
+        The part's headers and its body, the body taken by the length the part
+        declared rather than by searching for the next boundary.
+
+    Raises:
+        VerificationError: If the endpoint refused, answered as something other
+            than a multipart stream, or sent a part this cannot read.
+    """
+    split = urllib.parse.urlsplit(base_url.rstrip("/"))
+    if split.hostname is None:
+        message = f"--base-url names no host: {base_url!r}"
+        raise VerificationError(message)
+
+    reader, writer = await asyncio.open_connection(split.hostname, split.port or 80)
+    buffer = bytearray()
+    try:
+        writer.write(
+            f"GET {STREAM_PATH} HTTP/1.0\r\nHost: {split.netloc}\r\n\r\n".encode(
+                "latin-1",
+            ),
+        )
+        await writer.drain()
+
+        head = await _read_until(reader, buffer, b"\r\n\r\n")
+        status_line, _, header_block = head.partition(b"\r\n")
+        status = _parse_status(status_line)
+        response_headers = _parse_headers(header_block)
+        if status != 200:
+            message = (
+                f"the feed answered {status} rather than serving a stream; "
+                f"the session that should have made it eligible was still open"
+            )
+            raise VerificationError(message)
+        media_type = response_headers.get("content-type", "")
+        if not media_type.startswith("multipart/x-mixed-replace"):
+            message = f"the feed answered as {media_type!r}, not as a multipart stream"
+            raise VerificationError(message)
+
+        # The first boundary line, then the part's own headers.
+        await _read_until(reader, buffer, b"\r\n")
+        part_headers = _parse_headers(
+            await _read_until(reader, buffer, b"\r\n\r\n"),
+        )
+        try:
+            length = int(part_headers["content-length"])
+        except (KeyError, ValueError) as error:
+            message = f"the part declared no usable length: {part_headers}"
+            raise VerificationError(message) from error
+
+        while len(buffer) < length:
+            chunk = await reader.read(65536)
+            if not chunk:
+                message = (
+                    f"the part declared {length} bytes and the feed closed "
+                    f"after {len(buffer)}"
+                )
+                raise VerificationError(message)
+            buffer += chunk
+        return part_headers, bytes(buffer[:length])
+    finally:
+        writer.close()
+        with suppress(ConnectionError, OSError):
+            await writer.wait_closed()
+
+
+async def drive_session(
+    url: str,
+    credential: str,
+    payload: bytes,
+    base_url: str,
+) -> tuple[FrameResult, int]:
+    """Negotiate a session, send one frame, read the answer and the feed back.
 
     Every protocol step here belongs to `SessionClient`: the offer it builds,
     the agreement it parses, the framing it applies, and the envelope it
     validates. What is left is the assertions — that the capability was actually
-    agreed, and that something came back.
+    agreed, that something came back, and that the operator feed served the very
+    bytes that were sent.
+
+    The feed is read before the session is left, because leaving it is what makes
+    the feed ineligible: it holds a frame for exactly one authenticated session
+    and discards it when that session ends.
 
     Args:
         url: The session endpoint.
         credential: What the service authenticates the session against.
         payload: The compressed frame to send.
+        base_url: Where the service is listening, for the feed request.
 
     Returns:
-        The result the face capability produced for that frame.
+        The result the face capability produced for that frame, and how many
+        bytes the feed served for it.
 
     Raises:
         VerificationError: If the service agreed to no face capability, dropped
-            the frame because no session was up, or sent no result before the
-            deadline.
+            the frame because no session was up, sent no result before the
+            deadline, or served a feed part that is not the frame that was sent.
     """
     client = SessionClient(
         url=url,
@@ -256,7 +430,22 @@ async def drive_session(url: str, credential: str, payload: bytes) -> FrameResul
             message = "the frame was dropped: no session was up to send it on"
             raise VerificationError(message)
 
-        return await _first_result(client)
+        result = await _first_result(client)
+        headers, body = await asyncio.wait_for(
+            read_feed_part(base_url),
+            timeout=_RESULT_TIMEOUT_SECONDS,
+        )
+
+    if headers.get("content-type") != "image/jpeg":
+        message = f"the part was labelled {headers.get('content-type')!r}, not JPEG"
+        raise VerificationError(message)
+    if body != payload:
+        message = (
+            f"the feed served {len(body)} bytes that are not the {len(payload)} "
+            f"the frame was sent as; the original payload was not what was kept"
+        )
+        raise VerificationError(message)
+    return result, len(body)
 
 
 async def _first_result(client: SessionClient) -> FrameResult:
@@ -307,7 +496,8 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         prog="verify_groundstation_image.py",
         description=(
             "Wait for a running groundstation to report ready, drive one real "
-            "session through it, and fail unless it answers with a detection."
+            "session through it, and fail unless it answers with a detection "
+            "and serves the same frame back on its operator feed."
         ),
     )
     parser.add_argument(
@@ -358,7 +548,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(f"image-verify: ready: {json.dumps(health)}\n")
 
         payload = frame_bytes(arguments.frame)
-        result = asyncio.run(drive_session(url, arguments.credential, payload))
+        result, served = asyncio.run(
+            drive_session(
+                url,
+                arguments.credential,
+                payload,
+                arguments.base_url,
+            ),
+        )
         round_trip = (
             "unmeasured"
             if result.round_trip_seconds is None
@@ -370,6 +567,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"with {result.detections} detection(s) in {round_trip}: "
             f"{result.payload.to_wire().decode('utf-8')}\n",
         )
+        sys.stdout.write(
+            f"image-verify: {STREAM_PATH} served the same {served} bytes as "
+            f"one image/jpeg part\n",
+        )
         if result.detections < arguments.expect_detections:
             message = (
                 f"expected at least {arguments.expect_detections} detection(s) "
@@ -379,7 +580,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except VerificationError as error:
         sys.stderr.write(f"image-verify: {error}\n")
         return 1
-    sys.stdout.write("image-verify: the running image answered a real session\n")
+    sys.stdout.write(
+        "image-verify: the running image answered a real session and served its "
+        "frame back\n",
+    )
     return 0
 
 
