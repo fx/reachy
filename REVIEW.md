@@ -4,6 +4,12 @@
 
 ### Known false positives — do NOT report these
 
+**Spec and change statuses use different vocabularies.** Specs are `active` or
+`deprecated`; changes are `draft`, `in-progress` or `complete`. A proposed,
+unimplemented spec is correctly `active` while its sequencing change is `draft`.
+Do not report those values as contradictory or suggest a change-only status for a
+spec.
+
 **Wrapped list continuations are not code blocks.** Task lists in
 `docs/changes/` wrap at 80 columns with the continuation indented to 8 spaces.
 This renders as normal text — verified against GitHub's own renderer, which
