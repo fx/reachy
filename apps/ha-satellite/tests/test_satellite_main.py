@@ -787,6 +787,101 @@ class TestControlledWakeBeforeStartup:
         assert events == ["enable_motors", "wake_up"]
 
 
+@pytest.mark.asyncio
+async def test_a_stop_during_composition_abandons_it_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composition is where the gates open, so the stop has to reach it.
+
+    A confirmation that runs to completion after the daemon asked for shutdown
+    is a robot finishing the job of energising the motors it is being told to
+    let go of, and then starting an ESPHome server to advertise them.
+    """
+    events: list[str] = []
+    robot = FakeRobot()
+    stop = asyncio.Event()
+    monkeypatch.setattr(
+        robot,
+        "enable_motors",
+        lambda: events.append("enable_motors"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        robot,
+        "wake_up",
+        lambda: events.append("wake_up"),
+        raising=False,
+    )
+    composing = asyncio.Event()
+
+    async def _offload(work: Callable[[], object]) -> object:
+        return work()
+
+    async def _build(resolution: object, handle: object) -> SatelliteApplication:
+        """Stand where initial motor confirmation blocks, and never finish."""
+        del resolution, handle
+        events.append("build_application")
+        composing.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("assembly.abandoned")
+            raise
+        raise AssertionError("composition finished after it was abandoned")
+
+    _patch_startup(monkeypatch, build=_build, offload=_offload)
+    running = asyncio.create_task(run(robot, stop))
+    await composing.wait()
+
+    stop.set()
+    await running
+
+    assert events == [
+        "enable_motors",
+        "wake_up",
+        "build_application",
+        "assembly.abandoned",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_landing_with_a_finished_assembly_closes_it_unstarted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one case cancellation cannot cover: both landed, so close what exists."""
+    events: list[str] = []
+    robot = FakeRobot()
+    stop = asyncio.Event()
+    monkeypatch.setattr(robot, "enable_motors", lambda: None, raising=False)
+    monkeypatch.setattr(robot, "wake_up", lambda: None, raising=False)
+
+    async def _offload(work: Callable[[], object]) -> object:
+        return work()
+
+    class _Application:
+        async def run(self, stop: asyncio.Event) -> None:
+            """Record a start that must never happen."""
+            del stop
+            events.append("application.run")
+
+        async def aclose(self) -> None:
+            """Record the only correct thing left to do with this application."""
+            events.append("application.aclose")
+
+    async def _build(resolution: object, handle: object) -> _Application:
+        """Finish composing at the same moment the daemon asks for shutdown."""
+        del resolution, handle
+        events.append("build_application")
+        stop.set()
+        return _Application()
+
+    _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+    await run(robot, stop)
+
+    assert events == ["build_application", "application.aclose"]
+
+
 def _patch_startup(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -3716,6 +3811,76 @@ async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault(
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_tracking_owns_motion_before_the_first_calibration_or_yields_no_face() -> (
+    None
+):
+    """Both hops that keep `calibrate`'s ownership fallback out of production.
+
+    `ReachyMotion.calibrate` takes ownership itself when it has none, and that
+    acquisition advances the generation an in-flight measured reseed is checked
+    against — the strand
+    `test_satellite_motor_groups.py` removed. What stops it happening is a
+    coupling across two files that nothing else pins: this application acquires
+    at startup whenever tracking is enabled, and the behavior layer stands down
+    rather than yielding a face to calibrate when it is not. Either half
+    changing is what makes that fallback reachable again.
+    """
+    motion = FakeMotion()
+    perception = FakePerception()
+    perception.see(face(0.2, 0.0), source=DetectionSource.REMOTE)
+    application, stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=perception,
+        stop_after=3,
+    )
+
+    await application.run(stop)
+
+    assert application.settings.face_tracking_enabled
+    assert motion.acquired
+    assert motion.calibrated
+    assert motion.acquired[0] < motion.calibrated[0][1]
+
+    stood_down = SatelliteBehaviour(tracking_enabled=False, now=0.0)
+    prepared = stood_down.prepare(perception.latest(), 1.0)
+
+    assert prepared.directive.face is None
+
+
+@pytest.mark.asyncio
+async def test_a_stop_set_before_startup_starts_nothing_and_still_cleans_up() -> None:
+    """The last boundary a stop can arrive at, and it is still a boundary.
+
+    An application handed an already-set event has nothing to gain by acquiring
+    the head and opening a listening socket in order to close them again on the
+    next line, and a robot being shut down has something to lose by it.
+    """
+    robot = FakeRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    await groups.initialize()
+    motion = FakeMotion()
+    service = RecordingService()
+    application, stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=FakePerception(),
+        motor_groups=groups,
+        services=[service],
+    )
+    stop.set()
+
+    await application.run(stop)
+
+    assert motion.acquired == []
+    assert service.started == 0
+    assert service.closed == 1
+    assert motion.released
+    assert all(not groups.gate_open(group) for group in MotorGroup)
+
+
+@pytest.mark.asyncio
 async def test_application_shutdown_drains_reserved_target_before_motion_release() -> (
     None
 ):
@@ -3945,8 +4110,17 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
 
 
+@pytest.mark.filesystem
 class TestMotorComposition:
-    """Production motor wiring exercised entirely through deterministic fakes."""
+    """Production motor wiring over deterministic fakes and the wheel's assets.
+
+    The daemon and the robot are fakes; the assembly around them is not.
+    Assembling the application reads the wake-word models and the sounds the
+    wheel ships off a real disk, so every test here is a contract test and says
+    so — a runner splitting on `-m "not filesystem"` would otherwise run nine
+    tests that need those files present, and watch them fail for a reason
+    nothing in them mentions.
+    """
 
     _composed_head_switch = staticmethod(
         TestTheWiringAgainstTheWheelsOwnAssets._composed_head_switch

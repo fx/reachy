@@ -519,12 +519,22 @@ class ReachyMotion:
                 CalibrationStatus.REJECTED,
                 fault=MotionFault.CALIBRATION,
             )
-        # `_generation` is read here and never advanced. It counts ownership and
-        # measured state, and calibration changes neither: it repopulates a
-        # per-source cache from history it has already read. Advancing it made
-        # every tick with a face in view invalidate an in-flight measured
-        # reseed — a torque re-enable that confirms, opens no gate, and leaves
-        # the group unusable until the application restarts.
+        # `_generation` counts ownership and measured state. Calibrating changes
+        # neither — it repopulates a per-source cache from history it has
+        # already read — so this reads the counter and never advances it.
+        # Advancing it made every tick with a face in view invalidate an
+        # in-flight measured reseed: a torque re-enable that confirms, opens no
+        # gate, and leaves the group unusable until the application restarts.
+        #
+        # **This method can still advance it indirectly**, through the ownership
+        # fallback further down: with `_acquired` false it calls `acquire`,
+        # which bumps the counter and samples. Two hops keep production out of
+        # that branch, and neither is local to this file — `SatelliteApplication`
+        # acquires at startup whenever `face_tracking_enabled`, and
+        # `SatelliteBehaviour.prepare` stands down rather than yielding a face
+        # to calibrate when it is not. A change to either is what makes the
+        # fallback reachable again, so both are pinned by tests rather than
+        # assumed here.
         with self._state_lock:
             if self._released:
                 return GazeCalibration(

@@ -186,6 +186,14 @@ def directive_for(captured_at: float) -> GazeDirective:
     )
 
 
+# How many loop turns any yield loop below may spend before it calls the thing
+# it is waiting for lost. Generous, because what it waits for crosses a thread
+# and how many turns that takes is a property of how loaded the machine is; a
+# ceiling all the same, because a yield loop that cannot end hangs the suite
+# rather than failing it.
+_YIELD_TURNS = 100_000
+
+
 class _PausedRobot(FakeRobot):
     """Park one named daemon call on the worker while the loop keeps running."""
 
@@ -214,12 +222,25 @@ class _PausedRobot(FakeRobot):
 
 
 async def parked(robot: _PausedRobot) -> int:
-    """Yield to the loop until the worker is inside the parked daemon call."""
-    turns = 0
-    while not robot.started.is_set():
-        turns += 1
+    """Yield to the loop until the worker is inside the parked daemon call.
+
+    The turns are the evidence — the loop kept running while a daemon call
+    blocked the worker — and the ceiling is what stops a worker that never
+    arrives from hanging the suite instead of failing it. Reaching the ceiling
+    is a failure, not a timeout: a zero-delay yield spends no wall time, so the
+    whole budget is a fraction of a second even when it is exhausted.
+
+    Args:
+        robot: The fake parked on one of its daemon calls.
+
+    Returns:
+        How many loop turns passed before the worker reached that call.
+    """
+    for turn in range(_YIELD_TURNS):
+        if robot.started.is_set():
+            return turn
         await asyncio.sleep(0)
-    return turns
+    raise AssertionError("the parked daemon call was never reached")
 
 
 @pytest.mark.asyncio
@@ -972,6 +993,36 @@ async def test_calibrating_a_visible_face_cannot_strand_a_confirmed_reenable() -
 
 
 @pytest.mark.asyncio
+async def test_calibrating_without_ownership_takes_it_and_advances_the_generation() -> (
+    None
+):
+    """Calibrating never advances the counter; the fallback it can reach does.
+
+    The comment beside that read depends on this being the *only* way through
+    `calibrate` that touches the generation, and on production never taking it.
+    Pinned rather than argued, because the argument lives in two other files:
+    if the fallback ever became reachable, a tick with a face in view would go
+    back to invalidating the measured reseed of any group coming back on, and
+    nothing in this file would notice.
+    """
+    robot = FakeRobot()
+    motion = ReachyMotion(robot)
+    motion.observe(1000.0)
+    before = motion._generation
+    # Read into locals: asserting on the attribute both before and after would
+    # narrow it to the first reading and make the second assertion vacuous.
+    owned_before = motion._acquired
+
+    accepted = motion.calibrate(directive_for(1000.0), 1000.5)
+    owned_after = motion._acquired
+
+    assert accepted.state.value == "accepted"
+    assert not owned_before
+    assert owned_after
+    assert motion._generation > before
+
+
+@pytest.mark.asyncio
 async def test_a_gate_refused_expression_cannot_strand_a_confirmed_reenable() -> None:
     """The intents a closed gate refused never reached the robot, so they lose."""
     robot = _PausedRobot("enable")
@@ -1256,14 +1307,19 @@ async def test_initial_confirmation_leaves_the_event_loop_responsive() -> None:
     beats = 0
 
     async def _heartbeat() -> None:
+        """Count loop turns for as long as the parked confirmation is in flight."""
         nonlocal beats
-        while True:
+        for _ in range(_YIELD_TURNS):
+            if robot.release.is_set():
+                return
             beats += 1
             await asyncio.sleep(0)
 
     heart = asyncio.create_task(_heartbeat(), name="startup-heartbeat")
     startup = asyncio.create_task(groups.initialize(), name="startup")
     assert await parked(robot) > 0
+    # An independent task, not this one: what has to keep running while a daemon
+    # read blocks the worker is everything else on the loop.
     assert beats > 0
 
     groups.terminal()
@@ -1271,7 +1327,7 @@ async def test_initial_confirmation_leaves_the_event_loop_responsive() -> None:
 
     robot.release.set()
     assert await startup == ()
-    heart.cancel()
+    await heart
     await groups.aclose()
 
     assert all(groups.last_confirmed(group) is None for group in MotorGroup)
@@ -1296,6 +1352,40 @@ async def test_cancellation_during_initial_confirmation_leaks_nothing() -> None:
     assert all(not groups.gate_open(group) for group in MotorGroup)
     assert all(groups.last_confirmed(group) is None for group in MotorGroup)
     assert robot.automatic_body_yaw == []
+    assert motor_worker_threads() <= workers_before
+
+
+@pytest.mark.asyncio
+async def test_closing_after_a_cancelled_phase_waits_off_the_loop() -> None:
+    """Shutdown may not become the stall the whole split exists to prevent.
+
+    Cancelling the task that awaits a blocking phase cancels the wrapper and not
+    the thread, and startup has no task recorded in `_operation` for shutdown to
+    drain. `ThreadPoolExecutor.shutdown(wait=True)` waits on its *calling*
+    thread, so with nothing else tracking that worker this is where a
+    five-second daemon read stops the event loop dead.
+    """
+    workers_before = motor_worker_threads()
+    robot = _PausedRobot("read")
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    startup = asyncio.create_task(groups.initialize(), name="startup")
+    assert await parked(robot) > 0
+    startup.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+
+    closing = asyncio.create_task(groups.aclose(), name="closing")
+    beats = 0
+    for _ in range(50):
+        beats += 1
+        await asyncio.sleep(0)
+    still_waiting = not closing.done()
+
+    robot.release.set()
+    await closing
+
+    assert beats == 50
+    assert still_waiting
     assert motor_worker_threads() <= workers_before
 
 

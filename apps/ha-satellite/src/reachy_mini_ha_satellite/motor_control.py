@@ -13,10 +13,10 @@ import contextlib
 import math
 import threading
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -305,6 +305,10 @@ class MotorGroupCoordinator:
             thread_name_prefix="satellite-motors",
         )
         self._operation: asyncio.Task[None] | None = None
+        # The blocking phase running on that worker right now, if any. `Any`
+        # because shutdown asks it one question — is it finished — and never
+        # what it returned; the awaiting caller owns the result.
+        self._inflight: Future[Any] | None = None
         self._producer_waiters: set[
             tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]
         ] = set()
@@ -391,19 +395,41 @@ class MotorGroupCoordinator:
             self._operation = task
             return True
 
+    async def _offload[ResultT](
+        self,
+        function: Callable[..., ResultT],
+        *args: object,
+    ) -> ResultT:
+        """Run one blocking phase on the sole worker, recorded for shutdown.
+
+        The submitted future is kept, not merely awaited, because cancelling the
+        task that awaits it cancels the wrapper and never the thread. Without
+        the record, `aclose` reaches `ThreadPoolExecutor.shutdown(wait=True)`
+        with a five-second daemon call still running and waits for it *on the
+        event loop* — the exact stall every phase here exists to avoid. Startup
+        has no task for `_operation` to hold, and a cancelled operation task has
+        already let go of its own, so both arrive here.
+        """
+        submitted = self._executor.submit(function, *args)
+        self._inflight = submitted
+        try:
+            return await asyncio.wrap_future(submitted)
+        finally:
+            # Only once the worker itself is finished. A cancelled await leaves
+            # the thread running, and that is precisely the case the record is
+            # for.
+            if self._inflight is submitted and submitted.done():
+                self._inflight = None
+
     async def _run_reserved(self, operation: _ReservedOperation) -> None:
         """Keep local state on the loop and blocking daemon work on one worker."""
-        loop = asyncio.get_running_loop()
         complete = False
         try:
             if not self._current(operation):
                 return
             lifecycle = operation.lifecycle or MotorGroupLifecycle()
             prepared = (
-                await loop.run_in_executor(
-                    self._executor,
-                    lifecycle.prepare_worker,
-                )
+                await self._offload(lifecycle.prepare_worker)
                 if lifecycle.prepare_is_blocking()
                 else lifecycle.prepare_worker()
             )
@@ -418,11 +444,7 @@ class MotorGroupCoordinator:
                     state.body_policy = lifecycle.captured_policy(prepared)
                 state.policy_capture_pending = False
                 state.transition = MotorTransition.CONFIRMING
-            outcome = await loop.run_in_executor(
-                self._executor,
-                self._execute_reserved,
-                operation,
-            )
+            outcome = await self._offload(self._execute_reserved, operation)
             if isinstance(outcome, _DeferredEnable):
                 complete = await self._finalize_enable(outcome)
             elif isinstance(outcome, _DeferredRefresh):
@@ -491,13 +513,8 @@ class MotorGroupCoordinator:
             return False
         with self._lock:
             policy = self._groups[deferred.group].body_policy
-        loop = asyncio.get_running_loop()
         try:
-            restored = await loop.run_in_executor(
-                self._executor,
-                deferred.lifecycle.restore_worker,
-                policy,
-            )
+            restored = await self._offload(deferred.lifecycle.restore_worker, policy)
         except (Exception, asyncio.CancelledError):
             self._promote_failed_enable(deferred)
             raise
@@ -539,13 +556,8 @@ class MotorGroupCoordinator:
             return False
         with self._lock:
             policy = self._groups[deferred.group].body_policy
-        loop = asyncio.get_running_loop()
         try:
-            restored = await loop.run_in_executor(
-                self._executor,
-                deferred.lifecycle.restore_worker,
-                policy,
-            )
+            restored = await self._offload(deferred.lifecycle.restore_worker, policy)
         except (Exception, asyncio.CancelledError):
             self._fail_operation(operation)
             raise
@@ -651,9 +663,28 @@ class MotorGroupCoordinator:
                 if cancelled is None:
                     cancelled = error
         producer_drain.result()
+        while True:
+            inflight = self._inflight
+            if inflight is None or inflight.done():
+                break
+            try:
+                # Suppressed rather than logged or raised: how the phase ended
+                # belongs to whoever awaited it, and all this needs is for the
+                # worker to have stopped running. A phase that failed is a
+                # finished phase, and the loop leaves on the check above.
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(asyncio.wrap_future(inflight))
+            except asyncio.CancelledError as error:
+                if cancelled is None:
+                    cancelled = error
         if not self._closed:
             self._closed = True
-            # The active future and every producer reservation were drained above.
+            # Every blocking phase and every producer reservation was drained
+            # above, so this joins threads that have already finished. It is a
+            # synchronous wait on the event loop, which is only safe *because*
+            # of that: a startup or an operation cancelled out from under a
+            # five-second daemon call leaves its thread running, and the drain
+            # loop above is what waits for it asynchronously instead.
             self._executor.shutdown(wait=True, cancel_futures=True)
         if cancelled is not None:
             raise cancelled
@@ -670,7 +701,6 @@ class MotorGroupCoordinator:
         and cancellation reach the same generation checks the post-start
         operation is judged by, and no state moves off the loop to meet them.
         """
-        loop = asyncio.get_running_loop()
         registered: list[MotorGroup] = []
         with self._operation_mutex:
             for group in MotorGroup:
@@ -686,10 +716,7 @@ class MotorGroupCoordinator:
                     lifecycle = self._hooks[group].create()
                 try:
                     prepared = (
-                        await loop.run_in_executor(
-                            self._executor,
-                            lifecycle.prepare_worker,
-                        )
+                        await self._offload(lifecycle.prepare_worker)
                         if lifecycle.prepare_is_blocking()
                         else lifecycle.prepare_worker()
                     )
@@ -702,11 +729,7 @@ class MotorGroupCoordinator:
                             state.body_policy = lifecycle.captured_policy(prepared)
                         state.policy_capture_pending = False
                         state.transition = MotorTransition.CONFIRMING
-                    confirmation = await loop.run_in_executor(
-                        self._executor,
-                        self._read,
-                        group,
-                    )
+                    confirmation = await self._offload(self._read, group)
                     if not self._startup_current(group, generation):
                         return ()
                     actual = confirmation.physical_value(
@@ -723,10 +746,7 @@ class MotorGroupCoordinator:
                     if actual:
                         with self._lock:
                             self._groups[group].transition = MotorTransition.RESEEDING
-                        sample = await loop.run_in_executor(
-                            self._executor,
-                            lifecycle.sample_worker,
-                        )
+                        sample = await self._offload(lifecycle.sample_worker)
                         if not self._startup_current(group, generation):
                             return ()
                         lifecycle.sample_loop(sample)
@@ -734,8 +754,7 @@ class MotorGroupCoordinator:
                             return ()
                         with self._lock:
                             policy = self._groups[group].body_policy
-                        restored = await loop.run_in_executor(
-                            self._executor,
+                        restored = await self._offload(
                             lifecycle.restore_worker,
                             policy,
                         )

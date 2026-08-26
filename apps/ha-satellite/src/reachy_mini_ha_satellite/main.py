@@ -888,12 +888,23 @@ class SatelliteApplication:
     async def run(self, stop: asyncio.Event) -> None:
         """Start everything, tick until asked to stop, then leave the robot safe.
 
+        A stop already requested when this is entered starts nothing at all: the
+        motion port is left unacquired and no service is started. Cleanup still
+        runs, so whatever assembly opened is closed.
+
         Args:
             stop: Set by the daemon's termination signal, or by the settings
                 interface asking it to stop.
         """
         self._stop = stop
         try:
+            if stop.is_set():
+                # Before acquisition and before any service, because both are
+                # hardware and network the robot is being told to let go of.
+                # The cleanup below still runs, which is what closes the gates
+                # assembly opened.
+                _LOGGER.info("satellite.start skipped; stop requested before startup")
+                return
             if self._gaze_enabled:
                 acquired_at = self._clock()
                 self._motion.acquire(acquired_at)
@@ -2332,6 +2343,51 @@ async def build_application(
     return application
 
 
+async def _assemble(
+    resolution: Resolution,
+    handle: RobotHandle,
+    stop: asyncio.Event,
+) -> SatelliteApplication | None:
+    """Assemble the application, abandoning it if a stop arrives first.
+
+    Assembly is where initial motor confirmation happens, and confirmation is
+    what *opens* the gates: a stop the daemon sets while a five-second daemon
+    read is in flight has to reach it, or the robot finishes energising the
+    motors it is being told to shut down. Racing the two is what makes
+    `build_application`'s own cancellation path — which closes the coordinator
+    and registers nothing — the shutdown path as well, rather than a second one
+    written beside it.
+
+    Args:
+        resolution: The settings in effect and where they came from.
+        handle: What the daemon hands a running application.
+        stop: Set by the daemon's termination signal.
+
+    Returns:
+        The assembled application, or None if the stop won.
+    """
+    assembling = asyncio.ensure_future(build_application(resolution, handle))
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait(
+            (assembling, stopping),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        stopping.cancel()
+        if not assembling.done():
+            assembling.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        application = await assembling
+        if not stop.is_set():
+            return application
+        # The confirmation and the stop landed together, so there is a whole
+        # application here with its gates open. Closing it is the only thing
+        # left that is correct to do with it.
+        await application.aclose()
+    return None
+
+
 async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     """Read the configuration, build everything, and run until asked to stop.
 
@@ -2343,9 +2399,11 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     wake, or after controlled wake prevents the next hardware or composition
     boundary. One requested *during* assembly reaches the same place: initial
     motor confirmation is awaited off this loop, so the daemon's stop watcher
-    can still set this event while it runs. The blocking SDK call already running
-    on a worker thread is allowed to finish; Python cannot safely cancel it in
-    the middle.
+    can still set this event while it runs, and `_assemble` abandons the
+    assembly when it does — leaving every gate closed, no group registered,
+    motion unacquired and no service started. The blocking SDK call already
+    running on a worker thread is allowed to finish; Python cannot safely cancel
+    it in the middle.
 
     Raises:
         ConfigurationError: If the environment is not usable. Raised rather
@@ -2370,5 +2428,8 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     if stop.is_set():
         _LOGGER.info("satellite.start skipped; stop requested during controlled wake")
         return
-    application = await build_application(resolution, handle)
+    application = await _assemble(resolution, handle, stop)
+    if application is None:
+        _LOGGER.info("satellite.start skipped; stop requested during composition")
+        return
     await application.run(stop)
