@@ -242,9 +242,15 @@ deployment can get irreversibly wrong.
   the owner" (the no-owner page's is not). The habit that produces them is
   describing the shape of the code just edited. Before writing "every", "the
   one" or "both" about writers, reads, locks or persistence here, grep out
-  every `store.save`, `apply_settings_change` and `load_settings` call site and
-  write the sentence from what that list says — including the exceptions,
-  named by their cause, so the sentence survives the next writer.
+  every `store.save`, `store.load`, `apply_settings_change` and `load_settings`
+  call site and write the sentence from what that list says — including the
+  exceptions, named by their cause, so the sentence survives the next writer.
+  **`store.load` is in that list because the claim has a read half**: the
+  sentence above says every write goes through the owner's lock *and that the
+  file is read there too*, and only `store.load` shows where it is read.
+  `load_settings` takes the overrides as an argument and reads no file, so a
+  grep of the other three checks one half of a two-part sentence — which is the
+  same nearly-right that this rule exists to stop.
 - **Changing *how* something happens invalidates docstrings in modules you did
   not touch.** The same three passes produced a fourth instance one level down:
   making the boost write asynchronous falsified `audio_entities.py`, which was
