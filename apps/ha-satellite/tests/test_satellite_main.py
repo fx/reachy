@@ -60,6 +60,7 @@ from satellite_support import (
     connected,
     face,
     inline,
+    motor_worker_threads,
     no_sleep,
     pushed_numbers,
     vendored_server_state,
@@ -154,6 +155,7 @@ if TYPE_CHECKING:
 
     from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
     from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
+    from reachy_mini_ha_satellite.config import Resolution
     from reachy_mini_ha_satellite.ports import PerceptionPort
 
 # The RFC 5737 documentation range. This repository is public.
@@ -233,6 +235,30 @@ def _settings(**overrides: str) -> Settings:
         The settings.
     """
     return load_settings(_ENVIRONMENT, dict(overrides)).settings
+
+
+def assembled(
+    resolution: Resolution,
+    handle: RobotHandle,
+    *,
+    identity: NetworkIdentity | None = None,
+) -> SatelliteApplication:
+    """Assemble the application from a synchronous test, confirmation and all.
+
+    `build_application` awaits the initial motor confirmation off the loop, so
+    it needs one. A loop per assembly is what a synchronous test can give it,
+    and the coordinator it builds outlives that loop the same way it outlives
+    `run`'s.
+
+    Args:
+        resolution: The settings in effect and where they came from.
+        handle: What the daemon hands a running application.
+        identity: What to announce on the network.
+
+    Returns:
+        The assembled application.
+    """
+    return asyncio.run(build_application(resolution, handle, identity=identity))
 
 
 def _motor_confirmation(
@@ -575,7 +601,7 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(resolution: object, handle: object) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -613,7 +639,7 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(resolution: object, handle: object) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -649,7 +675,7 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(resolution: object, handle: object) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -696,7 +722,7 @@ class TestControlledWakeBeforeStartup:
                 del stop
                 events.append("application.run")
 
-        def _build(resolution: object, handle: object) -> _Application:
+        async def _build(resolution: object, handle: object) -> _Application:
             """Record composition without constructing any real service."""
             del resolution
             assert handle is robot
@@ -745,7 +771,10 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _must_not_build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _must_not_build(
+            resolution: object,
+            handle: object,
+        ) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after wake failed")
@@ -761,14 +790,15 @@ class TestControlledWakeBeforeStartup:
 def _patch_startup(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    build: Callable[..., object],
+    build: Callable[..., Awaitable[object]],
     offload: Callable[[Callable[[], object]], Awaitable[object]],
 ) -> None:
     """Replace startup's configuration edges, leaving lifecycle order real.
 
     Args:
         monkeypatch: Installs the inert edges.
-        build: What stands in for normal application composition.
+        build: What stands in for normal application composition, awaited the
+            way the real one is.
         offload: What runs SDK calls without starting a worker thread.
     """
 
@@ -3643,7 +3673,7 @@ async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault(
 
     robot = PausedRobot()
     groups = MotorGroupCoordinator(robot, clock=ManualClock())
-    groups.initialize()
+    await groups.initialize()
     robot.motor_disables_confirmed.append(_motor_confirmation(HEAD_MOTOR_IDS, False))
     motion = FakeMotion()
     application, stop = _application(
@@ -3651,7 +3681,7 @@ async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault(
         motion=motion,
         perception=FakePerception(),
         motor_groups=groups,
-        stop_after=20,
+        stop_after=60,
     )
     published: list[bool] = []
     assert groups.reserve_transition(
@@ -3660,13 +3690,13 @@ async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault(
         lambda: published.append(True),
     )
 
+    # Park the worker before the behavior loop starts, so what the ticks below
+    # are measured against is a confirmation that is already in flight. Waiting
+    # for the pause on a helper thread rather than counting loop turns keeps the
+    # loop free for the operation's own executor callbacks, which is what lets
+    # the worker reach the pause at all.
+    await asyncio.get_running_loop().run_in_executor(None, robot.started.wait)
     running = asyncio.create_task(application.run(stop))
-    for _ in range(40):
-        if robot.started.is_set():
-            break
-        await asyncio.sleep(0)
-    else:
-        raise AssertionError("motor worker did not start within bounded loop turns")
     for _ in range(20):
         await asyncio.sleep(0)
 
@@ -3695,7 +3725,7 @@ async def test_application_shutdown_drains_reserved_target_before_motion_release
     release_target = threading.Event()
     robot = FakeRobot()
     groups = MotorGroupCoordinator(robot, clock=ManualClock())
-    groups.initialize()
+    await groups.initialize()
 
     class RecordingMotion(FakeMotion):
         def release(self) -> None:
@@ -3751,11 +3781,11 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
     """
 
     @staticmethod
-    def _composed_head_switch(
+    async def _composed_head_switch(
         robot: FakeRobot,
     ) -> tuple[SatelliteApplication, ServerState, MotorSwitchEntity]:
         """Assemble production wiring and return its registered head control."""
-        application = build_application(
+        application = await build_application(
             load_settings(_ENVIRONMENT),
             robot,
             identity=_identity(),
@@ -3869,7 +3899,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
 
     def test_the_daemons_volume_service_is_wired_in(self) -> None:
         """R7: a service nothing starts is a requirement nothing satisfies."""
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT),
             cast("RobotHandle", FakeRobot()),
             identity=_identity(),
@@ -3887,7 +3917,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         else failing anywhere — so this pins the wiring rather than the entity,
         which `test_satellite_audio_entities.py` covers on its own.
         """
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT),
             cast("RobotHandle", FakeRobot()),
             identity=_identity(),
@@ -3922,11 +3952,51 @@ class TestMotorComposition:
         TestTheWiringAgainstTheWheelsOwnAssets._composed_head_switch
     )
 
+    @pytest.mark.asyncio
+    async def test_a_cancelled_initial_confirmation_registers_and_leaks_nothing(
+        self,
+    ) -> None:
+        """Assembly owns the coordinator until the application is handed it.
+
+        A confirmation cancelled part-way therefore has exactly one thing that
+        can close its worker, and it is here. Nothing downstream exists yet to
+        do it, so a startup that let the exception past would leave a thread
+        holding the robot for the life of the process.
+        """
+        workers_before = motor_worker_threads()
+        started = threading.Event()
+        release = threading.Event()
+
+        class _ParkedRobot(FakeRobot):
+            """Park the first correlated read until this test releases it."""
+
+            def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
+                started.set()
+                release.wait()
+                return super().read_motor_torque(ids)
+
+        robot = _ParkedRobot()
+        assembling = asyncio.create_task(
+            build_application(
+                load_settings(_ENVIRONMENT),
+                robot,
+                identity=_identity(),
+            )
+        )
+        await asyncio.get_running_loop().run_in_executor(None, started.wait)
+
+        assembling.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await assembling
+
+        assert motor_worker_threads() <= workers_before
+
     def test_confirmed_motor_switches_are_composed_after_stable_audio_entities(
         self,
     ) -> None:
         """All three exact groups are present only after their initial read-back."""
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT),
             FakeRobot(),
             identity=_identity(),
@@ -3957,7 +4027,7 @@ class TestMotorComposition:
             measured_head_poses=[measured_head, measured_head],
             measured_joints=[measured_joints, measured_joints, measured_joints],
         )
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT, {"body_motion_enabled": "true"}),
             robot,
             identity=_identity(),
@@ -4013,7 +4083,7 @@ class TestMotorComposition:
                 _motor_confirmation(ANTENNA_MOTOR_IDS, True),
             ]
         )
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT),
             robot,
             identity=_identity(),
@@ -4052,7 +4122,7 @@ class TestMotorComposition:
                 _motor_confirmation(HEAD_MOTOR_IDS, True),
             ]
         )
-        application, state, control = self._composed_head_switch(robot)
+        application, state, control = await self._composed_head_switch(robot)
         groups = application.motor_groups
         assert groups is not None
         clients = connected(state, 2)
@@ -4109,7 +4179,7 @@ class TestMotorComposition:
             ],
             motor_disables_confirmed=[MotorConfirmation.failed()],
         )
-        application, state, control = self._composed_head_switch(robot)
+        application, state, control = await self._composed_head_switch(robot)
         groups = application.motor_groups
         assert groups is not None
         clients = connected(state, 2)
@@ -4154,7 +4224,7 @@ class TestMotorComposition:
                 MotorConfirmation.failed(),
             ],
         )
-        application, state, control = self._composed_head_switch(robot)
+        application, state, control = await self._composed_head_switch(robot)
         groups = application.motor_groups
         assert groups is not None
         clients = connected(state, 2)
@@ -4213,7 +4283,7 @@ class TestMotorComposition:
             ],
             motor_disables_confirmed=[MotorConfirmation.failed()],
         )
-        application = build_application(
+        application = await build_application(
             load_settings(_ENVIRONMENT),
             robot,
             identity=_identity(),
@@ -4260,10 +4330,11 @@ class TestMotorComposition:
         assert not groups.gate_open(MotorGroup.BODY)
         await groups.aclose()
 
-    def test_composed_terminal_reconnect_performs_no_hardware_read(self) -> None:
+    @pytest.mark.asyncio
+    async def test_composed_terminal_reconnect_performs_no_hardware_read(self) -> None:
         """A reconnect racing shutdown reports retained state without new work."""
         robot = FakeRobot()
-        application, _state, control = self._composed_head_switch(robot)
+        application, _state, control = await self._composed_head_switch(robot)
         groups = application.motor_groups
         assert groups is not None
         groups.terminal()
@@ -4280,7 +4351,7 @@ class TestMotorComposition:
         robot = FakeRobot(
             motor_reads=[MotorConfirmation.unavailable() for _group in range(3)]
         )
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT),
             robot,
             identity=_identity(),
@@ -4311,7 +4382,7 @@ class TestRemainingWheelAssembly:
         """Ports to adapters, the behaviour layer, and the services it owns."""
         resolution = load_settings(_ENVIRONMENT, {})
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -4331,7 +4402,7 @@ class TestRemainingWheelAssembly:
             {"staleness_seconds": "0.2"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -4351,7 +4422,7 @@ class TestRemainingWheelAssembly:
             {"face_tracking_enabled": "false"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -4366,7 +4437,7 @@ class TestRemainingWheelAssembly:
             {"advertise": "false"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -4388,7 +4459,7 @@ class TestRemainingWheelAssembly:
         environ = {**_ENVIRONMENT, f"{ENV_PREFIX}WEB_ENABLED": "true"}
         resolution = load_settings(environ, {})
 
-        application = build_application(
+        application = await build_application(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -4419,7 +4490,7 @@ class TestRemainingWheelAssembly:
             {"advertise": "true", "web_enabled": "false"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),

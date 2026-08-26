@@ -27,6 +27,7 @@ certain about exactly the property it was checking.
 from __future__ import annotations
 
 import importlib
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -288,6 +289,21 @@ def immediately(work: Callable[[], None]) -> None:
         work: What to run.
     """
     work()
+
+
+def motor_worker_threads() -> set[threading.Thread]:
+    """Return every live motor-coordinator worker thread in this process.
+
+    Thread objects rather than names, and compared as a subset rather than for
+    equality: a coordinator another test in this session built and never closed
+    is still enumerable here, so "no thread leaked" is "no thread this test
+    started is still alive", not "the process has none".
+    """
+    return {
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("satellite-motors")
+    }
 
 
 # --- Time --------------------------------------------------------------------

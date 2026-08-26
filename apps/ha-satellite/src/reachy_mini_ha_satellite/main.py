@@ -2111,13 +2111,25 @@ def build_boost_setter(
     return _set_boost
 
 
-def build_application(
+async def build_application(
     resolution: Resolution,
     handle: RobotHandle,
     *,
     identity: NetworkIdentity | None = None,
 ) -> SatelliteApplication:
     """Wire the ports to the adapters and assemble everything that runs.
+
+    Awaited because initial motor confirmation is. That confirmation decides
+    which switches exist, so it has to finish before they are appended and
+    before anything that serves them starts — and it is several blocking daemon
+    calls, which the event loop must be free of while they run or the stop
+    watcher cannot set its event.
+
+    It stays *here*, rather than becoming an awaited step of its own between
+    this and `SatelliteApplication.run`, because registration is the thing it
+    gates: an application object that knows nothing about `ServerState` would
+    have to be handed the entity list to append to, and the ordering a reader
+    now finds on consecutive lines would become two halves to reassemble.
 
     Args:
         resolution: The settings in effect and where they came from.
@@ -2178,8 +2190,16 @@ def build_application(
     )
 
     def _motor_lifecycle(group: MotorGroup) -> MotorGroupLifecycle:
-        """Capture loop generations before any blocking motor lifecycle phase."""
-        behaviour_generation = behaviour.motion_generation
+        """Capture loop generations before any blocking motor lifecycle phase.
+
+        The generation captured here is the one the behavior layer advances when
+        it *reseeds*, not when it expresses. An expression produced while this
+        group is transitioning either reached a different group — which this
+        reseed does not write — or was refused by this group's own closed gate,
+        and a refused command must not be able to stop measured truth replacing
+        the hidden target it left behind.
+        """
+        behaviour_generation = behaviour.reseed_generation
 
         def _finalize(
             head: HeadMeasurement | None,
@@ -2192,7 +2212,7 @@ def build_application(
                 antennas=antennas,
                 expected_generation=behaviour_generation,
             ):
-                raise RuntimeError("newer expression state superseded motor reseed")
+                raise RuntimeError("newer measured reseed superseded this one")
 
         return motion.motor_lifecycle(group, time.monotonic, _finalize)
 
@@ -2201,7 +2221,15 @@ def build_application(
             group,
             lifecycle=functools.partial(_motor_lifecycle, group),
         )
-    registered_motor_groups = motor_groups.initialize()
+    try:
+        registered_motor_groups = await motor_groups.initialize()
+    except BaseException:
+        # Nothing owns the coordinator until the application below is handed it,
+        # so a cancelled or failed confirmation closes it here. Otherwise its
+        # worker outlives the startup that created it, with no application left
+        # to call `aclose`.
+        await motor_groups.aclose()
+        raise
 
     state = build_server_state(
         settings,
@@ -2313,8 +2341,11 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
 
     A stop requested before motor enable, between motor enable and controlled
     wake, or after controlled wake prevents the next hardware or composition
-    boundary. The blocking SDK call already running on a worker thread is allowed
-    to finish; Python cannot safely cancel it in the middle.
+    boundary. One requested *during* assembly reaches the same place: initial
+    motor confirmation is awaited off this loop, so the daemon's stop watcher
+    can still set this event while it runs. The blocking SDK call already running
+    on a worker thread is allowed to finish; Python cannot safely cancel it in
+    the middle.
 
     Raises:
         ConfigurationError: If the environment is not usable. Raised rather
@@ -2339,5 +2370,5 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     if stop.is_set():
         _LOGGER.info("satellite.start skipped; stop requested during controlled wake")
         return
-    application = build_application(resolution, handle)
+    application = await build_application(resolution, handle)
     await application.run(stop)

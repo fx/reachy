@@ -423,6 +423,21 @@ class ReachyMotion:
         """Re-read terminal state across daemon callbacks that may release."""
         return self._released
 
+    def _release_requested(self) -> bool:
+        """Whether terminal release has been asked for anywhere yet.
+
+        Wider than `_terminal`, and only the daemon policy writes ask it.
+        `release` asks the coordinator to become terminal *before* it sets
+        `_released`, so a check reading this adapter's own flag alone answers
+        "not released" throughout that window — long enough for a worker-side
+        policy write to report a restore that the coordinator has already
+        stopped anyone from undoing.
+        """
+        if self._released:
+            return True
+        coordinator = self._coordinator
+        return coordinator is not None and coordinator.terminal_requested
+
     def acquire(self, now: float) -> MotionMeasurement:
         """Disable competing body yaw and invalidate every older lifecycle snapshot."""
         with self._state_lock:
@@ -445,23 +460,6 @@ class ReachyMotion:
                         self._generation += 1
                 raise
         return self.observe(now) if not self._terminal() else self._measurement()
-
-    def quiesce_body(self) -> bool:
-        """Synchronously establish exclusive ownership for direct unit composition."""
-        snapshot = self._begin_lifecycle()
-        self._handle.set_automatic_body_yaw(False)
-        if self._commit_quiesce(snapshot) is None:
-            raise RuntimeError("newer motion ownership superseded body quiesce")
-        return snapshot.automatic_yaw
-
-    def restore_body_policy(self, automatic_yaw: bool) -> None:
-        """Synchronously restore policy only while its generation stays current."""
-        with self._state_lock:
-            if self._released:
-                return
-            generation = self._generation
-        restored = self._restore_policy_worker(generation, automatic_yaw)
-        self._commit_restore(generation, automatic_yaw, restored)
 
     def _measurement(self) -> MotionMeasurement:
         """Return only currently valid typed measurements, retaining cache privately."""
@@ -521,13 +519,18 @@ class ReachyMotion:
                 CalibrationStatus.REJECTED,
                 fault=MotionFault.CALIBRATION,
             )
+        # `_generation` is read here and never advanced. It counts ownership and
+        # measured state, and calibration changes neither: it repopulates a
+        # per-source cache from history it has already read. Advancing it made
+        # every tick with a face in view invalidate an in-flight measured
+        # reseed — a torque re-enable that confirms, opens no gate, and leaves
+        # the group unusable until the application restarts.
         with self._state_lock:
             if self._released:
                 return GazeCalibration(
                     CalibrationStatus.REJECTED,
                     fault=MotionFault.CALIBRATION,
                 )
-            self._generation += 1
         identity = directive.identity
         if (
             identity is None
@@ -752,20 +755,6 @@ class ReachyMotion:
         """Create one generation-stamped loop/worker lifecycle for a motor group."""
         return _ReachyMotionLifecycle(self, group, clock, finalize)
 
-    def reseed(
-        self,
-        group: MotorGroup,
-        now: float,
-    ) -> tuple[HeadMeasurement | None, BodyMeasurement | None, AntennaPose | None]:
-        """Synchronously sample and commit fresh state for direct unit composition."""
-        with self._state_lock:
-            generation = self._generation
-        sample = self._sample_reseed(group, now)
-        result = self._commit_reseed(sample, generation)
-        if result is None:
-            raise RuntimeError("motion changed while reseed sampling was in flight")
-        return sample.head, sample.body, sample.antennas
-
     def _sample_reseed(self, group: MotorGroup, now: float) -> _MotionReseedSample:
         """Read and validate hardware without mutating loop-owned adapter state."""
         pose: np.ndarray | None = None
@@ -849,15 +838,34 @@ class ReachyMotion:
         expected_generation: int,
         automatic_yaw: bool,
     ) -> bool:
+        """Hand the daemon its policy back, or leave its body producer off.
+
+        The post-write check asks exactly what the pre-write check asked. A
+        generation-only answer would report success from inside the window
+        `release` opens between asking the coordinator to become terminal and
+        setting `_released`, and the caller would then take a retained capture
+        for a restored one — leaving daemon automatic yaw enabled with nothing
+        left that would turn it off.
+        """
         with self._state_lock:
-            if self._released or self._generation != expected_generation:
+            if self._release_requested() or self._generation != expected_generation:
                 return False
-        self._handle.set_automatic_body_yaw(automatic_yaw)
-        with self._state_lock:
-            current = self._generation == expected_generation
-        if not current and automatic_yaw:
-            self._handle.set_automatic_body_yaw(False)
-        return current
+        restored = False
+        try:
+            self._handle.set_automatic_body_yaw(automatic_yaw)
+            with self._state_lock:
+                restored = (
+                    not self._release_requested()
+                    and self._generation == expected_generation
+                )
+        finally:
+            # Every path that did not keep the policy re-asserts the safe state,
+            # a call that raised included: the daemon may have adopted the write
+            # before it failed, and this is the last thread that knows the write
+            # was attempted at all.
+            if not restored and automatic_yaw:
+                self._handle.set_automatic_body_yaw(False)
+        return restored
 
     def _commit_restore(
         self,

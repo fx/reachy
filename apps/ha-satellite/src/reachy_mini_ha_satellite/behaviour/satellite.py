@@ -151,7 +151,7 @@ class SatelliteBehaviour:
         self._pending_command_step: ControllerStep | None = None
         self._pending_observation_age: float | None = None
         self._pending_handoff = False
-        self._motion_generation = 0
+        self._reseed_generation = 0
 
     @property
     def state(self) -> PipelineState:
@@ -164,9 +164,18 @@ class SatelliteBehaviour:
         return self._controller
 
     @property
-    def motion_generation(self) -> int:
-        """Return the loop-owned hidden-target generation for reseed commits."""
-        return self._motion_generation
+    def reseed_generation(self) -> int:
+        """Return how many measured reseeds this layer has committed.
+
+        Counted rather than "how many times a hidden target moved", and the
+        distinction is what keeps a confirmed motor group usable: expression
+        moves a hidden target on every tick that produces intents, including
+        ticks whose intents a closed motor gate refused, and a reseed that
+        deferred to one of those would leave the group's hidden target holding a
+        command the hardware never took. What a reseed must defer to is a newer
+        reseed, which is exactly what this counts.
+        """
+        return self._reseed_generation
 
     def controller_diagnostics(self) -> tuple[dict[str, DiagnosticScalar], ...]:
         """Return a bounded identifier-free snapshot of controller evidence."""
@@ -193,16 +202,16 @@ class SatelliteBehaviour:
         antennas: AntennaPose | None = None,
         expected_generation: int | None = None,
     ) -> bool:
-        """Discard hidden targets only if no newer expression generation won."""
+        """Discard hidden targets only if no newer measured reseed won."""
         if (
             expected_generation is not None
-            and self._motion_generation != expected_generation
+            and self._reseed_generation != expected_generation
         ):
             return False
         if antennas is not None:
             self._last_antennas = antennas
         if head is None:
-            self._motion_generation += 1
+            self._reseed_generation += 1
             return True
         seeded = step_controller(
             initial_controller_state(self._config),
@@ -225,7 +234,7 @@ class SatelliteBehaviour:
         self._pending_command_step = None
         self._pending_observation_age = None
         self._pending_handoff = False
-        self._motion_generation += 1
+        self._reseed_generation += 1
         return True
 
     def status(self, now: float) -> BehaviourStatus:
@@ -472,6 +481,4 @@ class SatelliteBehaviour:
         ):
             self._last_head = wanted.head
             intents.append(MoveHead(wanted.head))
-        if intents:
-            self._motion_generation += 1
         return tuple(intents)

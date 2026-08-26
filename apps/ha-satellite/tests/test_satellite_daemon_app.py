@@ -50,6 +50,7 @@ from reachy_mini_ha_satellite.motor_control import (
     MOTOR_IDENTIFIERS,
     MotorGroup,
     MotorGroupCoordinator,
+    MotorGroupLifecycle,
 )
 from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 
@@ -842,19 +843,24 @@ class TestConfirmedTorqueBoundary:
 
         robot = FakeRobot()
         groups = MotorGroupCoordinator(robot, clock=ManualClock())
-        assert MotorGroup.BODY in groups.initialize()
+        assert MotorGroup.BODY in await groups.initialize()
         events: list[str] = []
 
-        def _prepare() -> bool:
-            events.append("prepare")
-            return True
+        class _Recording(MotorGroupLifecycle):
+            def prepare_worker(self) -> object:
+                events.append("prepare")
+                return None
 
-        groups.set_hooks(
-            MotorGroup.BODY,
-            prepare=_prepare,
-            reseed=lambda: events.append("reseed"),
-            restore=lambda _policy: events.append("restore"),
-        )
+            def sample_worker(self) -> object:
+                events.append("reseed")
+                return None
+
+            def restore_worker(self, policy: bool | None) -> object:
+                del policy
+                events.append("restore")
+                return None
+
+        groups.set_hooks(MotorGroup.BODY, lifecycle=_Recording)
         robot.motor_disables_confirmed.append(translated)
         robot.motor_reads.append(translated)
         control = MotorSwitchEntity(
@@ -1033,7 +1039,8 @@ class TestConfirmedTorqueBoundary:
             for terminal in (False, True)
         ],
     )
-    def test_every_outcome_acknowledgement_and_terminal_combination_fails_closed(
+    @pytest.mark.asyncio
+    async def test_every_outcome_acknowledgement_and_terminal_combination_fails_closed(
         self,
         daemon_app: ModuleType,
         outcome: str,
@@ -1068,7 +1075,7 @@ class TestConfirmedTorqueBoundary:
         robot = FakeRobot(motor_reads=[translated])
         groups = MotorGroupCoordinator(robot, clock=ManualClock())
 
-        registered = groups.initialize()
+        registered = await groups.initialize()
 
         accepted = outcome == "confirmed" and acknowledged and terminal
         assert (MotorGroup.HEAD in registered) is accepted

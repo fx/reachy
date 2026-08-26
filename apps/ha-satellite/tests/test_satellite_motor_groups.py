@@ -1,13 +1,26 @@
-"""Deterministic acceptance tests for confirmed motor-group coordination."""
+"""Deterministic acceptance tests for confirmed motor-group coordination.
+
+Every operation below is reserved the way the composition root reserves one —
+`initialize`, `reserve_transition` and `reserve_refresh`, over the split
+loop/worker lifecycle `main.build_application` installs. There is no second,
+synchronous coordinator path to exercise instead: an acceptance matrix driving
+one is a matrix that says nothing about the machine the robot runs.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import threading
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
-from satellite_support import FakeRobot, ManualClock, face
+from satellite_support import (
+    FakeRobot,
+    ManualClock,
+    face,
+    motor_worker_threads,
+)
 
 from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
 from reachy_mini_ha_satellite.adapters.motion_reachy import (
@@ -40,10 +53,14 @@ from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     Detections,
     DetectionSource,
+    GazeDirective,
     GazeSample,
     HeadPose,
     MotionCommandStatus,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def confirmation(
@@ -61,14 +78,88 @@ def confirmation(
     )
 
 
-def coordinator(
+def install_lifecycles(
+    groups: MotorGroupCoordinator,
+    motion: ReachyMotion,
+    behaviour: SatelliteBehaviour,
+    clock: Callable[[], float],
+) -> None:
+    """Install exactly the hooks `main.build_application` installs.
+
+    Copied rather than imported because assembling the application reads the
+    wheel's own assets off a real disk. What matters is that the shape is the
+    same one: a lifecycle per generation, its reseed generation captured on the
+    loop before any blocking phase begins.
+    """
+
+    def _lifecycle(group: MotorGroup) -> MotorGroupLifecycle:
+        expected = behaviour.reseed_generation
+
+        def _finalize(
+            head: HeadMeasurement | None,
+            body: BodyMeasurement | None,
+            antennas: AntennaPose | None,
+        ) -> None:
+            if not behaviour.reseed_motion(
+                head=head,
+                body=body,
+                antennas=antennas,
+                expected_generation=expected,
+            ):
+                raise RuntimeError("newer measured reseed superseded this one")
+
+        return motion.motor_lifecycle(group, clock, _finalize)
+
+    for group in MotorGroup:
+        groups.set_hooks(group, lifecycle=functools.partial(_lifecycle, group))
+
+
+async def coordinator(
     robot: RobotHandle,
     clock: ManualClock | None = None,
 ) -> MotorGroupCoordinator:
-    """Build and initialize one coordinator over deterministic time."""
+    """Build and confirm one bare coordinator over deterministic time."""
     result = MotorGroupCoordinator(robot, clock=clock or ManualClock())
-    result.initialize()
+    await result.initialize()
     return result
+
+
+async def wired(
+    robot: FakeRobot | None = None,
+    *,
+    body_enabled: bool = False,
+) -> tuple[FakeRobot, MotorGroupCoordinator, ReachyMotion, SatelliteBehaviour]:
+    """Assemble and confirm the coordinator, motion adapter and behavior layer."""
+    handle = robot if robot is not None else FakeRobot()
+    clock = ManualClock()
+    groups = MotorGroupCoordinator(handle, clock=clock)
+    config = ControllerConfig(body_enabled=body_enabled)
+    motion = ReachyMotion(handle, controller_config=config, coordinator=groups)
+    behaviour = SatelliteBehaviour(controller_config=config)
+    install_lifecycles(groups, motion, behaviour, clock)
+    await groups.initialize()
+    return handle, groups, motion, behaviour
+
+
+async def driven(
+    groups: MotorGroupCoordinator,
+    group: MotorGroup,
+    requested: bool | None,
+) -> list[bool]:
+    """Reserve one operation the way an entity does and await its one worker."""
+    published: list[bool] = []
+
+    def _publish() -> None:
+        published.append(True)
+
+    reserved = (
+        groups.reserve_refresh(group, _publish)
+        if requested is None
+        else groups.reserve_transition(group, requested, _publish)
+    )
+    if reserved:
+        await groups.wait_idle()
+    return published
 
 
 def group_status(
@@ -80,6 +171,58 @@ def group_status(
     return cast("dict[str, object]", status_groups[group.value])
 
 
+def directive_for(captured_at: float) -> GazeDirective:
+    """Select one actionable qualified directive for a visible face."""
+    return GazeSelector().select(
+        Detections(
+            faces=(face(0.2, 0.0),),
+            fresh=True,
+            source=DetectionSource.REMOTE,
+            generation=1,
+            sequence=1,
+            captured_at=captured_at,
+            received_at=captured_at + 0.1,
+        )
+    )
+
+
+class _PausedRobot(FakeRobot):
+    """Park one named daemon call on the worker while the loop keeps running."""
+
+    def __init__(self, call: str, **kwargs: object) -> None:
+        """Take the call to park on, plus whatever `FakeRobot` scripts."""
+        super().__init__(**kwargs)  # type: ignore[arg-type]  # forwarded verbatim to the fake's own keyword script
+        self.parked_call = call
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def _park(self, call: str) -> None:
+        if call != self.parked_call:
+            return
+        self.started.set()
+        self.release.wait()
+
+    def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
+        """Park an independent read, then answer as the fake normally would."""
+        self._park("read")
+        return super().read_motor_torque(ids)
+
+    def enable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        """Park a confirmed enable, then answer as the fake normally would."""
+        self._park("enable")
+        return super().enable_motors_confirmed(ids)
+
+
+async def parked(robot: _PausedRobot) -> int:
+    """Yield to the loop until the worker is inside the parked daemon call."""
+    turns = 0
+    while not robot.started.is_set():
+        turns += 1
+        await asyncio.sleep(0)
+    return turns
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failed",
     [
@@ -105,14 +248,14 @@ def group_status(
         ),
     ],
 )
-def test_initial_absent_partial_or_contradictory_evidence_keeps_group_closed(
+async def test_initial_absent_partial_or_contradictory_evidence_keeps_group_closed(
     failed: MotorConfirmation,
 ) -> None:
     """No optimistic switch/gate state can be inferred from incomplete evidence."""
     robot = FakeRobot(motor_reads=[failed])
     groups = MotorGroupCoordinator(robot, clock=ManualClock())
 
-    registered = groups.initialize()
+    registered = await groups.initialize()
 
     assert MotorGroup.HEAD not in registered
     assert groups.last_confirmed(MotorGroup.HEAD) is None
@@ -129,8 +272,9 @@ def test_sdk_neutral_local_evidence_may_omit_ids_for_unit_fakes() -> None:
     assert local.physical_value(HEAD_MOTOR_IDS) is True
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error", list(MotorEvidenceError))
-def test_any_per_motor_error_makes_initial_group_incomplete(
+async def test_any_per_motor_error_makes_initial_group_incomplete(
     error: MotorEvidenceError,
 ) -> None:
     """No bounded per-motor error may be filtered out before agreement."""
@@ -145,7 +289,7 @@ def test_any_per_motor_error_makes_initial_group_incomplete(
     )
     groups = MotorGroupCoordinator(robot, clock=ManualClock())
 
-    assert MotorGroup.HEAD not in groups.initialize()
+    assert MotorGroup.HEAD not in await groups.initialize()
     assert groups.last_confirmed(MotorGroup.HEAD) is None
     assert not groups.gate_open(MotorGroup.HEAD)
 
@@ -214,12 +358,13 @@ _INCOMPLETE_EVIDENCE = [
 ]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "evidence",
     [case[1] for case in _INCOMPLETE_EVIDENCE],
     ids=[case[0] for case in _INCOMPLETE_EVIDENCE],
 )
-def test_incomplete_evidence_fails_initial_transition_and_refresh_closed(
+async def test_incomplete_evidence_fails_initial_transition_and_refresh_closed(
     evidence: tuple[MotorEvidence, ...],
 ) -> None:
     """Every confirmation path requires exact one-to-one complete agreement."""
@@ -231,13 +376,21 @@ def test_incomplete_evidence_fails_initial_transition_and_refresh_closed(
 
     initial_robot = FakeRobot(motor_reads=[incomplete])
     initial = MotorGroupCoordinator(initial_robot, clock=ManualClock())
-    assert MotorGroup.HEAD not in initial.initialize()
+    assert MotorGroup.HEAD not in await initial.initialize()
     assert initial.last_confirmed(MotorGroup.HEAD) is None
     assert not initial.gate_open(MotorGroup.HEAD)
 
-    transition_robot = FakeRobot(motor_disables_confirmed=[incomplete])
-    transition = coordinator(transition_robot)
-    assert transition.transition(MotorGroup.HEAD, False) is None
+    transition_robot = FakeRobot(
+        motor_disables_confirmed=[incomplete],
+        motor_reads=[
+            confirmation(HEAD_MOTOR_IDS, True),
+            confirmation(BODY_MOTOR_IDS, True),
+            confirmation(ANTENNA_MOTOR_IDS, True),
+            incomplete,
+        ],
+    )
+    transition = await coordinator(transition_robot)
+    await driven(transition, MotorGroup.HEAD, False)
     assert transition.last_confirmed(MotorGroup.HEAD) is True
     assert not transition.gate_open(MotorGroup.HEAD)
 
@@ -249,13 +402,14 @@ def test_incomplete_evidence_fails_initial_transition_and_refresh_closed(
             incomplete,
         ]
     )
-    refreshed = coordinator(refresh_robot)
-    assert refreshed.refresh(MotorGroup.HEAD) is None
+    refreshed = await coordinator(refresh_robot)
+    await driven(refreshed, MotorGroup.HEAD, None)
     assert refreshed.last_confirmed(MotorGroup.HEAD) is True
     assert not refreshed.gate_open(MotorGroup.HEAD)
 
 
-def test_missing_confirmed_api_gates_every_group_closed() -> None:
+@pytest.mark.asyncio
+async def test_missing_confirmed_api_gates_every_group_closed() -> None:
     """A released SDK without the canary surface cannot expose motor controls."""
 
     class LegacyHandle:
@@ -265,16 +419,17 @@ def test_missing_confirmed_api_gates_every_group_closed() -> None:
         cast("RobotHandle", LegacyHandle()), clock=ManualClock()
     )
 
-    assert groups.initialize() == ()
+    assert await groups.initialize() == ()
     assert all(not groups.gate_open(group) for group in MotorGroup)
 
 
-def test_initial_reads_use_the_three_exact_independent_motor_sets() -> None:
+@pytest.mark.asyncio
+async def test_initial_reads_use_the_three_exact_independent_motor_sets() -> None:
     """Group boundaries are fixed and neither antenna can become its own switch."""
     robot = FakeRobot()
     groups = MotorGroupCoordinator(robot, clock=ManualClock())
 
-    assert groups.initialize() == tuple(MotorGroup)
+    assert await groups.initialize() == tuple(MotorGroup)
     assert robot.motor_requests == [
         ("read", HEAD_MOTOR_IDS),
         ("read", BODY_MOTOR_IDS),
@@ -282,7 +437,7 @@ def test_initial_reads_use_the_three_exact_independent_motor_sets() -> None:
     ]
 
 
-_STARTUP_LIFECYCLE_PHASES = (
+_LIFECYCLE_PHASES = (
     "prepare_worker",
     "prepare_loop",
     "sample_worker",
@@ -292,7 +447,7 @@ _STARTUP_LIFECYCLE_PHASES = (
 )
 
 
-class _ScriptedStartupLifecycle(MotorGroupLifecycle):
+class _ScriptedLifecycle(MotorGroupLifecycle):
     """Inject one failure, cancellation or terminal request at an exact phase."""
 
     def __init__(
@@ -302,6 +457,7 @@ class _ScriptedStartupLifecycle(MotorGroupLifecycle):
         outcome: str,
         events: list[str],
     ) -> None:
+        """Take what to do, where to do it, and where to record every phase."""
         self._groups = groups
         self._phase = phase
         self._outcome = outcome
@@ -318,34 +474,41 @@ class _ScriptedStartupLifecycle(MotorGroupLifecycle):
         self._groups.terminal()
 
     def prepare_worker(self) -> object:
+        """Record and optionally break the worker-side quiesce."""
         self._run("prepare_worker")
         return None
 
     def prepare_loop(self, prepared: object) -> None:
+        """Record and optionally break the loop-side quiesce commit."""
         del prepared
         self._run("prepare_loop")
 
     def sample_worker(self) -> object:
+        """Record and optionally break the worker-side measured sample."""
         self._run("sample_worker")
         return None
 
     def sample_loop(self, sample: object) -> None:
+        """Record and optionally break the loop-side reseed commit."""
         del sample
         self._run("sample_loop")
 
     def restore_worker(self, policy: bool | None) -> object:
+        """Record and optionally break the worker-side policy restore."""
         del policy
         self._run("restore_worker")
         return None
 
     def restore_loop(self, restored: object) -> None:
+        """Record and optionally break the loop-side restore commit."""
         del restored
         self._run("restore_loop")
 
 
-@pytest.mark.parametrize("phase", _STARTUP_LIFECYCLE_PHASES)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", _LIFECYCLE_PHASES)
 @pytest.mark.parametrize("outcome", ["failure", "cancel", "terminal"])
-def test_each_enabled_startup_phase_fails_closed(
+async def test_each_enabled_startup_phase_fails_closed(
     phase: str,
     outcome: str,
 ) -> None:
@@ -355,14 +518,14 @@ def test_each_enabled_startup_phase_fails_closed(
     events: list[str] = []
     groups.set_hooks(
         MotorGroup.HEAD,
-        lifecycle=lambda: _ScriptedStartupLifecycle(groups, phase, outcome, events),
+        lifecycle=lambda: _ScriptedLifecycle(groups, phase, outcome, events),
     )
 
     if outcome == "cancel":
         with pytest.raises(asyncio.CancelledError):
-            groups.initialize()
+            await groups.initialize()
     else:
-        assert MotorGroup.HEAD not in groups.initialize()
+        assert MotorGroup.HEAD not in await groups.initialize()
 
     assert not groups.gate_open(MotorGroup.HEAD)
     assert groups.last_confirmed(MotorGroup.HEAD) is None
@@ -371,26 +534,60 @@ def test_each_enabled_startup_phase_fails_closed(
         assert all(not groups.gate_open(group) for group in MotorGroup)
 
 
-def test_initial_enabled_body_is_read_under_exclusive_ownership_then_restored() -> None:
-    """Initial registration does not race daemon automatic yaw either."""
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", _LIFECYCLE_PHASES)
+@pytest.mark.parametrize("outcome", ["failure", "cancel", "terminal"])
+async def test_each_enabled_transition_phase_fails_closed(
+    phase: str,
+    outcome: str,
+) -> None:
+    """The reserved enable path retains truth and never opens on a broken phase."""
     robot = FakeRobot()
-    groups = MotorGroupCoordinator(robot, clock=ManualClock())
-    motion = ReachyMotion(robot, coordinator=groups)
+    groups = await coordinator(robot)
+    events: list[str] = []
+    await driven(groups, MotorGroup.HEAD, False)
+    assert groups.last_confirmed(MotorGroup.HEAD) is False
     groups.set_hooks(
-        MotorGroup.BODY,
-        prepare=motion.quiesce_body,
-        restore=motion.restore_body_policy,
+        MotorGroup.HEAD,
+        lifecycle=lambda: _ScriptedLifecycle(groups, phase, outcome, events),
     )
 
-    assert MotorGroup.BODY in groups.initialize()
+    if outcome == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await driven(groups, MotorGroup.HEAD, True)
+    else:
+        await driven(groups, MotorGroup.HEAD, True)
+
+    assert phase in events
+    assert not groups.gate_open(MotorGroup.HEAD)
+    # Once a loop phase has failed *after* the confirmed enable, the physical
+    # truth it read is still truth and is retained; the gate is what must not
+    # advance with it. Terminal retains nothing, because terminal outranks every
+    # promotion.
+    promoted = outcome != "terminal" and phase in {
+        "sample_loop",
+        "restore_worker",
+        "restore_loop",
+    }
+    assert groups.last_confirmed(MotorGroup.HEAD) is promoted
+
+
+@pytest.mark.asyncio
+async def test_initial_enabled_body_is_read_under_exclusive_ownership_then_restored() -> (
+    None
+):
+    """Initial registration does not race daemon automatic yaw either."""
+    robot, groups, _motion, _behaviour = await wired()
+
+    assert groups.gate_open(MotorGroup.BODY)
     disabled = robot.events.index("motion.auto_yaw.false")
     read = robot.events.index("motors.read", disabled)
     restored = robot.events.index("motion.auto_yaw.true", read)
     assert disabled < read < restored
-    assert groups.gate_open(MotorGroup.BODY)
 
 
-def test_initial_disabled_body_is_quiesced_before_registration() -> None:
+@pytest.mark.asyncio
+async def test_initial_disabled_body_is_quiesced_before_registration() -> None:
     """A confirmed-off body cannot leave daemon automatic yaw targeting it."""
     robot = FakeRobot(
         motor_reads=[
@@ -399,27 +596,20 @@ def test_initial_disabled_body_is_quiesced_before_registration() -> None:
             confirmation(ANTENNA_MOTOR_IDS, True),
         ]
     )
-    groups = MotorGroupCoordinator(robot, clock=ManualClock())
-    motion = ReachyMotion(robot, coordinator=groups)
-    groups.set_hooks(
-        MotorGroup.BODY,
-        prepare=motion.quiesce_body,
-        reseed=lambda: None,
-        restore=motion.restore_body_policy,
-    )
+    _robot, groups, _motion, _behaviour = await wired(robot)
 
-    registered = groups.initialize()
-
-    assert MotorGroup.BODY in registered
     assert groups.last_confirmed(MotorGroup.BODY) is False
     assert not groups.gate_open(MotorGroup.BODY)
     assert robot.automatic_body_yaw == [False]
 
 
-def test_disable_closes_gate_before_daemon_call_and_isolates_unrelated_group() -> None:
+@pytest.mark.asyncio
+async def test_disable_closes_gate_before_daemon_call_and_isolates_unrelated_group() -> (
+    None
+):
     """An in-flight producer cannot pass the gate at the torque-off call edge."""
     robot = FakeRobot()
-    groups = coordinator(robot)
+    groups = await coordinator(robot)
     observed: list[bool] = []
     original = robot.disable_motors_confirmed
 
@@ -430,30 +620,41 @@ def test_disable_closes_gate_before_daemon_call_and_isolates_unrelated_group() -
 
     robot.disable_motors_confirmed = _disable  # type: ignore[method-assign]  # test instruments the exact daemon-call edge
 
-    assert groups.transition(MotorGroup.HEAD, False) is False
+    await driven(groups, MotorGroup.HEAD, False)
+
     assert observed == [False, True]
+    assert groups.last_confirmed(MotorGroup.HEAD) is False
     assert not groups.gate_open(MotorGroup.HEAD)
     assert groups.gate_open(MotorGroup.ANTENNAS)
 
 
-def test_agreeing_transition_uses_physical_result_and_reseed_before_open() -> None:
+@pytest.mark.asyncio
+async def test_agreeing_transition_uses_physical_result_and_reseed_before_open() -> (
+    None
+):
     """Torque-on is not commandable until fresh-state reseeding completes."""
     robot = FakeRobot()
-    groups = coordinator(robot)
-    assert groups.transition(MotorGroup.HEAD, False) is False
+    groups = await coordinator(robot)
+    await driven(groups, MotorGroup.HEAD, False)
     phases: list[bool] = []
 
-    def _reseed() -> None:
-        phases.append(groups.command((MotorGroup.HEAD,), lambda: None))
+    class _Reseeding(MotorGroupLifecycle):
+        def sample_worker(self) -> object:
+            phases.append(groups.command((MotorGroup.HEAD,), lambda: None))
+            return None
 
-    groups.set_hooks(MotorGroup.HEAD, reseed=_reseed)
+    groups.set_hooks(MotorGroup.HEAD, lifecycle=_Reseeding)
 
-    assert groups.transition(MotorGroup.HEAD, True) is True
+    published = await driven(groups, MotorGroup.HEAD, True)
+
     assert phases == [False]
+    assert published == [True]
+    assert groups.last_confirmed(MotorGroup.HEAD) is True
     assert groups.gate_open(MotorGroup.HEAD)
 
 
-def test_contradiction_publishes_actual_and_keeps_gate_closed() -> None:
+@pytest.mark.asyncio
+async def test_contradiction_publishes_actual_and_keeps_gate_closed() -> None:
     """A successful physical contradiction is evidence, never requested success."""
     robot = FakeRobot(
         motor_disables_confirmed=[
@@ -464,13 +665,16 @@ def test_contradiction_publishes_actual_and_keeps_gate_closed() -> None:
             )
         ]
     )
-    groups = coordinator(robot)
+    groups = await coordinator(robot)
 
-    assert groups.transition(MotorGroup.HEAD, False) is True
+    published = await driven(groups, MotorGroup.HEAD, False)
+
+    assert published == [True]
     assert groups.last_confirmed(MotorGroup.HEAD) is True
     assert not groups.gate_open(MotorGroup.HEAD)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [
@@ -486,19 +690,29 @@ def test_contradiction_publishes_actual_and_keeps_gate_closed() -> None:
         RuntimeError("unbounded daemon detail must not escape"),
     ],
 )
-def test_missing_late_failed_or_partial_transition_retains_boolean(
+async def test_missing_late_failed_or_partial_transition_retains_boolean(
     failure: MotorConfirmation | BaseException,
 ) -> None:
     """Fire-and-forget/no-exception behavior would fail this regression proof."""
-    robot = FakeRobot(motor_disables_confirmed=[failure])
-    groups = coordinator(robot)
+    robot = FakeRobot(
+        motor_disables_confirmed=[failure],
+        motor_reads=[
+            confirmation(HEAD_MOTOR_IDS, True),
+            confirmation(BODY_MOTOR_IDS, True),
+            confirmation(ANTENNA_MOTOR_IDS, True),
+            confirmation(HEAD_MOTOR_IDS, True),
+        ],
+    )
+    groups = await coordinator(robot)
 
-    assert groups.transition(MotorGroup.HEAD, False) is None
+    await driven(groups, MotorGroup.HEAD, False)
+
     assert groups.last_confirmed(MotorGroup.HEAD) is True
     assert not groups.gate_open(MotorGroup.HEAD)
 
 
-def test_later_independent_read_advances_retained_state() -> None:
+@pytest.mark.asyncio
+async def test_later_independent_read_advances_retained_state() -> None:
     """A failed request does not poison a later complete physical sample."""
     robot = FakeRobot(
         motor_disables_confirmed=[MotorConfirmation.failed()],
@@ -506,137 +720,152 @@ def test_later_independent_read_advances_retained_state() -> None:
             confirmation(HEAD_MOTOR_IDS, True),
             confirmation(BODY_MOTOR_IDS, True),
             confirmation(ANTENNA_MOTOR_IDS, True),
+            confirmation(HEAD_MOTOR_IDS, True),
             confirmation(HEAD_MOTOR_IDS, False),
         ],
     )
-    groups = coordinator(robot)
-    assert groups.transition(MotorGroup.HEAD, False) is None
+    groups = await coordinator(robot)
+    await driven(groups, MotorGroup.HEAD, False)
 
-    assert groups.refresh(MotorGroup.HEAD) is False
+    await driven(groups, MotorGroup.HEAD, None)
+
     assert groups.last_confirmed(MotorGroup.HEAD) is False
     assert not groups.gate_open(MotorGroup.HEAD)
 
 
-def test_motion_adapter_gates_gaze_pipeline_head_and_antennas_independently() -> None:
+@pytest.mark.asyncio
+async def test_motion_adapter_gates_gaze_pipeline_head_and_antennas_independently() -> (
+    None
+):
     """Every current application producer enters through the shared coordinator."""
-    robot = FakeRobot()
-    groups = coordinator(robot)
-    motion = ReachyMotion(robot, coordinator=groups)
+    robot, groups, motion, _behaviour = await wired()
     motion.acquire(0.0)
     sample = GazeSample(0.0, 0.0, 0.0, 0.0, False)
 
     assert motion.command_gaze(sample).status is MotionCommandStatus.ACCEPTED
     motion.move_head(HeadPose(pitch=0.1))
     motion.move_antennas(AntennaPose(left=0.2, right=-0.2))
-    assert len(robot.targets) == 3
+    before = len(robot.targets)
 
-    groups.transition(MotorGroup.HEAD, False)
+    await driven(groups, MotorGroup.HEAD, False)
     motion.command_gaze(sample)
     motion.move_head(HeadPose(pitch=0.2))
     motion.move_antennas(AntennaPose(left=0.3, right=-0.3))
 
-    assert len(robot.targets) == 4
+    assert len(robot.targets) == before + 1
     assert robot.targets[-1][1] == [-0.3, 0.3]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("face_tracking", [False, True])
 @pytest.mark.parametrize("body_motion", [False, True])
-def test_body_transition_captures_quiesces_and_restores_all_setting_combinations(
+async def test_body_transition_captures_quiesces_and_restores_all_setting_combinations(
     face_tracking: bool,
     body_motion: bool,
 ) -> None:
     """Automatic yaw is owned even when either restart-bound setting is false."""
-    robot = FakeRobot()
-    groups = coordinator(robot)
-    motion = ReachyMotion(
-        robot,
-        coordinator=groups,
-        controller_config=ControllerConfig(body_enabled=body_motion),
-    )
+    robot, groups, motion, _behaviour = await wired(body_enabled=body_motion)
     if face_tracking:
         motion.acquire(0.0)
+    captured = len(robot.automatic_body_yaw)
 
-    def _reseed_body() -> None:
-        motion.reseed(MotorGroup.BODY, 1.0)
+    await driven(groups, MotorGroup.BODY, False)
 
-    groups.set_hooks(
-        MotorGroup.BODY,
-        prepare=motion.quiesce_body,
-        reseed=_reseed_body,
-        restore=motion.restore_body_policy,
-    )
+    quiesced = robot.events.index("motion.auto_yaw.false", captured)
+    assert quiesced < robot.events.index("motors.disable.confirmed", quiesced)
+    assert not groups.gate_open(MotorGroup.BODY)
 
-    assert groups.transition(MotorGroup.BODY, False) is False
-    assert robot.events.index("motion.auto_yaw.false") < robot.events.index(
-        "motors.disable.confirmed"
-    )
-    assert groups.transition(MotorGroup.BODY, True) is True
+    await driven(groups, MotorGroup.BODY, True)
 
-    expected_restored = not face_tracking
-    assert robot.automatic_body_yaw[-1] is expected_restored
+    assert robot.automatic_body_yaw[-1] is (not face_tracking)
+    assert groups.last_confirmed(MotorGroup.BODY) is True
     assert groups.gate_open(MotorGroup.BODY)
 
 
-def test_failed_body_transition_never_restores_automatic_yaw() -> None:
+@pytest.mark.asyncio
+async def test_failed_body_transition_never_restores_automatic_yaw() -> None:
     """Unknown torque leaves exclusive ownership and the body gate closed."""
-    robot = FakeRobot(motor_disables_confirmed=[MotorConfirmation.failed()])
-    groups = coordinator(robot)
-    motion = ReachyMotion(robot, coordinator=groups)
-
-    def _reseed_body() -> None:
-        motion.reseed(MotorGroup.BODY, 1.0)
-
-    groups.set_hooks(
-        MotorGroup.BODY,
-        prepare=motion.quiesce_body,
-        reseed=_reseed_body,
-        restore=motion.restore_body_policy,
+    robot = FakeRobot(
+        motor_disables_confirmed=[MotorConfirmation.failed()],
+        motor_reads=[
+            confirmation(HEAD_MOTOR_IDS, True),
+            confirmation(BODY_MOTOR_IDS, True),
+            confirmation(ANTENNA_MOTOR_IDS, True),
+            confirmation(BODY_MOTOR_IDS, True),
+        ],
     )
+    _robot, groups, motion, _behaviour = await wired(robot)
+    restored = robot.automatic_body_yaw.count(True)
 
-    assert groups.transition(MotorGroup.BODY, False) is None
-    assert robot.automatic_body_yaw == [False]
+    await driven(groups, MotorGroup.BODY, False)
+
+    assert robot.automatic_body_yaw.count(True) == restored
+    assert robot.automatic_body_yaw[-1] is False
     motion.release()
-    assert robot.automatic_body_yaw == [False]
+    assert robot.automatic_body_yaw[-1] is False
 
 
-@pytest.mark.parametrize("phase", ["prepare", "confirm", "reseed", "restore"])
-def test_cancellation_in_each_transition_phase_leaves_gate_closed(phase: str) -> None:
-    """Cancellation propagates only after the group has entered its safe path."""
+@pytest.mark.asyncio
+async def test_terminal_during_a_policy_restore_leaves_daemon_yaw_disabled() -> None:
+    """The daemon's body producer does not come back behind terminal's back.
+
+    A restore that reports success while the coordinator is already terminal
+    hands the daemon its body back and then abandons the loop commit, so the
+    retained capture stops `release` undoing it. Nothing else would.
+    """
     robot = FakeRobot()
-    groups = coordinator(robot)
-    groups.transition(MotorGroup.HEAD, False)
+    _robot, groups, motion, _behaviour = await wired(robot)
+    await driven(groups, MotorGroup.BODY, False)
+    original = robot.set_automatic_body_yaw
 
-    def _cancel() -> bool:
-        raise asyncio.CancelledError
+    def _set_automatic_body_yaw(enabled: bool) -> None:
+        if enabled:
+            groups.terminal()
+        original(enabled)
 
-    def _cancel_void() -> None:
-        raise asyncio.CancelledError
+    robot.set_automatic_body_yaw = _set_automatic_body_yaw  # type: ignore[method-assign]  # terminal is requested inside the blocking policy write
 
-    def _cancel_restore(_policy: bool) -> None:
-        raise asyncio.CancelledError
+    await driven(groups, MotorGroup.BODY, True)
 
-    if phase == "confirm":
-        robot.motor_enables_confirmed.append(asyncio.CancelledError())
-    groups.set_hooks(
-        MotorGroup.HEAD,
-        prepare=_cancel if phase == "prepare" else lambda: False,
-        reseed=_cancel_void if phase == "reseed" else lambda: None,
-        restore=_cancel_restore if phase == "restore" else lambda _policy: None,
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        groups.transition(MotorGroup.HEAD, True)
-    assert not groups.gate_open(MotorGroup.HEAD)
+    assert robot.automatic_body_yaw[-1] is False
+    assert not groups.gate_open(MotorGroup.BODY)
+    assert not groups.safe_to_restore_body_policy()
+    motion.release()
+    assert robot.automatic_body_yaw[-1] is False
 
 
-def test_head_and_body_reenable_reset_faults_derivatives_and_hidden_target() -> None:
+@pytest.mark.asyncio
+async def test_a_raising_policy_restore_still_re_asserts_the_safe_state() -> None:
+    """A write may be adopted before it raises, and this is its only witness."""
+    robot = FakeRobot()
+    _robot, groups, motion, _behaviour = await wired(robot)
+    await driven(groups, MotorGroup.BODY, False)
+    original = robot.set_automatic_body_yaw
+
+    def _set_automatic_body_yaw(enabled: bool) -> None:
+        original(enabled)
+        if enabled:
+            raise RuntimeError("the daemon adopted the policy and then failed")
+
+    robot.set_automatic_body_yaw = _set_automatic_body_yaw  # type: ignore[method-assign]  # the policy write raises after the daemon took it
+
+    await driven(groups, MotorGroup.BODY, True)
+
+    assert robot.automatic_body_yaw[-2:] == [True, False]
+    assert not groups.gate_open(MotorGroup.BODY)
+    motion.release()
+    assert robot.automatic_body_yaw[-1] is False
+
+
+@pytest.mark.asyncio
+async def test_head_and_body_reenable_reset_faults_derivatives_and_hidden_target() -> (
+    None
+):
     """Fresh measurement replaces every controller target before a gate can reopen."""
     robot = FakeRobot()
     robot.measured_head_pose = head_pose_matrix(HeadPose(yaw=0.4, pitch=0.2))
     robot.measured_body_yaw = 0.1
-    config = ControllerConfig(body_enabled=True)
-    motion = ReachyMotion(robot, controller_config=config)
-    behaviour = SatelliteBehaviour(controller_config=config)
+    _robot, groups, _motion, behaviour = await wired(robot, body_enabled=True)
     prepared = behaviour.prepare(Detections(), 1.0)
     behaviour.finish(
         prepared,
@@ -647,8 +876,8 @@ def test_head_and_body_reenable_reset_faults_derivatives_and_hidden_target() -> 
     )
     assert behaviour.controller_state.safe_hold
 
-    head, body, antennas = motion.reseed(MotorGroup.BODY, 2.0)
-    behaviour.reseed_motion(head=head, body=body, antennas=antennas)
+    await driven(groups, MotorGroup.BODY, False)
+    await driven(groups, MotorGroup.BODY, True)
 
     state = behaviour.controller_state
     assert not state.safe_hold
@@ -663,29 +892,28 @@ def test_head_and_body_reenable_reset_faults_derivatives_and_hidden_target() -> 
         assert axis.acceleration == 0.0
 
 
-def test_antenna_reenable_seeds_both_measured_joints_as_one_group() -> None:
+@pytest.mark.asyncio
+async def test_antenna_reenable_seeds_both_measured_joints_as_one_group() -> None:
     """Neither antenna inherits a pre-disable expression target."""
-    robot = FakeRobot(
-        measured_joints=[([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.3, -0.4])]
-    )
-    motion = ReachyMotion(robot)
-    behaviour = SatelliteBehaviour()
+    robot = FakeRobot()
+    _robot, groups, _motion, behaviour = await wired(robot)
+    await driven(groups, MotorGroup.ANTENNAS, False)
+    robot.measured_joints.append(([0.0] * 7, [0.3, -0.4]))
 
-    head, body, antennas = motion.reseed(MotorGroup.ANTENNAS, 2.0)
-    behaviour.reseed_motion(head=head, body=body, antennas=antennas)
+    await driven(groups, MotorGroup.ANTENNAS, True)
 
-    assert head is None
-    assert body is None
-    assert antennas == AntennaPose(right=0.3, left=-0.4)
+    assert groups.gate_open(MotorGroup.ANTENNAS)
+    assert behaviour._last_antennas == AntennaPose(right=0.3, left=-0.4)
 
 
-def test_first_face_acquire_supersedes_inflight_body_policy_restore() -> None:
+@pytest.mark.asyncio
+async def test_first_face_acquire_supersedes_inflight_body_policy_restore() -> None:
     """Temporary transition ownership cannot overwrite newer gaze ownership."""
     robot = FakeRobot()
     config = ControllerConfig(body_enabled=True)
     motion = ReachyMotion(robot, controller_config=config)
     behaviour = SatelliteBehaviour(controller_config=config)
-    generation = behaviour.motion_generation
+    generation = behaviour.reseed_generation
 
     def _finalize(
         head: HeadMeasurement | None,
@@ -715,58 +943,62 @@ def test_first_face_acquire_supersedes_inflight_body_policy_restore() -> None:
     assert not motion._temporary_ownership
 
 
-def test_calibration_repopulation_supersedes_inflight_head_reseed() -> None:
-    """A sample cannot clear cache state created by newer loop calibration."""
+@pytest.mark.asyncio
+async def test_calibrating_a_visible_face_cannot_strand_a_confirmed_reenable() -> None:
+    """Tracking a face while a motor switch comes back on must not close it forever.
+
+    Calibration repopulates a per-source cache. It changes no ownership and no
+    measured state, so it has no business invalidating the measured sample a
+    torque re-enable is waiting to commit — and if it does, the group ends
+    confirmed on, gated shut, and unreachable by any later refresh.
+    """
+    robot = _PausedRobot("enable")
+    _robot, groups, motion, _behaviour = await wired(robot)
+    motion.acquire(1000.0)
+    motion.observe(1000.5)
+    await driven(groups, MotorGroup.HEAD, False)
+
+    reserved = groups.reserve_transition(MotorGroup.HEAD, True, lambda: None)
+    assert reserved
+    assert await parked(robot) > 0
+    assert motion.calibrate(directive_for(1000.2), 1000.6).state.value == "accepted"
+    robot.release.set()
+    await groups.wait_idle()
+
+    assert groups.last_confirmed(MotorGroup.HEAD) is True
+    assert groups.gate_open(MotorGroup.HEAD)
+    motion.move_head(HeadPose(pitch=0.2))
+    assert robot.targets
+
+
+@pytest.mark.asyncio
+async def test_a_gate_refused_expression_cannot_strand_a_confirmed_reenable() -> None:
+    """The intents a closed gate refused never reached the robot, so they lose."""
+    robot = _PausedRobot("enable")
+    _robot, groups, motion, behaviour = await wired(robot)
+    await driven(groups, MotorGroup.ANTENNAS, False)
+
+    reserved = groups.reserve_transition(MotorGroup.ANTENNAS, True, lambda: None)
+    assert reserved
+    assert await parked(robot) > 0
+    intents = behaviour.handle(PipelineEvent.WAKE_WORD_DETECTED, 1.0)
+    assert intents
+    motion.move_antennas(AntennaPose(left=0.9, right=0.9))
+    robot.release.set()
+    await groups.wait_idle()
+
+    assert groups.last_confirmed(MotorGroup.ANTENNAS) is True
+    assert groups.gate_open(MotorGroup.ANTENNAS)
+    assert behaviour._last_antennas == AntennaPose(right=0.0, left=0.0)
+
+
+@pytest.mark.asyncio
+async def test_a_newer_measured_reseed_still_supersedes_an_older_one() -> None:
+    """Dropping the expression guard does not let two reseeds commit out of order."""
     robot = FakeRobot()
     motion = ReachyMotion(robot)
     behaviour = SatelliteBehaviour()
-    motion.observe(1.0)
-    generation = behaviour.motion_generation
-
-    def _finalize(
-        head: HeadMeasurement | None,
-        body: BodyMeasurement | None,
-        antennas: AntennaPose | None,
-    ) -> None:
-        assert behaviour.reseed_motion(
-            head=head,
-            body=body,
-            antennas=antennas,
-            expected_generation=generation,
-        )
-
-    lifecycle = motion.motor_lifecycle(MotorGroup.HEAD, lambda: 2.0, _finalize)
-    prepared = lifecycle.prepare_worker()
-    lifecycle.prepare_loop(prepared)
-    sample = lifecycle.sample_worker()
-    directive = GazeSelector().select(
-        Detections(
-            faces=(face(0.2, 0.0),),
-            fresh=True,
-            source=DetectionSource.REMOTE,
-            generation=1,
-            sequence=1,
-            captured_at=1.0,
-            received_at=1.1,
-        )
-    )
-
-    assert motion.calibrate(directive, 2.1).state.value == "accepted"
-    cached = dict(motion._cache)
-    with pytest.raises(RuntimeError, match="superseded"):
-        lifecycle.sample_loop(sample)
-
-    assert motion._cache == cached
-
-
-def test_new_pipeline_expression_supersedes_inflight_antenna_reseed() -> None:
-    """Measured antenna data cannot resurrect over a newer pipeline target."""
-    robot = FakeRobot(
-        measured_joints=[([0.0] * 7, [0.3, -0.4])],
-    )
-    motion = ReachyMotion(robot)
-    behaviour = SatelliteBehaviour()
-    generation = behaviour.motion_generation
+    generation = behaviour.reseed_generation
 
     def _finalize(
         head: HeadMeasurement | None,
@@ -779,191 +1011,153 @@ def test_new_pipeline_expression_supersedes_inflight_antenna_reseed() -> None:
             antennas=antennas,
             expected_generation=generation,
         ):
-            raise RuntimeError("newer expression state superseded motor reseed")
+            raise RuntimeError("newer measured reseed superseded this one")
 
-    lifecycle = motion.motor_lifecycle(MotorGroup.ANTENNAS, lambda: 2.0, _finalize)
+    lifecycle = motion.motor_lifecycle(MotorGroup.HEAD, lambda: 2.0, _finalize)
     prepared = lifecycle.prepare_worker()
     lifecycle.prepare_loop(prepared)
     sample = lifecycle.sample_worker()
-    behaviour.handle(PipelineEvent.WAKE_WORD_DETECTED, 1.0)
-    current = behaviour._last_antennas
+    assert behaviour.reseed_motion(head=HeadMeasurement(0.1, 0.1, 2.0))
 
-    with pytest.raises(RuntimeError, match="newer expression"):
+    with pytest.raises(RuntimeError, match="superseded"):
         lifecycle.sample_loop(sample)
-    assert behaviour._last_antennas == current
-    assert current != AntennaPose(right=0.3, left=-0.4)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "read", "restore"])
-def test_reentrant_terminal_wins_every_initialize_callback_phase(phase: str) -> None:
+async def test_reentrant_terminal_wins_every_initialize_callback_phase(
+    phase: str,
+) -> None:
     """Initialization stops at the callback that requested terminal state."""
     robot = FakeRobot()
-    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    clock = ManualClock()
+    groups = MotorGroupCoordinator(robot, clock=clock)
     motion = ReachyMotion(robot, coordinator=groups)
-    events: list[str] = []
-
-    def _prepare() -> bool:
-        policy = motion.quiesce_body()
-        events.append("prepare")
-        if phase == "prepare":
-            groups.terminal()
-        return policy
-
-    def _restore(_policy: bool) -> None:
-        events.append("restore")
-        if phase == "restore":
-            groups.terminal()
-
-    groups.set_hooks(MotorGroup.BODY, prepare=_prepare, restore=_restore)
+    behaviour = SatelliteBehaviour()
+    install_lifecycles(groups, motion, behaviour, clock)
+    original_yaw = robot.set_automatic_body_yaw
     original_read = robot.read_motor_torque
+
+    def _set_automatic_body_yaw(enabled: bool) -> None:
+        original_yaw(enabled)
+        if not enabled and phase == "prepare":
+            groups.terminal()
+        if enabled and phase == "restore":
+            groups.terminal()
 
     def _read(ids: list[str]) -> MotorConfirmation:
         result = original_read(ids)
-        events.append("read")
         if phase == "read" and tuple(ids) == HEAD_MOTOR_IDS:
             groups.terminal()
         return result
 
+    robot.set_automatic_body_yaw = _set_automatic_body_yaw  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
     robot.read_motor_torque = _read  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
 
-    registered = groups.initialize()
+    registered = await groups.initialize()
 
     assert registered == ()
     assert all(not groups.gate_open(group) for group in MotorGroup)
     assert all(
         group_status(groups, group)["transition"] == "terminal" for group in MotorGroup
     )
-    assert robot.automatic_body_yaw.count(True) == 0
-    if phase == "prepare":
-        assert events == ["read", "prepare"]
-    elif phase == "read":
-        assert events == ["read"]
-    else:
-        assert events == ["read", "prepare", "read", "restore"]
+    if phase != "restore":
+        assert robot.automatic_body_yaw.count(True) == 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "set", "reseed", "restore"])
-def test_reentrant_terminal_wins_every_transition_callback_phase(phase: str) -> None:
+async def test_reentrant_terminal_wins_every_transition_callback_phase(
+    phase: str,
+) -> None:
     """A stale transition never advances state or restores policy after terminal."""
     robot = FakeRobot()
-    groups = coordinator(robot)
-    motion = ReachyMotion(robot, coordinator=groups)
-    events: list[str] = []
-
-    if phase in {"reseed", "restore"}:
-        groups.set_hooks(
-            MotorGroup.BODY,
-            prepare=motion.quiesce_body,
-            restore=motion.restore_body_policy,
-        )
-        assert groups.transition(MotorGroup.BODY, False) is False
-
-    def _prepare() -> bool:
-        policy = motion.quiesce_body()
-        events.append("prepare")
-        if phase == "prepare":
-            groups.terminal()
-        return policy
-
-    def _reseed() -> None:
-        events.append("reseed")
-        if phase == "reseed":
-            groups.terminal()
-
-    def _restore(_policy: bool) -> None:
-        events.append("restore")
-        if phase == "restore":
-            groups.terminal()
-
-    groups.set_hooks(
-        MotorGroup.BODY,
-        prepare=_prepare,
-        reseed=_reseed,
-        restore=_restore,
-    )
+    _robot, groups, _motion, _behaviour = await wired(robot)
     requested = phase in {"reseed", "restore"}
+    if requested:
+        await driven(groups, MotorGroup.BODY, False)
+    original_yaw = robot.set_automatic_body_yaw
     original_set = (
         robot.enable_motors_confirmed if requested else robot.disable_motors_confirmed
     )
+    original_joints = robot.get_current_joint_positions
+
+    def _set_automatic_body_yaw(enabled: bool) -> None:
+        original_yaw(enabled)
+        if not enabled and phase == "prepare":
+            groups.terminal()
+        if enabled and phase == "restore":
+            groups.terminal()
 
     def _set(ids: list[str]) -> MotorConfirmation:
         result = original_set(ids)
-        events.append("set")
         if phase == "set":
             groups.terminal()
         return result
 
+    def _joints() -> tuple[list[float], list[float]]:
+        result = original_joints()
+        if phase == "reseed":
+            groups.terminal()
+        return result
+
+    robot.set_automatic_body_yaw = _set_automatic_body_yaw  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
+    robot.get_current_joint_positions = _joints  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
     if requested:
         robot.enable_motors_confirmed = _set  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
     else:
         robot.disable_motors_confirmed = _set  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
     before = groups.last_confirmed(MotorGroup.BODY)
 
-    assert groups.transition(MotorGroup.BODY, requested) is None
+    published = await driven(groups, MotorGroup.BODY, requested)
+
+    assert published == []
     assert groups.last_confirmed(MotorGroup.BODY) is before
     assert not groups.gate_open(MotorGroup.BODY)
     assert group_status(groups, MotorGroup.BODY)["transition"] == "terminal"
     assert robot.automatic_body_yaw[-1] is False
-    if phase == "prepare":
-        assert events == ["prepare"]
-    elif phase == "set":
-        assert events == ["prepare", "set"]
-    elif phase == "reseed":
-        assert events == ["prepare", "set", "reseed"]
-    else:
-        assert events == ["prepare", "set", "reseed", "restore"]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "read", "restore"])
-def test_reentrant_terminal_wins_every_refresh_callback_phase(phase: str) -> None:
+async def test_reentrant_terminal_wins_every_refresh_callback_phase(phase: str) -> None:
     """A stale independent read cannot advance or restore after terminal."""
     robot = FakeRobot()
-    groups = coordinator(robot)
-    motion = ReachyMotion(robot, coordinator=groups)
-    events: list[str] = []
-
-    def _prepare() -> bool:
-        policy = motion.quiesce_body()
-        events.append("prepare")
-        if phase == "prepare":
-            groups.terminal()
-        return policy
-
-    def _restore(_policy: bool) -> None:
-        events.append("restore")
-        if phase == "restore":
-            groups.terminal()
-
-    groups.set_hooks(MotorGroup.BODY, prepare=_prepare, restore=_restore)
+    _robot, groups, _motion, _behaviour = await wired(robot)
+    original_yaw = robot.set_automatic_body_yaw
     original_read = robot.read_motor_torque
+
+    def _set_automatic_body_yaw(enabled: bool) -> None:
+        original_yaw(enabled)
+        if not enabled and phase == "prepare":
+            groups.terminal()
+        if enabled and phase == "restore":
+            groups.terminal()
 
     def _read(ids: list[str]) -> MotorConfirmation:
         result = original_read(ids)
-        events.append("read")
         if phase == "read":
             groups.terminal()
         return result
 
+    robot.set_automatic_body_yaw = _set_automatic_body_yaw  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
     robot.read_motor_torque = _read  # type: ignore[method-assign]  # inject terminal at the exact daemon callback boundary
     before = groups.last_confirmed(MotorGroup.BODY)
 
-    assert groups.refresh(MotorGroup.BODY) is None
+    published = await driven(groups, MotorGroup.BODY, None)
+
+    assert published == []
     assert groups.last_confirmed(MotorGroup.BODY) is before
     assert not groups.gate_open(MotorGroup.BODY)
     assert group_status(groups, MotorGroup.BODY)["transition"] == "terminal"
     assert robot.automatic_body_yaw[-1] is False
-    if phase == "prepare":
-        assert events == ["prepare"]
-    elif phase == "read":
-        assert events == ["prepare", "read"]
-    else:
-        assert events == ["prepare", "read", "restore"]
 
 
-def test_reentrant_terminal_from_clock_wins_before_state_promotion() -> None:
+@pytest.mark.asyncio
+async def test_reentrant_terminal_from_clock_wins_before_state_promotion() -> None:
     """The injected clock is another callback boundary before publication."""
     robot = FakeRobot()
-    groups = coordinator(robot)
+    groups = await coordinator(robot)
     before = groups.last_confirmed(MotorGroup.HEAD)
 
     def _clock() -> float:
@@ -972,16 +1166,19 @@ def test_reentrant_terminal_from_clock_wins_before_state_promotion() -> None:
 
     groups._clock = _clock
 
-    assert groups.transition(MotorGroup.HEAD, False) is None
+    published = await driven(groups, MotorGroup.HEAD, False)
+
+    assert published == []
     assert groups.last_confirmed(MotorGroup.HEAD) is before
     assert not groups.gate_open(MotorGroup.HEAD)
     assert group_status(groups, MotorGroup.HEAD)["transition"] == "terminal"
 
 
-def test_concurrent_terminal_request_wins_before_transition_publication() -> None:
+@pytest.mark.asyncio
+async def test_concurrent_terminal_request_wins_before_transition_publication() -> None:
     """The lock defers terminal's caller while its request still stops stale work."""
     robot = FakeRobot()
-    groups = coordinator(robot)
+    groups = await coordinator(robot)
     begin_terminal = threading.Event()
     terminal_requested = threading.Event()
     terminal_completed = threading.Event()
@@ -994,66 +1191,143 @@ def test_concurrent_terminal_request_wins_before_transition_publication() -> Non
         groups.terminal()
         terminal_completed.set()
 
-    worker = threading.Thread(target=_terminal)
+    worker = threading.Thread(target=_terminal, name="racing-terminal")
     worker.start()
 
     def _disable(ids: list[str]) -> MotorConfirmation:
         result = original_disable(ids)
         begin_terminal.set()
         terminal_requested.wait()
-        assert not terminal_completed.is_set()
         return result
 
     robot.disable_motors_confirmed = _disable  # type: ignore[method-assign]  # hold the exact in-flight daemon callback boundary
     before = groups.last_confirmed(MotorGroup.HEAD)
 
-    result = groups.transition(MotorGroup.HEAD, False)
+    published = await driven(groups, MotorGroup.HEAD, False)
     worker.join()
 
-    assert result is None
+    assert published == []
     assert terminal_completed.is_set()
     assert groups.last_confirmed(MotorGroup.HEAD) is before
     assert not groups.gate_open(MotorGroup.HEAD)
     assert group_status(groups, MotorGroup.HEAD)["transition"] == "terminal"
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["prepare", "read", "restore"])
-def test_cancelled_independent_refresh_closes_gate_and_retains_state(
+async def test_cancelled_independent_refresh_closes_gate_and_retains_state(
     phase: str,
 ) -> None:
     """Cancellation at every refresh phase cannot strand an open producer gate."""
     robot = FakeRobot()
-    groups = coordinator(robot)
-
-    def _prepare() -> bool:
-        if phase == "prepare":
-            raise asyncio.CancelledError
-        return True
-
-    def _restore(_policy: bool) -> None:
-        if phase == "restore":
-            raise asyncio.CancelledError
-
+    groups = await coordinator(robot)
+    events: list[str] = []
+    mapped = {
+        "prepare": "prepare_worker",
+        "read": "sample_worker",
+        "restore": "restore_worker",
+    }[phase]
     groups.set_hooks(
         MotorGroup.BODY,
-        prepare=_prepare,
-        restore=_restore,
+        lifecycle=lambda: _ScriptedLifecycle(groups, mapped, "cancel", events),
     )
     if phase == "read":
         robot.motor_reads.append(asyncio.CancelledError())
 
     with pytest.raises(asyncio.CancelledError):
-        groups.refresh(MotorGroup.BODY)
+        await driven(groups, MotorGroup.BODY, None)
 
     assert groups.last_confirmed(MotorGroup.BODY) is True
     assert not groups.gate_open(MotorGroup.BODY)
 
 
 @pytest.mark.asyncio
+async def test_initial_confirmation_leaves_the_event_loop_responsive() -> None:
+    """A five-second daemon read is not five seconds of a deaf application.
+
+    The daemon's stop watcher reaches the application through
+    `loop.call_soon_threadsafe`, so a blocking confirmation on this loop is a
+    stop nobody hears. What proves the loop is alive is that it kept running
+    turns while the worker sat in the parked read.
+    """
+    workers_before = motor_worker_threads()
+    robot = _PausedRobot("read")
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    beats = 0
+
+    async def _heartbeat() -> None:
+        nonlocal beats
+        while True:
+            beats += 1
+            await asyncio.sleep(0)
+
+    heart = asyncio.create_task(_heartbeat(), name="startup-heartbeat")
+    startup = asyncio.create_task(groups.initialize(), name="startup")
+    assert await parked(robot) > 0
+    assert beats > 0
+
+    groups.terminal()
+    assert all(not groups.gate_open(group) for group in MotorGroup)
+
+    robot.release.set()
+    assert await startup == ()
+    heart.cancel()
+    await groups.aclose()
+
+    assert all(groups.last_confirmed(group) is None for group in MotorGroup)
+    assert motor_worker_threads() <= workers_before
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_initial_confirmation_leaks_nothing() -> None:
+    """Startup and every later phase share one terminal path, cancellation too."""
+    workers_before = motor_worker_threads()
+    robot = _PausedRobot("read")
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+
+    startup = asyncio.create_task(groups.initialize(), name="startup")
+    assert await parked(robot) > 0
+    startup.cancel()
+    robot.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await startup
+    await groups.aclose()
+
+    assert all(not groups.gate_open(group) for group in MotorGroup)
+    assert all(groups.last_confirmed(group) is None for group in MotorGroup)
+    assert robot.automatic_body_yaw == []
+    assert motor_worker_threads() <= workers_before
+
+
+@pytest.mark.asyncio
+async def test_confirmed_startup_registers_only_confirmed_groups_in_phase_order() -> (
+    None
+):
+    """A responsive startup is still a strictly ordered one."""
+    robot = FakeRobot(
+        motor_reads=[
+            confirmation(HEAD_MOTOR_IDS, True),
+            confirmation(BODY_MOTOR_IDS, True),
+            MotorConfirmation.failed(),
+        ]
+    )
+    _robot, groups, _motion, _behaviour = await wired(robot)
+
+    assert groups.last_confirmed(MotorGroup.ANTENNAS) is None
+    assert groups.gate_open(MotorGroup.HEAD)
+    assert groups.gate_open(MotorGroup.BODY)
+    assert not groups.gate_open(MotorGroup.ANTENNAS)
+    assert robot.events.index("motion.auto_yaw.false") < robot.events.index(
+        "motion.auto_yaw.true"
+    )
+
+
+@pytest.mark.asyncio
 async def test_terminal_drain_is_responsive_cancellation_safe_and_leak_free() -> None:
     """Shutdown closes now but awaits a reserved external-thread target to return."""
+    workers_before = motor_worker_threads()
     robot = FakeRobot()
-    groups = coordinator(robot)
+    groups = await coordinator(robot)
     started = threading.Event()
     release = threading.Event()
     completed: list[bool] = []
@@ -1086,16 +1360,15 @@ async def test_terminal_drain_is_responsive_cancellation_safe_and_leak_free() ->
         await closing
 
     assert completed == [False]
-    assert not any(
-        thread.name == "satellite-motors" for thread in threading.enumerate()
-    )
+    assert motor_worker_threads() <= workers_before
 
 
-def test_terminal_release_is_idempotent_and_blocks_all_later_producers() -> None:
+@pytest.mark.asyncio
+async def test_terminal_release_is_idempotent_and_blocks_all_later_producers() -> None:
     """Shutdown and racing commands share one irreversible closed-gate path."""
     robot = FakeRobot()
-    groups = coordinator(robot)
-    motion = ReachyMotion(robot, coordinator=groups)
+    _robot, groups, motion, _behaviour = await wired(robot)
+    before = len(robot.targets)
 
     groups.terminal()
     groups.terminal()
@@ -1104,17 +1377,18 @@ def test_terminal_release_is_idempotent_and_blocks_all_later_producers() -> None
     motion.move_head(HeadPose(pitch=0.5))
     motion.move_antennas(AntennaPose(left=0.5, right=0.5))
 
-    assert robot.targets == []
+    assert len(robot.targets) == before
     assert all(not groups.gate_open(group) for group in MotorGroup)
 
 
-def test_diagnostics_are_fixed_bounded_and_identifier_free() -> None:
+@pytest.mark.asyncio
+async def test_diagnostics_are_fixed_bounded_and_identifier_free() -> None:
     """Repeated failures retain only stable scalar categories and group names."""
     robot = FakeRobot()
-    groups = coordinator(robot)
+    groups = await coordinator(robot)
     for _ in range(40):
         robot.motor_reads.append(RuntimeError("private request and hardware details"))
-        assert groups.refresh(MotorGroup.HEAD) is None
+        await driven(groups, MotorGroup.HEAD, None)
 
     status = groups.status()
     events = cast("list[dict[str, object]]", status["events"])
