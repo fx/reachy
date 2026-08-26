@@ -115,6 +115,14 @@ def test_initial_absent_partial_or_contradictory_evidence_keeps_group_closed(
     assert cast("dict[str, object]", head)["last_confirmed"] is None
 
 
+def test_sdk_neutral_local_evidence_may_omit_ids_for_unit_fakes() -> None:
+    """Only local fakes use absent IDs; daemon translation tests require every ID."""
+    local = confirmation(HEAD_MOTOR_IDS, True)
+
+    assert all(item.motor_id is None for item in local.evidence)
+    assert local.physical_value(HEAD_MOTOR_IDS) is True
+
+
 @pytest.mark.parametrize("error", list(MotorEvidenceError))
 def test_any_per_motor_error_makes_initial_group_incomplete(
     error: MotorEvidenceError,

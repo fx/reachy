@@ -48,10 +48,10 @@ from reachy_mini_ha_satellite.config import (
 )
 from reachy_mini_ha_satellite.main import run
 from reachy_mini_ha_satellite.motor_control import (
+    MOTOR_IDENTIFIERS,
     MotorConfirmation,
     MotorConfirmationOutcome,
     MotorEvidence,
-    MotorEvidenceError,
 )
 
 if TYPE_CHECKING:
@@ -110,7 +110,6 @@ _TORQUE_OUTCOMES: Final = {
     for outcome in MotorConfirmationOutcome
     if outcome is not MotorConfirmationOutcome.UNAVAILABLE
 }
-_TORQUE_ERRORS: Final = {error.value: error for error in MotorEvidenceError}
 _MISSING: Final = object()
 
 
@@ -212,25 +211,24 @@ class _ConfirmedRobotHandle:
         translated: list[MotorEvidence] = []
         expected_names = frozenset(expected)
         for state in states:
-            name = getattr(state, "name", None)
-            motor_id = getattr(state, "motor_id", None)
-            enabled = getattr(state, "enabled", None)
-            error_value = getattr(state, "error", None)
+            name = getattr(state, "name", _MISSING)
+            motor_id = getattr(state, "motor_id", _MISSING)
+            enabled = getattr(state, "enabled", _MISSING)
+            error_value = getattr(state, "error", _MISSING)
+            expected_id = MOTOR_IDENTIFIERS.get(name) if isinstance(name, str) else None
             if (
                 not isinstance(name, str)
                 or name not in expected_names
-                or (motor_id is not None and type(motor_id) is not int)
+                or expected_id is None
+                or type(motor_id) is not int
+                or motor_id != expected_id
+                or type(enabled) is not bool
+                or error_value is not None
             ):
                 return MotorConfirmation.failed()
-            if type(enabled) is bool and error_value is None:
-                translated.append(
-                    MotorEvidence(name=name, motor_id=motor_id, enabled=enabled)
-                )
-                continue
-            error = _TORQUE_ERRORS.get(_enum_value(error_value))
-            if enabled is not None or error is None:
-                return MotorConfirmation.failed()
-            translated.append(MotorEvidence(name=name, motor_id=motor_id, error=error))
+            translated.append(
+                MotorEvidence(name=name, motor_id=motor_id, enabled=enabled)
+            )
 
         confirmation = MotorConfirmation(True, outcome, tuple(translated))
         actual = confirmation.physical_value(

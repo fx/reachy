@@ -830,8 +830,9 @@ class TestConfirmedTorqueBoundary:
             operation="set",
             requested_enabled=False,
             outcome="confirmed",
-            evidence_enabled=True,
+            evidence_enabled=False,
         )
+        delattr(invalid.states[0], "motor_id")
         bridge = daemon_app._ConfirmedRobotHandle(
             SimpleNamespace(disable_motors_confirmed=lambda _ids: invalid)
         )
@@ -905,6 +906,117 @@ class TestConfirmedTorqueBoundary:
 
         assert translated.outcome.value == "failed"
         assert translated.physical_value(HEAD_MOTOR_IDS) is None
+
+    @pytest.mark.parametrize("field", ["name", "motor_id", "enabled", "error"])
+    def test_missing_required_per_state_field_fails_closed(
+        self,
+        daemon_app: ModuleType,
+        field: str,
+    ) -> None:
+        """Absent state fields never inherit the semantics of explicit null."""
+        result = _torque_result(
+            list(HEAD_MOTOR_IDS),
+            operation="read",
+            requested_enabled=None,
+        )
+        delattr(result.states[0], field)
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids: result)
+        )
+
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert translated.outcome.value == "failed"
+        assert translated.evidence == ()
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("name", None),
+            ("name", 11),
+            ("name", BODY_MOTOR_IDS[0]),
+            ("motor_id", None),
+            ("motor_id", True),
+            ("motor_id", "11"),
+            ("motor_id", 11.0),
+            ("motor_id", MOTOR_IDENTIFIERS[HEAD_MOTOR_IDS[1]]),
+            ("enabled", None),
+            ("enabled", 1),
+            ("enabled", "true"),
+            ("error", "read_failed"),
+            ("error", SimpleNamespace(value="read_failed")),
+        ],
+        ids=[
+            "null-name",
+            "integer-name",
+            "wrong-group-name",
+            "explicit-null-id",
+            "bool-id",
+            "string-id",
+            "float-id",
+            "mismatched-id",
+            "null-enabled",
+            "integer-enabled",
+            "string-enabled",
+            "string-error",
+            "enum-like-error",
+        ],
+    )
+    def test_wrong_per_state_field_type_or_value_fails_closed(
+        self,
+        daemon_app: ModuleType,
+        field: str,
+        value: object,
+    ) -> None:
+        """Every SDK state is explicit, typed and matched to its fixed motor."""
+        result = _torque_result(
+            list(HEAD_MOTOR_IDS),
+            operation="read",
+            requested_enabled=None,
+        )
+        setattr(result.states[0], field, value)
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids: result)
+        )
+
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert translated.outcome.value == "failed"
+        assert translated.evidence == ()
+
+    @pytest.mark.parametrize(
+        "replacement",
+        [
+            object(),
+            {
+                "name": HEAD_MOTOR_IDS[0],
+                "motor_id": MOTOR_IDENTIFIERS[HEAD_MOTOR_IDS[0]],
+                "enabled": True,
+                "error": None,
+            },
+        ],
+        ids=["opaque-object", "mapping"],
+    )
+    def test_non_attribute_state_variants_fail_closed(
+        self,
+        daemon_app: ModuleType,
+        replacement: object,
+    ) -> None:
+        """The translator supports SDK attribute objects only, never loose mappings."""
+        result = _torque_result(
+            list(HEAD_MOTOR_IDS),
+            operation="read",
+            requested_enabled=None,
+        )
+        result.states[0] = replacement
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids: result)
+        )
+
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert translated.outcome.value == "failed"
+        assert translated.evidence == ()
 
     @pytest.mark.parametrize(
         ("outcome", "acknowledged", "terminal"),

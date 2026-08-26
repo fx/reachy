@@ -85,7 +85,11 @@ class MotorEvidenceError(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class MotorEvidence:
-    """Physical evidence for one locally requested motor name."""
+    """Physical evidence for one locally requested motor name.
+
+    ``motor_id=None`` exists only for SDK-neutral unit fakes. The production SDK
+    translator requires and validates the explicit numeric ID for every state.
+    """
 
     name: str
     motor_id: int | None = None
