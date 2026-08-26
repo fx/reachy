@@ -219,20 +219,32 @@ deployment can get irreversibly wrong.
   running is refused**, decided from the factory's answer rather than from a
   list of the settings that produce it, so a save changing the address together
   with a restart-bound detection setting cannot retire the running source into
-  nothing and report success. And **every read of the durable file happens under
-  the owner's lock**: the page hands over a merge (`submit_merged`) and the
-  entity hands over an address (`submit_url`), because two surfaces write that
-  file and a map computed before the lock drops whatever the other committed in
-  between — in whichever order they arrive. **That applies to every writer of
-  that file, not only the two that write an address**: the owner's transition is
-  the only writer that suspends between its read and its commit, so a writer
+  nothing and report success. And **in a running application every write to the
+  overrides file goes through the owner's lock, and the file is read there
+  too**: the page hands over a merge (`submit_merged`), the address entity an
+  address (`submit_url`), and the speaker-boost entity a merge as well
+  (`reserve_merge`) — a map computed before the lock drops whatever another
+  surface committed in between, in whichever order they arrive. The boost is
+  there **not because it is an address** but because the owner's transition is
+  the only writer that suspends between its read and its commit, so any writer
   outside the lock has its setting discarded when the transition commits the map
-  it computed beforehand. The speaker-boost control therefore goes through
-  `reserve_merge` as well — not because a boost is an address, but because the
-  file has one lock. Three writers today, all through `submit_merged`: the
-  settings page, `submit_url`, and the boost setter. A page assembled with no
-  owner (`create_app(application=None)`) refuses an address change rather than
-  persisting one nothing adopted; every other setting still writes.
+  it computed beforehand. **The one supported exception is a settings interface
+  with no application behind it** (`create_app(application=None)`, which the
+  composition root never produces): it writes non-address settings straight
+  through `apply_settings_change`, unserialized — there is no owner to serialize
+  against and no transition to race — and it refuses an address change for the
+  same reason it is unserialized, that nothing is there to adopt one.
+- **Write a claim about that file from the list of paths, never from the change
+  in front of you.** Three successive corrections to the sentences above were
+  each nearly true and each failed on a path the author had not enumerated:
+  "the one path that persists a submission" (two do), "every read happens under
+  the owner's lock" (a third writer's did not), "every write is serialized by
+  the owner" (the no-owner page's is not). The habit that produces them is
+  describing the shape of the code just edited. Before writing "every", "the
+  one" or "both" about writers, reads, locks or persistence here, grep out
+  every `store.save`, `apply_settings_change` and `load_settings` call site and
+  write the sentence from what that list says — including the exceptions,
+  named by their cause, so the sentence survives the next writer.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys
   a device on what it announces, so a derived default would be correct on a

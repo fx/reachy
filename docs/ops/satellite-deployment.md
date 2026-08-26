@@ -348,14 +348,15 @@ fixed order:
 would let a change the running application rejected become the file the next
 start reads, so a robot would recover into the configuration that broke it.
 
-**Every change to the overrides file is serialized against that replacement**,
-including ones that have nothing to do with the address. The replacement is the
-only change that pauses partway — it has a session to close and another to open
-between reading the file and rewriting it — so a control that wrote the file on
-its own during that pause would have its setting discarded when the replacement
-finished. The speaker-boost control is the one this matters for today: setting
-the address and the boost together, from a scene or from two automations, leaves
-both in the file rather than whichever finished last.
+**On a running satellite, every change to the settings file is serialized
+against that replacement**, including changes that have nothing to do with the
+address. The replacement is the only change that pauses partway — it has a
+session to close and another to open between reading the file and rewriting it —
+so a control that wrote the file on its own during that pause would have its
+setting discarded when the replacement finished. The speaker-boost control is
+the one this matters for today: setting the address and the boost together, from
+a scene or from two automations, leaves both in the file rather than whichever
+finished last.
 
 **Any failure before step 6 leaves the file untouched**, and the preceding
 address stays durable, effective and what both surfaces report. The owner then

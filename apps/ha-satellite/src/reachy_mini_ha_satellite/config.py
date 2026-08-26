@@ -133,13 +133,15 @@ __all__ = [
 
 _LOGGER: Final = logging.getLogger(__name__)
 
-# What a writer hands to whoever serializes writes to the overrides file: the
-# overrides as they are when the write begins, in; the complete set to store,
-# out. A function rather than a ready-made mapping because the read has to
-# happen inside the operation that commits — a set computed from a copy read
-# earlier is a set that drops whatever another surface committed in between.
-# Declared here, beside `OverrideStore`, because it is the shape of a change to
-# that file and every writer of it needs the name.
+# What a writer hands to whatever performs the write: the overrides as they are
+# when it begins, in; the complete set to store, out. A function rather than a
+# ready-made mapping because the read has to happen inside the operation that
+# commits — a set computed from a copy read earlier is a set that drops whatever
+# another surface committed in between. On a running robot the thing that
+# performs the write is `GroundstationUrlOwner`, and its lock is what "inside"
+# means; a settings interface with no application behind it has no owner to hand
+# this to and calls it itself. Declared here, beside `OverrideStore`, because it
+# is the shape of a change to that file rather than a detail of either caller.
 #
 # A `type` statement rather than an assignment: `Callable` is imported for type
 # checking only, and an assigned alias would evaluate it at import time.

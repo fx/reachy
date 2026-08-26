@@ -371,10 +371,12 @@ def create_app(
         `application` is a parameter and cannot change, so the two would only
         ever be the same answer written twice.
 
-        The merge rather than its result, because the read has to happen inside
-        whatever serializes the write: Home Assistant's control writes the same
-        file, and a map computed from a snapshot older than the lock it commits
-        under drops whatever landed in between.
+        The merge rather than its result, because where there is an application
+        the read has to happen inside what serializes the write: Home Assistant's
+        controls write the same file, and a map computed from a snapshot older
+        than the lock it commits under drops whatever landed in between. With no
+        application there is nothing writing that file concurrently, so the
+        branch below reads it here — the same shape, and the reason it can be.
 
         Args:
             merge: What to make of the stored overrides.

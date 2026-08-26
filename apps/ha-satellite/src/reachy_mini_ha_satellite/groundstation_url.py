@@ -64,15 +64,15 @@ off the factory's own answer — no candidate while one is running — rather th
 off a list of the settings that produce it, which is a list that goes stale
 without anything noticing.
 
-**This owner serializes every write to the overrides file, and that is a
-separate job from owning the address.** It acquired it because of the
-transition: this is the only writer that *suspends* between reading that file
-and committing it — it has a session to retire and another to open in between —
-so any other writer doing its own read, merge and save runs to completion inside
-that window and has its setting discarded when the transition commits the map it
-computed beforehand. Three surfaces write the file and all three hand over a
-merge rather than a map, so the read, the merge and the commit are one
-serialized operation:
+**In a running application, every write to the overrides file goes through this
+owner's lock, and serializing them is a separate job from owning the address.**
+It acquired that job because of the transition: this is the only writer that
+*suspends* between reading the file and committing it — it has a session to
+retire and another to open in between — so any other writer doing its own read,
+merge and save runs to completion inside that window and has its setting
+discarded when the transition commits the map it computed beforehand. So each
+surface hands over a merge rather than a map, and the read, the merge and the
+commit are one serialized operation:
 
 | Writer | How it reaches the file |
 |---|---|
@@ -83,6 +83,14 @@ serialized operation:
 The boost is not an address and this owner has no opinion about it. It is here
 because the file has one lock, and a writer outside that lock is the defect
 rather than the exception.
+
+**The one supported exception is a settings interface with no application
+behind it** — `web.create_app(application=None)`, which the composition root
+never produces. It writes non-address settings straight through
+`config.apply_settings_change`, unserialized, and correctly so: there is no
+owner to serialize against and no transition to race. It refuses an address
+change for the same reason it is unserialized, which is that there is nothing
+there to adopt one.
 
 This is compensation, not a transaction. A filesystem and a network cannot be
 committed together, and claiming they can is how the claim stops being checked.
@@ -487,16 +495,20 @@ class GroundstationUrlOwner:
     async def submit_merged(self, merge: OverrideMerge) -> Resolution | None:
         """Apply whatever `merge` makes of the overrides, read under the lock.
 
-        **Every surface that writes the overrides file arrives here**, one way
-        or another: the settings page directly, Home Assistant's address control
-        through `submit_url`, and its speaker-boost control through
-        `reserve_merge`. Each hands over the *computation* rather than its
-        result, because a set of overrides computed from a copy of the file read
-        before the lock is a set that silently drops whatever another surface
-        committed in between — and this owner's transition suspends between its
-        own read and its own commit, which is exactly the window that makes such
-        a drop reachable. Reading here is what makes the read, the merge and the
-        commit one serialized operation.
+        **Every surface that writes the overrides file of a running application
+        arrives here**, one way or another: the settings page directly, Home
+        Assistant's address control through `submit_url`, and its speaker-boost
+        control through `reserve_merge`. A settings interface served with no
+        application behind it does not, and has no owner to arrive at; see the
+        module docstring for why that is the one exception rather than a hole.
+
+        Each of them hands over the *computation* rather than its result,
+        because a set of overrides computed from a copy of the file read before
+        the lock is a set that silently drops whatever another surface committed
+        in between — and this owner's transition suspends between its own read
+        and its own commit, which is exactly the window that makes such a drop
+        reachable. Reading here is what makes the read, the merge and the commit
+        one serialized operation.
 
         Args:
             merge: What to make of the stored overrides. Called once, with the
