@@ -46,6 +46,7 @@ from reachy_mini_ha_satellite.ports import (
     NEUTRAL_HEAD,
     GazeDirective,
     GazeOutcome,
+    HeadPose,
     MotionCommandResult,
     MotionCommandStatus,
 )
@@ -55,7 +56,6 @@ if TYPE_CHECKING:
         AntennaPose,
         CalibratedGaze,
         Detections,
-        HeadPose,
     )
 
 __all__ = ["BehaviourStatus", "PreparedGazeTick", "SatelliteBehaviour"]
@@ -178,6 +178,40 @@ class SatelliteBehaviour:
             )
             raise ValueError(message)
         self._idle_seconds = idle_seconds
+
+    def reseed_motion(
+        self,
+        *,
+        head: HeadMeasurement | None = None,
+        body: BodyMeasurement | None = None,
+        antennas: AntennaPose | None = None,
+    ) -> None:
+        """Discard hidden targets and seed fresh measured state after torque-on."""
+        if antennas is not None:
+            self._last_antennas = antennas
+        if head is None:
+            return
+        seeded = step_controller(
+            initial_controller_state(self._config),
+            None,
+            now=head.measured_at,
+            dt=0.0,
+            config=self._config,
+            head_measurement=head,
+            body_measurement=body,
+        ).state
+        self._controller = seeded
+        body_yaw = body.yaw if body is not None and self._config.body_enabled else 0.0
+        self._last_head = HeadPose(
+            yaw=head.world_yaw - body_yaw,
+            pitch=head.world_elevation,
+            roll=0.0,
+        )
+        self._selector = GazeSelector()
+        self._pending_prior_state = None
+        self._pending_command_step = None
+        self._pending_observation_age = None
+        self._pending_handoff = False
 
     def status(self, now: float) -> BehaviourStatus:
         """Report pipeline and predictive ownership without inferring from motion."""

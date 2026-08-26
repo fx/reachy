@@ -40,6 +40,11 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated p
 from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.adapters.sounds import Sound
 from reachy_mini_ha_satellite.esphome.models import AvailableWakeWord, WakeWordType
+from reachy_mini_ha_satellite.motor_control import (
+    MotorConfirmation,
+    MotorConfirmationOutcome,
+    MotorEvidence,
+)
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -1215,6 +1220,9 @@ class FakeRobot:
         measured_head_poses: Iterable[PoseMatrix | BaseException] = (),
         measured_joints: Iterable[tuple[list[float], list[float]] | BaseException] = (),
         image_gaze_poses: Iterable[PoseMatrix | BaseException] = (),
+        motor_reads: Iterable[MotorConfirmation | BaseException] = (),
+        motor_enables_confirmed: Iterable[MotorConfirmation | BaseException] = (),
+        motor_disables_confirmed: Iterable[MotorConfirmation | BaseException] = (),
         events: list[str] | None = None,
     ) -> None:
         """Wrap media and load deterministic feedback scripts.
@@ -1224,6 +1232,9 @@ class FakeRobot:
             measured_head_poses: Values or failures returned by measured-pose reads.
             measured_joints: Values or failures returned by measured-joint reads.
             image_gaze_poses: Values or failures returned by calibration queries.
+            motor_reads: Confirmed physical read results or failures.
+            motor_enables_confirmed: Confirmed enable results or failures.
+            motor_disables_confirmed: Confirmed disable results or failures.
             events: Optional shared lifecycle event record.
         """
         self._media = media if media is not None else FakeMedia()
@@ -1232,6 +1243,9 @@ class FakeRobot:
         self.measured_head_poses = list(measured_head_poses)
         self.measured_joints = list(measured_joints)
         self.image_gaze_poses = list(image_gaze_poses)
+        self.motor_reads = list(motor_reads)
+        self.motor_enables_confirmed = list(motor_enables_confirmed)
+        self.motor_disables_confirmed = list(motor_disables_confirmed)
         self.events = events if events is not None else []
         self.heads: list[PoseMatrix] = []
         self.antennas: list[list[float]] = []
@@ -1242,6 +1256,7 @@ class FakeRobot:
         self.image_gaze: list[tuple[int, int, float, bool]] = []
         self.automatic_body_yaw: list[bool] = []
         self.motor_enables = 0
+        self.motor_requests: list[tuple[str, tuple[str, ...]]] = []
         self.wake_ups = 0
 
     def enable_motors(self, ids: list[str] | None = None) -> None:
@@ -1249,6 +1264,41 @@ class FakeRobot:
         del ids
         self.motor_enables += 1
         self.events.append("motors.enable")
+
+    def enable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        """Return a scripted complete physical enable confirmation."""
+        self.motor_requests.append(("enable", tuple(ids)))
+        self.events.append("motors.enable.confirmed")
+        return self._motor_confirmation(self.motor_enables_confirmed, ids, True)
+
+    def disable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        """Return a scripted complete physical disable confirmation."""
+        self.motor_requests.append(("disable", tuple(ids)))
+        self.events.append("motors.disable.confirmed")
+        return self._motor_confirmation(self.motor_disables_confirmed, ids, False)
+
+    def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
+        """Return a scripted independent complete physical torque read."""
+        self.motor_requests.append(("read", tuple(ids)))
+        self.events.append("motors.read")
+        return self._motor_confirmation(self.motor_reads, ids, True)
+
+    @staticmethod
+    def _motor_confirmation(
+        script: list[MotorConfirmation | BaseException],
+        ids: list[str],
+        enabled: bool,
+    ) -> MotorConfirmation:
+        scripted = script.pop(0) if script else None
+        if isinstance(scripted, BaseException):
+            raise scripted
+        if scripted is not None:
+            return scripted
+        return MotorConfirmation(
+            True,
+            MotorConfirmationOutcome.CONFIRMED,
+            tuple(MotorEvidence(name=name, enabled=enabled) for name in ids),
+        )
 
     def wake_up(self) -> None:
         """Record the SDK-controlled wake sequence."""

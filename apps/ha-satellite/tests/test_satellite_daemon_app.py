@@ -22,8 +22,9 @@ import importlib
 import runpy
 import sys
 import threading
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
 from satellite_support import FakeRobot
@@ -246,7 +247,8 @@ class TestBridgingTheStopSignal:
 
         application.wrapped_run()
 
-        assert seen == [application.handle]
+        assert len(seen) == 1
+        assert vars(seen[0])["_raw"] is application.handle
 
     def test_finishing_for_its_own_reasons_leaves_no_thread_on_a_closed_loop(
         self,
@@ -582,3 +584,71 @@ class TestBeingExecutedTheWayTheDaemonExecutesIt:
             runpy.run_module(_UNDER_TEST, run_name="__main__")
 
         assert raised.value.code == 0
+
+
+class TestConfirmedTorqueBoundary:
+    """SDK results become bounded local evidence only in the daemon entry point."""
+
+    def test_missing_canary_method_reports_unavailable(
+        self, daemon_app: ModuleType
+    ) -> None:
+        """Released SDK 1.9 stays runnable but exposes no optimistic switch."""
+        bridge = daemon_app._ConfirmedRobotHandle(SimpleNamespace())
+
+        result = bridge.read_motor_torque(["one"])
+
+        assert result.outcome.value == "unavailable"
+        assert not result.acknowledged
+        assert result.evidence == ()
+
+    def test_canary_result_is_translated_without_request_or_numeric_ids(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """Correlation proves terminality but its identifiers never leave the seam."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda ids: SimpleNamespace(
+                request_id=uuid4(),
+                operation=SimpleNamespace(value="read"),
+                requested_names=list(ids),
+                requested_enabled=None,
+                acknowledged=True,
+                terminal=True,
+                outcome=SimpleNamespace(value="confirmed"),
+                states=[
+                    SimpleNamespace(
+                        name=name,
+                        motor_id=index + 10,
+                        enabled=True,
+                        error=None,
+                    )
+                    for index, name in enumerate(ids)
+                ],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        result = bridge.read_motor_torque(["one", "two"])
+
+        assert result.physical_value(("one", "two")) is True
+        assert not hasattr(result, "request_id")
+        assert all(not hasattr(item, "motor_id") for item in result.evidence)
+
+    def test_malformed_or_unexpected_sdk_evidence_fails_closed(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """Unknown enum values and motors cannot be smuggled into local policy."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda _ids: SimpleNamespace(
+                acknowledged=True,
+                outcome=SimpleNamespace(value="future-outcome"),
+                states=[SimpleNamespace(name="unexpected", enabled=True, error=None)],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        result = bridge.read_motor_torque(["one"])
+
+        assert result.outcome.value == "failed"
+        assert result.physical_value(("one",)) is None

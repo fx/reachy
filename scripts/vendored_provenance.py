@@ -95,6 +95,8 @@ EXEMPT_FILES = frozenset(
         "apps/ha-satellite/tests/test_satellite_decode.py",
         "apps/ha-satellite/tests/test_satellite_main.py",
         "apps/ha-satellite/tests/test_satellite_motion_adapter.py",
+        "apps/ha-satellite/tests/test_satellite_motor_entities.py",
+        "apps/ha-satellite/tests/test_satellite_motor_groups.py",
         "apps/ha-satellite/tests/test_satellite_network.py",
         "apps/ha-satellite/tests/test_satellite_perception_contract.py",
         "apps/ha-satellite/tests/test_satellite_perception_local.py",

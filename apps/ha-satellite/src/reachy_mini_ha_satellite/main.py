@@ -114,6 +114,8 @@ from reachy_mini_ha_satellite.esphome.wake_word import (
 )
 from reachy_mini_ha_satellite.esphome.webrtc import WebRTCProcessor
 from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
+from reachy_mini_ha_satellite.motor_control import MotorGroup, MotorGroupCoordinator
+from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
     CalibrationStatus,
     Detections,
@@ -610,6 +612,7 @@ class SatelliteApplication:
         motion: MotionPort,
         perception: PerceptionPort,
         behaviour: SatelliteBehaviour,
+        motor_groups: MotorGroupCoordinator | None = None,
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -623,6 +626,7 @@ class SatelliteApplication:
             motion: The head and the antennas.
             perception: What is in front of the robot.
             behaviour: What to do about it.
+            motor_groups: Confirmed torque state and producer gates, when available.
             services: The things with lifetimes, started in order and stopped
                 in reverse.
             clock: The monotonic source the behaviour layer is given.
@@ -636,6 +640,7 @@ class SatelliteApplication:
         self._motion = motion
         self._perception = perception
         self._behaviour = behaviour
+        self._motor_groups = motor_groups
         self._services = tuple(services)
         self._clock = clock
         self._sleep = sleep
@@ -707,6 +712,11 @@ class SatelliteApplication:
         """
         return self._settings
 
+    @property
+    def motor_groups(self) -> MotorGroupCoordinator | None:
+        """Return the application-owned coordinator for entities and diagnostics."""
+        return self._motor_groups
+
     def status(self) -> dict[str, object]:
         """Say what the robot is doing, for the settings interface to report.
 
@@ -716,7 +726,7 @@ class SatelliteApplication:
         """
         report = self._behaviour.status(self._clock())
         controller = self._behaviour.controller_state
-        return {
+        status: dict[str, object] = {
             "pipeline": report.state.value,
             "gaze": report.outcome.value,
             "tracking": report.tracking,
@@ -727,6 +737,9 @@ class SatelliteApplication:
                 "safe_hold": controller.safe_hold,
             },
         }
+        if self._motor_groups is not None:
+            status["motors"] = self._motor_groups.status()
+        return status
 
     def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
         """Return the behavior layer's bounded private controller evidence."""
@@ -909,6 +922,8 @@ class SatelliteApplication:
             return
         self._closed = True
 
+        if self._motor_groups is not None:
+            self._motor_groups.terminal()
         _guard("motion", self._motion.release)
         _guard("the media interface", self._audio.stop)
 
@@ -2134,9 +2149,11 @@ def build_application(
         body_enabled=settings.body_motion_enabled,
         require_motion_measurements=True,
     )
+    motor_groups = MotorGroupCoordinator(handle, clock=time.monotonic)
     motion = ReachyMotion(
         handle,
         controller_config=controller_config,
+        coordinator=motor_groups,
         tick_seconds=settings.behaviour_tick_seconds,
     )
     perception: PerceptionPort = (
@@ -2148,6 +2165,27 @@ def build_application(
         controller_config=controller_config,
         now=time.monotonic(),
     )
+
+    def _reseed(group: MotorGroup) -> None:
+        """Read fresh physical state and replace every hidden movement target."""
+        head, body, antennas = motion.reseed(group, time.monotonic())
+        behaviour.reseed_motion(head=head, body=body, antennas=antennas)
+
+    motor_groups.set_hooks(
+        MotorGroup.HEAD,
+        reseed=functools.partial(_reseed, MotorGroup.HEAD),
+    )
+    motor_groups.set_hooks(
+        MotorGroup.BODY,
+        prepare=motion.quiesce_body,
+        reseed=functools.partial(_reseed, MotorGroup.BODY),
+        restore=motion.restore_body_policy,
+    )
+    motor_groups.set_hooks(
+        MotorGroup.ANTENNAS,
+        reseed=functools.partial(_reseed, MotorGroup.ANTENNAS),
+    )
+    registered_motor_groups = motor_groups.initialize()
 
     state = build_server_state(
         settings,
@@ -2162,6 +2200,7 @@ def build_application(
         motion=motion,
         perception=perception,
         behaviour=behaviour,
+        motor_groups=motor_groups,
     )
 
     # The same file `run` read the overrides out of, and the same by
@@ -2192,6 +2231,15 @@ def build_application(
         ),
     )
     state.entities.append(boost)
+    for group in registered_motor_groups:
+        state.entities.append(
+            MotorSwitchEntity(
+                state=state,
+                coordinator=motor_groups,
+                group=group,
+                key=len(state.entities),
+            )
+        )
     # The other direction, and the reason the boost control needs one where the
     # volume control does not: the settings page can change this value without
     # Home Assistant having asked. `apply_live` is what every change of it

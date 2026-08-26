@@ -16,8 +16,13 @@ from typing import TYPE_CHECKING, Final
 
 import numpy as np
 
-from reachy_mini_ha_satellite.behaviour.gaze_controller import ControllerConfig
+from reachy_mini_ha_satellite.behaviour.gaze_controller import (
+    BodyMeasurement,
+    ControllerConfig,
+    HeadMeasurement,
+)
 from reachy_mini_ha_satellite.motion_validation import SampleFault, validate_gaze_sample
+from reachy_mini_ha_satellite.motor_control import MotorGroup, MotorGroupCoordinator
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -35,6 +40,8 @@ from reachy_mini_ha_satellite.ports import (
 from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from reachy_contracts import NormalisedPoint
     from reachy_mini_ha_satellite.adapters.daemon import PoseMatrix, RobotHandle
 
@@ -339,6 +346,7 @@ class ReachyMotion:
         handle: RobotHandle,
         *,
         controller_config: ControllerConfig | None = None,
+        coordinator: MotorGroupCoordinator | None = None,
         body_enabled: bool = False,
         staleness_seconds: float = _DEFAULT_STALENESS_SECONDS,
         tick_seconds: float = _DEFAULT_TICK_SECONDS,
@@ -363,6 +371,7 @@ class ReachyMotion:
         )
         self._handle = handle
         self._config = controller_config
+        self._coordinator = coordinator
         self._history = TimedPoseHistory(
             maximum_age=staleness_seconds,
             maximum_samples=history_samples,
@@ -391,8 +400,29 @@ class ReachyMotion:
         if self._released or self._acquired:
             return self._measurement()
         self._acquired = True
-        self._handle.set_automatic_body_yaw(False)
+        try:
+            self._handle.set_automatic_body_yaw(False)
+        except Exception:
+            if not self._released:
+                self._acquired = False
+            raise
         return self.observe(now) if not self._terminal() else self._measurement()
+
+    def quiesce_body(self) -> bool:
+        """Capture daemon automatic-yaw policy and establish exclusive ownership."""
+        if self._released:
+            raise RuntimeError("motion has been released")
+        prior = not self._acquired
+        self._handle.set_automatic_body_yaw(False)
+        self._acquired = True
+        return prior
+
+    def restore_body_policy(self, automatic_yaw: bool) -> None:
+        """Restore only the automatic-yaw policy captured before a safe transition."""
+        if self._released:
+            return
+        self._handle.set_automatic_body_yaw(automatic_yaw)
+        self._acquired = not automatic_yaw
 
     def _measurement(self) -> MotionMeasurement:
         """Return only currently valid typed measurements, retaining cache privately."""
@@ -607,10 +637,23 @@ class ReachyMotion:
                 abs_tol=1e-9,
             ):
                 raise ValueError("tracking pose direction must match the sample")
+            required = [MotorGroup.HEAD]
             if self._config.body_enabled:
-                self._handle.set_target(head=pose, body_yaw=sample.body_yaw)
+                required.append(MotorGroup.BODY)
+                sent = self._command(
+                    required,
+                    lambda: self._handle.set_target(
+                        head=pose,
+                        body_yaw=sample.body_yaw,
+                    ),
+                )
             else:
-                self._handle.set_target(head=pose)
+                sent = self._command(
+                    required,
+                    lambda: self._handle.set_target(head=pose),
+                )
+            if not sent:
+                raise RuntimeError("a required motor command gate is closed")
         except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
             return MotionCommandResult(
                 MotionCommandStatus.REJECTED,
@@ -620,23 +663,98 @@ class ReachyMotion:
         return MotionCommandResult(MotionCommandStatus.ACCEPTED, call=call)
 
     def move_head(self, pose: HeadPose) -> None:
-        """Command a pipeline head pose while the adapter remains live."""
+        """Command a pipeline head pose while the adapter remains live and gated."""
         if self._released:
             return
-        self._handle.set_target(head=head_pose_matrix(pose))
+        self._command(
+            (MotorGroup.HEAD,),
+            lambda: self._handle.set_target(head=head_pose_matrix(pose)),
+        )
 
     def move_antennas(self, pose: AntennaPose) -> None:
-        """Command independent antenna angles right then left."""
+        """Command independent antenna angles right then left while gated."""
         if self._released:
             return
-        self._handle.set_target(antennas=[pose.right, pose.left])
+        self._command(
+            (MotorGroup.ANTENNAS,),
+            lambda: self._handle.set_target(antennas=[pose.right, pose.left]),
+        )
+
+    def _command(
+        self,
+        groups: list[MotorGroup] | tuple[MotorGroup, ...],
+        action: Callable[[], None],
+    ) -> bool:
+        """Run one adapter producer through the shared serialized gate."""
+        if self._released:
+            return False
+        coordinator = self._coordinator
+        if coordinator is None:
+            action()
+            return True
+        return coordinator.command(groups, action)
+
+    def reseed(
+        self,
+        group: MotorGroup,
+        now: float,
+    ) -> tuple[HeadMeasurement | None, BodyMeasurement | None, AntennaPose | None]:
+        """Reacquire fresh measured state after confirmed physical torque-on."""
+        head: HeadMeasurement | None = None
+        body: BodyMeasurement | None = None
+        antennas: AntennaPose | None = None
+        if group in {MotorGroup.HEAD, MotorGroup.BODY}:
+            pose = self._handle.get_current_head_pose()
+            rotation = _pose_rotation(pose, measured=True)
+            world_yaw, world_elevation = _direction_angles(rotation)
+            self._history = TimedPoseHistory(
+                maximum_age=self._config.staleness_seconds,
+                maximum_samples=(
+                    math.ceil(
+                        self._config.staleness_seconds / MIN_BEHAVIOUR_TICK_SECONDS
+                    )
+                    + _HISTORY_ENDPOINT_SAMPLES
+                ),
+            )
+            self._history.append(now, pose)
+            self._cache.clear()
+            self._deferred.clear()
+            self._last_head_measurement = (world_yaw, world_elevation, now)
+            self._head_fault = MotionFault.NONE
+            head = HeadMeasurement(world_yaw, world_elevation, now)
+        if group is MotorGroup.BODY or (
+            group is MotorGroup.HEAD and self._config.body_enabled
+        ):
+            head_joints, _antenna_joints = self._handle.get_current_joint_positions()
+            if len(head_joints) != 7 or not math.isfinite(float(head_joints[0])):
+                raise ValueError("body reseed requires one complete finite joint read")
+            body_yaw = float(head_joints[0])
+            self._last_body_measurement = (body_yaw, now)
+            self._body_fault = MotionFault.NONE
+            body = BodyMeasurement(body_yaw, now)
+        if group is MotorGroup.ANTENNAS:
+            _head_joints, antenna_joints = self._handle.get_current_joint_positions()
+            if len(antenna_joints) != 2 or not all(
+                math.isfinite(float(value)) for value in antenna_joints
+            ):
+                raise ValueError("antenna reseed requires two finite joint values")
+            antennas = AntennaPose(
+                right=float(antenna_joints[0]),
+                left=float(antenna_joints[1]),
+            )
+        return head, body, antennas
 
     def release(self) -> None:
-        """Become terminal first and restore daemon automatic yaw exactly once."""
+        """Become terminal first and restore automatic yaw only from known torque."""
         if self._released:
             return
+        coordinator = self._coordinator
+        if coordinator is not None:
+            coordinator.terminal()
         self._released = True
-        if self._acquired:
+        if self._acquired and (
+            coordinator is None or coordinator.safe_to_restore_body_policy()
+        ):
             self._handle.set_automatic_body_yaw(True)
 
     def _cache_result(

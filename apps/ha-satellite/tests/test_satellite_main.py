@@ -108,6 +108,8 @@ from reachy_mini_ha_satellite.main import (
     load_preferences,
     run,
 )
+from reachy_mini_ha_satellite.motor_control import MotorConfirmation
+from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -3736,6 +3738,58 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         application.apply_live(_settings(speaker_boost_percent="640"))
 
         assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
+
+    def test_confirmed_motor_switches_are_composed_after_stable_audio_entities(
+        self,
+    ) -> None:
+        """All three exact groups are present only after their initial read-back."""
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            FakeRobot(),
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        motors = [
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+        ]
+
+        assert [entity.key for entity in motors] == [2, 3, 4]
+        motion = cast("ReachyMotion", application._motion)
+        assert application.motor_groups is motion._coordinator
+        assert "motors" in application.status()
+
+    def test_unconfirmed_motor_groups_register_no_operable_switch(self) -> None:
+        """Compatibility with the released SDK gates entities closed, not optimistic."""
+        robot = FakeRobot(
+            motor_reads=[MotorConfirmation.unavailable() for _group in range(3)]
+        )
+        application = build_application(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+
+        assert not any(
+            isinstance(entity, MotorSwitchEntity) for entity in esphome._state.entities
+        )
+        assert all(
+            not cast("dict[str, object]", group)["gate_open"]
+            for group in cast(
+                "dict[str, object]",
+                cast("dict[str, object]", application.status()["motors"])["groups"],
+            ).values()
+        )
 
     def test_the_whole_application_assembles_over_a_fake_robot(self) -> None:
         """Ports to adapters, the behaviour layer, and the services it owns."""
