@@ -54,6 +54,7 @@ from reachy_mini_ha_satellite.config import (
     load_settings,
     log_resolved_configuration,
     overrides_path,
+    resolve_submission,
     resolved_configuration,
     setting_names,
     state_directory,
@@ -1169,3 +1170,73 @@ class TestTheGroundstationAddressBound:
         so — see the comment beside `LIVE_SETTINGS`.
         """
         assert GROUNDSTATION_URL_SETTING in LIVE_SETTINGS
+
+    @pytest.mark.parametrize("length", [256, 512])
+    def test_resolving_a_submission_gives_the_runtime_remedy(
+        self,
+        length: int,
+    ) -> None:
+        """The ordering that keeps a submission off the migration's wording.
+
+        Every surface resolves a submitted set of overrides through this, so
+        which of the two refusals an operator reads is decided here once rather
+        than by each caller remembering to check the length first.
+
+        Args:
+            length: How long the submitted address is.
+        """
+        with pytest.raises(ConfigurationError) as raised:
+            resolve_submission(
+                _TRACKING,
+                {GROUNDSTATION_URL_SETTING: address_of_length(length)},
+            )
+
+        message = str(raised.value)
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+        assert str(length) in message
+        assert "Nothing was changed." in message
+        assert "overrides file" not in message
+        assert "start the application again" not in message
+
+    def test_the_same_overrides_at_startup_give_the_migration_remedy(self) -> None:
+        """The other half, so the two are shown to differ rather than assumed to.
+
+        A released 256-character address really is in a file at startup, and
+        removing it really does need a restart — which is why a submission must
+        not be told the same thing.
+        """
+        overlong = {GROUNDSTATION_URL_SETTING: address_of_length(256)}
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings(_TRACKING, overlong)
+
+        message = str(raised.value)
+        assert "overrides file" in message
+        assert "start the application again" in message
+
+    def test_persisting_a_submission_refuses_before_it_writes(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """The one path that persists a submission cannot be reached with one.
+
+        Which is what makes the ordering structural rather than a rule every
+        caller has to remember: `apply_settings_change` resolves through
+        `resolve_submission`, so a future surface that forgets the check still
+        cannot write an address no surface could report.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(Path("/reachy-satellite-submission/settings.json"))
+
+        with pytest.raises(ConfigurationError) as raised:
+            apply_settings_change(
+                {GROUNDSTATION_URL_SETTING: address_of_length(256)},
+                store=store,
+                environ=_TRACKING,
+            )
+
+        assert "Nothing was changed." in str(raised.value)
+        assert store.load() == {}

@@ -69,7 +69,7 @@ from reachy_mini_ha_satellite.config import (
     apply_settings_change,
     canonical_string,
     configuration_report,
-    load_settings,
+    resolve_submission,
     resolved_configuration,
     setting_names,
     variable_for,
@@ -403,7 +403,12 @@ def create_app(
             # this path stays open for every other setting and refuses that one
             # rather than becoming a second write path around the owner.
             wanted = merge(store.load())
-            if load_settings(source, wanted).settings.groundstation_url != (
+            # `resolve_submission` and not `load_settings`: this is a submission,
+            # so an over-long address is refused with the runtime remedy rather
+            # than with the startup migration's — which would tell an operator
+            # to edit an overrides file nothing has written. REQ-095 asks for
+            # that refusal from *either* surface, and this branch is one of them.
+            if resolve_submission(source, wanted).settings.groundstation_url != (
                 _resolved().settings.groundstation_url
             ):
                 raise ConfigurationError(_NO_OWNER_MESSAGE)

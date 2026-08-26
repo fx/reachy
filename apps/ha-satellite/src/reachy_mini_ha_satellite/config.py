@@ -121,6 +121,7 @@ __all__ = [
     "load_settings",
     "log_resolved_configuration",
     "overrides_path",
+    "resolve_submission",
     "resolved_configuration",
     "setting_names",
     "state_directory",
@@ -759,12 +760,22 @@ def _check_url_length(
 def validate_groundstation_url_length(url: str) -> None:
     """Refuse a runtime submission before anything is built or written.
 
-    Both submission paths call this first, and both reach it through
-    `groundstation_url.GroundstationUrlOwner`: the settings page inside the
-    serialized transition, the Home Assistant entity from `reserve_submission`
-    before one is even scheduled. So an overlong address never reaches source
-    construction or the durable file, and the preceding effective value stays
-    the read-back.
+    Every path that can receive a submitted address reaches this before anything
+    that could produce migration wording, and all but one reach it through
+    `resolve_submission`, which is where that ordering is kept:
+
+    - the Home Assistant text entity, through
+      `GroundstationUrlOwner.reserve_submission`, which is the one place that
+      calls this directly: it runs in the protocol's message loop, which cannot
+      await, so it refuses before it schedules anything;
+    - the settings page with an application attached, through
+      `GroundstationUrlOwner._apply`;
+    - the same page with none, through `web/app.py`'s own write;
+    - and anything at all that persists a submission, through
+      `apply_settings_change`.
+
+    So an overlong address never reaches source construction or the durable
+    file, and the preceding effective value stays the read-back.
 
     **Not `_check_url_length`**, which refuses the same length at startup and
     says to edit the overrides file and restart. That remedy is right for a
@@ -898,6 +909,49 @@ def load_settings(
     )
 
 
+def resolve_submission(
+    environ: Mapping[str, str] | None,
+    wanted: Mapping[str, str],
+) -> Resolution:
+    """Resolve overrides that were **submitted**, refusing an over-long address.
+
+    The difference from `load_settings` is not what it refuses but what it says
+    to do about it. Both stop the same 256-character address; `load_settings`
+    speaks to an operator upgrading an installation, and tells them to remove
+    the entry from the overrides file and start the application again. Not one
+    clause of that is true of a submission: nothing has been written, there is
+    no entry, and the robot is running. So a submission runs
+    `validate_groundstation_url_length` first, which states the limit and the
+    length and says nothing was changed.
+
+    **The ordering lives here rather than in each caller**, and that is the
+    point of the function existing at all. Every surface that can receive an
+    address — the settings page with an application behind it, the same page
+    with none, and the Home Assistant control — resolves through this, and
+    `apply_settings_change` does too, so the one path that *persists* a
+    submission cannot be reached with an over-long address whatever a future
+    caller remembers to do. Getting it wrong by omission is what put the
+    migration wording on a runtime refusal twice.
+
+    Args:
+        environ: The environment to resolve against, or `None` for the process
+            environment.
+        wanted: The complete set of overrides submitted, by setting name.
+
+    Returns:
+        The settings the submission resolves to.
+
+    Raises:
+        ConfigurationError: If the submitted address is longer than
+            `GROUNDSTATION_URL_MAX_LENGTH`, or for anything `load_settings`
+            refuses.
+    """
+    submitted = wanted.get(GROUNDSTATION_URL_SETTING)
+    if submitted is not None:
+        validate_groundstation_url_length(submitted)
+    return load_settings(environ, wanted)
+
+
 def apply_settings_change(
     wanted: Mapping[str, str],
     *,
@@ -959,7 +1013,10 @@ def apply_settings_change(
             for the reason `OverrideStore.save` records: a change that appears
             to have been accepted and was not is the worst outcome available.
     """
-    resolved = load_settings(environ, wanted)
+    # `resolve_submission` and not `load_settings`: this is the one path that
+    # persists a submission, so the runtime refusal belongs on it rather than on
+    # each caller's memory of needing one.
+    resolved = resolve_submission(environ, wanted)
     store.save(wanted)
     if apply_live is not None:
         apply_live(resolved.settings)

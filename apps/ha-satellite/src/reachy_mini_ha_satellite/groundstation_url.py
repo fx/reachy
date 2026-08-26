@@ -90,7 +90,7 @@ from reachy_mini_ha_satellite.config import (
     GROUNDSTATION_URL_SETTING,
     ConfigurationError,
     apply_settings_change,
-    load_settings,
+    resolve_submission,
     validate_groundstation_url_length,
 )
 from reachy_mini_ha_satellite.ports import Detections
@@ -535,17 +535,15 @@ class GroundstationUrlOwner:
         """
         if self._closed:
             raise ConfigurationError(_OVERTAKEN_MESSAGE)
-        submitted = wanted.get(GROUNDSTATION_URL_SETTING)
-        if submitted is not None:
-            # Before `load_settings`, which has a length check of its own — but
-            # that one is the **startup migration**, and it tells an operator to
-            # remove an entry from a file this submission has not written and to
-            # restart an application that is running. This is the runtime
-            # refusal, and putting it here is what makes it the first thing both
-            # surfaces reach: the entity path runs it earlier still, without a
-            # loop, because `reserve_submission` cannot await.
-            validate_groundstation_url_length(submitted)
-        resolved = load_settings(self._environ, wanted)
+        # `resolve_submission` and not `load_settings`: it refuses an over-long
+        # address with the runtime remedy before `load_settings` can refuse it
+        # with the startup migration's, which tells an operator to edit a file
+        # this submission has not written and restart an application that is
+        # running. Holding that ordering in one helper rather than here is what
+        # stops the next surface getting it wrong by omission — the entity path
+        # additionally runs the check in `reserve_submission`, without a loop,
+        # because that one cannot await.
+        resolved = resolve_submission(self._environ, wanted)
         if resolved.settings.groundstation_url == self.effective_url:
             # Nothing to retire or start, so the released order is the right
             # one and this is the one definition of it.

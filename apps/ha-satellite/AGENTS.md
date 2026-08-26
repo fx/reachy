@@ -175,7 +175,19 @@ deployment can get irreversibly wrong.
   is that constant rather than a second number: the settings model, the settings
   page's field, the text entity's declared maximum and both submission paths all
   read it. A released 256–512-character value refuses startup, naming the layer
-  that holds it, and is never truncated. `groundstation_url.
+  that holds it, and is never truncated. **The two refusals are not
+  interchangeable**: `load_settings` speaks to an upgrade — remove the entry
+  from the overrides file and restart — and `validate_groundstation_url_length`
+  speaks to a submission, where nothing was written, there is no entry and the
+  robot is running. Every surface that receives an address therefore resolves
+  through `config.resolve_submission`, which runs the runtime check before
+  `load_settings` can produce the migration wording, and
+  `apply_settings_change` resolves through it too, so the one path that
+  *persists* a submission cannot be reached with an over-long address whatever
+  a new caller remembers. `reserve_submission` is the single direct caller of
+  the validator, because it runs in the protocol's message loop and cannot
+  await. Resolving a submission with bare `load_settings` is the defect this
+  arrangement exists to make impossible. `groundstation_url.
   GroundstationUrlOwner` is the only thing that writes the setting, because the
   order matters — prepare, retire, start, **commit the durable file**, publish —
   and `config.apply_settings_change` persists first, which for this setting

@@ -1616,6 +1616,36 @@ class TestAPageWithNothingBehindIt:
         assert _store().load() == {"idle_seconds": "9.0"}
 
     @pytest.mark.asyncio
+    async def test_an_overlong_submission_is_refused_with_the_runtime_remedy(
+        self,
+    ) -> None:
+        """This surface reaches the runtime check too, not the startup migration.
+
+        REQ-095 asks for the runtime refusal from *either* configuration
+        surface, and "either" includes the page serving with nothing behind it.
+        The migration's remedy — remove the entry from the overrides file and
+        start the application again — describes nothing that is true here.
+        """
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app()) as client:
+            response = await client.post(
+                "/settings",
+                content=_form(settings, groundstation_url="ws://" + "a" * 300),
+                headers=_FORM_HEADERS,
+            )
+
+        assert response.status_code == 400
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in response.text
+        assert "Nothing was changed." in response.text
+        assert "overrides file" not in response.text
+        assert "start the application again" not in response.text
+        # Not the no-owner refusal either: the length is refused first, because
+        # an address that cannot be represented is refused wherever it arrives.
+        assert "cannot be changed from here" not in response.text
+        assert _store().load() == {}
+
+    @pytest.mark.asyncio
     async def test_resubmitting_the_address_unchanged_is_not_a_change(self) -> None:
         """An ordinary save carries every field, this one included, and still saves."""
         settings = load_settings(ENVIRONMENT, {}).settings
