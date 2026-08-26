@@ -1214,16 +1214,18 @@ class TestTheGroundstationAddressBound:
         assert "overrides file" in message
         assert "start the application again" in message
 
-    def test_persisting_a_submission_refuses_before_it_writes(
+    def test_apply_settings_change_refuses_before_it_writes(
         self,
         fs: FakeFilesystem,
     ) -> None:
-        """The one path that persists a submission cannot be reached with one.
+        """One of the two functions that persist a submitted address.
 
-        Which is what makes the ordering structural rather than a rule every
-        caller has to remember: `apply_settings_change` resolves through
-        `resolve_submission`, so a future surface that forgets the check still
-        cannot write an address no surface could report.
+        It resolves through `resolve_submission`, so a caller that forgot the
+        check cannot write an address no surface could report. The other writer
+        is `GroundstationUrlOwner._replace`, and the evidence for that one is
+        `test_satellite_groundstation_url.py`'s
+        `test_the_owners_own_commit_is_never_reached_by_an_overlong_address` —
+        named there because it is that module's code that does the writing.
 
         Args:
             fs: The in-memory filesystem.

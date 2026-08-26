@@ -73,6 +73,7 @@ from reachy_mini_ha_satellite.adapters.motion_reachy import (
     ReachyMotion,
     head_pose_matrix,
 )
+from reachy_mini_ha_satellite.adapters.output_gain import DEFAULT_BOOST_PERCENT
 from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
@@ -103,7 +104,10 @@ from reachy_mini_ha_satellite.config import (
 from reachy_mini_ha_satellite.esphome.models import Preferences, ServerState
 from reachy_mini_ha_satellite.esphome.peripheral_api import LVAEvent
 from reachy_mini_ha_satellite.esphome.satellite import VoiceSatelliteProtocol
-from reachy_mini_ha_satellite.groundstation_url import ReplaceableRemoteSource
+from reachy_mini_ha_satellite.groundstation_url import (
+    GroundstationUrlOwner,
+    ReplaceableRemoteSource,
+)
 from reachy_mini_ha_satellite.main import (
     _THREAD_JOIN_SECONDS,
     AdvertisementService,
@@ -3701,10 +3705,125 @@ class TestLogging:
         assert logging.getLogger().level == logging.WARNING
 
 
-class TestWritingABoostChosenFromHomeAssistant:
-    """The setter the speaker-boost control is handed, over a real store."""
+_REPLACEMENT_URL: Final = "ws://192.0.2.20:8080/v1/session"
 
-    def test_it_persists_the_value_and_adopts_it_at_once(
+
+class _GatedRemoteSource:
+    """A remote source whose close can be held open by a test.
+
+    Enough of `ConnectableSource` for the owner to retire one and install
+    another, and no more: the transition is what these tests are about, and the
+    session behind it has its own.
+    """
+
+    def __init__(self, *, close_gate: asyncio.Event | None = None) -> None:
+        """Describe a source without starting anything.
+
+        Args:
+            close_gate: What `aclose` waits on, or `None` to close at once.
+        """
+        self.connected = False
+        self._close_gate = close_gate
+
+    async def start(self) -> None:
+        """Begin."""
+        self.connected = True
+
+    def latest(self) -> Detections:
+        """Report nothing seen.
+
+        Returns:
+            The empty, not-fresh view.
+        """
+        return Detections()
+
+    async def aclose(self) -> None:
+        """Stop, after any gate a test installed."""
+        if self._close_gate is not None:
+            await self._close_gate.wait()
+        self.connected = False
+
+
+async def _built(settings: Settings, source: _GatedRemoteSource) -> _GatedRemoteSource:
+    """Hand back a prepared source, as an asynchronous factory does.
+
+    Args:
+        settings: The candidate configuration, unread.
+        source: What to hand back.
+
+    Returns:
+        That source.
+    """
+    del settings
+    return source
+
+
+async def _no_source(settings: Settings) -> None:
+    """Build no groundstation source at all.
+
+    Args:
+        settings: The candidate configuration, unread.
+
+    Returns:
+        `None`, the local-only composition — the boost never changes the
+        address, so the transition half of the owner is never entered.
+    """
+    del settings
+    return
+
+
+def _boost_owner(
+    store: OverrideStore,
+    adopted: list[Settings],
+    environ: Mapping[str, str] | None = None,
+) -> GroundstationUrlOwner:
+    """Assemble the owner a boost is written through.
+
+    Args:
+        store: Where the overrides are kept.
+        adopted: Where each newly resolved configuration is recorded, which is
+            what the owner's `apply_live` does in production.
+        environ: The environment to resolve against.
+
+    Returns:
+        The owner.
+    """
+    return GroundstationUrlOwner(
+        store=store,
+        resolution=load_settings(environ or _ENVIRONMENT, store.load()),
+        source=ReplaceableRemoteSource(),
+        factory=_no_source,
+        environ=environ or _ENVIRONMENT,
+        apply_live=adopted.append,
+    )
+
+
+async def _drain_reserved(owner: GroundstationUrlOwner) -> None:
+    """Let every write reserved from the protocol's loop finish.
+
+    Args:
+        owner: Whose reserved work to wait for. It has no public handle,
+            deliberately: production awaits it only at shutdown.
+    """
+    # A snapshot, awaited once. Looping until the set empties would spin: a task
+    # that is already done is awaited without yielding, so the `call_soon` that
+    # discards it from the set would never get a turn to run.
+    for requested in tuple(owner._requested):
+        await requested
+
+
+class TestWritingABoostChosenFromHomeAssistant:
+    """The setter the speaker-boost control is handed, over a real store.
+
+    It writes through `GroundstationUrlOwner`, which is what serializes writes
+    to the overrides file — not because the boost is an address but because the
+    file has one writer for the same reason it has one lock. So each of these
+    lets the reserved write finish before it asserts: the setter runs in the
+    protocol's synchronous message loop and can only schedule.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_persists_the_value_and_adopts_it_at_once(
         self,
         fs: FakeFilesystem,
     ) -> None:
@@ -3717,19 +3836,21 @@ class TestWritingABoostChosenFromHomeAssistant:
         del fs
         store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
+        owner = _boost_owner(store, adopted)
 
-        satellite_main.build_boost_setter(
-            store=store,
-            apply_live=adopted.append,
-            environ=_ENVIRONMENT,
-        )(640.0)
+        satellite_main.build_boost_setter(owner)(640.0)
+        await _drain_reserved(owner)
 
         assert store.load() == {"speaker_boost_percent": "640.0"}
         assert [settings.speaker_boost_percent for settings in adopted] == [
             pytest.approx(640.0),
         ]
 
-    def test_it_leaves_every_other_override_alone(self, fs: FakeFilesystem) -> None:
+    @pytest.mark.asyncio
+    async def test_it_leaves_every_other_override_alone(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
         """A slider is not a form: it must not drop what somebody else wrote.
 
         Args:
@@ -3739,19 +3860,18 @@ class TestWritingABoostChosenFromHomeAssistant:
         store = OverrideStore(_BOOST_OVERRIDES)
         store.save({"log_level": "debug"})
         adopted: list[Settings] = []
+        owner = _boost_owner(store, adopted)
 
-        satellite_main.build_boost_setter(
-            store=store,
-            apply_live=adopted.append,
-            environ=_ENVIRONMENT,
-        )(300.0)
+        satellite_main.build_boost_setter(owner)(300.0)
+        await _drain_reserved(owner)
 
         assert store.load() == {
             "log_level": "debug",
             "speaker_boost_percent": "300.0",
         }
 
-    def test_setting_the_value_already_in_the_file_writes_nothing(
+    @pytest.mark.asyncio
+    async def test_setting_the_value_already_in_the_file_writes_nothing(
         self,
         fs: FakeFilesystem,
     ) -> None:
@@ -3763,21 +3883,24 @@ class TestWritingABoostChosenFromHomeAssistant:
         establishes that a write does move the inode here, which is what makes
         the second pair's equality mean the write was declined.
 
+        The comparison is now `submit_merged`'s, against the file it read under
+        the lock — which is the same guard in a place where it cannot be wrong.
+
         Args:
             fs: An in-memory filesystem.
         """
         del fs
         store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
-        setter = satellite_main.build_boost_setter(
-            store=store,
-            apply_live=adopted.append,
-            environ=_ENVIRONMENT,
-        )
+        owner = _boost_owner(store, adopted)
+        setter = satellite_main.build_boost_setter(owner)
+
         setter(300.0)
+        await _drain_reserved(owner)
         before_a_real_change = _BOOST_OVERRIDES.stat().st_ino
 
         setter(640.0)
+        await _drain_reserved(owner)
         after_a_real_change = _BOOST_OVERRIDES.stat().st_ino
 
         # The store renames a new file into place rather than writing in place,
@@ -3788,6 +3911,7 @@ class TestWritingABoostChosenFromHomeAssistant:
         assert after_a_real_change != before_a_real_change
 
         setter(640.0)
+        await _drain_reserved(owner)
 
         assert _BOOST_OVERRIDES.stat().st_ino == after_a_real_change
         assert store.load() == {"speaker_boost_percent": "640.0"}
@@ -3796,7 +3920,11 @@ class TestWritingABoostChosenFromHomeAssistant:
             pytest.approx(640.0),
         ]
 
-    def test_a_change_after_a_repeat_is_still_written(self, fs: FakeFilesystem) -> None:
+    @pytest.mark.asyncio
+    async def test_a_change_after_a_repeat_is_still_written(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
         """The guard drops a repeat, never the next real move of the slider.
 
         Args:
@@ -3805,15 +3933,13 @@ class TestWritingABoostChosenFromHomeAssistant:
         del fs
         store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
-        setter = satellite_main.build_boost_setter(
-            store=store,
-            apply_live=adopted.append,
-            environ=_ENVIRONMENT,
-        )
+        owner = _boost_owner(store, adopted)
+        setter = satellite_main.build_boost_setter(owner)
 
         setter(640.0)
         setter(640.0)
         setter(300.0)
+        await _drain_reserved(owner)
 
         assert store.load() == {"speaker_boost_percent": "300.0"}
         assert [settings.speaker_boost_percent for settings in adopted] == [
@@ -3821,7 +3947,8 @@ class TestWritingABoostChosenFromHomeAssistant:
             pytest.approx(300.0),
         ]
 
-    def test_a_value_equal_to_the_environments_is_still_pinned(
+    @pytest.mark.asyncio
+    async def test_a_value_equal_to_the_environments_is_still_pinned(
         self,
         fs: FakeFilesystem,
     ) -> None:
@@ -3838,27 +3965,24 @@ class TestWritingABoostChosenFromHomeAssistant:
         del fs
         store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
+        environ = {**_ENVIRONMENT, f"{ENV_PREFIX}SPEAKER_BOOST_PERCENT": "300.0"}
+        owner = _boost_owner(store, adopted, environ)
 
-        satellite_main.build_boost_setter(
-            store=store,
-            apply_live=adopted.append,
-            environ={
-                **_ENVIRONMENT,
-                f"{ENV_PREFIX}SPEAKER_BOOST_PERCENT": "300.0",
-            },
-        )(300.0)
+        satellite_main.build_boost_setter(owner)(300.0)
+        await _drain_reserved(owner)
 
         assert store.load() == {"speaker_boost_percent": "300.0"}
         assert [settings.speaker_boost_percent for settings in adopted] == [
             pytest.approx(300.0),
         ]
 
-    def test_a_store_that_cannot_be_written_is_reported_and_not_raised(
+    @pytest.mark.asyncio
+    async def test_a_store_that_cannot_be_written_is_reported_and_not_raised(
         self,
         fs: FakeFilesystem,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """It runs inside the protocol's loop, so raising would drop a client.
+        """It begins in the protocol's loop, so raising would drop a client.
 
         Args:
             fs: An in-memory filesystem.
@@ -3869,47 +3993,134 @@ class TestWritingABoostChosenFromHomeAssistant:
         fs.create_file(_BOOST_STATE_DIR)
         store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
+        owner = _boost_owner(store, adopted)
 
         with caplog.at_level(logging.ERROR):
-            satellite_main.build_boost_setter(
-                store=store,
-                apply_live=adopted.append,
-                environ=_ENVIRONMENT,
-            )(300.0)
+            satellite_main.build_boost_setter(owner)(300.0)
+            await _drain_reserved(owner)
 
         assert adopted == []
         assert "the speaker boost could not be saved" in caplog.text
 
-    def test_a_store_that_cannot_be_read_is_reported_and_not_raised(
+    @pytest.mark.asyncio
+    async def test_a_store_that_cannot_be_read_is_reported_and_not_raised(
         self,
         fs: FakeFilesystem,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """The read is inside the guard too, so a hand-broken file is reported.
+        """A hand-broken file is reported too, from the same one place.
 
         `OverrideStore.load` raises for a file that exists and is not a JSON
-        object of strings, and the setter reads before it decides whether the
-        write is a repeat. A read left outside the `try` would send that error
-        out of `handle_message` and into the protocol's loop — the very thing
-        the reported-not-raised rule above exists to prevent.
+        object of strings, and the read now happens inside `submit_merged` —
+        under the lock, where the merge that needs it also runs. The reserved
+        task is what catches it, so the error never reaches the protocol's loop.
 
         Args:
             fs: An in-memory filesystem.
             caplog: Where the refusal is looked for.
         """
-        fs.create_file(_BOOST_OVERRIDES, contents="{not json")
         store = OverrideStore(_BOOST_OVERRIDES)
         adopted: list[Settings] = []
+        # Assembled before the file is broken, because that is the order it
+        # happens in: the owner is built at startup from a file that read, and
+        # somebody hand-edits it afterwards.
+        owner = _boost_owner(store, adopted)
+        fs.create_file(_BOOST_OVERRIDES, contents="{not json")
 
         with caplog.at_level(logging.ERROR):
-            satellite_main.build_boost_setter(
-                store=store,
-                apply_live=adopted.append,
-                environ=_ENVIRONMENT,
-            )(300.0)
+            satellite_main.build_boost_setter(owner)(300.0)
+            await _drain_reserved(owner)
 
         assert adopted == []
         assert "the speaker boost could not be saved" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_boost_set_after_shutdown_began_is_reported_not_written(
+        self,
+        fs: FakeFilesystem,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A slider moved while the robot is stopping writes nothing.
+
+        Scheduling a write then would leave a task nothing awaits, against a
+        file the application has finished with — and the setter cannot raise,
+        because it runs in the protocol's loop.
+
+        Args:
+            fs: An in-memory filesystem.
+            caplog: Where the refusal is looked for.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+        owner = _boost_owner(store, adopted)
+        await owner.aclose()
+
+        with caplog.at_level(logging.ERROR):
+            satellite_main.build_boost_setter(owner)(300.0)
+            await _drain_reserved(owner)
+
+        assert store.load() == {}
+        assert adopted == []
+        assert "the speaker boost was not saved" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_boost_set_during_a_transition_survives_it(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """Both controls are entities on one device, and a scene sets both.
+
+        Home Assistant sets the address; the owner reads the file, then suspends
+        closing the source it retired. Home Assistant sets the boost in that
+        window. A setter doing its own read-merge-save would commit there and
+        the transition would then commit the set it computed *before*
+        suspending, so the boost would be gone from the file while still adopted
+        in memory — reverting silently at the next start, with the slider
+        disagreeing with the durable value in the meantime.
+
+        Args:
+            fs: An in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(_BOOST_OVERRIDES)
+        adopted: list[Settings] = []
+        retiring = asyncio.Event()
+        running = _GatedRemoteSource(close_gate=retiring)
+        owner = GroundstationUrlOwner(
+            store=store,
+            resolution=load_settings(_ENVIRONMENT, store.load()),
+            source=ReplaceableRemoteSource(running),
+            factory=lambda settings: _built(settings, _GatedRemoteSource()),
+            environ=_ENVIRONMENT,
+            apply_live=adopted.append,
+        )
+
+        assert owner.reserve_submission(_REPLACEMENT_URL) is True
+        # Enough for the transition to take the lock, read the file and reach
+        # the close it suspends in.
+        for _ in range(6):
+            await asyncio.sleep(0)
+        satellite_main.build_boost_setter(owner)(300.0)
+        retiring.set()
+        await _drain_reserved(owner)
+
+        # Both settings, from two writes that could not see each other's map
+        # before this change and now cannot help but see it.
+        assert store.load() == {
+            "groundstation_url": _REPLACEMENT_URL,
+            "speaker_boost_percent": "300.0",
+        }
+        # Two adoptions, one per committed write, and the boost's is the last
+        # word rather than something the transition overwrote after it.
+        assert [settings.speaker_boost_percent for settings in adopted] == [
+            pytest.approx(DEFAULT_BOOST_PERCENT),
+            pytest.approx(300.0),
+        ]
+        assert [settings.groundstation_url for settings in adopted] == [
+            _REPLACEMENT_URL,
+            _REPLACEMENT_URL,
+        ]
 
 
 @pytest.mark.asyncio

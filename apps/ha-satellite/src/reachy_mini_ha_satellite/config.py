@@ -108,6 +108,7 @@ __all__ = [
     "REDACTED_UNSET",
     "SECRET_SETTINGS",
     "ConfigurationError",
+    "OverrideMerge",
     "OverrideStore",
     "Resolution",
     "SettingSource",
@@ -131,6 +132,18 @@ __all__ = [
 ]
 
 _LOGGER: Final = logging.getLogger(__name__)
+
+# What a writer hands to whoever serializes writes to the overrides file: the
+# overrides as they are when the write begins, in; the complete set to store,
+# out. A function rather than a ready-made mapping because the read has to
+# happen inside the operation that commits — a set computed from a copy read
+# earlier is a set that drops whatever another surface committed in between.
+# Declared here, beside `OverrideStore`, because it is the shape of a change to
+# that file and every writer of it needs the name.
+#
+# A `type` statement rather than an assignment: `Callable` is imported for type
+# checking only, and an assigned alias would evaluate it at import time.
+type OverrideMerge = Callable[[Mapping[str, str]], Mapping[str, str]]
 
 ENV_PREFIX: Final = "REACHY_SATELLITE_"
 
@@ -771,8 +784,19 @@ def validate_groundstation_url_length(url: str) -> None:
     - the settings page with an application attached, through
       `GroundstationUrlOwner._apply`;
     - the same page with none, through `web/app.py`'s own write;
-    - and anything at all that persists a submission, through
-      `apply_settings_change`.
+    - the same page's speaker-boost control, through
+      `GroundstationUrlOwner.reserve_merge` and `_apply`;
+    - and `apply_settings_change`, which resolves through
+      `resolve_submission` rather than through `load_settings`.
+
+    **Two functions persist a submitted set of overrides, and both resolve
+    through `resolve_submission` before they write.** `apply_settings_change` is
+    one; `GroundstationUrlOwner._replace` is the other, writing through
+    `self._store.save` at its commit point — reached only from `_apply`, which
+    has resolved already. Naming both is the honest form of this invariant: it
+    is what the code does, a reader can check it, and it does not quietly become
+    false the next time something else learns to write. A third writer joins the
+    list rather than invalidating the statement.
 
     So an overlong address never reaches source construction or the durable
     file, and the preceding effective value stays the read-back.
@@ -927,11 +951,13 @@ def resolve_submission(
     **The ordering lives here rather than in each caller**, and that is the
     point of the function existing at all. Every surface that can receive an
     address — the settings page with an application behind it, the same page
-    with none, and the Home Assistant control — resolves through this, and
-    `apply_settings_change` does too, so the one path that *persists* a
-    submission cannot be reached with an over-long address whatever a future
-    caller remembers to do. Getting it wrong by omission is what put the
-    migration wording on a runtime refusal twice.
+    with none, and the Home Assistant control — resolves through this; and so
+    does **each of the two functions that persist a submitted address**,
+    `apply_settings_change` and `GroundstationUrlOwner._replace`, the second
+    by way of `_apply`. That is the invariant: not that there is one writer,
+    because there are two, but that no writer is reachable without having
+    resolved here first. Getting it wrong by omission is what put the migration
+    wording on a runtime refusal twice.
 
     Args:
         environ: The environment to resolve against, or `None` for the process
@@ -971,7 +997,10 @@ def apply_settings_change(
     Merging is the caller's, deliberately: a form submits every field and drops
     the ones equal to the layers below, while an entity submits the single name
     it owns. Both then hand the whole `wanted` mapping here, because the store
-    holds a complete set rather than a patch.
+    holds a complete set rather than a patch. *When* that merge runs is not the
+    caller's, though — see `OverrideMerge`: the file has to be read inside
+    whatever serializes writes to it, and on a running robot that is
+    `GroundstationUrlOwner`.
 
     **`groundstation_url` does not travel this path**, and that is the one
     exception worth stating here rather than leaving a reader to discover.
@@ -1013,9 +1042,10 @@ def apply_settings_change(
             for the reason `OverrideStore.save` records: a change that appears
             to have been accepted and was not is the worst outcome available.
     """
-    # `resolve_submission` and not `load_settings`: this is the one path that
-    # persists a submission, so the runtime refusal belongs on it rather than on
-    # each caller's memory of needing one.
+    # `resolve_submission` and not `load_settings`: this function persists a
+    # submission, so the runtime refusal belongs on it rather than on each
+    # caller's memory of needing one. `GroundstationUrlOwner._replace` is the
+    # other function that persists one and does the same, through `_apply`.
     resolved = resolve_submission(environ, wanted)
     store.save(wanted)
     if apply_live is not None:

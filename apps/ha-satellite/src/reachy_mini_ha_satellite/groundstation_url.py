@@ -64,13 +64,25 @@ off the factory's own answer — no candidate while one is running — rather th
 off a list of the settings that produce it, which is a list that goes stale
 without anything noticing.
 
-**One lock, and every read of the durable file happens inside it.** The settings
-page submits a whole form and Home Assistant's control submits one setting, and
-*neither* computes what to store before this owner has the lock: the page hands
-over a merge (`submit_merged`) and the control hands over an address
-(`submit_url`), and the file is read here in both cases. Two writers computing a
-map from a copy read before the lock is how one of them silently drops the
-other's setting, whichever commits first.
+**This owner serializes every write to the overrides file, and that is a
+separate job from owning the address.** It acquired it because of the
+transition: this is the only writer that *suspends* between reading that file
+and committing it — it has a session to retire and another to open in between —
+so any other writer doing its own read, merge and save runs to completion inside
+that window and has its setting discarded when the transition commits the map it
+computed beforehand. Three surfaces write the file and all three hand over a
+merge rather than a map, so the read, the merge and the commit are one
+serialized operation:
+
+| Writer | How it reaches the file |
+|---|---|
+| The settings page | `SettingsHost.apply_settings` → `submit_merged` |
+| Home Assistant's address control | `reserve_submission` → `submit_url` → `submit_merged` |
+| Home Assistant's speaker-boost control | `main.build_boost_setter` → `reserve_merge` → `submit_merged` |
+
+The boost is not an address and this owner has no opinion about it. It is here
+because the file has one lock, and a writer outside that lock is the defect
+rather than the exception.
 
 This is compensation, not a transaction. A filesystem and a network cannot be
 committed together, and claiming they can is how the claim stops being checked.
@@ -89,6 +101,7 @@ from typing import TYPE_CHECKING, Final
 from reachy_mini_ha_satellite.config import (
     GROUNDSTATION_URL_SETTING,
     ConfigurationError,
+    OverrideMerge,
     apply_settings_change,
     resolve_submission,
     validate_groundstation_url_length,
@@ -432,17 +445,57 @@ class GroundstationUrlOwner:
                 with contextlib.suppress(Exception):
                     self._publish()
 
-    async def submit_merged(
-        self,
-        merge: Callable[[Mapping[str, str]], Mapping[str, str]],
-    ) -> Resolution:
+    def reserve_merge(self, merge: OverrideMerge, what: str) -> None:
+        """Schedule one owner-serialized overrides write, from a synchronous loop.
+
+        The counterpart of `reserve_submission` for a control that changes a
+        setting this owner has no special order for. It exists because the
+        ESPHome message loop is synchronous and cannot take an asynchronous
+        lock, and because a control that did its own read-modify-write would be
+        reading a file a suspended transition is about to rewrite — which is how
+        one entity's setting silently disappears while another's is being
+        adopted.
+
+        Args:
+            merge: What to make of the stored overrides.
+            what: What is being changed, for the log line if it is refused.
+        """
+        if self._closed:
+            _LOGGER.error("%s was not saved: the application is shutting down", what)
+            return
+        task = asyncio.get_running_loop().create_task(
+            self._merge_requested(merge, what),
+            name="satellite-overrides-merge",
+        )
+        self._requested.add(task)
+        task.add_done_callback(self._requested.discard)
+
+    async def _merge_requested(self, merge: OverrideMerge, what: str) -> None:
+        """Perform one reserved merge, reporting rather than raising.
+
+        Args:
+            merge: What to make of the stored overrides.
+            what: What is being changed, for the log line.
+        """
+        try:
+            await self.submit_merged(merge)
+        except ConfigurationError as error:
+            # As `_submit_requested` does, and for the same reason: this began
+            # in the protocol's message loop and nothing there can catch it.
+            _LOGGER.error("%s could not be saved: %s", what, error)
+
+    async def submit_merged(self, merge: OverrideMerge) -> Resolution | None:
         """Apply whatever `merge` makes of the overrides, read under the lock.
 
-        The settings page's write path. It hands over the *computation* rather
-        than its result because a complete set of overrides computed from a copy
-        of the file read before the lock is a set that silently drops whatever
-        the other surface committed in between — and both surfaces write this
-        one file now. Reading here is what makes the read, the merge and the
+        **Every surface that writes the overrides file arrives here**, one way
+        or another: the settings page directly, Home Assistant's address control
+        through `submit_url`, and its speaker-boost control through
+        `reserve_merge`. Each hands over the *computation* rather than its
+        result, because a set of overrides computed from a copy of the file read
+        before the lock is a set that silently drops whatever another surface
+        committed in between — and this owner's transition suspends between its
+        own read and its own commit, which is exactly the window that makes such
+        a drop reachable. Reading here is what makes the read, the merge and the
         commit one serialized operation.
 
         Args:
@@ -450,7 +503,8 @@ class GroundstationUrlOwner:
                 file as it is at the moment this operation begins.
 
         Returns:
-            The settings in effect after the change.
+            The settings in effect afterwards, or `None` when the merge made no
+            difference to what is stored and nothing was written.
 
         Raises:
             ConfigurationError: For everything `submit` raises, and for stored
@@ -459,7 +513,19 @@ class GroundstationUrlOwner:
         async with self._lock:
             if self._closed:
                 raise ConfigurationError(_OVERTAKEN_MESSAGE)
-            return await self._apply(merge(self._store.load()))
+            previous = self._store.load()
+            wanted = merge(previous)
+            if wanted == previous:
+                # Re-resolving and rewriting the file would spend an erase cycle
+                # on the robot's card to arrive at what is already there — the
+                # write the vendored `ServerState.persist_volume` declines for
+                # the same reason. The comparison is against the file as read
+                # *here*, so it is exact rather than nearly right: a caller
+                # comparing before the lock could skip a write another surface
+                # had just made necessary.
+                await self._restore_if_unavailable()
+                return None
+            return await self._apply(wanted)
 
     async def submit(self, wanted: Mapping[str, str]) -> Resolution:
         """Apply one complete set of overrides that depend on nothing stored.
@@ -489,11 +555,9 @@ class GroundstationUrlOwner:
         """Change one address, merging it into whatever else is stored.
 
         Home Assistant's control owns one setting, so it submits one rather than
-        a whole form — and the merge that turns it into a complete set of
-        overrides happens **under the lock**, after the stored file is read
-        there. Two surfaces write that file now; a merge computed from a copy
-        read before the lock silently drops whichever setting the other surface
-        committed in between.
+        a whole form. It is `submit_merged` with the merge that pins that one
+        name, written here so the entity's path has a name of its own and so
+        there is one spelling of what "changing the address" means to the file.
 
         Args:
             url: The address, already known to be short enough.
@@ -506,20 +570,9 @@ class GroundstationUrlOwner:
             ConfigurationError: For everything `submit` raises, and for stored
                 overrides that no longer parse.
         """
-        async with self._lock:
-            if self._closed:
-                raise ConfigurationError(_OVERTAKEN_MESSAGE)
-            previous = self._store.load()
-            wanted = {**previous, GROUNDSTATION_URL_SETTING: url}
-            if wanted == previous:
-                # The stored overrides already say this, so the address in
-                # effect already is this. Re-resolving and rewriting the file
-                # would spend an erase cycle on the robot's card to arrive at
-                # what is there — the same write `build_boost_setter` and the
-                # vendored `ServerState.persist_volume` both decline.
-                await self._restore_if_unavailable()
-                return None
-            return await self._apply(wanted)
+        return await self.submit_merged(
+            lambda previous: {**previous, GROUNDSTATION_URL_SETTING: url},
+        )
 
     async def _apply(self, wanted: Mapping[str, str]) -> Resolution:
         """Apply one complete set of overrides, with the lock already held.

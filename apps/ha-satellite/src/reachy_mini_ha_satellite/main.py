@@ -89,10 +89,10 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
 from reachy_mini_ha_satellite.config import (
     OVERRIDES_FILENAME,
     ConfigurationError,
+    OverrideMerge,
     OverrideStore,
     Resolution,
     Settings,
-    apply_settings_change,
     as_configured_string,
     load_settings,
     log_resolved_configuration,
@@ -136,11 +136,11 @@ from reachy_mini_ha_satellite.ports import (
     SourceSelection,
 )
 from reachy_mini_ha_satellite.wake_word import WakeWordDetector
-from reachy_mini_ha_satellite.web import OverrideMerge, create_app
+from reachy_mini_ha_satellite.web import create_app
 from reachy_session_client import DEFAULT_BACKOFF, Backoff, Credential, SessionClient
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
     from pymicro_wakeword import MicroWakeWord
     from pyopen_wakeword import OpenWakeWord
@@ -731,7 +731,7 @@ class SatelliteApplication:
         owner = self._groundstation
         return None if owner is None else owner.resolution
 
-    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution | None:
         """Apply what a submission makes of the stored overrides.
 
         The settings page's one write path. It goes through the address owner
@@ -746,7 +746,8 @@ class SatelliteApplication:
             merge: What to make of the stored overrides.
 
         Returns:
-            The settings in effect after the change.
+            The settings in effect after the change, or `None` when the merge
+            made no difference to what is stored and nothing was written.
 
         Raises:
             ConfigurationError: If the submission was refused, or if no owner is
@@ -2158,12 +2159,7 @@ class _NoPerception:
         """Do nothing, successfully."""
 
 
-def build_boost_setter(
-    *,
-    store: OverrideStore,
-    apply_live: Callable[[Settings], None],
-    environ: Mapping[str, str] | None = None,
-) -> Callable[[float], None]:
+def build_boost_setter(owner: GroundstationUrlOwner) -> Callable[[float], None]:
     """Build what the speaker-boost control writes a chosen value through.
 
     A function of its own rather than a closure inside `build_application`, so
@@ -2172,69 +2168,57 @@ def build_boost_setter(
     wheel's own wake-word models and cues off a real disk, which a fake
     filesystem cannot serve.
 
-    `apply_live` is what reaches the audio adapter, so the returned setter never
-    touches `ReachyAudio` and there is exactly one path from "a boost was
-    chosen" to "the outputs heard about it", whichever surface chose it.
+    **It goes through the address owner, and that is not because it changes the
+    address.** It does not. It goes through it because that owner serializes
+    writes to the overrides file, and this control writes the same file. The
+    owner's transition suspends between reading that file and committing it — it
+    has a session to retire and another to open in between — and a setter doing
+    its own read, merge and save would run to completion inside that suspension,
+    on the same message loop, from the same Home Assistant device. The
+    transition would then commit the set it computed before suspending and the
+    boost would be gone from the file while still adopted in memory: a slider
+    that disagrees with the durable value and silently reverts at the next
+    start. A scene setting both entities is all it takes.
+
+    Adoption comes from the owner too, through the `apply_live` it was built
+    with, so there is still exactly one path from "a boost was chosen" to "the
+    outputs heard about it", whichever surface chose it.
+
+    **The write is scheduled rather than performed**, because the ESPHome
+    message loop is synchronous and cannot take an asynchronous lock — the same
+    arrangement `reserve_submission` uses for the address. The reply the entity
+    sends therefore carries the value in effect *before* the write lands, and
+    `apply_live`'s push corrects it a moment later. That is what "the response
+    carries a read-back, not an echo" already promised.
 
     **It always writes an override, even for a value equal to the environment's**
     — unlike `web/app.py`'s `_overrides_from`, which drops one matching the layer
     beneath. A reviewer will compare the two, so: a form renders every field and
     submits values nobody touched, whereas a slider only moves when somebody
     moves it, and there is no "revert to the environment" gesture on a slider to
-    undo a pin with.
+    undo a pin with. A write that would replace the file with itself is still
+    declined, by `submit_merged`, which compares against the file it read under
+    the lock rather than one read before it.
 
     Args:
-        store: Where the overrides are kept.
-        apply_live: What adopts the newly resolved settings.
-        environ: The environment to resolve against. Defaults to the process
-            environment, which is what `run` resolved the running configuration
-            from.
+        owner: What serializes writes to the overrides file, and what holds the
+            environment and the live adoption they are resolved against.
 
     Returns:
         A setter taking the boost in percent.
     """
 
     def _set_boost(percent: float) -> None:
-        """Persist a boost chosen from Home Assistant, and adopt it at once.
+        """Ask for a boost chosen from Home Assistant to be persisted and adopted.
 
         Args:
             percent: The boost, already clamped by the entity that offers it.
         """
-        try:
-            previous = store.load()
-            wanted = {
-                **previous,
-                "speaker_boost_percent": as_configured_string(percent),
-            }
-            # Equality with the *file*, which is a different question from the
-            # one `build_boost_setter`'s docstring declines to act on: that one
-            # is with the environment layer, and a first set equal to the
-            # environment's value still writes its pin. This only drops a write
-            # that would replace the file with itself — a scene or a scheduled
-            # automation re-sending the value already stored, which would
-            # otherwise re-resolve the settings and spend an erase cycle on the
-            # robot's card each time. The vendored
-            # `ServerState.persist_volume` declines the same write for the same
-            # reason.
-            if wanted == previous:
-                return
-            apply_settings_change(
-                wanted,
-                store=store,
-                environ=environ,
-                apply_live=apply_live,
-            )
-        except ConfigurationError as error:
-            # Reported rather than raised: this runs inside the ESPHome
-            # protocol's message loop, and an overrides file that cannot be
-            # read or written must not drop the connection. The read is inside
-            # the `try` for that reason — `OverrideStore.load` raises the same
-            # error for a file somebody hand-edited into invalid JSON, and a
-            # broken file is exactly when a slider is likeliest to be reached
-            # for. The entity reads the boost back afterwards, so Home
-            # Assistant is told the value actually in effect rather than the
-            # one it asked for.
-            _LOGGER.error("the speaker boost could not be saved: %s", error)
+        chosen = as_configured_string(percent)
+        owner.reserve_merge(
+            lambda previous: {**previous, "speaker_boost_percent": chosen},
+            "the speaker boost",
+        )
 
     return _set_boost
 
@@ -2423,10 +2407,10 @@ async def build_application(
         state=state,
         key=len(state.entities),
         get_percent=lambda: application.settings.speaker_boost_percent,
-        set_percent=build_boost_setter(
-            store=store,
-            apply_live=application.apply_live,
-        ),
+        # The address owner, because it serializes writes to the overrides file
+        # this control also writes — not because the boost is an address. See
+        # `build_boost_setter`.
+        set_percent=build_boost_setter(groundstation),
     )
     state.entities.append(boost)
     for group in registered_motor_groups:

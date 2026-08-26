@@ -64,6 +64,7 @@ from reachy_mini_ha_satellite.config import (
     LIVE_SETTINGS,
     SECRET_SETTINGS,
     ConfigurationError,
+    OverrideMerge,
     Resolution,
     Settings,
     apply_settings_change,
@@ -77,24 +78,14 @@ from reachy_mini_ha_satellite.config import (
 from reachy_mini_ha_satellite.web.render import CLEAR_PREFIX, render_settings_page
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
 
     from starlette.requests import Request
     from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
     from reachy_mini_ha_satellite.config import OverrideStore
 
-__all__ = ["OverrideMerge", "SettingsHost", "base_form_values", "create_app"]
-
-# What a write hands to whoever owns the order: the overrides as they are when
-# the write begins, in; the complete set to store, out. A function rather than a
-# ready-made mapping because the read has to happen inside the operation that
-# commits, and this is the only shape that lets the page decide *what* to write
-# while the application decides *when* the file is read.
-#
-# A `type` statement rather than an assignment: `Callable` is imported for type
-# checking only, and an assigned alias would evaluate it at import time.
-type OverrideMerge = Callable[[Mapping[str, str]], Mapping[str, str]]
+__all__ = ["SettingsHost", "base_form_values", "create_app"]
 
 # What a form submission is allowed to be. A settings page is not an upload
 # endpoint, and a body larger than this is either a mistake or an attempt.
@@ -157,7 +148,7 @@ class SettingsHost(Protocol):
         """
         ...
 
-    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution | None:
         """Persist and adopt what `merge` makes of the stored overrides.
 
         Asked of the application rather than performed here, because the order
@@ -178,7 +169,8 @@ class SettingsHost(Protocol):
                 file as it is when the write begins.
 
         Returns:
-            The settings in effect after the change.
+            The settings in effect after the change, or `None` when the merge
+            made no difference to what is stored and nothing was written.
         """
         ...
 
@@ -372,7 +364,7 @@ def create_app(
                 return live
         return current.resolution
 
-    async def _write(merge: OverrideMerge) -> Resolution:
+    async def _write(merge: OverrideMerge) -> Resolution | None:
         """Persist and adopt one submission, through whoever owns the order.
 
         Resolved here rather than at each of the two writing paths:
@@ -388,7 +380,8 @@ def create_app(
             merge: What to make of the stored overrides.
 
         Returns:
-            The settings in effect afterwards.
+            The settings in effect afterwards, or `None` when nothing needed
+            writing.
 
         Raises:
             ConfigurationError: If the address would change with no application
@@ -482,12 +475,15 @@ def create_app(
                 status_code=400,
             )
 
+        # `None` is a save that changed nothing the file did not already say, so
+        # there is no new resolution to record and `changed` below is empty.
+        if resolved is not None:
+            current.resolution = resolved
         changed = tuple(
             name
             for name in setting_names()
             if previous.get(name, base[name]) != wanted.get(name, base[name])
         )
-        current.resolution = resolved
 
         return _redirect_after(changed)
 
@@ -530,7 +526,8 @@ def create_app(
                 _page(_resolved(), store, application, error=str(error)),
                 status_code=400,
             )
-        current.resolution = resolved
+        if resolved is not None:
+            current.resolution = resolved
         return _redirect_after(tuple(sorted(discarded)))
 
     async def stop(request: Request) -> Response:

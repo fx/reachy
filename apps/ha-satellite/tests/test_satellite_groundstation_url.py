@@ -409,6 +409,49 @@ class TestOneSharedBound:
         assert source.connected is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("length", [256, 512])
+    async def test_the_owners_own_commit_is_never_reached_by_an_overlong_address(
+        self,
+        fs: FakeFilesystem,
+        length: int,
+    ) -> None:
+        """The second of the two functions that persist a submitted address.
+
+        `_replace` writes through `self._store.save` at its commit point, so
+        `config.apply_settings_change` is not the only writer and the invariant
+        needs evidence from this one too. It gets it by the commit never being
+        reached: `_apply` resolves through `resolve_submission` first, so an
+        over-long address is refused before a candidate is even built.
+
+        Args:
+            fs: The in-memory filesystem.
+            length: How long the submitted address is.
+        """
+        del fs
+        factory = FakeFactory(FakeSource(SECOND_URL))
+        owner, _source, store = build_owner(
+            factory=factory,
+            initial=FakeSource(FIRST_URL),
+        )
+        # Counting rather than reading the file back: what is under test is the
+        # commit point of `_replace`, and a save that happened and was undone
+        # would leave the same empty file as one that never happened.
+        writes = _CountingStore(store.path)
+        owner._store = writes
+
+        # The runtime remedy's own sentence, so this is evidence that `_apply`
+        # resolved through `resolve_submission` rather than through anything
+        # that would have produced the startup migration's wording instead.
+        with pytest.raises(ConfigurationError, match=r"Nothing was changed\."):
+            await owner.submit(
+                {GROUNDSTATION_URL_SETTING: address_of_length(length)},
+            )
+
+        assert writes.saves == 0
+        assert factory.asked == []
+        assert stored(store) == {}
+
+    @pytest.mark.asyncio
     async def test_nothing_is_truncated_to_fit(self, fs: FakeFilesystem) -> None:
         """A shortened address is a different groundstation, so none is written.
 

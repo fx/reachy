@@ -61,7 +61,7 @@ if TYPE_CHECKING:
     from pyfakefs.fake_filesystem import FakeFilesystem
     from starlette.applications import Starlette
 
-    from reachy_mini_ha_satellite.web import OverrideMerge
+    from reachy_mini_ha_satellite.config import OverrideMerge
 
 # Every character that changes shape when something escapes it. Never anybody's
 # — see the root AGENTS.md on what may enter a tracked file in a public
@@ -129,7 +129,7 @@ class RecordingHost:
         """
         return self.live
 
-    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution | None:
         """Persist and adopt the way an application with no address owner does.
 
         The real application routes this through
@@ -143,7 +143,9 @@ class RecordingHost:
             merge: What to make of the stored overrides.
 
         Returns:
-            The settings in effect afterwards.
+            The settings in effect afterwards. Never `None` here: the stand-in
+            writes whatever it is given, and declining an identical write is
+            `submit_merged`'s business rather than the page's.
 
         Raises:
             ConfigurationError: Whatever `refusal` was set to, standing in for
@@ -1687,14 +1689,15 @@ class _OwnedHost(RecordingHost):
             apply_live=self.apply_live,
         )
 
-    async def apply_settings(self, merge: OverrideMerge) -> Resolution:
+    async def apply_settings(self, merge: OverrideMerge) -> Resolution | None:
         """Hand the computation to the owner, as the application does.
 
         Args:
             merge: What to make of the stored overrides.
 
         Returns:
-            The settings in effect afterwards.
+            The settings in effect afterwards, or `None` when nothing needed
+            writing.
         """
         return await self.owner.submit_merged(merge)
 

@@ -181,10 +181,15 @@ deployment can get irreversibly wrong.
   speaks to a submission, where nothing was written, there is no entry and the
   robot is running. Every surface that receives an address therefore resolves
   through `config.resolve_submission`, which runs the runtime check before
-  `load_settings` can produce the migration wording, and
-  `apply_settings_change` resolves through it too, so the one path that
-  *persists* a submission cannot be reached with an over-long address whatever
-  a new caller remembers. `reserve_submission` is the single direct caller of
+  `load_settings` can produce the migration wording. **Two functions persist a
+  submitted set of overrides and both resolve through it first**:
+  `config.apply_settings_change`, and `GroundstationUrlOwner._replace`, which
+  writes through `self._store.save` at its commit point and is reached only
+  from `_apply`. The invariant is not that there is one writer — there are two
+  — but that no writer is reachable without having resolved through
+  `resolve_submission`, so a new caller cannot persist an address no surface
+  could report. A third writer joins that list rather than invalidating it.
+  `reserve_submission` is the single direct caller of
   the validator, because it runs in the protocol's message loop and cannot
   await. Resolving a submission with bare `load_settings` is the defect this
   arrangement exists to make impossible. `groundstation_url.
@@ -218,8 +223,15 @@ deployment can get irreversibly wrong.
   the owner's lock**: the page hands over a merge (`submit_merged`) and the
   entity hands over an address (`submit_url`), because two surfaces write that
   file and a map computed before the lock drops whatever the other committed in
-  between — in whichever order they arrive. A page assembled with no owner
-  (`create_app(application=None)`) refuses an address change rather than
+  between — in whichever order they arrive. **That applies to every writer of
+  that file, not only the two that write an address**: the owner's transition is
+  the only writer that suspends between its read and its commit, so a writer
+  outside the lock has its setting discarded when the transition commits the map
+  it computed beforehand. The speaker-boost control therefore goes through
+  `reserve_merge` as well — not because a boost is an address, but because the
+  file has one lock. Three writers today, all through `submit_merged`: the
+  settings page, `submit_url`, and the boost setter. A page assembled with no
+  owner (`create_app(application=None)`) refuses an address change rather than
   persisting one nothing adopted; every other setting still writes.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys

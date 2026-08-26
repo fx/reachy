@@ -12,7 +12,6 @@ what a settings page is allowed to do to a running robot.
 """
 
 from reachy_mini_ha_satellite.web.app import (
-    OverrideMerge,
     SettingsHost,
     base_form_values,
     create_app,
@@ -26,7 +25,6 @@ from reachy_mini_ha_satellite.web.render import (
 
 __all__ = [
     "CLEAR_PREFIX",
-    "OverrideMerge",
     "SettingsHost",
     "base_form_values",
     "create_app",
