@@ -22,6 +22,10 @@ specs:
     path: specs/ha-satellite/
     description: The robot-side ESPHome voice satellite for Home Assistant
     status: active
+  - name: home-assistant-configuration-and-camera-feed
+    path: specs/home-assistant-configuration-and-camera-feed/
+    description: Live Home Assistant motor and groundstation controls plus the bounded groundstation MJPEG feed
+    status: active
   - name: perception
     path: specs/perception/
     description: Face and gesture detection — model licensing, detection semantics and accuracy requirements
@@ -173,3 +177,10 @@ changes:
     spec: gaze-control
     status: complete
     depends_on: ["0018"]
+  - id: "0020"
+    name: home-assistant-configuration-and-camera-feed
+    path: changes/0020-home-assistant-configuration-and-camera-feed.md
+    description: Safe live motor groups, immediate groundstation replacement, and a bounded Home Assistant MJPEG feed
+    spec: home-assistant-configuration-and-camera-feed
+    status: draft
+    depends_on: ["0017", "0018", "0019"]

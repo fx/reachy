@@ -11,15 +11,20 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** All nine specs and
-all 92 requirements are now registered in `.duvet/config.toml`, so `duvet report
---ci` and `duvet query -c implementation` check the complete requirement set.
-The distinction still matters: duvet also loads any specification an annotation
-points at before registration, which is why an older snapshot could contain more
-requirement text than the gate covered. That historical mismatch ended when 0015
-registered architecture and 0019 registered gaze-control with its final safety,
-diagnostics and deterministic acceptance evidence in place. Regeneration is
-byte-identical, and a green run is now evidence about all nine specs. See
+**`.duvet/snapshot.txt` records annotations, not coverage.** All nine
+implemented specs and all 92 implemented requirements are registered in
+`.duvet/config.toml`, so `duvet report --ci` and `duvet query -c implementation`
+check the complete implemented requirement set. The proposed Home Assistant
+configuration and camera-feed spec adds REQ-093–098 but is deliberately absent
+from both registration and snapshot until change 0020's final implementation
+pull request supplies its traces; do not report that proposal sequencing as a
+coverage defect. The distinction still matters: duvet also loads any
+specification an annotation points at before registration, which is why an older
+snapshot could contain more requirement text than the gate covered. That
+historical mismatch ended when 0015 registered architecture and 0019 registered
+gaze-control with its final safety, diagnostics and deterministic acceptance
+evidence in place. Regeneration is byte-identical for the registered corpus, and
+a green run is evidence about all nine implemented specs. See
 `.duvet/config.toml` for each registration rationale and for why annotations are
 written `#:=`/`#:%` rather than duvet's documented `#=`/`#%`.
 

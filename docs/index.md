@@ -9,6 +9,7 @@
 | [gaze-control](specs/gaze-control/) | Predictive visual servoing and coordinated head-body motion for stable, natural face tracking | active |
 | [groundstation](specs/groundstation/) | The off-robot service hosting heavy computation as pluggable capabilities | active |
 | [ha-satellite](specs/ha-satellite/) | The robot-side ESPHome voice satellite for Home Assistant | active |
+| [home-assistant-configuration-and-camera-feed](specs/home-assistant-configuration-and-camera-feed/) | Live Home Assistant motor and groundstation controls plus the bounded groundstation MJPEG feed | active |
 | [perception](specs/perception/) | Face and gesture detection — model licensing, detection semantics and accuracy requirements | active |
 | [provisioning](specs/provisioning/) | Idempotent Ansible provisioning from a stock robot image to a configured state | active |
 | [reachyctl](specs/reachyctl/) | The command-line tool for deploying, configuring and diagnosing a robot | active |
@@ -37,3 +38,4 @@
 | 0017 | [speaker-controls-in-home-assistant](changes/0017-speaker-controls-in-home-assistant.md) | [ha-satellite](specs/ha-satellite/) | complete | 0016 |
 | 0018 | [satellite-runtime-stability](changes/0018-satellite-runtime-stability.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
 | 0019 | [predictive-gaze-and-coordinated-motion](changes/0019-predictive-gaze-and-coordinated-motion.md) | [gaze-control](specs/gaze-control/) | complete | 0018 |
+| 0020 | [home-assistant-configuration-and-camera-feed](changes/0020-home-assistant-configuration-and-camera-feed.md) | [home-assistant-configuration-and-camera-feed](specs/home-assistant-configuration-and-camera-feed/) | draft | 0017, 0018, 0019 |
