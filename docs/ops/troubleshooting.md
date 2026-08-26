@@ -511,17 +511,40 @@ and `doctor` has no check for it. Ask the endpoint directly, from a host that ca
 reach the groundstation:
 
 ```
-curl --silent --show-error --include --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
+curl --silent --show-error --dump-header - --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
 ```
 
-It answers one of four things, and each is a different investigation:
+**Executed** against a service with no robot connected to it:
 
-| Status | Body | What to do |
+```
+HTTP/1.1 503 Service Unavailable
+date: Wed, 26 Aug 2026 20:48:51 GMT
+server: uvicorn
+cache-control: no-store
+content-length: 30
+content-type: application/json
+```
+
+`--dump-header -` and not `--include`: a granted stream never ends, so the body
+has to go to `/dev/null` — and `--include` writes the status line and the headers
+into that same stream, which would leave you reading nothing at all. The status
+line is what this question turns on, and it is one of four:
+
+| Status | The `feed` value in the body | What to do |
 |---|---|---|
-| `200` | a multipart stream | The feed is fine; the fault is between Home Assistant and the groundstation — check the URL the integration was given and what the network between them allows |
+| `200` | none; the body is the stream | The feed is fine; the fault is between Home Assistant and the groundstation — check the URL the integration was given and what the network between them allows |
 | `503` | `no_eligible_session` | No robot session is up. That is [`groundstation.session`](#groundstationsession) |
 | `409` | `ambiguous_sessions` | Two or more robots are authenticated against one groundstation. The feed refuses to choose; give each robot its own groundstation |
 | `429` | `viewer_capacity_reached` | Four viewers already hold the stream. Close the browser tabs and dashboards holding it, or wait — a disconnected viewer gives its slot back at once |
+
+Every refusal is short JSON naming that situation, so once the status is not
+`200` the body is safe to print — repeat the request with `--include` and no
+`--output` and it arrives under the headers. **Executed** against the same
+service, the last line was:
+
+```
+{"feed":"no_eligible_session"}
+```
 
 A `503` immediately after a robot reconnects is expected and brief: the feed
 holds no frame from a session that ended, so it stays unavailable until the robot

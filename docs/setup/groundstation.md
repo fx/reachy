@@ -454,10 +454,12 @@ M-^?M-XM-^?M-`^@^PJFIF^@^A^A^@^@^A^@^A^@^@M-^?M-[^@C^@^C^B^B^B^B^B^C^B^B^B^C^C^C
 start of a JPEG — `cat -v` is what makes both visible. The bytes are the robot's
 own: nothing here re-encodes them.
 
-> **How these three transcripts were produced.** The session was driven by this
-> repository's committed fixture frame rather than by a robot's camera, the same
-> way `just image-verify` drives one, so the 9276 bytes above are that fixture's.
-> A robot's session produces the same response with its own frames.
+> **How every transcript in this step was produced.** No robot was involved in
+> any of them. The sessions were driven by this repository's committed fixture
+> frames rather than by a camera, the same way `just image-verify` drives one, so
+> the 9276 bytes above are a fixture's; the 409 below came from opening a second
+> such session, and the 429 from four `curl` viewers holding the stream while a
+> fifth asked. A robot's session produces the same responses with its own frames.
 
 Three more things are worth knowing before you point anything at it.
 

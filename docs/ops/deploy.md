@@ -156,15 +156,31 @@ Only if you configured one — Home Assistant's MJPEG IP Camera integration read
 camera that went unavailable with nothing else to explain it.
 
 ```
-curl --silent --show-error --include --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
+curl --silent --show-error --dump-header - --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
 ```
 
-With the robot reconnected this answers `200` and a
-`multipart/x-mixed-replace` content type. Immediately after a restart it answers
-`503 no_eligible_session` instead, and briefly: the feed holds no frame from a
-session that ended, so it stays unavailable until the robot's next frame arrives.
+`--dump-header -` and not `--include`: the response is a stream that never ends,
+so the body has to go to `/dev/null` and `--include` would send the status line
+and the headers there with it, leaving nothing on the terminal to read.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No output is recorded for this step. What
+> it prints depends on a robot having reconnected to the service you just
+> restarted, and nothing in this repository has a Reachy Mini attached. The
+> endpoint's own answers *are* recorded, against a real service driven by a
+> committed fixture frame — see
+> [the groundstation runbook](../setup/groundstation.md#8-look-at-what-the-robot-is-sending).
+> What has never been performed is this step: on a live deployment, after a
+> restart, with a robot reconnecting.
+
+A `200` with a `multipart/x-mixed-replace` content type is the outcome to look
+for; the status line is all this command shows, because the body is where the
+stream would be. A `503` immediately after a restart is expected and brief: the
+feed holds no frame from a session that ended, so it stays unavailable until the
+robot's next frame arrives.
 [The endpoint's four answers](../setup/groundstation.md#8-look-at-what-the-robot-is-sending)
-say what any other status means.
+say what any other status means, and
+[the troubleshooting entry](troubleshooting.md#the-home-assistant-camera-shows-nothing)
+is how to read the reason out of a refusal's body.
 
 ### Rolling back
 
