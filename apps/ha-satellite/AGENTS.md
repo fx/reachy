@@ -50,6 +50,8 @@ that apply here.
 | `src/reachy_mini_ha_satellite/behaviour/` | The pure decision layer: pipeline expression, source-qualified face selection, predictive gaze estimation, bounded coordinated trajectories and head arbitration |
 | `src/reachy_mini_ha_satellite/wake_word.py` | What actually *runs* the wake-word models over captured audio — the thresholds, the refractory window and the mute check, with only the model calls behind a seam |
 | `src/reachy_mini_ha_satellite/config.py` | Settings, their three layers, and the one place a secret is declared to be one |
+| `src/reachy_mini_ha_satellite/groundstation_url.py` | The serialized replacement of the groundstation address: the source factory, the transition order, the durable commit, compensation and bounded reconstruction |
+| `src/reachy_mini_ha_satellite/groundstation_entities.py` | The Home Assistant text control over that address |
 | `src/reachy_mini_ha_satellite/web/` | The settings interface REQ-049 requires |
 | `src/reachy_mini_ha_satellite/main.py` | The composition root: ports to adapters, the loop, and the four services |
 | `src/reachy_mini_ha_satellite/daemon_app.py` | The `reachy_mini_apps` entry point, and the ONLY module that imports the SDK |
@@ -167,6 +169,22 @@ deployment can get irreversibly wrong.
   starting, but predictive control reads none of them. They stay outside
   `LIVE_SETTINGS`, are read-only and marked `legacy compatibility; ignored` on
   the settings surface, and an ordinary save drops stale override copies.
+- **The groundstation address has one bound and one write path.**
+  `reachy_contracts.settings.SESSION_URL_MAX_LENGTH` is the 255 characters a
+  Home Assistant text state can carry, and `config.GROUNDSTATION_URL_MAX_LENGTH`
+  is that constant rather than a second number: the settings model, the settings
+  page's field, the text entity's declared maximum and both submission paths all
+  read it. A released 256–512-character value refuses startup, naming the layer
+  that holds it, and is never truncated. `groundstation_url.
+  GroundstationUrlOwner` is the only thing that writes the setting, because the
+  order matters — prepare, retire, start, **commit the durable file**, publish —
+  and `config.apply_settings_change` persists first, which for this setting
+  would let a restart adopt what runtime rejected. It owns the bounded,
+  cancellable reconstruction of a source that failed before it existed, since
+  the connectivity supervisor cannot supervise an object that does not exist.
+  Anything that reaches around it, or a second `RemotePerception` alongside
+  `ReplaceableRemoteSource`'s one delegate, is the overlap this ordering exists
+  to exclude.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys
   a device on what it announces, so a derived default would be correct on a

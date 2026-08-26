@@ -273,7 +273,7 @@ never by value.
 | `REACHY_SATELLITE_FACE_TRACKING_ENABLED` | `true` | Whether predictive gaze follows a face at all. **Needs a restart.** |
 | `REACHY_SATELLITE_BODY_MOTION_ENABLED` | `false` | Whether predictive gaze coordinates body yaw with its world head target. Provisional, explicit opt-in, and **needs a restart**. |
 | `REACHY_SATELLITE_DETECTION_SOURCE` | `remote` | `remote`, `local`, or `remote_with_local_fallback`. |
-| `REACHY_SATELLITE_GROUNDSTATION_URL` | none | Where the groundstation serves its session endpoint. `ws://` or `wss://`, with no user information, query or fragment. Required unless the source is `local`. |
+| `REACHY_SATELLITE_GROUNDSTATION_URL` | none | Where the groundstation serves its session endpoint. `ws://` or `wss://`, with no user information, query or fragment, and **at most 255 characters** — see below. Required unless the source is `local`. **Applies at once**: it is changeable from the settings page and from Home Assistant without a restart. |
 | `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL` | none | **Secret.** The shared secret presented to open a session. Required whenever a session is opened. |
 | `REACHY_SATELLITE_FRAME_INTERVAL_SECONDS` | `0.1` | How often a frame goes up to the groundstation. |
 | `REACHY_SATELLITE_STALENESS_SECONDS` | `2.0` | How long a detection stays worth acting on. Past it the head returns to neutral. |
@@ -292,6 +292,89 @@ never by value.
 **One setting is secret**: `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL`. It is
 reported as set or unset everywhere it is reported, and its value appears in no
 log line, no page and no error message.
+
+### The groundstation address is capped at 255 characters
+
+Home Assistant reports the address as a text entity, and an ESPHome text state
+carries at most 255 characters. One bound therefore applies everywhere the
+address is accepted: the settings model, the settings page's field, the Home
+Assistant control's declared maximum, and both submission paths. It is declared
+once, in `reachy_contracts`, so `reachyctl config` and the provisioning
+declaration validate against the same number.
+
+Nothing is truncated. A shortened address is a different groundstation, so an
+address that does not fit is refused rather than trimmed.
+
+**Upgrading from a release that accepted 512 characters.** The previous settings
+model allowed twice this length. If an existing installation has one between 256
+and 512 characters — in the daemon's environment or in the overrides file the
+settings page writes — the upgraded application **refuses to start** and says
+which of the two layers holds it and what to do about it. The refusal never
+repeats the address, because the address is reported by value on every surface
+and one that cannot be represented must not reach the boot log.
+
+Two remedies, one per layer:
+
+- **Environment.** Set `REACHY_SATELLITE_GROUNDSTATION_URL` to an address of 255
+  characters or fewer, or unset it, and start the application again. On a robot
+  provisioned by `reachyctl`, change it there — see the
+  [robot runbook](../setup/robot.md).
+- **Persisted override.** The settings page wrote it. Remove the
+  `groundstation_url` entry from `<state_dir>/settings.json`, or replace it with
+  a shorter address, and start the application again.
+
+*Pending hardware verification: the transcript of a robot refusing to start on a
+legacy over-long address has not been recorded, because nothing in this
+repository has a Reachy Mini attached. The behaviour is covered by
+`apps/ha-satellite/tests/test_satellite_config.py` at 255, 256 and 512
+characters and from both layers.*
+
+### Replacing the groundstation while the satellite runs
+
+Both surfaces — the settings page and Home Assistant's `groundstation_url` text
+control — hand the whole submission to one owner, which performs the change in a
+fixed order:
+
+1. resolve and validate the candidate, refusing an over-long or unusable address
+   before anything is built or written;
+2. cancel and await any restoration attempt still running;
+3. build the replacement source;
+4. retire and close the preceding one;
+5. start the replacement;
+6. **atomically replace the durable settings file** — this is the commit point;
+7. publish the new address as the effective read-back.
+
+**The durable write is last on purpose.** Persisting first and adopting second
+would let a change the running application rejected become the file the next
+start reads, so a robot would recover into the configuration that broke it.
+
+**Any failure before step 6 leaves the file untouched**, and the preceding
+address stays durable, effective and what both surfaces report. The owner then
+rebuilds the preceding source from the configuration it retained. If that
+rebuild fails it retries a bounded number of times with an increasing, capped
+delay, closing each partly built source before the next attempt, and stops. What
+is true after it stops:
+
+- the effective and durable address is still the preceding one;
+- remote health is **unavailable** — there is no session client, rather than a
+  broken one;
+- local detection remains available wherever
+  `REACHY_SATELLITE_DETECTION_SOURCE` selects a fallback;
+- no unbounded recovery work and no second, overlapping client is left behind.
+
+A later submission, or a restart, begins a fresh attempt. A submission that
+arrives while a restoration is pending cancels and awaits it first, and shutdown
+does the same, so a source built too late is closed rather than installed.
+
+This is compensation rather than a transaction: a filesystem and a network
+cannot be committed together. What holds after every outcome is that the durable
+value, the one eligible remote source and both read-backs describe the same
+address.
+
+*Pending hardware verification: replacing a live groundstation against a real
+robot and a real Home Assistant has not been run, so no transcript is recorded
+here. The ordering, every failure point and the bounded restoration are covered
+by `apps/ha-satellite/tests/test_satellite_groundstation_url.py`.*
 
 Predictive gaze consumes each source-qualified detection once, calibrates its
 image point against measured capture and query poses without moving, and then
