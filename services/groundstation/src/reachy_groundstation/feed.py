@@ -215,6 +215,19 @@ class FeedRegistry:
             return FeedAvailability.NO_ELIGIBLE_SESSION
         return FeedAvailability.AVAILABLE
 
+    @property
+    def at_capacity(self) -> bool:
+        """Whether every viewer slot is currently taken.
+
+        Asking is not taking, which is the whole reason this exists beside
+        `reserve_viewer`: a `HEAD` has to report the answer a `GET` would have
+        been given without holding a slot in order to find it out.
+
+        Returns:
+            Whether a `reserve_viewer` made now would be refused.
+        """
+        return self._viewers >= self._max_viewers
+
     def reserve_viewer(self) -> bool:
         """Take one of the viewer slots, if there is one free.
 
@@ -225,7 +238,7 @@ class FeedRegistry:
             Whether a slot was taken. A caller that got `True` owes exactly one
             `release_viewer`.
         """
-        if self._viewers >= self._max_viewers:
+        if self.at_capacity:
             return False
         self._viewers += 1
         return True

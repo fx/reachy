@@ -31,6 +31,12 @@ recency; and 429 is the standard answer to a concurrency bound, which keeps
 "nothing to show" and "no room to show it in" from arriving as the same code. The
 bodies name the situation and nothing else: no session identifier, no address, no
 count.
+
+`HEAD` answers the status and the headers a `GET` would have answered with, and
+nothing else — every situation in the table included, so a client that polls with
+`HEAD` sees a saturated feed rather than an inviting 200. What it does not do is
+reserve anything: four `HEAD` requests holding connections nobody reads would be
+the whole bound, on an endpoint that asks for no credential.
 """
 
 from __future__ import annotations
@@ -141,6 +147,29 @@ async def _parts(feed: FeedRegistry) -> AsyncIterator[bytes]:
         yield _part(frame.payload)
 
 
+class _HeadResponse(Response):
+    """The status and headers a `GET` would have sent, and no body at all.
+
+    A `HEAD` describes the answer to a `GET`, so every header on it has to be
+    the one that answer would carry. Starlette adds `Content-Length: 0` to a
+    response whose body is empty, and the `GET` here is a `StreamingResponse`,
+    which declares no length at all — so the header would be describing this
+    empty answer rather than the stream it stands for, and an HTTP/1.1 server
+    reading it would frame the response by length where the `GET` is framed as
+    chunked. It is dropped rather than corrected, because there is no length to
+    state.
+    """
+
+    def init_headers(self, headers: Mapping[str, str] | None = None) -> None:
+        """Build the headers, then drop the one that is about the wrong body.
+
+        Args:
+            headers: The headers the caller asked for.
+        """
+        super().init_headers(headers)
+        del self.headers["content-length"]
+
+
 class _ViewerStream(StreamingResponse):
     """A stream that gives its viewer slot back whenever the response ends.
 
@@ -186,6 +215,10 @@ def stream_response(feed: FeedRegistry, method: str) -> Response:
     Both decisions and the reservation happen without awaiting, so two requests
     arriving together cannot both take the last slot.
 
+    Every situation is decided before the method is, and that ordering is what
+    keeps the two methods in step: a `HEAD` diverges from the `GET` it describes
+    only in taking no slot and sending no body.
+
     Args:
         feed: What holds the live frame.
         method: The request method. Starlette answers `HEAD` with whatever
@@ -198,12 +231,18 @@ def stream_response(feed: FeedRegistry, method: str) -> Response:
     """
     availability = feed.availability()
     if availability is not FeedAvailability.AVAILABLE:
+        # One object for both methods, so the two cannot report a situation
+        # differently. The server sends no body for a `HEAD`; the length this
+        # declares is the length of the body a `GET` would have received, which
+        # is what a `HEAD` is for.
         return _refusal(availability.value, _REFUSALS[availability])
     if method == "HEAD":
-        # What a `GET` would have started, and no further. Capacity is not
-        # consulted because nothing is reserved: this answer is over by the time
-        # it is sent.
-        return Response(
+        # `at_capacity` asks the question `reserve_viewer` answers by taking a
+        # slot, which is the only way a `HEAD` can report the bound honestly and
+        # still not consume it.
+        if feed.at_capacity:
+            return _refusal(_CAPACITY_REACHED, 429)
+        return _HeadResponse(
             status_code=200,
             media_type=_MEDIA_TYPE,
             headers=_NO_STORE,

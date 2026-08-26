@@ -21,6 +21,7 @@ yields rather than sleeps.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 import httpx
 import pytest
@@ -36,9 +37,11 @@ from groundstation_support import (
     make_settings,
     png_bytes,
 )
+from starlette.responses import StreamingResponse
 
 from reachy_contracts import ErrorCode, WireModel
 from reachy_groundstation.api.app import STREAM_PATH, create_app
+from reachy_groundstation.api.mjpeg import stream_response
 from reachy_groundstation.feed import (
     MAX_VIEWERS,
     FeedAvailability,
@@ -470,6 +473,82 @@ async def test_a_head_request_reports_the_same_refusal_a_get_would() -> None:
     async with _client(feed) as client:
         response = await client.head(STREAM_PATH)
     assert response.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_a_head_request_reports_capacity_without_taking_the_last_slot() -> None:
+    """The one refusal a HEAD could have answered 200 to, and it is the worst.
+
+    A saturated feed answering `HEAD` with 200 tells a client to open a `GET`
+    that is about to be refused, and it is the only situation in the table an
+    operator cannot see from the endpoint's own state.
+    """
+    feed = FeedRegistry(max_viewers=1)
+    with feed.authenticated_session():
+        feed.publish(jpeg_bytes())
+        assert feed.reserve_viewer() is True
+        async with _client(feed) as client:
+            response = await client.head(STREAM_PATH)
+    assert response.status_code == 429
+    assert response.headers["cache-control"] == "no-store"
+    # The slot the GET took, and no other: asking cost nothing.
+    assert feed.viewers == 1
+
+
+def test_the_capacity_question_can_be_asked_without_answering_it() -> None:
+    """`reserve_viewer` answers by taking, which is why `at_capacity` exists."""
+    feed = FeedRegistry(max_viewers=1)
+    # Read into locals and compared at the end, because an `assert` on a
+    # property narrows its type for everything after it and the next reading
+    # then looks unreachable to the type checker.
+    empty = feed.at_capacity
+    assert feed.reserve_viewer() is True
+    full = feed.at_capacity
+    feed.release_viewer()
+    freed = feed.at_capacity
+    assert (empty, full, freed) == (False, True, False)
+    assert feed.viewers == 0
+
+
+@pytest.mark.parametrize(
+    ("sessions", "reserved"),
+    [
+        (0, 0),  # nothing connected
+        (2, 0),  # two robots, and no choosing between them
+        (1, 0),  # a stream to be had
+        (1, 1),  # every slot taken
+    ],
+)
+def test_a_head_answers_with_exactly_the_headers_a_get_would_have_sent(
+    sessions: int,
+    reserved: int,
+) -> None:
+    """A HEAD describes the answer to a GET, so it may not describe itself.
+
+    The responses are built rather than driven over a client, because what is
+    being compared is the header list each one would put on the wire — and the
+    `GET` in the available case is a stream that never finishes, so a client
+    would have to be interrupted to be asked.
+
+    Args:
+        sessions: How many authenticated sessions to hold open.
+        reserved: How many viewer slots to take before asking.
+    """
+    feed = FeedRegistry(max_viewers=1)
+    with contextlib.ExitStack() as held:
+        for _ in range(sessions):
+            held.enter_context(feed.authenticated_session())
+        feed.publish(jpeg_bytes())
+        for _ in range(reserved):
+            assert feed.reserve_viewer() is True
+
+        head = stream_response(feed, "HEAD")
+        get = stream_response(feed, "GET")
+
+    assert head.status_code == get.status_code
+    assert head.raw_headers == get.raw_headers
+    # Only the `GET` may have taken a slot, and only when it was given a stream.
+    assert feed.viewers == reserved + int(isinstance(get, StreamingResponse))
 
 
 @pytest.mark.asyncio
