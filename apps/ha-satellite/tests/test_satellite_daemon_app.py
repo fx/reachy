@@ -34,7 +34,7 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated p
     SwitchCommandRequest,
     SwitchStateResponse,
 )
-from satellite_support import FakeRobot, ManualClock
+from satellite_support import FakeRobot, ManualClock, vendored_server_state
 
 from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.config import (
@@ -659,7 +659,7 @@ class TestConfirmedTorqueBoundary:
     ) -> None:
         """Correlation IDs disappear while motor IDs remain available for matching."""
         raw = SimpleNamespace(
-            read_motor_torque=lambda ids: SimpleNamespace(
+            read_motor_torque=lambda ids, **_kwargs: SimpleNamespace(
                 request_id=uuid4(),
                 operation=SimpleNamespace(value="read"),
                 requested_names=list(ids),
@@ -751,7 +751,7 @@ class TestConfirmedTorqueBoundary:
             evidence_enabled=evidence_enabled,
         )
         bridge = daemon_app._ConfirmedRobotHandle(
-            SimpleNamespace(read_motor_torque=lambda _ids: result)
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
         )
 
         translated = bridge.read_motor_torque(expected)
@@ -806,7 +806,7 @@ class TestConfirmedTorqueBoundary:
             "enable_motors_confirmed" if requested else "disable_motors_confirmed"
         )
         bridge = daemon_app._ConfirmedRobotHandle(
-            SimpleNamespace(**{method_name: lambda _ids: result})
+            SimpleNamespace(**{method_name: lambda _ids, **_kwargs: result})
         )
 
         translated = (
@@ -820,7 +820,8 @@ class TestConfirmedTorqueBoundary:
             evidence if valid else None
         )
 
-    def test_invalid_set_envelope_cannot_advance_any_coordinator_effect(
+    @pytest.mark.asyncio
+    async def test_invalid_set_envelope_cannot_advance_any_coordinator_effect(
         self,
         daemon_app: ModuleType,
     ) -> None:
@@ -834,7 +835,7 @@ class TestConfirmedTorqueBoundary:
         )
         delattr(invalid.states[0], "motor_id")
         bridge = daemon_app._ConfirmedRobotHandle(
-            SimpleNamespace(disable_motors_confirmed=lambda _ids: invalid)
+            SimpleNamespace(disable_motors_confirmed=lambda _ids, **_kwargs: invalid)
         )
         translated = bridge.disable_motors_confirmed(list(BODY_MOTOR_IDS))
         assert translated.outcome.value == "failed"
@@ -857,6 +858,7 @@ class TestConfirmedTorqueBoundary:
         robot.motor_disables_confirmed.append(translated)
         robot.motor_reads.append(translated)
         control = MotorSwitchEntity(
+            state=vendored_server_state(),
             coordinator=groups,
             group=MotorGroup.BODY,
             key=7,
@@ -867,9 +869,13 @@ class TestConfirmedTorqueBoundary:
         )
 
         assert responses == [SwitchStateResponse(key=7, state=True)]
+        assert events == []
+        assert not groups.gate_open(MotorGroup.BODY)
+        await groups.wait_idle()
         assert events == ["prepare"]
         assert groups.last_confirmed(MotorGroup.BODY) is True
         assert not groups.gate_open(MotorGroup.BODY)
+        await groups.aclose()
 
     @pytest.mark.parametrize(
         "field",
@@ -899,7 +905,7 @@ class TestConfirmedTorqueBoundary:
         )
         delattr(result, field)
         bridge = daemon_app._ConfirmedRobotHandle(
-            SimpleNamespace(read_motor_torque=lambda _ids: result)
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
         )
 
         translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
@@ -921,7 +927,7 @@ class TestConfirmedTorqueBoundary:
         )
         delattr(result.states[0], field)
         bridge = daemon_app._ConfirmedRobotHandle(
-            SimpleNamespace(read_motor_torque=lambda _ids: result)
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
         )
 
         translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
@@ -976,7 +982,7 @@ class TestConfirmedTorqueBoundary:
         )
         setattr(result.states[0], field, value)
         bridge = daemon_app._ConfirmedRobotHandle(
-            SimpleNamespace(read_motor_torque=lambda _ids: result)
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
         )
 
         translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
@@ -1010,7 +1016,7 @@ class TestConfirmedTorqueBoundary:
         )
         result.states[0] = replacement
         bridge = daemon_app._ConfirmedRobotHandle(
-            SimpleNamespace(read_motor_torque=lambda _ids: result)
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
         )
 
         translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
@@ -1036,7 +1042,7 @@ class TestConfirmedTorqueBoundary:
     ) -> None:
         """Only terminal acknowledged confirmed reads can register or open a gate."""
         raw = SimpleNamespace(
-            read_motor_torque=lambda ids: SimpleNamespace(
+            read_motor_torque=lambda ids, **_kwargs: SimpleNamespace(
                 request_id=uuid4(),
                 operation=SimpleNamespace(value="read"),
                 requested_names=list(ids),
@@ -1075,7 +1081,7 @@ class TestConfirmedTorqueBoundary:
     ) -> None:
         """A named motor with neither a physical value nor error is incomplete."""
         raw = SimpleNamespace(
-            read_motor_torque=lambda ids: SimpleNamespace(
+            read_motor_torque=lambda ids, **_kwargs: SimpleNamespace(
                 request_id=uuid4(),
                 operation=SimpleNamespace(value="read"),
                 requested_names=list(ids),
@@ -1109,7 +1115,7 @@ class TestConfirmedTorqueBoundary:
     ) -> None:
         """Unknown enum values and motors cannot be smuggled into local policy."""
         raw = SimpleNamespace(
-            read_motor_torque=lambda _ids: SimpleNamespace(
+            read_motor_torque=lambda _ids, **_kwargs: SimpleNamespace(
                 acknowledged=True,
                 outcome=SimpleNamespace(value="future-outcome"),
                 states=[SimpleNamespace(name="unexpected", enabled=True, error=None)],

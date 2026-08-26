@@ -124,6 +124,7 @@ from reachy_mini_ha_satellite.motor_control import (
     MotorConfirmationOutcome,
     MotorEvidence,
     MotorGroup,
+    MotorGroupCoordinator,
 )
 from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
@@ -492,6 +493,7 @@ def _application(
     motion: FakeMotion,
     perception: FakePerception,
     behaviour: SatelliteBehaviour | None = None,
+    motor_groups: MotorGroupCoordinator | None = None,
     services: Sequence[Any] = (),
     stop_after: int = 2,
 ) -> tuple[SatelliteApplication, asyncio.Event]:
@@ -502,6 +504,7 @@ def _application(
         motion: The head and the antennas.
         perception: What is in front of the robot.
         behaviour: The pure behavior owner, or a fresh default.
+        motor_groups: Optional asynchronous motor-operation owner.
         services: The things with lifetimes.
         stop_after: How many ticks to run before the stop event is set. The
             loop's wait is what sets it, so no wall time is spent, and the
@@ -534,6 +537,7 @@ def _application(
         motion=motion,
         perception=perception,
         behaviour=behaviour or SatelliteBehaviour(now=0.0),
+        motor_groups=motor_groups,
         services=services,
         clock=_advancing(),
         sleep=_wait,
@@ -3615,6 +3619,69 @@ class TestWritingABoostChosenFromHomeAssistant:
         assert "the speaker boost could not be saved" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault() -> (
+    None
+):
+    """A paused SDK worker leaves behavior cadence and controller health intact."""
+
+    class PausedRobot(FakeRobot):
+        """Pause one confirmed disable without blocking the event loop."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release_confirmation = threading.Event()
+
+        def disable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+            self.started.set()
+            self.release_confirmation.wait()
+            return super().disable_motors_confirmed(ids)
+
+    robot = PausedRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    groups.initialize()
+    robot.motor_disables_confirmed.append(_motor_confirmation(HEAD_MOTOR_IDS, False))
+    motion = FakeMotion()
+    application, stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=FakePerception(),
+        motor_groups=groups,
+        stop_after=20,
+    )
+    published: list[bool] = []
+    assert groups.reserve_transition(
+        MotorGroup.HEAD,
+        False,
+        lambda: published.append(True),
+    )
+
+    running = asyncio.create_task(application.run(stop))
+    for _ in range(40):
+        if robot.started.is_set():
+            break
+        await asyncio.sleep(0)
+    else:
+        raise AssertionError("motor worker did not start within bounded loop turns")
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    controller = cast("dict[str, object]", application.status()["controller"])
+    assert controller["fault"] == "none"
+    assert controller["safe_hold"] is False
+    assert len(motion.observed) >= 2
+    assert not running.done()
+
+    robot.release_confirmation.set()
+    await running
+
+    controller = cast("dict[str, object]", application.status()["controller"])
+    assert controller["fault"] == "none"
+    assert controller["safe_hold"] is False
+    assert published == []
+
+
 @pytest.mark.filesystem
 class TestTheWiringAgainstTheWheelsOwnAssets:
     """The assembly, reading the wake-word models and sounds the wheel ships.
@@ -3814,10 +3881,11 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         assert application.motor_groups is motion._coordinator
         assert "motors" in application.status()
 
-    def test_composed_reconnect_refreshes_once_without_list_reads_or_broadcast(
+    @pytest.mark.asyncio
+    async def test_composed_reconnect_refreshes_once_without_list_reads_or_broadcast(
         self,
     ) -> None:
-        """Reconnect is the bounded production path for later independent evidence."""
+        """Reconnect returns retained state while one worker read completes later."""
         robot = FakeRobot(
             motor_reads=[
                 _motor_confirmation(HEAD_MOTOR_IDS, True),
@@ -3834,34 +3902,47 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         before = len(robot.motor_requests)
 
         listed = list(control.handle_message(ListEntitiesRequest()))
-
-        assert len(listed) == 1
-        assert len(robot.motor_requests) == before
-        assert all(client.sent == [] for client in clients)
-
         first = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
 
-        assert first == [SwitchStateResponse(key=control.key, state=False)]
+        assert len(listed) == 1
+        assert first == [SwitchStateResponse(key=control.key, state=True)]
+        assert len(robot.motor_requests) == before
+        assert all(client.sent == [] for client in clients)
+        await groups.wait_idle()
         assert robot.motor_requests[before:] == [("read", HEAD_MOTOR_IDS)]
         assert groups.last_confirmed(MotorGroup.HEAD) is False
         assert not groups.gate_open(MotorGroup.HEAD)
-        assert all(client.sent == [] for client in clients)
+        assert all(
+            client.sent == [SwitchStateResponse(key=control.key, state=False)]
+            for client in clients
+        )
 
         second = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
 
-        assert second == [SwitchStateResponse(key=control.key, state=True)]
+        assert second == [SwitchStateResponse(key=control.key, state=False)]
+        assert robot.motor_requests[before:] == [("read", HEAD_MOTOR_IDS)]
+        await groups.wait_idle()
         assert robot.motor_requests[before:] == [
             ("read", HEAD_MOTOR_IDS),
             ("read", HEAD_MOTOR_IDS),
         ]
         assert groups.last_confirmed(MotorGroup.HEAD) is True
         assert not groups.gate_open(MotorGroup.HEAD)
-        assert all(client.sent == [] for client in clients)
+        assert all(
+            client.sent
+            == [
+                SwitchStateResponse(key=control.key, state=False),
+                SwitchStateResponse(key=control.key, state=True),
+            ]
+            for client in clients
+        )
+        await groups.aclose()
 
-    def test_composed_failed_command_refreshes_once_and_yields_fresh_readback(
+    @pytest.mark.asyncio
+    async def test_composed_failed_command_refreshes_once_and_yields_fresh_readback(
         self,
     ) -> None:
-        """A failed command gets one read and never publishes the request itself."""
+        """A failed command returns retained state while one recovery read runs."""
         robot = FakeRobot(
             motor_reads=[
                 _motor_confirmation(HEAD_MOTOR_IDS, True),
@@ -3883,17 +3964,26 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
             )
         )
 
-        assert responses == [SwitchStateResponse(key=control.key, state=False)]
+        assert responses == [SwitchStateResponse(key=control.key, state=True)]
+        assert len(robot.motor_requests) == before
+        assert not groups.gate_open(MotorGroup.HEAD)
+        await groups.wait_idle()
         assert robot.motor_requests[before:] == [
             ("disable", HEAD_MOTOR_IDS),
             ("read", HEAD_MOTOR_IDS),
         ]
         assert groups.last_confirmed(MotorGroup.HEAD) is False
-        assert not groups.gate_open(MotorGroup.HEAD)
-        assert all(client.sent == [] for client in clients)
+        assert all(
+            client.sent == [SwitchStateResponse(key=control.key, state=False)]
+            for client in clients
+        )
+        await groups.aclose()
 
-    def test_composed_incomplete_refresh_retains_until_one_later_attempt(self) -> None:
-        """Incomplete recovery stays closed; another request gets one later attempt."""
+    @pytest.mark.asyncio
+    async def test_composed_incomplete_refresh_retains_until_one_later_attempt(
+        self,
+    ) -> None:
+        """Incomplete recovery remains closed and another request gets one attempt."""
         robot = FakeRobot(
             motor_reads=[
                 _motor_confirmation(HEAD_MOTOR_IDS, True),
@@ -3920,6 +4010,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         )
 
         assert retained == [SwitchStateResponse(key=control.key, state=True)]
+        await groups.wait_idle()
         assert robot.motor_requests[before:] == [
             ("disable", HEAD_MOTOR_IDS),
             ("read", HEAD_MOTOR_IDS),
@@ -3934,7 +4025,8 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
             )
         )
 
-        assert updated == [SwitchStateResponse(key=control.key, state=False)]
+        assert updated == [SwitchStateResponse(key=control.key, state=True)]
+        await groups.wait_idle()
         assert robot.motor_requests[before:] == [
             ("disable", HEAD_MOTOR_IDS),
             ("read", HEAD_MOTOR_IDS),
@@ -3943,9 +4035,14 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         ]
         assert groups.last_confirmed(MotorGroup.HEAD) is False
         assert not groups.gate_open(MotorGroup.HEAD)
-        assert all(client.sent == [] for client in clients)
+        assert all(
+            client.sent == [SwitchStateResponse(key=control.key, state=False)]
+            for client in clients
+        )
+        await groups.aclose()
 
-    def test_composed_body_refresh_true_keeps_policy_quiesced_and_gate_closed(
+    @pytest.mark.asyncio
+    async def test_composed_body_refresh_true_keeps_policy_quiesced_and_gate_closed(
         self,
     ) -> None:
         """Independent truth cannot restore automatic yaw or reopen body producers."""
@@ -3983,6 +4080,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         reconnect = list(body.handle_message(SubscribeHomeAssistantStatesRequest()))
 
         assert reconnect == [SwitchStateResponse(key=body.key, state=True)]
+        await groups.wait_idle()
         assert robot.motor_requests[reconnect_requests:] == [("read", BODY_MOTOR_IDS)]
         assert robot.automatic_body_yaw[reconnect_policy:] == [False, True]
         assert groups.gate_open(MotorGroup.BODY)
@@ -3994,6 +4092,8 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         )
 
         assert responses == [SwitchStateResponse(key=body.key, state=True)]
+        assert not groups.gate_open(MotorGroup.BODY)
+        await groups.wait_idle()
         assert robot.motor_requests[before_requests:] == [
             ("disable", BODY_MOTOR_IDS),
             ("read", BODY_MOTOR_IDS),
@@ -4001,6 +4101,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         assert robot.automatic_body_yaw[before_policy:] == [False]
         assert groups.last_confirmed(MotorGroup.BODY) is True
         assert not groups.gate_open(MotorGroup.BODY)
+        await groups.aclose()
 
     def test_composed_terminal_reconnect_performs_no_hardware_read(self) -> None:
         """A reconnect racing shutdown reports retained state without new work."""

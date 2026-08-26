@@ -111,6 +111,7 @@ _TORQUE_OUTCOMES: Final = {
     if outcome is not MotorConfirmationOutcome.UNAVAILABLE
 }
 _MISSING: Final = object()
+_MOTOR_CONFIRMATION_TIMEOUT_SECONDS: Final = 5.0
 
 
 def _enum_value(value: object) -> str:
@@ -152,7 +153,7 @@ class _ConfirmedRobotHandle:
         if not callable(method):
             return MotorConfirmation.unavailable()
         return self._translate(
-            method(list(ids)),
+            method(list(ids), timeout=_MOTOR_CONFIRMATION_TIMEOUT_SECONDS),
             ids,
             operation,
             requested_enabled,

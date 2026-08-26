@@ -922,12 +922,18 @@ class SatelliteApplication:
             return
         self._closed = True
 
+        cancelled: asyncio.CancelledError | None = None
         if self._motor_groups is not None:
             self._motor_groups.terminal()
+            try:
+                await self._motor_groups.aclose()
+            except asyncio.CancelledError as error:
+                cancelled = error
+            except Exception:
+                _LOGGER.error("motor confirmation failed to stop cleanly")
         _guard("motion", self._motion.release)
         _guard("the media interface", self._audio.stop)
 
-        cancelled: asyncio.CancelledError | None = None
         for service in reversed(self._services):
             try:
                 await _aguard(
@@ -2166,10 +2172,14 @@ def build_application(
         now=time.monotonic(),
     )
 
-    def _reseed(group: MotorGroup) -> None:
-        """Read fresh physical state and replace every hidden movement target."""
+    def _reseed(group: MotorGroup) -> Callable[[], None]:
+        """Read hardware on the worker and return loop-only state finalization."""
         head, body, antennas = motion.reseed(group, time.monotonic())
-        behaviour.reseed_motion(head=head, body=body, antennas=antennas)
+
+        def _finalize() -> None:
+            behaviour.reseed_motion(head=head, body=body, antennas=antennas)
+
+        return _finalize
 
     motor_groups.set_hooks(
         MotorGroup.HEAD,
@@ -2234,6 +2244,7 @@ def build_application(
     for group in registered_motor_groups:
         state.entities.append(
             MotorSwitchEntity(
+                state=state,
                 coordinator=motor_groups,
                 group=group,
                 key=len(state.entities),
