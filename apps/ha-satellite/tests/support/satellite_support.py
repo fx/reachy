@@ -26,6 +26,7 @@ certain about exactly the property it was checking.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import threading
 from pathlib import Path
@@ -289,6 +290,47 @@ def immediately(work: Callable[[], None]) -> None:
         work: What to run.
     """
     work()
+
+
+#: How many loop turns a bounded yield loop may spend before it reports what it
+#: waited for lost. Generous, because these wait across a thread and how many
+#: turns that takes is a property of how loaded the machine is. A ceiling all
+#: the same: a yield loop that cannot end hangs the suite rather than failing
+#: it, and a zero-delay yield spends no wall time, so exhausting the whole
+#: budget still costs a fraction of a second.
+YIELD_TURNS: Final = 100_000
+
+
+async def until(condition: Callable[[], bool], what: str) -> int:
+    """Yield to the event loop until something has happened, or say it never did.
+
+    This is what a test reaches for instead of a fixed turn budget whenever the
+    outcome it goes on to assert depends on one thing having happened before
+    another. A budget that is usually enough is a happens-before relationship
+    that usually holds, which is indistinguishable from a flaky merge gate — and
+    the way it fails is to assert the *other* ordering's outcome, which reads
+    like a real defect.
+
+    A budget is still right where the turns are the measurement rather than a
+    stand-in for an ordering: "the loop ran ten more turns" is a fact about the
+    loop, not a race.
+
+    Args:
+        condition: What is being waited for. Polled, so it must be cheap.
+        what: Named in the failure, so an exhausted budget says what was lost.
+
+    Returns:
+        How many loop turns passed before the condition held.
+
+    Raises:
+        AssertionError: If the condition never held within the ceiling above.
+    """
+    for turns in range(YIELD_TURNS):
+        if condition():
+            return turns
+        await asyncio.sleep(0)
+    message = f"{what} never happened within {YIELD_TURNS} loop turns"
+    raise AssertionError(message)
 
 
 def motor_worker_threads() -> set[threading.Thread]:

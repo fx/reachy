@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from satellite_support import (
+    YIELD_TURNS,
     FakeRobot,
     ManualClock,
     face,
     motor_worker_threads,
+    until,
 )
 
 from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
@@ -186,14 +188,6 @@ def directive_for(captured_at: float) -> GazeDirective:
     )
 
 
-# How many loop turns any yield loop below may spend before it calls the thing
-# it is waiting for lost. Generous, because what it waits for crosses a thread
-# and how many turns that takes is a property of how loaded the machine is; a
-# ceiling all the same, because a yield loop that cannot end hangs the suite
-# rather than failing it.
-_YIELD_TURNS = 100_000
-
-
 class _PausedRobot(FakeRobot):
     """Park one named daemon call on the worker while the loop keeps running."""
 
@@ -224,11 +218,9 @@ class _PausedRobot(FakeRobot):
 async def parked(robot: _PausedRobot) -> int:
     """Yield to the loop until the worker is inside the parked daemon call.
 
-    The turns are the evidence — the loop kept running while a daemon call
-    blocked the worker — and the ceiling is what stops a worker that never
-    arrives from hanging the suite instead of failing it. Reaching the ceiling
-    is a failure, not a timeout: a zero-delay yield spends no wall time, so the
-    whole budget is a fraction of a second even when it is exhausted.
+    The turns it takes are the evidence — the loop kept running while a daemon
+    call blocked the worker — and `until` is what stops a worker that never
+    arrives hanging the suite instead of failing it.
 
     Args:
         robot: The fake parked on one of its daemon calls.
@@ -236,11 +228,7 @@ async def parked(robot: _PausedRobot) -> int:
     Returns:
         How many loop turns passed before the worker reached that call.
     """
-    for turn in range(_YIELD_TURNS):
-        if robot.started.is_set():
-            return turn
-        await asyncio.sleep(0)
-    raise AssertionError("the parked daemon call was never reached")
+    return await until(robot.started.is_set, "the parked daemon call")
 
 
 @pytest.mark.asyncio
@@ -1309,7 +1297,7 @@ async def test_initial_confirmation_leaves_the_event_loop_responsive() -> None:
     async def _heartbeat() -> None:
         """Count loop turns for as long as the parked confirmation is in flight."""
         nonlocal beats
-        for _ in range(_YIELD_TURNS):
+        for _ in range(YIELD_TURNS):
             if robot.release.is_set():
                 return
             beats += 1
@@ -1385,6 +1373,53 @@ async def test_closing_after_a_cancelled_phase_waits_off_the_loop() -> None:
     await closing
 
     assert beats == 50
+    assert still_waiting
+    assert motor_worker_threads() <= workers_before
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_every_outstanding_phase_not_only_the_last() -> None:
+    """One record per phase, so a later one finishing cannot retire an earlier.
+
+    Driven past the reserved paths deliberately, because this tree cannot reach
+    the interleaving: it submits one phase at a time on one worker, so a second
+    finishing does imply the first did. `aclose` was correct only for as long as
+    that stayed true, and nothing states or checks it. A phase abandoned by its
+    caller and a phase cancelled before it starts are exactly the pair that
+    breaks a single slot — the second is finished the moment it is cancelled,
+    and retires a record still owed to the first.
+    """
+    workers_before = motor_worker_threads()
+    robot = FakeRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    started = threading.Event()
+    release = threading.Event()
+
+    def _park() -> None:
+        started.set()
+        release.wait()
+
+    abandoned = asyncio.create_task(groups._offload(_park), name="abandoned-phase")
+    await until(started.is_set, "the first phase reaching the worker")
+    abandoned.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await abandoned
+
+    # Queued behind the parked one, so cancelling it cancels work that never ran.
+    queued = asyncio.create_task(groups._offload(lambda: None), name="queued-phase")
+    await asyncio.sleep(0)
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+
+    closing = asyncio.create_task(groups.aclose(), name="closing")
+    for _ in range(50):
+        await asyncio.sleep(0)
+    still_waiting = not closing.done()
+
+    release.set()
+    await closing
+
     assert still_waiting
     assert motor_worker_threads() <= workers_before
 

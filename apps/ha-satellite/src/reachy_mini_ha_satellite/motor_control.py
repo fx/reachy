@@ -305,10 +305,13 @@ class MotorGroupCoordinator:
             thread_name_prefix="satellite-motors",
         )
         self._operation: asyncio.Task[None] | None = None
-        # The blocking phase running on that worker right now, if any. `Any`
-        # because shutdown asks it one question — is it finished — and never
-        # what it returned; the awaiting caller owns the result.
-        self._inflight: Future[Any] | None = None
+        # Every blocking phase submitted and not yet finished. A set rather than
+        # one slot: a slot is correct only while at most one phase is
+        # outstanding on one worker, which is true here and is enforced by
+        # nothing. `Any` because shutdown asks these one question — are you
+        # finished — and never what they returned; the awaiting caller owns
+        # that.
+        self._inflight: set[Future[Any]] = set()
         self._producer_waiters: set[
             tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]
         ] = set()
@@ -402,24 +405,35 @@ class MotorGroupCoordinator:
     ) -> ResultT:
         """Run one blocking phase on the sole worker, recorded for shutdown.
 
-        The submitted future is kept, not merely awaited, because cancelling the
-        task that awaits it cancels the wrapper and never the thread. Without
-        the record, `aclose` reaches `ThreadPoolExecutor.shutdown(wait=True)`
-        with a five-second daemon call still running and waits for it *on the
-        event loop* — the exact stall every phase here exists to avoid. Startup
-        has no task for `_operation` to hold, and a cancelled operation task has
-        already let go of its own, so both arrive here.
+        The submitted future is recorded, not merely awaited, because cancelling
+        the task that awaits it cancels the wrapper and never the thread.
+        Without the record, `aclose` reaches
+        `ThreadPoolExecutor.shutdown(wait=True)` with a five-second daemon call
+        still running and waits for it *on the event loop* — the exact stall
+        every phase here exists to avoid. Startup has no task for `_operation`
+        to hold, and a cancelled operation task has already let go of its own,
+        so both arrive here.
+
+        The record is retired by a completion callback rather than by this
+        method, and it is a set rather than one slot. Both follow from the same
+        thing: an abandoned phase is one nobody comes back to. A slot would be
+        overwritten by the next submission and cleared when *that* one finished,
+        which retires a phase still running unless at most one is ever
+        outstanding on exactly one worker — an invariant this file happens to
+        hold and nothing states, checks or preserves.
         """
         submitted = self._executor.submit(function, *args)
-        self._inflight = submitted
-        try:
-            return await asyncio.wrap_future(submitted)
-        finally:
-            # Only once the worker itself is finished. A cancelled await leaves
-            # the thread running, and that is precisely the case the record is
-            # for.
-            if self._inflight is submitted and submitted.done():
-                self._inflight = None
+        with self._lock:
+            self._inflight.add(submitted)
+        # Fires on the worker as it finishes, so a phase leaves this record when
+        # the thread is done with it rather than when someone is still waiting.
+        submitted.add_done_callback(self._retire)
+        return await asyncio.wrap_future(submitted)
+
+    def _retire(self, submitted: Future[Any]) -> None:
+        """Drop one finished phase from the in-flight record, from any thread."""
+        with self._lock:
+            self._inflight.discard(submitted)
 
     async def _run_reserved(self, operation: _ReservedOperation) -> None:
         """Keep local state on the loop and blocking daemon work on one worker."""
@@ -664,19 +678,22 @@ class MotorGroupCoordinator:
                     cancelled = error
         producer_drain.result()
         while True:
-            inflight = self._inflight
-            if inflight is None or inflight.done():
+            with self._lock:
+                pending = tuple(self._inflight)
+            if not pending:
                 break
-            try:
-                # Suppressed rather than logged or raised: how the phase ended
-                # belongs to whoever awaited it, and all this needs is for the
-                # worker to have stopped running. A phase that failed is a
-                # finished phase, and the loop leaves on the check above.
-                with contextlib.suppress(Exception):
-                    await asyncio.shield(asyncio.wrap_future(inflight))
-            except asyncio.CancelledError as error:
-                if cancelled is None:
-                    cancelled = error
+            for phase in pending:
+                try:
+                    # Suppressed rather than logged or raised: how the phase
+                    # ended belongs to whoever awaited it, and all this needs is
+                    # for the worker to have stopped running. A phase that
+                    # failed is a finished phase, and it has already retired
+                    # itself from the record the loop re-reads above.
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(asyncio.wrap_future(phase))
+                except asyncio.CancelledError as error:
+                    if cancelled is None:
+                        cancelled = error
         if not self._closed:
             self._closed = True
             # Every blocking phase and every producer reservation was drained

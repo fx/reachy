@@ -63,6 +63,7 @@ from satellite_support import (
     motor_worker_threads,
     no_sleep,
     pushed_numbers,
+    until,
     vendored_server_state,
 )
 
@@ -3801,6 +3802,13 @@ async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault(
     assert len(motion.observed) >= 2
     assert not running.done()
 
+    # Wait for shutdown to have become terminal rather than assuming the ticks
+    # above got it there. Releasing the worker first is a different scenario —
+    # the operation completes, publishes, and this test asserts the outcome of
+    # the ordering it did not set up. Which of the two lands first is otherwise
+    # nothing's decision: the tick loop reaching `stop_after` and the released
+    # worker's continuation are independently scheduled.
+    await until(lambda: groups.terminal_requested, "shutdown asking for terminal")
     robot.release_confirmation.set()
     await running
 
