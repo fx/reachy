@@ -149,6 +149,23 @@ The expected shape is
 `/readyz` says the service thinks it is ready; a probe says a frame went out and
 a result came back over the protocol the robot actually speaks.
 
+### 5. Confirm the camera feed still answers
+
+Only if you configured one — Home Assistant's MJPEG IP Camera integration reads
+`/stream.mjpg` on this service, so a groundstation that came back without it is a
+camera that went unavailable with nothing else to explain it.
+
+```
+curl --silent --show-error --include --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
+```
+
+With the robot reconnected this answers `200` and a
+`multipart/x-mixed-replace` content type. Immediately after a restart it answers
+`503 no_eligible_session` instead, and briefly: the feed holds no frame from a
+session that ended, so it stays unavailable until the robot's next frame arrives.
+[The endpoint's four answers](../setup/groundstation.md#8-look-at-what-the-robot-is-sending)
+say what any other status means.
+
 ### Rolling back
 
 Point `GROUNDSTATION_IMAGE` at the previous tag and repeat. Nothing in the

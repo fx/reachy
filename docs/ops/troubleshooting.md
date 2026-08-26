@@ -503,6 +503,34 @@ means the link was working, which is a different investigation:
 **A head that returns to neutral is a signal.** Holding the last pose would look
 like successfully tracking somebody who has left the room.
 
+### The Home Assistant camera shows nothing
+
+The camera is the groundstation's `/stream.mjpg`, read by Home Assistant's
+built-in MJPEG IP Camera integration; the satellite announces no camera entity
+and `doctor` has no check for it. Ask the endpoint directly, from a host that can
+reach the groundstation:
+
+```
+curl --silent --show-error --include --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
+```
+
+It answers one of four things, and each is a different investigation:
+
+| Status | Body | What to do |
+|---|---|---|
+| `200` | a multipart stream | The feed is fine; the fault is between Home Assistant and the groundstation — check the URL the integration was given and what the network between them allows |
+| `503` | `no_eligible_session` | No robot session is up. That is [`groundstation.session`](#groundstationsession) |
+| `409` | `ambiguous_sessions` | Two or more robots are authenticated against one groundstation. The feed refuses to choose; give each robot its own groundstation |
+| `429` | `viewer_capacity_reached` | Four viewers already hold the stream. Close the browser tabs and dashboards holding it, or wait — a disconnected viewer gives its slot back at once |
+
+A `503` immediately after a robot reconnects is expected and brief: the feed
+holds no frame from a session that ended, so it stays unavailable until the robot
+sends its next one.
+
+**The endpoint is not authenticated**, so a `200` from a host that should not be
+able to reach it is its own finding — see
+[the groundstation runbook](../setup/groundstation.md#9-decide-what-the-network-may-reach).
+
 ### A setting changed on the page did nothing
 
 The page marks each setting *applies at once* or *needs a restart*, and the ones

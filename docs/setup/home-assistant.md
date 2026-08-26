@@ -402,6 +402,61 @@ pipeline. Only being unmuted unmutes it.
 > decides them is pure and fully covered; what has not been checked is how it
 > looks.
 
+## 6. Add the camera, if you want to see what the robot sees
+
+The robot's camera reaches Home Assistant through the **groundstation**, not
+through the satellite. The satellite announces no camera entity and this
+repository ships no custom Home Assistant component: the groundstation serves
+`/stream.mjpg` and Home Assistant's own built-in **MJPEG IP Camera** integration
+reads it. That integration is a separate device entry, so nothing about the
+robot's ESPHome device — its identity, its entities, its history — is involved.
+
+> ### ⚠️ The video is not authenticated
+>
+> `/stream.mjpg` answers anybody who can reach the groundstation's port. It is
+> the room the robot is in, so the groundstation belongs on a network you trust,
+> for the same reason and with rather more force than
+> [the robot does](#the-trust-boundary-is-the-network). The
+> [groundstation runbook](groundstation.md#8-look-at-what-the-robot-is-sending)
+> is where that endpoint and its bounds are described.
+
+**Settings → Devices & Services → Add Integration → MJPEG IP Camera.** The
+integration asks for a **stream URL**, and that is the whole of the required
+configuration:
+
+```
+http://198.51.100.10:8080/stream.mjpg
+```
+
+Substitute the address `GROUNDSTATION_PUBLISH` puts the service on. Leave the
+still-image URL empty: this groundstation serves no still-image endpoint, and the
+integration derives its snapshots from the stream. Leave the username and
+password empty too — there is no authentication to give.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No expected output is recorded for this
+> step: it needs a Home Assistant instance and a robot sending frames, and
+> neither has been run against this repository. The endpoint's own responses
+> *are* recorded, from a real service — see the groundstation runbook.
+
+What to expect once it is added, and what each behaviour is:
+
+| What you see | What it is |
+|---|---|
+| A live picture | One robot is connected and sending frames |
+| The camera unavailable, with nothing connected | No robot session — the endpoint answers 503 |
+| The camera unavailable, with two robots connected | Deliberate: the feed refuses to choose between them and answers 409 |
+| The camera unavailable after a fifth viewer | Four viewers at once is the bound; the endpoint answers 429 |
+
+The picture is the newest frame rather than a smooth recording: one frame is held
+for the whole service and each new one replaces it, so a viewer that falls behind
+skips forward instead of playing a backlog. Nothing is recorded, on the
+groundstation or anywhere else.
+
+**If you run two robots against one groundstation**, this camera is not the
+feature to use — the feed refuses ambiguity rather than picking a robot by
+connection order, and a groundstation per robot is what gives each of them a
+feed.
+
 ## The trust boundary is the network
 
 Anything that can reach the robot can open the settings page, read the resolved
@@ -423,6 +478,7 @@ replace its credential. Every response is `no-store`.
 | Found, but as a **new** device | The announced identity changed — [troubleshooting](../ops/troubleshooting.md#home-assistantidentity) |
 | Found, but the head never tracks | `/status`, and the groundstation link — [troubleshooting](../ops/troubleshooting.md#groundstationsession) |
 | A setting on the page did nothing | It is marked *needs a restart* — [troubleshooting](../ops/troubleshooting.md#a-setting-changed-on-the-page-did-nothing) |
+| The camera is unavailable | The groundstation's feed, not the satellite — [the endpoint's four answers](groundstation.md#8-look-at-what-the-robot-is-sending) |
 
 ## Next
 
