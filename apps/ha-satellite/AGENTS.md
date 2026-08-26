@@ -23,8 +23,11 @@ outcome). The app is also one side of
 robot half of the camera-feed contract. Its motor switches are gated on a
 correlated daemon acknowledgement and physical read-back for every motor in a
 group; the current fire-and-forget SDK surface is not sufficient and no switch is
-exposed without that prerequisite. Body motion remains restart-bound, false by
-default and a provisional opt-in because the rollout did not settle calibration
+exposed without that prerequisite and an initial confirmation. The existing
+switch wire remains Boolean: later failures retain the last-confirmed value and
+surface bounded diagnostics rather than inventing a third state. Body motion
+remains restart-bound, false by default and a provisional opt-in because the
+rollout did not settle calibration
 or its shipping default. The two implemented specs are registered in
 `.duvet/config.toml`; repository traceability covers all nine implemented specs
 and all 92 implemented requirements. The proposed spec remains unregistered

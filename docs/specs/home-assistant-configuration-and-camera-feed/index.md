@@ -41,18 +41,30 @@ Home Assistant component is part of this contract.
 
 The satellite MUST expose stable Home Assistant Configuration entities for the
 head motors, body motor, antenna motors and groundstation session URL that report
-only confirmed effective state, with each motor switch requiring an agreeing
-correlated daemon acknowledgement and physical grouped-torque read-back and
-becoming unavailable when that confirmation is absent or contradictory.
+only confirmed effective state, announce each Boolean motor switch only after an
+initial agreeing correlated daemon acknowledgement and physical grouped-torque
+read-back, publish a new Boolean only from a later successful read-back including
+the actual value when it contradicts a request, and otherwise reject the request,
+retain the last-confirmed Boolean without publishing the requested value, keep the
+group's command gate closed and surface bounded identifier-free confirmation
+diagnostics.
 
-#### Scenario: Home Assistant reconnects
+#### Scenario: Home Assistant reconnects after initial confirmation
 
-- **GIVEN** an existing installation with automations and dashboards that refer
-  to the configuration entities
-- **WHEN** the satellite is upgraded or Home Assistant reconnects
-- **THEN** the same object identifiers describe the same controls, the URL matches
-  the running application, and each available motor value matches confirmed
-  physical torque state for its whole group
+- **GIVEN** each motor group has an agreeing initial acknowledgement and physical
+  Boolean read-back
+- **WHEN** the satellite announces its entities or Home Assistant reconnects
+- **THEN** the same object identifiers describe the same controls and each initial
+  switch Boolean matches confirmed physical torque state for its whole group
+
+#### Scenario: Initial motor confirmation fails
+
+- **GIVEN** a motor group without an agreeing initial acknowledgement and physical
+  grouped-torque read-back
+- **WHEN** the satellite constructs the Home Assistant entity set
+- **THEN** no operable switch or fabricated Boolean is announced for that group,
+  its command gate remains closed and bounded diagnostics report the confirmation
+  failure
 
 #### Scenario: A non-motor change is refused
 
@@ -61,13 +73,37 @@ becoming unavailable when that confirmation is absent or contradictory.
 - **THEN** the entity continues to report the previous effective value and the
   Home Assistant connection remains usable
 
-#### Scenario: Motor confirmation is unavailable
+#### Scenario: A motor request is confirmed
 
-- **GIVEN** a requested motor transition whose acknowledgement is missing or whose
-  grouped torque read-back is missing or contradictory
-- **WHEN** the transition finishes or its confirmation bound expires
-- **THEN** the switch reports unavailable rather than the requested or inferred
-  state and no command producer resumes for that group
+- **GIVEN** a registered motor switch with a last-confirmed Boolean
+- **WHEN** a requested transition receives an agreeing acknowledgement and grouped
+  physical read-back
+- **THEN** the switch publishes that read-back Boolean as its new last-confirmed
+  state
+
+#### Scenario: Physical read-back contradicts the request
+
+- **GIVEN** a registered motor switch whose requested Boolean differs from a
+  successful grouped physical read-back
+- **WHEN** the transition completes
+- **THEN** the switch publishes the actual read-back Boolean rather than the
+  request, refuses the requested outcome, keeps the group command gate closed and
+  records bounded diagnostics
+
+#### Scenario: Confirmation is absent after registration
+
+- **GIVEN** a registered motor switch with a last-confirmed Boolean
+- **WHEN** acknowledgement or grouped read-back is missing, late or fails
+- **THEN** no requested Boolean is published, the command is refused, the
+  last-confirmed Boolean remains the switch state and diagnostics distinguish that
+  retained value from a newly confirmed sample
+
+#### Scenario: A later read-back succeeds
+
+- **GIVEN** a failed command left a registered switch at its last-confirmed Boolean
+- **WHEN** a subsequent grouped physical read-back succeeds
+- **THEN** the switch may publish that actual Boolean as the new last-confirmed
+  state regardless of the earlier request
 
 ### REQ-094: Motor groups change safely at run time
 
@@ -318,15 +354,32 @@ are compatibility identifiers, not display labels. The three motor entities are
 switches and the address is a text entity. All four appear in Home Assistant's
 Configuration category.
 
-A motor switch has three reportable outcomes: confirmed on, confirmed off and
-unavailable. The current SDK's selective torque methods return `None` after a
-fire-and-forget command and expose no per-group physical torque query. That is not
-confirmation. Implementation therefore has a hard prerequisite on a daemon/SDK
-contract that correlates each grouped request with an acknowledgement and returns
-physical torque state for every named motor in the group. The switches are not
-registered until that prerequisite exists and passes against both the fake and
-real daemon boundary. A timeout, transport failure, partial group state or
-contradictory read-back publishes unavailable and leaves command gates closed.
+The existing ESPHome switch state is Boolean and has no availability field, so the
+proposal adds neither a third state nor a protocol extension. The current SDK's
+selective torque methods return `None` after a fire-and-forget command and expose
+no per-group physical torque query. That is not confirmation. Implementation
+therefore has a hard prerequisite on a daemon/SDK contract that correlates each
+grouped request with an acknowledgement and returns physical torque state for
+every named motor in the group.
+
+Before the entity set becomes operable, each motor group is read successfully.
+Only a group with an agreeing initial acknowledgement and read-back receives its
+stable switch object ID; an unconfirmed group gets no fabricated entity or state
+for that process. An installation that knew the object ID therefore observes the
+ordinary ESPHome entity-list/connection lifecycle, not a synthetic switch Boolean.
+After registration the entity stores one last-confirmed Boolean and the
+confirmation evidence separately. A successful read-back replaces and
+publishes that Boolean even when it contradicts the requested value. Missing or
+failed confirmation leaves the command gate closed and the Boolean unchanged; a
+command response may repeat that retained Boolean so Home Assistant returns to the
+known state, but it does not mark it as a new sample. A later successful read-back
+can advance it.
+
+A bounded identifier-free motor diagnostic record carries the static group,
+requested Boolean, acknowledgement outcome, read-back outcome, whether the
+published value changed and the age of the last confirmation. It is the surface
+that distinguishes a retained last-confirmed Boolean from fresh evidence without
+claiming a switch-wire capability that does not exist.
 
 The motor switches start enabled after controlled wake confirms physical state.
 They are runtime torque gates, not a replacement for behavior settings. Head maps
@@ -427,7 +480,11 @@ ambiguity appears.
   and left/right antenna controls are outside this contract.
 - Motor switches depend on a correlated daemon acknowledgement and grouped
   physical torque read-back capability that the current fire-and-forget SDK
-  surface does not provide; no switch is exposed until that prerequisite lands.
+  surface does not provide; no switch is exposed until that prerequisite and its
+  initial confirmation succeed.
+- Motor switches retain the existing Boolean wire shape. There is no third state,
+  availability extension or custom Home Assistant component; confirmation age and
+  failure remain bounded diagnostic facts beside the last-confirmed Boolean.
 - The stream observes the existing robot upload. It does not add a robot inbound
   listener, a second camera pull, frame recording, retention or transcoding, and
   it labels only explicitly validated JPEG-format bytes as `image/jpeg`.

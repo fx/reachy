@@ -126,11 +126,21 @@ current `enable_motors` and `disable_motors` methods return `None` after
 mode do not satisfy this prerequisite. `RobotHandle` and fakes expose the richer
 result without importing the SDK beyond `daemon_app.py`.
 
-A motor coordinator owns confirmed group state, serializes writes and maps the
-three groups to the SDK identifiers fixed by REQ-094. It is injected into entity
-setters and every motion-adapter entry point rather than copied into behavior.
-Per-group critical sections cover gaze, pipeline expressions, antenna expressions
-and all application commands.
+A motor coordinator serializes writes and maps the three groups to the SDK
+identifiers fixed by REQ-094. Its per-group record contains an optional
+`last_confirmed` Boolean plus confirmation evidence, not a tri-state switch value.
+Initial read-back gates whether the corresponding stable object ID is inserted in
+`ServerState.entities`; later entity messages use the existing Boolean
+`SwitchStateResponse` unchanged.
+
+The coordinator is injected into entity setters and every motion-adapter entry
+point rather than copied into behavior. Per-group critical sections cover gaze,
+pipeline expressions, antenna expressions and all application commands. A setter
+closes the gate, performs the acknowledged transition and returns the physical
+Boolean read-back. Contradiction updates the entity from that read-back. Missing
+confirmation leaves `last_confirmed` untouched, repeats it only as a retained
+command read-back if a response is needed, and appends a bounded identifier-free
+diagnostic event. A separate successful read-back may update it later.
 
 The body path additionally captures and disables daemon automatic yaw before the
 body gate closes, including when `face_tracking_enabled` is false or
@@ -213,13 +223,15 @@ Only commands and output actually observed are transcribed.
   - **Alternatives considered:** Adding entities to the vendored entity module or
     building a custom Home Assistant component.
 - **Decision:** Gate switch registration on correlated daemon acknowledgement and
-  per-motor physical torque read-back for each whole group.
+  per-motor physical torque read-back, then retain one last-confirmed Boolean per
+  registered group.
   - **Why:** The current SDK returns `None` after a fire-and-forget send, while an
-    unobserved daemon response confirms only command handling and the available
-    motor-mode query is aggregate. Neither proves the requested physical group
-    state.
+    unobserved daemon response and aggregate motor mode prove no physical group
+    state. The existing switch wire carries only a Boolean, so confirmation
+    freshness belongs in diagnostics rather than a fabricated third state.
   - **Alternatives considered:** Optimistic switch state, treating no exception as
-    success, polling aggregate mode, or exposing switches as unavailable forever.
+    success, polling aggregate mode, extending the switch protocol, or adding a
+    custom Home Assistant component.
 - **Decision:** Treat each physical motor group and all its command producers as
   one live boundary, with the three groups confirmed after controlled startup.
   - **Why:** A switch that only changes torque can leave application or daemon
@@ -283,6 +295,8 @@ Only commands and output actually observed are transcribed.
   or safety-limit change.
 - No change to the restart-bound false default for `body_motion_enabled`.
 - No individual Stewart-actuator or left/right antenna control.
+- No ESPHome switch-wire extension, third motor-switch state or custom Home
+  Assistant motor component; switches keep the existing Boolean state shape.
 - No robot-link wire-format change, second robot client or inbound robot listener.
 - No video authentication in this change.
 - No frame recording, retention beyond the sole global live JPEG, disk write,
@@ -317,8 +331,9 @@ Only commands and output actually observed are transcribed.
   - [ ] Extend `RobotHandle` and deterministic fakes with acknowledged grouped
         enable, disable and read-back results without importing the SDK outside its
         existing entry point
-  - [ ] Add one serialized confirmed-state coordinator for the exact head, body and
-        antenna mappings, including unavailable and partial-group outcomes
+  - [ ] Add one serialized coordinator for the exact head, body and antenna
+        mappings with an optional initial value, one last-confirmed Boolean and
+        bounded identifier-free confirmation diagnostics per group
   - [ ] Gate gaze, pipeline-head and antenna expression commands and every other
         application producer before torque-off
   - [ ] Inventory daemon-owned move, tracking, expression and automatic-yaw
@@ -326,13 +341,18 @@ Only commands and output actually observed are transcribed.
   - [ ] Acquire exclusive body ownership and quiesce daemon automatic yaw for all
         `face_tracking_enabled` and `body_motion_enabled` combinations, then seed
         measured state before restoring the prior policy after confirmed enable
-  - [ ] Add stable switch entities outside the vendored directory only after the
-        acknowledgement prerequisite, publishing physical read-back rather than
-        request echoes
-  - [ ] Cover missing, late and contradictory acknowledgement; partial group
-        read-back; in-flight application and daemon producers; automatic-yaw
-        ownership; reseeding; hidden targets; failure; cancellation; safe hold;
-        release and shutdown
+  - [ ] Insert each stable switch object ID only after an agreeing initial physical
+        read-back, using the existing Boolean switch messages without a protocol
+        extension or custom Home Assistant component
+  - [ ] Publish only successful physical read-back Booleans and actual state on
+        contradiction; on failure reject the requested value, keep confirmation
+        evidence unchanged and repeat only the retained Boolean when the protocol
+        requires a response, then allow a later successful read-back to advance it
+  - [ ] Cover absent initial confirmation, missing, late and contradictory later
+        acknowledgement, partial group read-back, retained-state diagnostics,
+        subsequent successful read-back, in-flight application and daemon
+        producers, automatic-yaw ownership, reseeding, hidden targets, failure,
+        cancellation, safe hold, release and shutdown
   - [ ] Run the focused satellite suites and repository checks required above
 
 - [ ] Add persisted live groundstation URL replacement
@@ -399,9 +419,10 @@ Only commands and output actually observed are transcribed.
 ## Verification Stages
 
 1. **Deterministic motor acceptance:** drive every REQ-093 and REQ-094 scenario
-   through correlated acknowledgement, grouped physical read-back, all four
-   face/body-setting combinations, automatic-yaw ownership, transition failures,
-   controller faults and terminal lifecycle boundaries.
+   through absent and successful initial confirmation, Boolean registration,
+   agreeing, contradictory, missing and later-successful read-back, last-confirmed
+   diagnostics, all four face/body-setting combinations, automatic-yaw ownership,
+   transition failures, controller faults and terminal lifecycle boundaries.
 2. **Deterministic source acceptance:** drive every REQ-095 scenario at the
    255/256/512 boundaries and through both legacy sources, candidate preparation,
    source close/start, atomic file commit, repeated reconstruction failure then
