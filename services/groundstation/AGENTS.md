@@ -15,8 +15,9 @@ runtime, the pinned model store and the perception capabilities, and
 [0006](../../docs/changes/0006-groundstation-images.md), which added the
 container image, its verification and the standalone deployment. The proposed
 [0020](../../docs/changes/0020-home-assistant-configuration-and-camera-feed.md)
-(draft) adds a latest-only MJPEG observer after authentication and JPEG
-validation; it does not change the robot-link wire contract.
+(draft) adds one global latest-only MJPEG value for the sole authenticated
+session after explicit JPEG-format validation and successful decode; it does not
+change the robot-link wire contract.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.

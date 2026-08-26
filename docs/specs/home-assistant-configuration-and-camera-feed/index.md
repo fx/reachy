@@ -40,32 +40,43 @@ Home Assistant component is part of this contract.
 ### REQ-093: Home Assistant configuration reports effective state
 
 The satellite MUST expose stable Home Assistant Configuration entities for the
-head motors, body motor, antenna motors and groundstation session URL, with each
-entity reporting the value known to be in effect rather than an unconfirmed
-request.
+head motors, body motor, antenna motors and groundstation session URL that report
+only confirmed effective state, with each motor switch requiring an agreeing
+correlated daemon acknowledgement and physical grouped-torque read-back and
+becoming unavailable when that confirmation is absent or contradictory.
 
 #### Scenario: Home Assistant reconnects
 
 - **GIVEN** an existing installation with automations and dashboards that refer
   to the configuration entities
 - **WHEN** the satellite is upgraded or Home Assistant reconnects
-- **THEN** the same object identifiers describe the same controls and their
-  published values match the running application
+- **THEN** the same object identifiers describe the same controls, the URL matches
+  the running application, and each available motor value matches confirmed
+  physical torque state for its whole group
 
-#### Scenario: A requested change is refused
+#### Scenario: A non-motor change is refused
 
 - **GIVEN** an entity showing a value that is currently in effect
-- **WHEN** validation, persistence or hardware adoption of a requested value
-  fails
+- **WHEN** validation, persistence or runtime adoption of a requested value fails
 - **THEN** the entity continues to report the previous effective value and the
   Home Assistant connection remains usable
+
+#### Scenario: Motor confirmation is unavailable
+
+- **GIVEN** a requested motor transition whose acknowledgement is missing or whose
+  grouped torque read-back is missing or contradictory
+- **WHEN** the transition finishes or its confirmation bound expires
+- **THEN** the switch reports unavailable rather than the requested or inferred
+  state and no command producer resumes for that group
 
 ### REQ-094: Motor groups change safely at run time
 
 The satellite MUST apply independent head, body and antenna motor-group switches
-immediately by quiescing that group's commands before disabling its exact motors
-and by reacquiring measured state before re-enabling movement, without weakening
-existing trajectory, workspace, ownership, safe-hold or terminal-release
+immediately by quiescing every application- and daemon-owned command producer for
+the group before torque-off, establishing exclusive body-command ownership when
+needed, confirming each physical grouped-torque transition, and reacquiring and
+seeding measured state before movement or the preceding ownership policy resumes,
+without weakening existing trajectory, workspace, safe-hold or terminal-release
 guarantees.
 
 #### Scenario: Head motors are disabled while tracking
@@ -74,23 +85,40 @@ guarantees.
   and body motion are available
 - **WHEN** the operator disables the head group
 - **THEN** head commands stop before torque is removed from `stewart_1` through
-  `stewart_6`, while commands for enabled unrelated groups may continue
+  `stewart_6`, while enabled unrelated groups may continue and no successful
+  transition is reported before the whole head group is confirmed off
 
 #### Scenario: A motor group is re-enabled
 
 - **GIVEN** a disabled motor group whose mechanism may have moved while torque was
   off
 - **WHEN** the operator re-enables that group
-- **THEN** its motors are enabled, measured state is reacquired, stale controller
-  state is discarded, and the first later movement begins without a target jump
+- **THEN** measured state is reacquired after the whole group is confirmed on,
+  stale target and controller state are discarded, and the first later movement
+  begins without a target jump
 
-#### Scenario: Body torque is changed
+#### Scenario: Body torque is disabled without gaze ownership
 
-- **GIVEN** the restart-bound `body_motion_enabled` setting in either state
-- **WHEN** the operator changes the live body-motor switch
-- **THEN** only `body_rotation` torque availability changes; the setting's
-  false-by-default shipping decision and the calibrated controller limits remain
-  unchanged
+- **GIVEN** any combination of face tracking and restart-bound body motion in which
+  daemon automatic body yaw may still command `body_rotation`
+- **WHEN** the operator disables the body group
+- **THEN** the satellite first establishes exclusive body-command ownership and
+  quiesces automatic yaw, without changing either setting or its default
+
+#### Scenario: Body torque is re-enabled
+
+- **GIVEN** a disabled body group and the ownership or automatic-yaw policy that
+  preceded its disablement
+- **WHEN** confirmed physical torque and fresh measured body state become available
+- **THEN** body trajectory state is seeded before the preceding ownership policy
+  resumes, with no hidden target or target jump
+
+#### Scenario: A body transition fails or shutdown begins
+
+- **GIVEN** a body transition in progress under exclusive command ownership
+- **WHEN** confirmation fails, cancellation arrives or terminal shutdown begins
+- **THEN** no automatic or application body producer resumes against unknown torque
+  state and terminal release remains safe and idempotent
 
 #### Scenario: Antenna motors are disabled
 
@@ -98,43 +126,66 @@ guarantees.
 - **WHEN** the operator disables the antenna group
 - **THEN** antenna commands stop before torque is removed from `right_antenna` and
   `left_antenna`, without splitting them into independently configurable groups
+  or reporting success before both are confirmed off
 
 ### REQ-095: Groundstation replacement is persisted and isolated
 
-The satellite MUST apply the shared session-URL validation rules, durably retain
-and report an accepted URL as the effective value, adopt it immediately as the
-only remote detection source without overlap or eligibility for late results
-from the preceding source, preserve local fallback and bounded reconnection, and
-retain the preceding effective URL when adoption fails.
+The satellite MUST apply one shared session-URL contract across every
+configuration surface that accepts at most 255 characters without truncation,
+refuses a legacy overlong value with actionable remediation, and changes an
+accepted URL immediately through a compensating transition in which the durable
+value, sole eligible remote source and effective read-back advance together only
+after adoption succeeds or remain together on the preceding value after any
+failure, while preserving local fallback and bounded reconnection and excluding
+overlap and late results.
 
-#### Scenario: The running satellite changes groundstations
+#### Scenario: Either configuration surface changes groundstations
 
 - **GIVEN** an active authenticated remote session producing detections
 - **WHEN** the operator submits another valid session URL through Home Assistant
-- **THEN** detections and connection state come only from the replacement after
-  adoption, late results from the preceding source are ignored, and fallback and
-  bounded reconnection continue to work
+  or the application settings page
+- **THEN** the replacement becomes durable, effective and readable together,
+  detections and connection state come only from it, late preceding results are
+  ignored, and fallback and bounded reconnection continue to work
 
-#### Scenario: A URL change is refused
+#### Scenario: A change fails before durable commit
 
-- **GIVEN** a running remote source and a submitted URL that fails validation,
-  durable storage or live adoption
-- **WHEN** the change attempt finishes
-- **THEN** the preceding URL remains the effective read-back and no second remote
-  source remains active
+- **GIVEN** a running remote source and a candidate URL that passes validation
+- **WHEN** replacement preparation, preceding-source retirement, candidate startup
+  or durable commit fails
+- **THEN** compensation leaves the preceding URL as both restart and runtime
+  configuration and effective read-back, restores at most its one remote source,
+  and reports remote health unavailable if that source cannot yet be rebuilt
+
+#### Scenario: A legacy overlong URL is loaded
+
+- **GIVEN** a previously accepted environment or persisted URL containing 256 to
+  512 characters
+- **WHEN** the upgraded satellite validates configuration at startup
+- **THEN** startup refuses it without truncation and names the 255-character
+  limit, the responsible configuration source and how to replace or remove that
+  value before restarting
+
+#### Scenario: An overlong runtime request is submitted
+
+- **GIVEN** a running application and a URL longer than 255 characters
+- **WHEN** either configuration surface submits it
+- **THEN** validation refuses it before source or durable state changes and the
+  preceding effective value remains the read-back
 
 #### Scenario: The application restarts
 
-- **GIVEN** a URL successfully adopted from Home Assistant
+- **GIVEN** a URL successfully adopted through either configuration surface
 - **WHEN** the satellite application starts again
-- **THEN** that URL remains effective without a redeployment
+- **THEN** that exact URL remains effective without a redeployment
 
 ### REQ-096: MJPEG is a bounded latest-frame view
 
-The groundstation MUST retain at most one validated original JPEG globally for a
-standards-compatible MJPEG stream, replace rather than queue that frame for slow
-viewers, and add no robot connection, stream-only decode or re-encode, or
-capability-processing blockage.
+The groundstation MUST retain at most one original payload globally for a
+standards-compatible MJPEG stream only after both explicit JPEG-format signature
+validation and successful image decode, replace rather than queue that payload
+for slow viewers, and add no robot connection, stream-only decode or re-encode,
+or capability-processing blockage.
 
 #### Scenario: A viewer is slower than the robot
 
@@ -151,10 +202,17 @@ capability-processing blockage.
 - **THEN** no JPEG remains retained for the feed rather than one being kept for
   each session
 
-#### Scenario: A malformed frame arrives
+#### Scenario: A decodable non-JPEG image arrives
+
+- **GIVEN** one eligible session and a payload such as PNG that the general image
+  decoder accepts
+- **WHEN** the groundstation validates the payload for the feed
+- **THEN** it is rejected before publication and is never labeled `image/jpeg`
+
+#### Scenario: A malformed JPEG arrives
 
 - **GIVEN** one eligible session with a valid latest frame
-- **WHEN** a later payload fails the groundstation's existing JPEG validation
+- **WHEN** a later payload has a JPEG signature but fails image decode
 - **THEN** the malformed payload is not published and capability error handling
   continues independently
 
@@ -234,32 +292,58 @@ than inside the vendored ESPHome protocol directory. Their object identifiers ar
 `head_motors`, `body_motor`, `antenna_motors` and `groundstation_url`; these names
 are compatibility identifiers, not display labels. The three motor entities are
 switches and the address is a text entity. All four appear in Home Assistant's
-Configuration category and publish a read-back after each attempted change.
+Configuration category.
 
-The motor switches start enabled, preserving controlled-wake behavior. They are
-runtime torque gates, not a replacement for behavior settings. In particular,
-the body switch does not change `body_motion_enabled`: it only determines whether
-the existing controller is allowed to command and energize `body_rotation`.
-Head maps to all six Stewart motors as one group, body maps to the rotation motor,
-and both antenna joints remain one group.
+A motor switch has three reportable outcomes: confirmed on, confirmed off and
+unavailable. The current SDK's selective torque methods return `None` after a
+fire-and-forget command and expose no per-group physical torque query. That is not
+confirmation. Implementation therefore has a hard prerequisite on a daemon/SDK
+contract that correlates each grouped request with an acknowledgement and returns
+physical torque state for every named motor in the group. The switches are not
+registered until that prerequisite exists and passes against both the fake and
+real daemon boundary. A timeout, transport failure, partial group state or
+contradictory read-back publishes unavailable and leaves command gates closed.
 
-The groundstation entity uses the session client's existing URL validation, so
-WebSocket scheme and credential-exclusion rules retain one owner. It writes the
-same persisted overrides file as the application settings page. The remote source
-owns replacement as one serialized lifecycle transition: invalidate old results,
-close the old client, create a new source generation and only then start the new
-client. A failed transition leaves or restores the prior effective source rather
-than permitting two producers.
+The motor switches start enabled after controlled wake confirms physical state.
+They are runtime torque gates, not a replacement for behavior settings. Head maps
+to all six Stewart motors as one group, body maps to `body_rotation`, and both
+antenna joints remain one group. Each gate covers every producer that can reach
+that hardware. For body motion this includes daemon automatic yaw even when face
+tracking never acquired gaze ownership. A body transition records the preceding
+automatic-yaw policy, disables it before torque-off, seeds fresh measured state
+after confirmed re-enable and restores that policy only after the body gate is
+safe. Failure and shutdown keep the producer quiesced rather than restoring it
+against unknown torque.
+
+The text entity and the shared settings model both cap `groundstation_url` at 255
+characters, so the entity can represent every value any configuration layer
+accepts. The session client's scheme and credential-exclusion validation remains
+the other shared half of the URL contract. Existing 256–512-character environment
+or persisted values are rejected at startup with source-specific remediation;
+none is truncated or silently hidden from Home Assistant.
+
+The settings page and Home Assistant entity call one serialized replacement
+operation. It validates and prepares a candidate while preserving the preceding
+durable value and source, retires the preceding source, starts the candidate, and
+only then atomically replaces the durable settings file and publishes the new
+effective value. Failure before durable replacement leaves that file untouched.
+Failure during its atomic replacement closes the candidate and reconstructs the
+preceding sole source from the preserved value. Compensation failure closes all
+remote publication and reports unavailable rather than allowing runtime and
+restart configuration to disagree. This is explicit ordering and compensation,
+not a claim of an atomic filesystem-and-network transaction.
 
 ### MJPEG feed
 
-The groundstation keeps one original compressed latest frame globally. While one
-authenticated camera session is active, a newly validated payload replaces that
-value atomically. Any transition to zero or multiple authenticated sessions
-clears it. Returning from multiple sessions to one leaves it empty until the
-remaining session supplies a fresh validated JPEG, so ambiguity can never
-resurrect an earlier image. The capability pipeline continues to receive its one
-decoded frame; streaming reads the validated compressed bytes and does not add
+The groundstation keeps one original compressed latest frame globally. A
+dedicated format gate verifies the JPEG signature rather than treating successful
+OpenCV decode as proof of format; the existing decoder accepts PNG and other image
+formats. Only a payload that passes both checks can replace the global value and
+be labeled `image/jpeg`. The original bytes remain unchanged. Any transition to
+zero or multiple authenticated sessions clears the value. Returning from multiple
+sessions to one leaves it empty until the remaining session supplies a fresh
+actual JPEG, so ambiguity can never resurrect an earlier image. The capability
+pipeline continues to receive its one decoded frame; streaming does not add
 another decode.
 
 `GET /stream.mjpg` responds as `multipart/x-mixed-replace`, with each part marked
@@ -303,8 +387,12 @@ ambiguity appears.
   single-client transport remain unchanged.
 - Motor controls stop at the three physical groups. Individual Stewart actuators
   and left/right antenna controls are outside this contract.
+- Motor switches depend on a correlated daemon acknowledgement and grouped
+  physical torque read-back capability that the current fire-and-forget SDK
+  surface does not provide; no switch is exposed until that prerequisite lands.
 - The stream observes the existing robot upload. It does not add a robot inbound
-  listener, a second camera pull, frame recording, retention or transcoding.
+  listener, a second camera pull, frame recording, retention or transcoding, and
+  it labels only explicitly validated JPEG-format bytes as `image/jpeg`.
 - The standard Home Assistant MJPEG integration is the only camera integration in
   scope. A custom component and a native satellite camera entity are excluded.
 - Hardware-free tests use fakes for the robot, camera and Home Assistant. Live
@@ -329,4 +417,4 @@ need a separate proposal.
 
 | Date | Change | Document |
 |------|--------|----------|
-| 2026-08-26 | Proposed live Home Assistant configuration and a bounded groundstation camera feed | [0020-home-assistant-configuration-and-camera-feed](../../changes/0020-home-assistant-configuration-and-camera-feed.md) |
+| 2026-08-26 | Proposed acknowledged motor controls, transactional live configuration and a bounded actual-JPEG camera feed | [0020-home-assistant-configuration-and-camera-feed](../../changes/0020-home-assistant-configuration-and-camera-feed.md) |

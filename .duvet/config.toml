@@ -26,12 +26,18 @@
 
 '$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
 
-# EVERY SPEC IS REGISTERED. THIS IS THE STATE THIS COMMENT HAS BEEN DESCRIBING
-# AS THE GOAL SINCE BEFORE ANY CODE EXISTED.
+# EVERY IMPLEMENTED SPEC IS REGISTERED. THIS IS THE STATE THIS COMMENT HAS BEEN
+# DESCRIBING AS THE GOAL SINCE BEFORE ANY CODE EXISTED.
 #
-# `docs/specs/` holds 9 specs carrying 92 requirements, and all 9 are registered
-# below, so `duvet query -c implementation` and `duvet report --ci` mean what
-# they appear to mean for every requirement this repository has:
+# `docs/specs/` holds 10 specs. Nine implemented specs carry 92 requirements and
+# all nine are registered below, so `duvet query -c implementation` and `duvet
+# report --ci` cover every implemented requirement. The proposed Home Assistant
+# configuration and camera-feed spec carries REQ-093–098 and is deliberately
+# unregistered until change 0020 completes their implementation and annotations.
+# Its omission here is what keeps this proposal from making the gate red before
+# implementation exists.
+#
+# The nine implemented and registered specs are:
 #
 #   - perception, whose 8 requirements are implemented and annotated by
 #     docs/changes/0005-perception-capability.md;

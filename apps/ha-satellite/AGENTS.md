@@ -20,9 +20,12 @@ including deterministic acceptance evidence and the scrubbed staged-rollout
 outcome). The app is also one side of
 [0020](../../docs/changes/0020-home-assistant-configuration-and-camera-feed.md)
 (draft), which proposes live motor-group and groundstation entities plus the
-robot half of the camera-feed contract. Body motion remains restart-bound, false
-by default and a provisional opt-in because the rollout did not settle
-calibration or its shipping default. The two implemented specs are registered in
+robot half of the camera-feed contract. Its motor switches are gated on a
+correlated daemon acknowledgement and physical read-back for every motor in a
+group; the current fire-and-forget SDK surface is not sufficient and no switch is
+exposed without that prerequisite. Body motion remains restart-bound, false by
+default and a provisional opt-in because the rollout did not settle calibration
+or its shipping default. The two implemented specs are registered in
 `.duvet/config.toml`; repository traceability covers all nine implemented specs
 and all 92 implemented requirements. The proposed spec remains unregistered
 until 0020 completes REQ-093–098.

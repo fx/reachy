@@ -180,7 +180,7 @@ changes:
   - id: "0020"
     name: home-assistant-configuration-and-camera-feed
     path: changes/0020-home-assistant-configuration-and-camera-feed.md
-    description: Safe live motor groups, immediate groundstation replacement, and a bounded Home Assistant MJPEG feed
+    description: Daemon-confirmed motor groups, transactional groundstation replacement, and a bounded actual-JPEG Home Assistant feed
     spec: home-assistant-configuration-and-camera-feed
     status: draft
-    depends_on: ["0017", "0018", "0019"]
+    depends_on: ["0015", "0017", "0018", "0019"]
