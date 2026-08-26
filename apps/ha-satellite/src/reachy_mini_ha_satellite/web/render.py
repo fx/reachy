@@ -20,6 +20,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Literal, get_args, get_origin
 
 from reachy_mini_ha_satellite.config import (
+    GROUNDSTATION_URL_MAX_LENGTH,
+    GROUNDSTATION_URL_SETTING,
     LIVE_SETTINGS,
     SECRET_SETTINGS,
     Settings,
@@ -167,8 +169,17 @@ def _field(report: SettingReport, settings: Settings) -> str:
         )
         control = f'<select id="{field}" name="{name}">{options}</select>'
     else:
+        # The one field with a declared maximum on the page, and it is the
+        # shared one rather than a number written here: an over-long address is
+        # refused by the settings model and by the Home Assistant control alike,
+        # so the browser stopping it first is a courtesy and not the check.
+        limit = (
+            f' maxlength="{GROUNDSTATION_URL_MAX_LENGTH}"'
+            if report.name == GROUNDSTATION_URL_SETTING
+            else ""
+        )
         control = (
-            f'<input type="text" id="{field}" name="{name}" '
+            f'<input type="text" id="{field}" name="{name}"{limit} '
             f'value="{_escape(form_value(settings, report.name))}">'
         )
 

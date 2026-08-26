@@ -31,10 +31,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from reachy_contracts.settings import SESSION_URL_MAX_LENGTH
 from reachy_mini_ha_satellite.config import (
     BOOTSTRAP_SETTINGS,
     COMPATIBILITY_SETTINGS,
     ENV_PREFIX,
+    GROUNDSTATION_URL_MAX_LENGTH,
+    GROUNDSTATION_URL_SETTING,
     IDENTITY_SETTING,
     LIVE_SETTINGS,
     OVERRIDES_FILENAME,
@@ -54,6 +57,7 @@ from reachy_mini_ha_satellite.config import (
     setting_names,
     state_directory,
     unrecognised_variables,
+    validate_groundstation_url_length,
     variable_for,
 )
 from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
@@ -1039,3 +1043,145 @@ class TestRenderingAValueBackToAString:
         assert canonical_string("groundstation_credential", AWKWARD_CREDENTIAL) == (
             AWKWARD_CREDENTIAL
         )
+
+
+def _address_of_length(length: int) -> str:
+    """Build a valid session address of exactly this many characters.
+
+    Valid in every respect but its length, so a refusal below is a refusal of
+    the length and of nothing else. The address is from the RFC 5737
+    documentation range.
+
+    Args:
+        length: How long it must be.
+
+    Returns:
+        The address, padded in its path.
+    """
+    prefix = "ws://192.0.2.10:8080/v1/session/"
+    return prefix + "a" * (length - len(prefix))
+
+
+# The smallest environment that resolves *and* opens a session, which is what
+# makes the address below load-bearing rather than unread.
+_TRACKING = {
+    f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1",
+    f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": "example-credential",
+}
+
+
+class TestTheGroundstationAddressBound:
+    """One 255-character contract, refused rather than truncated."""
+
+    def test_the_declared_maximum_is_the_shared_one(self) -> None:
+        """Not a number of this application's own — see `config`'s own comment."""
+        assert GROUNDSTATION_URL_MAX_LENGTH == SESSION_URL_MAX_LENGTH
+        assert (
+            Settings.model_fields[GROUNDSTATION_URL_SETTING].metadata[0].max_length
+            == GROUNDSTATION_URL_MAX_LENGTH
+        )
+
+    def test_the_boundary_length_resolves(self) -> None:
+        """255 is the limit, so 255 is a value that starts the application."""
+        url = _address_of_length(GROUNDSTATION_URL_MAX_LENGTH)
+
+        resolution = load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
+
+        assert resolution.settings.groundstation_url == url
+
+    @pytest.mark.parametrize("length", [256, 400, 512])
+    def test_a_legacy_environment_value_refuses_startup(self, length: int) -> None:
+        """REQ-095's legacy scenario, from the layer a deployment writes.
+
+        Args:
+            length: How long the released address is.
+        """
+        url = _address_of_length(length)
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
+
+        message = str(raised.value)
+        assert variable_for(GROUNDSTATION_URL_SETTING) in message
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+        assert "environment" in message
+        assert "start the application again" in message
+
+    @pytest.mark.parametrize("length", [256, 512])
+    def test_a_legacy_persisted_value_names_the_overrides_file(
+        self,
+        length: int,
+    ) -> None:
+        """The other layer, whose remedy is a different file and a different act.
+
+        Args:
+            length: How long the released address is.
+        """
+        environ = {**_TRACKING, f"{ENV_PREFIX}STATE_DIR": "/reachy-satellite-legacy"}
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings(
+                environ,
+                {GROUNDSTATION_URL_SETTING: _address_of_length(length)},
+            )
+
+        message = str(raised.value)
+        assert "override" in message
+        assert "/reachy-satellite-legacy/settings.json" in message
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+
+    def test_the_refusal_never_repeats_the_address(self) -> None:
+        """`groundstation_url` is rendered by value everywhere it is reported.
+
+        A refusal that quoted it would put a value nothing can represent into
+        the boot log, which is the one place an operator is certain to paste.
+        """
+        url = _address_of_length(400)
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
+
+        message = str(raised.value)
+        assert url not in message
+        assert "192.0.2.10" not in message
+
+    @pytest.mark.parametrize("length", [0, 40, GROUNDSTATION_URL_MAX_LENGTH])
+    def test_a_runtime_submission_within_the_bound_is_accepted(
+        self,
+        length: int,
+    ) -> None:
+        """The check both submission paths run first, on the values it passes.
+
+        Args:
+            length: How long the submitted address is.
+        """
+        validate_groundstation_url_length("a" * length)
+
+    @pytest.mark.parametrize("length", [256, 512])
+    def test_a_runtime_submission_over_the_bound_is_refused(
+        self,
+        length: int,
+    ) -> None:
+        """Stated as the limit and the length, never as the address.
+
+        Args:
+            length: How long the submitted address is.
+        """
+        url = _address_of_length(length)
+
+        with pytest.raises(ConfigurationError) as raised:
+            validate_groundstation_url_length(url)
+
+        message = str(raised.value)
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+        assert str(length) in message
+        assert url not in message
+
+    def test_the_address_is_a_live_setting(self) -> None:
+        """What the set means to an operator is "no restart", which is now true.
+
+        Its adoption is `groundstation_url.GroundstationUrlOwner`'s rather than
+        `apply_live`'s, and that is the one entry in the set of which that is
+        so — see the comment beside `LIVE_SETTINGS`.
+        """
+        assert GROUNDSTATION_URL_SETTING in LIVE_SETTINGS
