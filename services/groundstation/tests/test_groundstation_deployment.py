@@ -268,6 +268,24 @@ def test_the_collector_scrapes_the_service_compose_actually_runs() -> None:
     assert scrape["scrape_configs"][0]["static_configs"][0]["targets"]
 
 
+@pytest.mark.filesystem  # the compose file on disk is the thing under test
+def test_the_service_has_nowhere_to_write_a_camera_frame() -> None:
+    """The feed retains one frame in memory, and the deployment keeps it that way.
+
+    The service holds a live JPEG now, which makes "it does not need to write
+    anywhere" a privacy property rather than only a hardening one: a bind mount
+    or a named volume added here would be somewhere frames could accumulate
+    without anything in the application changing. The read-only root and the
+    absent volume list are what stop that being possible.
+    """
+    service = _load_yaml(_COMPOSE)["services"][_SERVICE_NAME]
+    assert service["read_only"] is True
+    assert "volumes" not in service
+    # The one writable path, bounded and in memory, for what a Python process
+    # may still want a temporary directory for.
+    assert service["tmpfs"] == ["/tmp:size=16m"]  # noqa: S108  # the container's own tmpfs mount point, read out of the compose file rather than used as a path here
+
+
 @pytest.mark.filesystem  # the overlay on disk is the thing under test
 def test_the_accelerated_overlay_asks_the_host_for_a_gpu() -> None:
     """The `-cuda` tag alone is a CPU deployment, so the overlay is the switch.

@@ -15,7 +15,8 @@ addresses are loopback or RFC 5737 documentation ranges; substitute your own.
   is 437 MiB on x86-64 and 354 MiB on 64-bit ARM, uncompressed. The accelerated
   variant is 3.4 GiB, which is what a CUDA runtime plus cuDNN costs.
 - **You get:** a service answering `/readyz` and accepting authenticated
-  sessions, with a Prometheus scraping it.
+  sessions, with a Prometheus scraping it and an MJPEG feed of whatever the
+  connected robot is looking at.
 - **Then go to:** [the robot](robot.md), which points the satellite at it.
 
 ---
@@ -380,7 +381,141 @@ The exit status is 0, and the summary line says exactly what that means:
 **nothing failed, but not everything was checked**. `--models-dir` is the
 directory `just models` wrote into; leave it off and that check is skipped too.
 
-## 8. Decide what the network may reach
+## 8. Look at what the robot is sending
+
+`/stream.mjpg` shows the frame the robot most recently sent, as a
+`multipart/x-mixed-replace` stream — the format Home Assistant's built-in MJPEG
+IP Camera integration reads, and the reason this endpoint exists. It observes the
+session the robot already opened: nothing connects back to the robot, nothing
+asks it for a second capture, and nothing decodes or re-encodes a frame for the
+stream.
+
+> ### ⚠️ This endpoint is not authenticated, and it is camera video
+>
+> `/stream.mjpg` answers anybody who can reach the port, exactly as `/livez`,
+> `/readyz`, `/capabilities`, `/config` and `/metrics` do. Those expose the shape
+> of a deployment; this one exposes the room the robot is in. **Publish the port
+> only on a trusted network** — [step 9](#9-decide-what-the-network-may-reach) is
+> where that is decided — and do not put it behind a port forward, a tunnel or a
+> reverse proxy that is reachable from the internet.
+
+With no robot connected there is nothing to show, and the endpoint says so rather
+than holding a connection open in case one arrives:
+
+```
+curl --silent --show-error --include http://127.0.0.1:8080/stream.mjpg
+```
+
+```
+HTTP/1.1 503 Service Unavailable
+date: Wed, 26 Aug 2026 20:10:19 GMT
+server: uvicorn
+cache-control: no-store
+content-length: 30
+content-type: application/json
+
+{"feed":"no_eligible_session"}
+```
+
+With one authenticated session that has sent a frame, the same request opens the
+stream:
+
+```
+curl --silent --show-error --dump-header - --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
+```
+
+```
+HTTP/1.1 200 OK
+date: Wed, 26 Aug 2026 20:10:32 GMT
+server: uvicorn
+cache-control: no-store
+content-type: multipart/x-mixed-replace; boundary=reachyframe
+Transfer-Encoding: chunked
+
+curl: (28) Operation timed out after 2001 milliseconds with 9343 bytes received
+```
+
+The timeout is the expected ending: the stream does not finish, so `--max-time`
+is how `curl` stops. Each part carries its own type and length:
+
+```
+curl --silent --max-time 2 --output - http://127.0.0.1:8080/stream.mjpg | head -c 120 | cat -v
+```
+
+```
+--reachyframe^M
+Content-Type: image/jpeg^M
+Content-Length: 9276^M
+^M
+M-^?M-XM-^?M-`^@^PJFIF^@^A^A^@^@^A^@^A^@^@M-^?M-[^@C^@^C^B^B^B^B^B^C^B^B^B^C^C^C^C^D^F^D^D^D^D^D^H^F^F^E^F	^H
+```
+
+`^M` is the carriage return of each header line and `M-^?M-X` is `ff d8`, the
+start of a JPEG — `cat -v` is what makes both visible. The bytes are the robot's
+own: nothing here re-encodes them.
+
+> **How every transcript in this step was produced.** No robot was involved in
+> any of them. The sessions were driven by this repository's committed fixture
+> frames rather than by a camera, the same way `just image-verify` drives one, so
+> the 9276 bytes above are a fixture's; the 409 below came from opening a second
+> such session, and the 429 from four `curl` viewers holding the stream while a
+> fifth asked. A robot's session produces the same responses with its own frames.
+
+Three more things are worth knowing before you point anything at it.
+
+**Only one robot, or none.** The feed shows the sole authenticated session's
+frame. Connect a second robot to the same groundstation and it refuses rather
+than choosing between them:
+
+```
+HTTP/1.1 409 Conflict
+date: Wed, 26 Aug 2026 20:10:50 GMT
+server: uvicorn
+cache-control: no-store
+content-length: 29
+content-type: application/json
+
+{"feed":"ambiguous_sessions"}
+```
+
+Going back to one session does not bring the old frame back: the feed stays
+unavailable until the remaining robot sends a new one, which is usually the next
+frame it was going to send anyway.
+
+**Four viewers.** A fifth is refused, and the fifth is a refusal about capacity
+rather than about the robot:
+
+```
+HTTP/1.1 429 Too Many Requests
+date: Wed, 26 Aug 2026 20:10:56 GMT
+server: uvicorn
+cache-control: no-store
+content-length: 34
+content-type: application/json
+
+{"feed":"viewer_capacity_reached"}
+```
+
+A viewer that disconnects gives its slot back immediately, so a browser tab left
+open and then closed does not cost anything. Home Assistant is one viewer.
+
+**Latest only, never a backlog.** One frame is held for the whole service, and a
+new one replaces it. A viewer that reads slowly gets the current frame next
+rather than working through the ones it missed.
+
+**The service keeps nothing, and that is a claim about the service.** It holds
+that one frame in memory, writes no frame to disk, and has no volume to write one
+to — the container's root filesystem is read-only and its only writable path is a
+16 MiB `tmpfs` on `/tmp` that nothing here writes a frame into. Every response is
+`cache-control: no-store`, which asks a cache, a proxy or a browser not to retain
+one. **Asking is all it is.** Once a frame has been sent, what the recipient does
+with it is outside this boundary: Home Assistant, a browser and anything between
+them are free to buffer, cache or record what they were given, and no header
+stops them. That is the reason [step 9](#9-decide-what-the-network-may-reach) is a
+decision — who can reach this port is the last control you have over where these
+frames end up.
+
+## 9. Decide what the network may reach
 
 By default the service is published on the loopback interface only:
 
@@ -391,18 +526,20 @@ GROUNDSTATION_PUBLISH=127.0.0.1:8080
 A robot on another host cannot reach that, so a real deployment changes it — and
 should do so deliberately, because **the session endpoint is authenticated and
 the endpoints beside it are not**. `/livez`, `/readyz`, `/capabilities`,
-`/config` and `/metrics` answer anybody who can reach the port. `/config` reports
-secrets as `<set>` rather than by value, so what is exposed is the shape of the
-deployment rather than its credential — but that is still more than a public
-network should see.
+`/config`, `/metrics` and `/stream.mjpg` answer anybody who can reach the port.
+`/config` reports secrets as `<set>` rather than by value, so what is exposed
+there is the shape of the deployment rather than its credential — but
+`/stream.mjpg` is the robot's camera, which is a different order of exposure
+altogether and is what makes this step a decision rather than a formality.
 
-Publish it on the interface the robot is on, not on all of them:
+Publish it on the interface the robot and Home Assistant are on, not on all of
+them:
 
 ```
 GROUNDSTATION_PUBLISH=198.51.100.10:8080
 ```
 
-## 9. The accelerated variant, if the host has an NVIDIA GPU
+## 10. The accelerated variant, if the host has an NVIDIA GPU
 
 Point `GROUNDSTATION_IMAGE` at the tag ending in `-cuda` **and** bring in the
 overlay:
@@ -427,7 +564,7 @@ Whether the accelerated variant is faster than the CPU path is
 [the benchmark suite's](../specs/benchmarks/) question, and the measurements that
 made CPU the default say it may well not be for this workload.
 
-## 10. Stopping, and starting again
+## 11. Stopping, and starting again
 
 ```
 docker compose down
@@ -447,6 +584,7 @@ removes the containers and the network but keeps the Prometheus volume. Add
 | `http://<host>:8080/capabilities` | What a session would be able to negotiate |
 | `http://<host>:8080/config` | Every setting in force, secrets redacted |
 | `http://<host>:8080/metrics` | Prometheus exposition, with exemplars |
+| `http://<host>:8080/stream.mjpg` | The sole connected robot's newest frame, unauthenticated |
 | `ws://<host>:8080/v1/session` | The session endpoint the robot opens |
 | `http://<host>:9090/` | The Prometheus scraping all of it |
 

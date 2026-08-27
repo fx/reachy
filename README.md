@@ -38,12 +38,39 @@ wake-word model has none left for inference.
 - [Troubleshooting](docs/ops/troubleshooting.md), keyed to `reachyctl doctor`'s
   check identifiers
 
+## ⚠️ The three motor switches need a forked `reachy-mini`, for now
+
+The Home Assistant switches for the head, body and antenna motor groups turn
+physical torque on and off, so the satellite will not announce one until it can
+*prove* what the torque actually is. That takes a daemon call that correlates a
+selective torque request with its completion and reads physical torque back for
+every motor in the group individually. **No released `reachy-mini` provides it.**
+The published methods send and return `None`, and the daemon's aggregate motor
+mode is not per-group state.
+
+So the robot must run the branch **`feat/correlated-motor-torque-readback`** from
+the fork at **https://github.com/fx/reachy_mini** in its daemon's application
+environment. That branch is reviewed, but it is neither released nor merged
+upstream — no upstream pull request is open yet — and the pin in
+[`pyproject.toml`](pyproject.toml) and
+[`apps/ha-satellite/pyproject.toml`](apps/ha-satellite/pyproject.toml) therefore
+still names the released range. **Move both pins to an official release once one
+carries the API**, and delete this section with them.
+
+Without that build the satellite **fails closed, and only there**: the daemon
+boundary finds no confirmation method, every group stays unconfirmed, and the
+application announces **no motor switch at all** rather than a switch whose state
+it made up. Bounded, identifier-free diagnostics record the missing confirmation.
+Nothing else changes. The groundstation URL text control, the live replacement
+behind it, and the groundstation's `/stream.mjpg` camera feed are unaffected by
+which `reachy-mini` the robot runs — they do not touch motors.
+
 **Working on it:**
 
 - [`AGENTS.md`](AGENTS.md) — the map of the repository and the invariants that
   hold across it. Read this before changing anything
 - [`REVIEW.md`](REVIEW.md) — the review conventions every change is judged against
-- [`docs/index.md`](docs/index.md) — eight specs and the change documents that
+- [`docs/index.md`](docs/index.md) — ten specs and the change documents that
   sequence the work. The specs are the authority; a change document sequences, it
   does not redefine
 - [`docs/contracts/`](docs/contracts/) — generated schemas and interface

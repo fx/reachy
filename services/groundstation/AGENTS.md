@@ -4,20 +4,20 @@ The off-robot service that hosts heavy computation as pluggable capabilities.
 Distribution `reachy-groundstation`, import name `reachy_groundstation`.
 
 **Specs:** [groundstation](../../docs/specs/groundstation/), with
-[perception](../../docs/specs/perception/) for the first capability and the
-proposed
+[perception](../../docs/specs/perception/) for the first capability and
 [Home Assistant Configuration and Camera Feed](../../docs/specs/home-assistant-configuration-and-camera-feed/)
-contract for its operator video surface.
+for its operator video surface.
 **Filled in by:** [0004](../../docs/changes/0004-groundstation-session.md) —
 transport, session layer, capability registry, pipeline and observability —
 [0005](../../docs/changes/0005-perception-capability.md), which added the model
 runtime, the pinned model store and the perception capabilities, and
 [0006](../../docs/changes/0006-groundstation-images.md), which added the
-container image, its verification and the standalone deployment. The proposed
+container image, its verification and the standalone deployment.
 [0020](../../docs/changes/0020-home-assistant-configuration-and-camera-feed.md)
-(draft) adds one global latest-only MJPEG value for the sole authenticated
-session after explicit JPEG-format validation and successful decode; it does not
-change the robot-link wire contract.
+(done) added one global latest-only MJPEG value for the sole authenticated
+session after explicit JPEG-format validation and successful decode, and
+`/stream.mjpg` over it; it does not change the robot-link wire contract, and
+REQ-096–098 are registered and traced with the rest.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -26,7 +26,7 @@ that apply here.
 
 ```
 src/reachy_groundstation/
-├─ api/            # the session endpoint and the operator surface
+├─ api/            # the session endpoint, the operator surface, the MJPEG feed
 ├─ session/        # authentication, framing, negotiation, routing
 ├─ pipeline/       # the bounded queue, the single decode, result assembly
 ├─ capabilities/   # the interface, the registry, and the capabilities
@@ -35,6 +35,7 @@ src/reachy_groundstation/
 ├─ runtime/        # model-runtime sessions: providers, thread bounds, warm-up
 ├─ obs/            # structured logging, metrics, tracing
 ├─ ports.py        # the seam: the decoded frame and the two interfaces
+├─ feed.py         # one live JPEG for the sole session, and the viewer bound
 ├─ config.py       # settings, read once by a function the entry point calls
 └─ service.py      # the composition root
 
@@ -53,7 +54,15 @@ deploy/
   they hold a `CapabilityRegistryPort` handed to them by `service.py`, which is
   the only module outside `capabilities/` that names it.
   `just lint-capability-boundary` proves that rule fires against a committed
-  fixture and then runs it over the tree; it is part of `just lint`.
+  fixture and then runs it over the tree; it is part of `just lint`. `feed.py`
+  sits beside `ports.py` for the same reason those ports do: all three of those
+  packages hold one, so it cannot live inside any of them.
+- **The operator feed retains one frame and validates it twice.** `feed.py` holds
+  a single optional payload for the whole process, never one per session, and
+  `pipeline/runner.py` is its only writer — a payload is offered to it just when
+  `is_jpeg` accepts the bytes *and* the decode that frame needed anyway
+  succeeded. A frame reaches no log line, metric, span or error message, and
+  `/stream.mjpg` labels only what passed both checks `image/jpeg`.
 - **A capability is an interface plus a registration.** Implement
   `ports.CapabilityPort` — `CapabilityBase` gives you the two lifecycle hooks
   defaulted — and decorate a factory with `capabilities.register`. That, plus

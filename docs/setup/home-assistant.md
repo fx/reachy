@@ -368,6 +368,53 @@ No reconnection took place between those two readings.
 > [change 0016](../changes/0016-audible-playback.md) answered, and the 500%
 > default is inherited from it unchanged.
 
+### The motor and groundstation controls are in the same group
+
+Four more controls sit in **Configuration** beside the two above:
+
+| Control | Object ID | What it is |
+|---|---|---|
+| **Head Motors** | `head_motors` | Torque on the six Stewart actuators, as one group |
+| **Body Motor** | `body_motor` | Torque on `body_rotation` |
+| **Antenna Motors** | `antenna_motors` | Torque on both antennas, as one group |
+| **Groundstation URL** | `groundstation_url` | The session address, at most 255 characters |
+
+**Groundstation URL** applies at once and survives a restart: it is written to
+the same `settings.json` the boost is, so the robot's own settings page shows
+what you set here and the other way round. A refused address leaves the control
+reporting the one still in effect.
+[`docs/ops/satellite-deployment.md`](../ops/satellite-deployment.md) has the
+ordering, the failure behaviour and the 255-character migration.
+
+**The three motor switches turn physical torque off**, so the robot goes limp for
+that group — hold the head before you switch it off. Turning one back on
+reacquires measured state before anything moves again, so there is no jump. Each
+switch reports only torque state that was physically read back: a request the
+robot contradicts publishes what the robot actually did, not what was asked for.
+
+> ### ⚠️ The motor switches need a forked `reachy-mini`
+>
+> They appear only if the robot's daemon application environment holds a
+> `reachy-mini` that acknowledges a selective torque request and reads physical
+> torque back per motor. **No released version has that API**, so on a stock
+> robot the satellite announces **no motor switch at all** rather than one whose
+> state it invented — three fewer rows in Configuration, and nothing else
+> affected. Until an upstream release carries it, the switches need the branch
+> `feat/correlated-motor-torque-readback` from the fork at
+> https://github.com/fx/reachy_mini, which is reviewed but neither released nor
+> merged, with no upstream pull request open yet. The
+> [robot runbook](robot.md#-the-motor-switches-need-a-forked-reachy-mini-for-now)
+> says the same thing where the robot is set up.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No readings are recorded for these four
+> controls. The motor switches need a robot carrying that forked build and
+> nothing in this repository has a Reachy Mini attached; the address control
+> needs a real Home Assistant. What is covered without hardware is every one of
+> their behaviours, in
+> `apps/ha-satellite/tests/test_satellite_motor_entities.py`,
+> `apps/ha-satellite/tests/test_satellite_motor_groups.py` and
+> `apps/ha-satellite/tests/test_satellite_groundstation_entities.py`.
+
 ## 5. Watch the robot, not the screen
 
 The point of a robot satellite is that you can tell what it is doing from across
@@ -402,6 +449,71 @@ pipeline. Only being unmuted unmutes it.
 > decides them is pure and fully covered; what has not been checked is how it
 > looks.
 
+## 6. Add the camera, if you want to see what the robot sees
+
+The robot's camera reaches Home Assistant through the **groundstation**, not
+through the satellite. The satellite announces no camera entity and this
+repository ships no custom Home Assistant component: the groundstation serves
+`/stream.mjpg` and Home Assistant's own built-in **MJPEG IP Camera** integration
+reads it. That integration is a separate device entry, so nothing about the
+robot's ESPHome device — its identity, its entities, its history — is involved.
+
+> ### ⚠️ The video is not authenticated
+>
+> `/stream.mjpg` answers anybody who can reach the groundstation's port. It is
+> the room the robot is in, so the groundstation belongs on a network you trust,
+> for the same reason and with rather more force than
+> [the robot does](#the-trust-boundary-is-the-network). The
+> [groundstation runbook](groundstation.md#8-look-at-what-the-robot-is-sending)
+> is where that endpoint and its bounds are described.
+
+**Settings → Devices & Services → Add Integration → MJPEG IP Camera.** The
+integration asks for a **stream URL**, and that is the whole of the required
+configuration:
+
+```
+http://198.51.100.10:8080/stream.mjpg
+```
+
+Substitute the address `GROUNDSTATION_PUBLISH` puts the service on. Leave the
+still-image URL empty: this groundstation serves no still-image endpoint, and the
+integration derives its snapshots from the stream. Leave the username and
+password empty too — there is no authentication to give.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No expected output is recorded for this
+> step: it needs a Home Assistant instance and a robot sending frames, and
+> neither has been run against this repository. The endpoint's own responses
+> *are* recorded, from a real service — see the groundstation runbook.
+
+What to expect once it is added, and what each behaviour is:
+
+| What you see | What it is |
+|---|---|
+| A live picture | One robot is connected and sending frames |
+| The camera unavailable, with nothing connected | No robot session — the endpoint answers 503 |
+| The camera unavailable, with two robots connected | Deliberate: the feed refuses to choose between them and answers 409 |
+| The camera unavailable after a fifth viewer | Four viewers at once is the bound; the endpoint answers 429 |
+
+The picture is the newest frame rather than a smooth recording: one frame is held
+for the whole service and each new one replaces it, so a viewer that falls behind
+skips forward instead of playing a backlog.
+
+**The groundstation records nothing** — it holds that one frame in memory, writes
+no frame to disk, has no volume to write one to, and marks every response
+`no-store`. What it cannot do is bind the far end. **Home Assistant is a separate
+recipient**, and what it and your browser do with frames they have been given is
+theirs to decide: a `no-store` header is a request, not an enforcement. If you
+add recording, snapshots or a camera-history integration in front of this camera,
+those frames are retained by Home Assistant on Home Assistant's terms — check
+that before pointing anything at it, because
+[the groundstation runbook](groundstation.md#8-look-at-what-the-robot-is-sending)
+describes bounds that end at the response.
+
+**If you run two robots against one groundstation**, this camera is not the
+feature to use — the feed refuses ambiguity rather than picking a robot by
+connection order, and a groundstation per robot is what gives each of them a
+feed.
+
 ## The trust boundary is the network
 
 Anything that can reach the robot can open the settings page, read the resolved
@@ -423,6 +535,7 @@ replace its credential. Every response is `no-store`.
 | Found, but as a **new** device | The announced identity changed — [troubleshooting](../ops/troubleshooting.md#home-assistantidentity) |
 | Found, but the head never tracks | `/status`, and the groundstation link — [troubleshooting](../ops/troubleshooting.md#groundstationsession) |
 | A setting on the page did nothing | It is marked *needs a restart* — [troubleshooting](../ops/troubleshooting.md#a-setting-changed-on-the-page-did-nothing) |
+| The camera is unavailable | The groundstation's feed, not the satellite — [the endpoint's four answers](groundstation.md#8-look-at-what-the-robot-is-sending) |
 
 ## Next
 

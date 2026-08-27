@@ -9,7 +9,7 @@ replacement of the groundstation URL, then the bounded MJPEG feed, operator
 documentation and final traceability.
 
 **Spec:** [Home Assistant Configuration and Camera Feed](../specs/home-assistant-configuration-and-camera-feed/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0015, 0017, 0018, 0019
 
 ## Approval
@@ -312,7 +312,10 @@ Only commands and output actually observed are transcribed.
   per-group physical torque read-back. The first implementation task cannot expose
   a switch until a compatible daemon/SDK release provides that capability. If it
   is unavailable when implementation starts, contribute it upstream or hold the
-  task; do not substitute optimistic state.
+  task; do not substitute optimistic state. **This is still true as written, and
+  the completion notes record what was done about it:** no release provides the
+  capability, so the robot runs a reviewed but unreleased fork branch and a stock
+  robot gets no motor switch at all.
 - **Physical read-back breadth:** the prerequisite covers all nine named motors,
   including body and antennas, rather than inferring a group's state from the
   aggregate head motor mode. Hardware-free fakes establish semantics, while the
@@ -337,7 +340,8 @@ Only commands and output actually observed are transcribed.
         so the "contribute that capability upstream" half is outstanding. The
         operator's decision was to ship against that build and record the
         dependency rather than hold the task. Nothing was substituted for
-        optimistic state — a robot without that build gets no switch at all
+        optimistic state — a robot without that build gets no switch at all; the
+        root `README.md` and the completion notes record the same dependency
   - [x] Extend `RobotHandle` and deterministic fakes with acknowledged grouped
         enable, disable and read-back results without importing the SDK outside its
         existing entry point (PR #31)
@@ -403,35 +407,48 @@ Only commands and output actually observed are transcribed.
   - [x] Run the focused satellite suites and repository checks required above
         (PR #32)
 
-- [ ] Add the bounded MJPEG feed, documentation and final traceability
-  - [ ] Add one global optional latest-original-JPEG value beside session
-        cardinality metadata, with no per-session JPEG mapping
-  - [ ] Wire authentication and finalization to clear the global value on zero or
-        multiple sessions and require a post-ambiguity validated frame
-  - [ ] Add explicit JPEG signature/format validation beside successful general
-        image decode, publishing original bytes only when both checks pass
-  - [ ] Serve `/stream.mjpg` with standard multipart JPEG framing, no-store
+- [x] Add the bounded MJPEG feed, documentation and final traceability (PR #33)
+  - [x] Add one global optional latest-original-JPEG value beside session
+        cardinality metadata, with no per-session JPEG mapping (PR #33)
+  - [x] Wire authentication and finalization to clear the global value on zero or
+        multiple sessions and require a post-ambiguity validated frame (PR #33)
+  - [x] Add explicit JPEG signature/format validation beside successful general
+        image decode, publishing original bytes only when both checks pass (PR #33)
+  - [x] Serve `/stream.mjpg` with standard multipart JPEG framing, no-store
         responses and four bounded viewer slots, without another robot connection,
         stream-only decode/re-encode, capability blockage or per-viewer frame queue
-  - [ ] Cover zero, one and multiple sessions, post-ambiguity freshness, malformed
+        (PR #33)
+  - [x] Cover zero, one and multiple sessions, post-ambiguity freshness, malformed
         JPEG, decodable PNG and other non-JPEG payloads, slow viewers, replacement,
         disconnect, cancellation, capacity and application shutdown using unit
-        fakes and marked in-process transport tests
-  - [ ] Prove logs, metrics, traces, errors and deployment storage contain no frame
-        body, credential or installation identifier
-  - [ ] Extend the existing container image verification with one authenticated
+        fakes and marked in-process transport tests (PR #33)
+  - [x] Prove logs, metrics, traces, errors and deployment storage contain no frame
+        body, credential or installation identifier (PR #33)
+  - [x] Extend the existing container image verification with one authenticated
         fixture session and actual-JPEG multipart read while outbound network stays
-        unavailable
-  - [ ] Update setup and operations runbooks for the four entities, standard Home
-        Assistant MJPEG integration and trusted-network video boundary
-  - [ ] Run staged live verification only after hardware-free acceptance, record
-        scrubbed outcomes, and leave any unrun step marked pending rather than
-        inventing output
-  - [ ] Add exact annotations for REQ-093 through REQ-098, register the spec with
+        unavailable — the extension is written and unit-covered; see the completion
+        notes for where it was and was not executed (PR #33)
+  - [x] Update setup and operations runbooks for the four entities, standard Home
+        Assistant MJPEG integration and trusted-network video boundary (PR #33)
+  - [ ] **Deferred, and deliberately not ticked.** Run staged live verification
+        only after hardware-free acceptance, record scrubbed outcomes, and leave
+        any unrun step marked pending rather than inventing output. Nothing in this
+        repository has a Reachy Mini or a Home Assistant instance attached, so no
+        stage of the live verification was run and no outcome is recorded. Every
+        such step carries a **⏳ PENDING HARDWARE VERIFICATION** marker instead of
+        invented output, which is the second half of this item and the half that is
+        satisfied. The outstanding list is [`docs/tasks.md`](../tasks.md)
+  - [x] Add exact annotations for REQ-093 through REQ-098, register the spec with
         `format = "markdown"`, regenerate the duvet snapshot from the repository
-        root and run every repository gate
-  - [ ] Update exhaustive spec and requirement counts, mark 0020 complete and
-        synchronize `docs/index.yml` and `docs/index.md`
+        root and run the repository gates this environment can run — `just check`,
+        `just contracts-check`, `just duvet`, `just leak-scan` and
+        `just secret-scan` (PR #33)
+  - [ ] **Not ticked, because it was not run here.** `just image-verify`, the
+        local equivalent of the `images.yml` gate, needs a Docker daemon this
+        environment does not have, so the gate runs on the pull request rather
+        than locally; see the completion notes
+  - [x] Update exhaustive spec and requirement counts, mark 0020 complete and
+        synchronize `docs/index.yml` and `docs/index.md` (PR #33)
 
 ## Verification Stages
 
@@ -457,6 +474,86 @@ Only commands and output actually observed are transcribed.
    on any predeclared threshold breach.
 5. **Evidence:** apply REQ-098 and the repository's runbook scrubbing convention
    to every recorded outcome; leave unrun hardware steps marked pending.
+
+## Completion notes
+
+- **`complete` here means implemented, reviewed, traced and gated — not validated
+  against a Reachy Mini.** Stages 1 to 3 of the verification above are complete:
+  every REQ-093 to REQ-098 scenario is driven deterministically, with the feed's
+  protocol framing, viewer bound and cancellation driven over a marked in-process
+  HTTP transport. Stage 4, the staged live verification, was not run at all, and
+  stage 5 therefore records no outcome. Nothing in this repository has a Reachy
+  Mini or a Home Assistant instance attached, so every step that needs one carries
+  a **⏳ PENDING HARDWARE VERIFICATION** marker in place of output.
+
+- **⚠️ The motor switches ship against a fork, and that is the honest state of
+  the blocking prerequisite.** The first task's prerequisite asked for a
+  daemon/SDK *release* providing correlated selective-torque acknowledgement and
+  per-motor physical read-back, and said to contribute the capability upstream or
+  hold the task otherwise. What actually happened:
+
+  - **No released `reachy-mini` provides it.** The published torque methods are
+    fire-and-forget and return `None`, and the daemon's aggregate motor mode is
+    not per-group physical state. That has not changed.
+  - **The capability was implemented and reviewed**, and lives on the branch
+    `feat/correlated-motor-torque-readback` of the fork at
+    https://github.com/fx/reachy_mini. The robot runs that branch.
+  - **It is neither released nor merged, and no upstream pull request is open
+    yet.** Contributing it upstream is outstanding work that this change does not
+    close.
+  - **The task was neither held nor faked.** The operator's decision was to ship
+    the features against that build and record the dependency as an operational
+    fact. The pins in `pyproject.toml` and `apps/ha-satellite/pyproject.toml`
+    still name the released range `>=1.9,<2`, because adding a git dependency on
+    an unmerged branch would put an unreleasable resolution in `uv.lock`. Move
+    both pins to an official release once one carries the API, and delete the
+    notes that point at the fork.
+
+  **Nothing was substituted for optimistic state**, which is the failure that
+  prerequisite existed to prevent. The daemon boundary looks for the confirmation
+  methods and returns an `unavailable` confirmation when they are absent, so on a
+  stock robot every group stays unconfirmed, **no motor switch is announced at
+  all**, the command gates stay closed and bounded identifier-free diagnostics
+  record the missing confirmation. That is exactly REQ-093's "Initial motor
+  confirmation fails" scenario, and it is covered without hardware by
+  `test_missing_confirmed_api_gates_every_group_closed`.
+
+  The dependency is recorded where an operator meets it: `README.md`,
+  [the robot runbook](../setup/robot.md#-the-motor-switches-need-a-forked-reachy-mini-for-now),
+  [the Home Assistant runbook](../setup/home-assistant.md), the robot half of
+  [`docs/ops/deploy.md`](../ops/deploy.md) and
+  [`docs/ops/satellite-deployment.md`](../ops/satellite-deployment.md).
+
+- **The other three entities and the feed do not depend on it.** The
+  `groundstation_url` text control, the replacement owner behind it and the
+  groundstation's `/stream.mjpg` reach no motor and work on a stock robot.
+
+- **What the container-image verification does and does not prove here.**
+  `scripts/verify_groundstation_image.py` now drives one authenticated fixture
+  session and reads one `image/jpeg` multipart part off the feed with outbound
+  network unavailable, and its parsing and refusals are covered by
+  `scripts/tests/test_verify_groundstation_image.py`. `just image-verify` itself
+  was **not executed for this change document's finalisation** — the environment
+  it was written in has no Docker daemon — so the evidence that the extension
+  runs against a real container is the `images.yml` job rather than a local
+  transcript.
+
+- **Traceability.** REQ-093 to REQ-098 are annotated in the implementing modules
+  and in their acceptance tests, `.duvet/config.toml` registers
+  `docs/specs/home-assistant-configuration-and-camera-feed/index.md` with
+  `format = "markdown"`, and the snapshot was regenerated from the repository root
+  after `rm -rf .duvet/requirements`. That takes the repository to **ten
+  registered specs and 98 traced requirements**, with no proposal left
+  unregistered, and the counts in `AGENTS.md`, `REVIEW.md`, the two member
+  `AGENTS.md` files, `docs/tasks.md` and `.duvet/config.toml`'s header say so.
+
+- **⚠️ One stale sentence was left alone on purpose.** The spec's overview still
+  says "The behavior described here is proposed and not yet implemented", which
+  this change makes false. A `## Changelog` row is the only spec edit an
+  implementing change may make and this document asks for none, so correcting it
+  is its own `/spec-writer` proposal. It is recorded as an outstanding item in
+  [`docs/tasks.md`](../tasks.md), beside the seven specs with the same defect
+  spelled the other way round.
 
 ## Open Questions
 

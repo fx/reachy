@@ -64,6 +64,18 @@ Catch-all task list for work not tracked in a specific [change document](changes
         control and the ducking measured across their range;
         [0016](changes/0016-audible-playback.md) records the numbers. What is
         left of this bullet is the three legs in front of it
+      - The four controls
+        [0020](changes/0020-home-assistant-configuration-and-camera-feed.md)
+        added: **Groundstation URL** replacing a live groundstation without a
+        restart, and the three motor switches taking torque off and putting it
+        back one group at a time with the head held. **The motor switches need a
+        robot whose daemon environment carries the forked `reachy-mini` that
+        change's completion notes name**; on a stock robot they are correctly
+        absent, and confirming *that* is the cheaper half of this bullet
+      - The camera: Home Assistant's MJPEG IP Camera integration pointed at the
+        groundstation's `/stream.mjpg`, showing a picture, and the endpoint's
+        three refusals — no robot, two robots, a fifth viewer — observed against
+        a live deployment rather than a fixture
 
       **The benchmarks**
       - `just bench photon-to-head` and `just bench robot-load`, the two
@@ -73,6 +85,31 @@ Catch-all task list for work not tracked in a specific [change document](changes
       - The accelerated groundstation variant on a host with an NVIDIA GPU, and
         whether it is in fact faster than the CPU path
       - The default image on an aarch64 host, rather than under emulation
+
+- [ ] **Contribute the correlated motor-torque read-back upstream, then move the
+      `reachy-mini` pin off the fork.**
+      [0020](changes/0020-home-assistant-configuration-and-camera-feed.md) needed
+      a daemon call that correlates a selective torque request with its completion
+      and reads physical torque back per motor. No released `reachy-mini` has one.
+      The capability was implemented and reviewed on the branch
+      `feat/correlated-motor-torque-readback` of the fork at
+      https://github.com/fx/reachy_mini, which is what a robot has to run for the
+      three motor switches to appear at all — and **no upstream pull request is
+      open yet**, which is the half of that change's own prerequisite it did not
+      close.
+
+      Two steps, in order: open the upstream pull request and see it merged and
+      released; then move the pins in `pyproject.toml` and
+      `apps/ha-satellite/pyproject.toml` to that release and delete the notes
+      pointing at the fork — `README.md`,
+      [the robot runbook](setup/robot.md),
+      [the Home Assistant runbook](setup/home-assistant.md),
+      [`docs/ops/deploy.md`](ops/deploy.md),
+      [`docs/ops/satellite-deployment.md`](ops/satellite-deployment.md),
+      `apps/ha-satellite/AGENTS.md` and `.duvet/config.toml`'s registration
+      rationale all say the same thing and all stop being true together. Until
+      then nothing here pins the fork: a git dependency on an unmerged branch
+      would put an unreleasable resolution in `uv.lock`.
 
 - [ ] **Reconcile the robot's configuration vocabulary with the settings the
       satellite actually reads.** Found while writing the runbooks for
@@ -113,12 +150,14 @@ Catch-all task list for work not tracked in a specific [change document](changes
 - [ ] **Make `Requirements traceability` a required status check.**
       [0002](changes/0002-ci-and-hygiene-gates.md)'s completion notes list six
       checks to require and deliberately exclude this one, because it passed
-      vacuously while no specification was registered. As of
-      [0019](changes/0019-predictive-gaze-and-coordinated-motion.md) registers
-      the ninth spec only with its final safety and deterministic acceptance
-      evidence present, so all nine specs and all 92 requirements are traced and
-      the exclusion no longer applies. A repository setting rather than a file,
-      which is why it is a task here.
+      vacuously while no specification was registered.
+      [0019](changes/0019-predictive-gaze-and-coordinated-motion.md) registered
+      the ninth spec with its final safety and deterministic acceptance evidence
+      present and
+      [0020](changes/0020-home-assistant-configuration-and-camera-feed.md) the
+      tenth with its annotations, so all ten specs and all 98 requirements are
+      traced and the exclusion no longer applies. A repository setting rather
+      than a file, which is why it is a task here.
 
 - [ ] Correct the stale Overview text in the **seven** [specs](specs/) that still
       say nothing is implemented yet:
@@ -135,6 +174,17 @@ Catch-all task list for work not tracked in a specific [change document](changes
       `/spec-writer`;
       [0014](changes/0014-benchmarks-and-gates.md) raised it for the benchmarks
       spec alone and it is the same defect everywhere.
+
+      **An eighth match the grep above does not find.**
+      [home-assistant-configuration-and-camera-feed](specs/home-assistant-configuration-and-camera-feed/)
+      says "The behavior described here is proposed and not yet implemented",
+      which spells it the other way round and which
+      [0020](changes/0020-home-assistant-configuration-and-camera-feed.md) made
+      false: all six of its requirements are implemented, annotated and
+      registered. 0020 asked for no changelog row, and a changelog row is the one
+      spec edit an implementing change may make, so it was left alone rather than
+      corrected in passing. Search for `not yet implemented` as well as
+      `implemented yet` when this is picked up.
 
 ## Completed
 

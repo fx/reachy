@@ -12,6 +12,18 @@ that parks on an event holds the pipeline while frames pile up behind it, and th
 reconnection test drops the connection mid-session and negotiates again against a
 service whose capability set changed in between.
 
+The operator feed is here for the same reason. Its subject is multipart framing,
+a viewer bound, a disconnect and a stream that has to end — none of which an
+in-memory client that buffers a whole response can show. So the feed's viewers
+are real HTTP clients reading a real socket while a real robot session feeds it,
+and its eligibility rules are unit-tested in `test_groundstation_feed.py`.
+
+Shutting the server down is part of what is under test rather than a fixture
+detail, which is why every test here stops it the way a container does — the
+composition root's own server class, a real `SIGTERM`, and no graceful-shutdown
+timeout to bound the wait. A harness that differed from the composed service on
+any of those three would be unable to see a stream that stops it from stopping.
+
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
 """
@@ -21,8 +33,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
+import signal
 from typing import TYPE_CHECKING
 
+import httpx
 import pytest
 import uvicorn
 import websockets.exceptions
@@ -36,18 +51,22 @@ from groundstation_support import (
     TallyCapability,
     build_observability,
     frame_message,
+    jpeg_bytes,
     make_settings,
     offer_message,
 )
 from websockets.asyncio.client import connect
 
 from reachy_contracts import SessionAgreement, SessionClose
-from reachy_groundstation.api.app import SESSION_PATH, create_app
+from reachy_groundstation.api.app import SESSION_PATH, STREAM_PATH, create_app
+from reachy_groundstation.api.mjpeg import BOUNDARY
+from reachy_groundstation.feed import MAX_VIEWERS, FeedRegistry
+from reachy_groundstation.service import FeedClosingServer
 from reachy_groundstation.session.framing import MessageKind, decode_control
 from reachy_groundstation.session.transport import CLOSE_POLICY_VIOLATION
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Iterator
 
     from starlette.applications import Starlette
     from websockets.asyncio.client import ClientConnection
@@ -63,6 +82,27 @@ STAMP = "17352.884"
 _TIMEOUT = 10.0
 
 
+@contextlib.contextmanager
+def _shutdown_signal_absorbed() -> Iterator[None]:
+    """Keep the signal these tests stop the server with from ending the run.
+
+    Uvicorn restores the handlers it replaced and then re-raises whatever signal
+    it caught, so that a process which asked to stop still stops. Here the
+    handler that re-raise reaches is pytest's, and the suite would end at the
+    first server it shut down. This is the one part of the path these tests
+    replace: the delivery, uvicorn's own handler and everything its shutdown
+    does are real.
+
+    Yields:
+        Nothing; the absorbing is the point.
+    """
+    previous = signal.signal(signal.SIGTERM, lambda *_: None)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
 class _Harness:
     """A running server and the pieces a test wants to look at.
 
@@ -70,18 +110,33 @@ class _Harness:
         port: The ephemeral port the server bound.
         url: Where to open a session.
         obs: The reporting bundle the service is writing to.
+        feed: The live frame the application serves `/stream.mjpg` from, so a
+            test can read the viewer count back rather than inferring it from
+            what the endpoint answered.
+        serving: The task running the server, so a test about stopping can wait
+            for it to stop rather than assume it did.
     """
 
-    def __init__(self, port: int, obs: Observability) -> None:
+    def __init__(
+        self,
+        port: int,
+        obs: Observability,
+        feed: FeedRegistry,
+        serving: asyncio.Task[None],
+    ) -> None:
         """Record where the server ended up.
 
         Args:
             port: The ephemeral port it bound.
             obs: The reporting bundle it writes to.
+            feed: The live frame it serves.
+            serving: The task running it.
         """
         self.port = port
         self.url = f"ws://127.0.0.1:{port}{SESSION_PATH}"
         self.obs = obs
+        self.feed = feed
+        self.serving = serving
 
     def sample(self, name: str) -> float:
         """Read one metric back.
@@ -103,6 +158,13 @@ async def _serving(
 ) -> AsyncIterator[_Harness]:
     """Run the real application on a real socket for the duration of a test.
 
+    The server is the composition root's own `FeedClosingServer`, configured the
+    way `service.main` configures it and stopped the way a container stops it —
+    including leaving `timeout_graceful_shutdown` unset. A harness that bounded
+    the graceful shutdown where production does not would be compensating for
+    the one defect this file is best placed to catch: an open stream that makes
+    the drain wait for the very close it is waiting to be told about.
+
     Args:
         registry: What the application is composed around.
         overrides: Settings to change from their defaults.
@@ -111,10 +173,12 @@ async def _serving(
         Where the server is listening and what it is reporting to.
     """
     obs, _exporter = build_observability()
+    feed = FeedRegistry()
     app: Starlette = create_app(
         settings=make_settings(**overrides),
         registry=registry,
         obs=obs,
+        feed=feed,
     )
     config = uvicorn.Config(
         app,
@@ -127,26 +191,33 @@ async def _serving(
         ws_max_size=make_settings(**overrides).max_message_bytes,
         lifespan="on",
     )
-    server = uvicorn.Server(config)
-    task = asyncio.create_task(server.serve(), name="uvicorn")
-    try:
-        # Bounded rather than open-ended: a server that failed to start would
-        # otherwise hang the suite instead of failing it.
-        deadline = asyncio.get_running_loop().time() + _TIMEOUT
-        while not server.started:
-            if task.done():
-                await task
-                message = "the server stopped before it started"
-                raise AssertionError(message)
-            if asyncio.get_running_loop().time() > deadline:
-                message = "the server did not start"
-                raise AssertionError(message)
-            await asyncio.sleep(0.005)
-        port = server.servers[0].sockets[0].getsockname()[1]
-        yield _Harness(port, obs)
-    finally:
-        server.should_exit = True
-        await asyncio.wait_for(task, timeout=_TIMEOUT)
+    server = FeedClosingServer(config, feed=feed)
+    # Installed before the server is, because uvicorn records the handlers it
+    # displaces as it starts serving and restores those on the way out.
+    with _shutdown_signal_absorbed():
+        task = asyncio.create_task(server.serve(), name="uvicorn")
+        try:
+            # Bounded rather than open-ended: a server that failed to start
+            # would otherwise hang the suite instead of failing it.
+            deadline = asyncio.get_running_loop().time() + _TIMEOUT
+            while not server.started:
+                if task.done():
+                    await task
+                    message = "the server stopped before it started"
+                    raise AssertionError(message)
+                if asyncio.get_running_loop().time() > deadline:
+                    message = "the server did not start"
+                    raise AssertionError(message)
+                await asyncio.sleep(0.005)
+            port = server.servers[0].sockets[0].getsockname()[1]
+            yield _Harness(port, obs, feed, task)
+        finally:
+            # `handle_exit` and not `should_exit`, because `handle_exit` is what
+            # a signal reaches and it is where the feed is closed. Setting the
+            # flag would skip that and hang here on any test that left a viewer
+            # open — which is exactly what the composed service used to do.
+            server.handle_exit(signal.SIGTERM, None)
+            await asyncio.wait_for(task, timeout=_TIMEOUT)
 
 
 async def _receive(connection: ClientConnection) -> tuple[MessageKind, bytes]:
@@ -352,3 +423,318 @@ async def test_a_credential_never_reaches_the_configuration_endpoint() -> None:
         await writer.wait_closed()
     assert CREDENTIAL.encode() not in response
     assert b'"credential":"<set>"' in response
+
+
+class _Viewer:
+    """One MJPEG client, reading parts off a real response as they arrive.
+
+    A part is read out of a buffer rather than out of whatever the transport
+    happened to deliver, because a chunk boundary is not a part boundary: the
+    server writes one part per frame and the network is free to split or join
+    them anywhere.
+
+    Attributes:
+        response: The open streaming response.
+    """
+
+    def __init__(self, response: httpx.Response) -> None:
+        """Start reading a response nothing has consumed yet.
+
+        Args:
+            response: The open streaming response.
+        """
+        self.response = response
+        self._chunks = response.aiter_bytes()
+        self._buffer = bytearray()
+
+    async def _fill(self) -> None:
+        """Take one more chunk off the wire.
+
+        Raises:
+            StopAsyncIteration: When the server has finished the response.
+        """
+        async with asyncio.timeout(_TIMEOUT):
+            self._buffer += await anext(self._chunks)
+
+    async def part(self) -> tuple[bytes, dict[str, str], bytes]:
+        """Read one whole part.
+
+        Returns:
+            The boundary line, the part's headers, and its body — the body taken
+            by the declared length rather than by searching for the next
+            boundary, which is what a length is for.
+        """
+        while b"\r\n\r\n" not in self._buffer:
+            await self._fill()
+        head, _, rest = bytes(self._buffer).partition(b"\r\n\r\n")
+        lines = head.split(b"\r\n")
+        headers = {
+            name.decode("ascii").strip().lower(): value.decode("ascii").strip()
+            for name, _, value in (line.partition(b":") for line in lines[1:])
+        }
+        length = int(headers["content-length"])
+        self._buffer = bytearray(rest)
+        # The two bytes past the body are the CRLF separating this part from the
+        # next boundary.
+        while len(self._buffer) < length + 2:
+            await self._fill()
+        body = bytes(self._buffer[:length])
+        del self._buffer[: length + 2]
+        return lines[0], headers, body
+
+    async def ended(self) -> bool:
+        """Wait for the server to finish the response.
+
+        Returns:
+            True once the stream is over, having consumed anything still on the
+            way. A stream that never ends fails the test on `_fill`'s timeout
+            rather than stalling the suite.
+        """
+        try:
+            while True:
+                await self._fill()
+        except StopAsyncIteration:
+            return True
+
+
+@contextlib.asynccontextmanager
+async def _viewing(port: int) -> AsyncIterator[_Viewer]:
+    """Open one viewer on the feed and disconnect it on the way out.
+
+    Args:
+        port: Where the server is listening.
+
+    Yields:
+        The viewer.
+    """
+    async with (
+        httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=_TIMEOUT) as web,
+        web.stream("GET", STREAM_PATH) as response,
+    ):
+        yield _Viewer(response)
+
+
+@contextlib.asynccontextmanager
+async def _robot(harness: _Harness, frames: int = 1) -> AsyncIterator[ClientConnection]:
+    """Open one authenticated session and drive frames through it.
+
+    Each frame is awaited to its result before the next is sent, which is what
+    makes "the feed has this frame" true at a point a test can name: the pipeline
+    offers a payload to the feed while decoding it, and the result is delivered
+    after that.
+
+    Args:
+        harness: The running server.
+        frames: How many frames to send, each a different shade so the one the
+            feed retained is identifiable.
+
+    Yields:
+        The still-open connection.
+    """
+    async with connect(harness.url) as connection:
+        await connection.send(offer_message(ECHO))
+        await _receive(connection)
+        for sequence in range(frames):
+            await connection.send(
+                frame_message(sequence, payload=jpeg_bytes(fill=10 * sequence)),
+            )
+            await _receive(connection)
+        yield connection
+
+
+async def _stream_status(port: int) -> int:
+    """Ask for the feed and report only what it answered.
+
+    The body is deliberately not read: a stream that was granted would never
+    finish, and what this asks is which of the four answers came back.
+
+    Args:
+        port: Where the server is listening.
+
+    Returns:
+        The status code.
+    """
+    async with (
+        httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", timeout=_TIMEOUT) as web,
+        web.stream("GET", STREAM_PATH) as response,
+    ):
+        return response.status_code
+
+
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-096-mjpeg-is-a-bounded-latest-frame-view
+#:% The groundstation MUST retain at most one original payload globally for a
+#:% standards-compatible MJPEG stream only after both explicit JPEG-format signature
+#:% validation and successful image decode, replace rather than queue that payload
+#:% for slow viewers, and add no robot connection, stream-only decode or re-encode,
+#:% or capability-processing blockage.
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_the_feed_sends_the_frame_the_robot_sent_as_a_multipart_part() -> None:
+    """The operator's client reads the robot's own bytes, framed and unaltered."""
+    payload = jpeg_bytes(fill=0)
+    async with (
+        _serving(StaticRegistry(EchoCapability())) as harness,
+        _robot(harness),
+        _viewing(harness.port) as viewer,
+    ):
+        assert viewer.response.status_code == 200
+        content_type = viewer.response.headers["content-type"]
+        cache = viewer.response.headers["cache-control"]
+        boundary, headers, body = await viewer.part()
+
+    assert content_type == f"multipart/x-mixed-replace; boundary={BOUNDARY}"
+    assert cache == "no-store"
+    assert boundary == f"--{BOUNDARY}".encode("ascii")
+    assert headers["content-type"] == "image/jpeg"
+    assert headers["content-length"] == str(len(payload))
+    assert body == payload
+
+
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_a_viewer_arriving_late_gets_the_newest_frame_and_no_backlog() -> None:
+    """Five frames arrived and one is retained, so the first part is the fifth."""
+    async with (
+        _serving(StaticRegistry(EchoCapability()), queue_bound=8) as harness,
+        _robot(harness, frames=5),
+        _viewing(harness.port) as viewer,
+    ):
+        _boundary, _headers, body = await viewer.part()
+
+    assert body == jpeg_bytes(fill=40)
+
+
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface
+#:% The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+#:% the deployment's trusted-network boundary while retaining at most one live JPEG
+#:% globally in application state, marking responses non-cacheable, never recording
+#:% or writing frames or emitting frame content through observability, enforcing a
+#:% finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+#:% of eligibility.
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_the_viewer_bound_refuses_a_further_viewer_and_frees_on_disconnect() -> (
+    None
+):
+    """Four at once; the fifth is told the service is busy, not that it is broken."""
+    async with _serving(StaticRegistry(EchoCapability())) as harness, _robot(harness):
+        async with contextlib.AsyncExitStack() as viewers:
+            # Kept in a list, and that is load-bearing rather than tidy: a
+            # viewer nothing refers to is collected, its response iterator is
+            # finalised, and the connection closes — which would end the very
+            # streams this test is counting.
+            open_viewers = [
+                await viewers.enter_async_context(_viewing(harness.port))
+                for _ in range(MAX_VIEWERS)
+            ]
+            for viewer in open_viewers:
+                await viewer.part()
+            assert (await _stream_status(harness.port), harness.feed.viewers) == (
+                429,
+                MAX_VIEWERS,
+            )
+
+        # Every viewer disconnected on the way out of the stack. A slot released
+        # only on a clean end would leave this at 429 for ever, so the poll is
+        # the assertion and its bound is what makes a leak a failure.
+        deadline = asyncio.get_running_loop().time() + _TIMEOUT
+        while await _stream_status(harness.port) != 200:
+            if asyncio.get_running_loop().time() > deadline:
+                message = "a disconnected viewer never gave its slot back"
+                raise AssertionError(message)
+            await asyncio.sleep(0.005)
+
+
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_the_feed_ends_when_the_robot_session_closes() -> None:
+    """The viewer finishes rather than waiting on a robot that has gone."""
+    async with (
+        _serving(StaticRegistry(EchoCapability())) as harness,
+        _robot(harness) as connection,
+        _viewing(harness.port) as viewer,
+    ):
+        await viewer.part()
+        await connection.close()
+        await connection.wait_closed()
+        assert await viewer.ended() is True
+
+
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-097-feed-eligibility-is-deterministic
+#:% The groundstation MUST serve `/stream.mjpg` only after exactly one active
+#:% authenticated robot session has supplied a fresh validated JPEG while it is the
+#:% sole session, clear all feed frame state and end viewers whenever authenticated
+#:% session cardinality is zero or greater than one, and require another fresh
+#:% validated JPEG after cardinality returns to one.
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_a_second_robot_ends_the_feed_and_refuses_the_next_viewer() -> None:
+    """Ambiguity is refused rather than resolved by connection order."""
+    async with (
+        _serving(StaticRegistry(EchoCapability())) as harness,
+        _robot(harness),
+        _viewing(harness.port) as viewer,
+    ):
+        await viewer.part()
+        async with connect(harness.url) as second:
+            await second.send(offer_message(ECHO))
+            await _receive(second)
+            assert await viewer.ended() is True
+            assert await _stream_status(harness.port) == 409
+
+
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_the_feed_refuses_a_viewer_when_no_robot_is_connected() -> None:
+    """No stream is held open waiting for a robot that may never arrive."""
+    async with _serving(StaticRegistry(EchoCapability())) as harness:
+        assert await _stream_status(harness.port) == 503
+
+
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_an_unauthenticated_client_never_makes_the_feed_ambiguous() -> None:
+    """A wrong credential is refused before anything counts it as a session."""
+    async with _serving(StaticRegistry(EchoCapability())) as harness, _robot(harness):
+        refused = await connect(harness.url)
+        await refused.send(offer_message(ECHO, credential="the-wrong-one"))
+        await refused.wait_closed()
+        assert await _stream_status(harness.port) == 200
+
+
+@pytest.mark.enable_socket  # a real server and a real client; see the module docstring
+@pytest.mark.asyncio
+async def test_a_shutdown_signal_ends_an_attached_viewer_and_stops_the_server() -> None:
+    """A stream is the one response that would otherwise never end by itself.
+
+    Every part of this is the composed service's: the server class, the way it
+    is configured, the signal a container sends, and uvicorn's own shutdown
+    sequence with its graceful timeout left at the unbounded default. Driving
+    the lifespan hook directly instead would prove nothing, because the whole
+    defect is that uvicorn does not reach that hook until the viewers it is
+    waiting for have gone.
+
+    The session stays open and the frame stays retained across the signal, on
+    purpose: the viewer has to end because the process is stopping rather than
+    because the feed stopped being eligible, which is the only reading under
+    which this is evidence. And the frame is published straight into the feed
+    rather than through a robot, so the single connection the drain has to wait
+    for is the viewer's.
+    """
+    async with _serving(StaticRegistry(EchoCapability())) as harness:
+        with harness.feed.authenticated_session():
+            harness.feed.publish(jpeg_bytes())
+            async with _viewing(harness.port) as viewer:
+                await viewer.part()
+                assert harness.feed.viewers == 1
+
+                os.kill(os.getpid(), signal.SIGTERM)
+
+                assert await viewer.ended() is True
+                # Shielded, so a server that has not stopped fails this test
+                # rather than being cancelled into looking as if it had.
+                await asyncio.wait_for(
+                    asyncio.shield(harness.serving),
+                    timeout=_TIMEOUT,
+                )
+            assert harness.feed.viewers == 0

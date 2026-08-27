@@ -82,6 +82,7 @@ __all__ = [
     "make_header",
     "make_settings",
     "offer_message",
+    "png_bytes",
     "recorded_spans",
 ]
 
@@ -232,6 +233,32 @@ def jpeg_bytes(width: int = 32, height: int = 24, fill: int = 128) -> bytes:
     """
     image = np.full((height, width, 3), fill, dtype=np.uint8)
     ok, encoded = cv2.imencode(".jpg", image)
+    if not ok:  # pragma: no cover - cv2 does not fail on a solid array
+        message = "cv2 declined to encode a solid array"
+        raise RuntimeError(message)
+    return bytes(encoded.tobytes())
+
+
+def png_bytes(width: int = 32, height: int = 24, fill: int = 128) -> bytes:
+    """Encode a solid-colour PNG.
+
+    The decoder this service uses reads PNG under a flag named for JPEG, so a
+    payload that decodes proves nothing about its format. This is what the tests
+    about that use: a real image, in a real format, that the feed must never
+    label `image/jpeg`.
+
+    Encoding happens in memory, so a unit test may do it.
+
+    Args:
+        width: The image's width in pixels.
+        height: The image's height in pixels.
+        fill: The grey level to fill it with.
+
+    Returns:
+        The encoded bytes.
+    """
+    image = np.full((height, width, 3), fill, dtype=np.uint8)
+    ok, encoded = cv2.imencode(".png", image)
     if not ok:  # pragma: no cover - cv2 does not fail on a solid array
         message = "cv2 declined to encode a solid array"
         raise RuntimeError(message)

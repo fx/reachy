@@ -355,7 +355,7 @@ its step.
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, every released wheel — the `reachyctl` set and the robot application — built, installed into an empty environment, verified, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — all nine implemented specs and all 92 implemented requirements; proposed specs register on completion | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — all ten implemented specs and all 98 implemented requirements; proposed specs register on completion | `just duvet` |
 | `provisioning.yml` | pull requests, pushes to `main` | `Provisioning lint`; `Idempotency`, which applies the playbook twice against a container target and fails on any changed step in the second application | `just provision-lint`, `just provision-idempotency` |
 | `bench.yml` | pull requests, pushes to `main` | `Benchmark` — the hardware-free suite, judged against the committed baseline | `just bench`, `just bench-compare` |
 
@@ -374,15 +374,13 @@ time. It no longer does — see below — so it belongs in the required set now.
 
 ## Requirements traceability
 
-**All nine implemented specs are registered and all 92 implemented requirements
-are traced.** The proposed
-[Home Assistant Configuration and Camera Feed](docs/specs/home-assistant-configuration-and-camera-feed/)
-spec adds REQ-093–098 but remains deliberately unregistered until
+**All ten specs are implemented, registered and traced: 98 requirements, none
+outstanding.** There is no unregistered proposal left —
 [change 0020](docs/changes/0020-home-assistant-configuration-and-camera-feed.md)
-completes their implementation and annotations. A green "Requirements
-traceability" run is evidence about the whole implemented requirement set; the
-proposal is visible in the documentation indexes without making that gate red
-before implementation exists.
+implemented REQ-093–098 and registered
+[Home Assistant Configuration and Camera Feed](docs/specs/home-assistant-configuration-and-camera-feed/)
+in the same pull request. A green "Requirements traceability" run is therefore
+evidence about the whole requirement set.
 
 A spec is registered by the change that **completes** it, in that change's pull
 request, alongside the annotations that make it pass — never by the change that
@@ -395,8 +393,13 @@ safety implementation, deterministic REQ-074–092 acceptance matrix and bounded
 diagnostics in place. Its three tasks and staged rollout are complete, with
 scrubbed aggregate evidence in the change document. Body motion remains
 restart-bound, false by default and a provisional opt-in because the rollout did
-not settle calibration or a shipping-default decision. The header comment in
-`.duvet/config.toml` records which change registered which spec and why.
+not settle calibration or a shipping-default decision. Change 0020 registered the
+Home Assistant configuration and camera-feed spec with its third task, which is
+the one that made REQ-096–098 true; its motor switches additionally need a
+`reachy-mini` build no released version provides, which `README.md` records as an
+operational fact about the robot rather than a gap in the implementation. The
+header comment in `.duvet/config.toml` records which change registered which spec
+and why.
 
 Two requirements are cited from files that are neither Python nor a workflow, and
 both have a `[[source]]` block of their own: REQ-001 from the `Justfile`, whose

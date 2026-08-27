@@ -105,6 +105,15 @@ _FALSE: Final = frozenset({"false", "no", "off", "0"})
 # keeps `reachyctl config`, the provisioning declaration and the satellite's own
 # settings model agreeing about the same bound — the same argument the rest of
 # this module makes for the vocabulary as a whole.
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-095-groundstation-replacement-is-persisted-and-isolated
+#:% The satellite MUST apply one shared session-URL contract across every
+#:% configuration surface that accepts at most 255 characters without truncation,
+#:% refuses a legacy overlong value with actionable remediation, and changes an
+#:% accepted URL immediately through a compensating transition in which the durable
+#:% value, sole eligible remote source and effective read-back advance together only
+#:% after adoption succeeds or remain together on the preceding value after any
+#:% failure, while making source restoration bounded and cancellable, preserving
+#:% local fallback and bounded reconnection, and excluding overlap and late results.
 SESSION_URL_MAX_LENGTH: Final = 255
 
 

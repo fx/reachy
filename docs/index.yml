@@ -182,5 +182,5 @@ changes:
     path: changes/0020-home-assistant-configuration-and-camera-feed.md
     description: Daemon-confirmed motor groups, transactional groundstation replacement, and a bounded actual-JPEG Home Assistant feed
     spec: home-assistant-configuration-and-camera-feed
-    status: draft
+    status: complete
     depends_on: ["0015", "0017", "0018", "0019"]

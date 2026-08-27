@@ -149,6 +149,39 @@ The expected shape is
 `/readyz` says the service thinks it is ready; a probe says a frame went out and
 a result came back over the protocol the robot actually speaks.
 
+### 5. Confirm the camera feed still answers
+
+Only if you configured one — Home Assistant's MJPEG IP Camera integration reads
+`/stream.mjpg` on this service, so a groundstation that came back without it is a
+camera that went unavailable with nothing else to explain it.
+
+```
+curl --silent --show-error --dump-header - --max-time 2 --output /dev/null http://127.0.0.1:8080/stream.mjpg
+```
+
+`--dump-header -` and not `--include`: the response is a stream that never ends,
+so the body has to go to `/dev/null` and `--include` would send the status line
+and the headers there with it, leaving nothing on the terminal to read.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No output is recorded for this step. What
+> it prints depends on a robot having reconnected to the service you just
+> restarted, and nothing in this repository has a Reachy Mini attached. The
+> endpoint's own answers *are* recorded, against a real service driven by a
+> committed fixture frame — see
+> [the groundstation runbook](../setup/groundstation.md#8-look-at-what-the-robot-is-sending).
+> What has never been performed is this step: on a live deployment, after a
+> restart, with a robot reconnecting.
+
+A `200` with a `multipart/x-mixed-replace` content type is the outcome to look
+for; the status line is all this command shows, because the body is where the
+stream would be. A `503` immediately after a restart is expected and brief: the
+feed holds no frame from a session that ended, so it stays unavailable until the
+robot's next frame arrives.
+[The endpoint's four answers](../setup/groundstation.md#8-look-at-what-the-robot-is-sending)
+say what any other status means, and
+[the troubleshooting entry](troubleshooting.md#the-home-assistant-camera-shows-nothing)
+is how to read the reason out of a refusal's body.
+
 ### Rolling back
 
 Point `GROUNDSTATION_IMAGE` at the previous tag and repeat. Nothing in the
@@ -158,6 +191,27 @@ in memory and the model files are in the image.
 ---
 
 ## Updating the robot
+
+### ⚠️ Upgrading the satellite does not bring the motor switches with it
+
+The three Home Assistant motor switches — head, body and antennas — need a
+`reachy-mini` in the daemon's application environment that correlates a selective
+torque request with its completion and reads physical torque back per motor. **No
+released version has that API**, so a robot whose daemon environment holds a
+released `reachy-mini` will come back from this upgrade with the groundstation URL
+control and everything else, and with no motor switches — the satellite fails
+closed and announces nothing it cannot confirm, recording bounded
+identifier-free diagnostics instead. That is the designed outcome, not a failed
+deployment, and no `doctor` check reports it.
+
+Until an upstream release carries the API, the switches need the branch
+`feat/correlated-motor-torque-readback` from the fork at
+https://github.com/fx/reachy_mini installed in that environment. It is reviewed
+but neither released nor merged, and no upstream pull request is open yet, which
+is why nothing in this repository pins it and neither `deploy` nor the
+provisioning roles install it. When an official release does carry it, move the
+pins in `pyproject.toml` and `apps/ha-satellite/pyproject.toml` to that release
+and drop this note.
 
 ### 1. Get the wheel, and check it is the one that was published
 

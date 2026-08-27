@@ -1,6 +1,6 @@
 """The groundstation address: one bound, one order, one source, one file.
 
-Every scenario of the proposed REQ-095 is driven here, plus the boundary lengths
+Every scenario of REQ-095 is driven here, plus the boundary lengths
 and failure points the change document names. Nothing opens a socket, reads a
 clock or sleeps: the source is a fake, the factory is a fake, the delay between
 reconstruction attempts is a recorded call, and the durable file is a real file
@@ -322,6 +322,15 @@ def stored(store: OverrideStore) -> dict[str, str]:
     return store.load()
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-095-groundstation-replacement-is-persisted-and-isolated
+#:% The satellite MUST apply one shared session-URL contract across every
+#:% configuration surface that accepts at most 255 characters without truncation,
+#:% refuses a legacy overlong value with actionable remediation, and changes an
+#:% accepted URL immediately through a compensating transition in which the durable
+#:% value, sole eligible remote source and effective read-back advance together only
+#:% after adoption succeeds or remain together on the preceding value after any
+#:% failure, while making source restoration bounded and cancellable, preserving
+#:% local fallback and bounded reconnection, and excluding overlap and late results.
 class TestOneSharedBound:
     """REQ-095's shared 255-character contract, at its boundaries."""
 
@@ -473,6 +482,15 @@ class TestOneSharedBound:
         assert stored(store) == {}
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-095-groundstation-replacement-is-persisted-and-isolated
+#:% The satellite MUST apply one shared session-URL contract across every
+#:% configuration surface that accepts at most 255 characters without truncation,
+#:% refuses a legacy overlong value with actionable remediation, and changes an
+#:% accepted URL immediately through a compensating transition in which the durable
+#:% value, sole eligible remote source and effective read-back advance together only
+#:% after adoption succeeds or remain together on the preceding value after any
+#:% failure, while making source restoration bounded and cancellable, preserving
+#:% local fallback and bounded reconnection, and excluding overlap and late results.
 class TestEitherSurfaceChangesGroundstations:
     """REQ-095's replacement scenario, from the one path both surfaces use."""
 
@@ -840,6 +858,15 @@ class TestFailureBeforeDurableCommit:
         assert source.latest() == Detections()
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-095-groundstation-replacement-is-persisted-and-isolated
+#:% The satellite MUST apply one shared session-URL contract across every
+#:% configuration surface that accepts at most 255 characters without truncation,
+#:% refuses a legacy overlong value with actionable remediation, and changes an
+#:% accepted URL immediately through a compensating transition in which the durable
+#:% value, sole eligible remote source and effective read-back advance together only
+#:% after adoption succeeds or remain together on the preceding value after any
+#:% failure, while making source restoration bounded and cancellable, preserving
+#:% local fallback and bounded reconnection, and excluding overlap and late results.
 class TestBoundedReconstruction:
     """REQ-095's repeated-restoration and exhaustion scenarios."""
 

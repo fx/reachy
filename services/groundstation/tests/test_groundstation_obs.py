@@ -1,9 +1,16 @@
 """Observability: what the boot log says, what a metric carries, what a span is.
 
-The test that matters most here is the pair at the end. The boot log and the
-configuration endpoint are two surfaces reporting the same thing, and the way
-that goes wrong is that one of them is updated and the other is not. They are
-therefore checked against the same credential, in the same test.
+Two tests matter most, and they are both about something not being there. The
+boot log and the configuration endpoint are two surfaces reporting the same
+thing, and the way that goes wrong is that one of them is updated and the other
+is not — so they are checked against the same credential, in the same test. And
+a camera frame must reach none of these surfaces at all, so a real frame is
+driven through a real pipeline and then looked for in every one of them — as raw
+bytes, as the escape sequence something that rendered it would have written, and
+as hexadecimal, because a surface that had to make text of a frame has leaked it
+just as surely as one that did not. `_searchable` and `_needles` are those three
+readings, and a test of their own proves they find a payload that is really
+there; a search that cannot see a presence is no evidence of an absence.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`. Nothing here touches a socket, a clock or a file.
@@ -11,19 +18,27 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import httpx
 import pytest
 import structlog
 from groundstation_support import (
     CREDENTIAL,
+    EchoCapability,
     StaticRegistry,
+    agreed,
     build_observability,
     captured_logs,
+    jpeg_bytes,
+    make_header,
     make_settings,
 )
 
+from reachy_contracts import WireModel
 from reachy_groundstation.api.app import create_app
 from reachy_groundstation.config import REDACTED_SET, Settings, resolved_configuration
+from reachy_groundstation.feed import FeedRegistry
 from reachy_groundstation.obs import (
     STAGE_DECODE,
     build_metrics,
@@ -39,8 +54,63 @@ from reachy_groundstation.obs import (
 from reachy_groundstation.obs import (
     build_observability as build_service_observability,
 )
+from reachy_groundstation.pipeline.queue import QueuedFrame
+from reachy_groundstation.pipeline.runner import FramePipeline
+from reachy_groundstation.session.framing import MessageKind
 
 OTHER_CREDENTIAL = "a-different-example-credential"
+
+
+def _searchable(value: object) -> bytes:
+    """Render one recorded surface as the bytes a leaked frame is findable in.
+
+    `repr` is what this deliberately is not. It escapes every byte a JPEG is
+    made of, so a payload written straight into a log record cannot appear in
+    its output and a search for raw bytes always succeeds — which is how three
+    of the four surfaces below came to be checked with an assertion that could
+    not fail.
+
+    So the structure is walked instead. `bytes` are taken exactly as they are,
+    text comes back through `latin-1` so that a payload decoded on the way in is
+    recovered byte for byte, and anything else is rendered with `str` and
+    encoded the same way. What escaping survives that is `_needles`' problem
+    rather than this function's.
+
+    Args:
+        value: A surface, or any part of one.
+
+    Returns:
+        Its bytes.
+    """
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, str):
+        return value.encode("latin-1", "backslashreplace")
+    if isinstance(value, Mapping):
+        return b"".join(_searchable(part) for pair in value.items() for part in pair)
+    if isinstance(value, Sequence):
+        return b"".join(_searchable(part) for part in value)
+    return str(value).encode("latin-1", "backslashreplace")
+
+
+def _needles(payload: bytes) -> tuple[bytes, ...]:
+    """List every shape one payload could be recognised in.
+
+    Raw first, which is what a `bytes` value left in a structure leaves behind.
+    Then the two renderings that survive a surface which had to make text of it:
+    the escape sequence `repr` writes, and hexadecimal. Each has a prefix beside
+    it, because a surface that quoted only the beginning of a frame has leaked
+    just as much of a room as one that quoted all of it.
+
+    Args:
+        payload: The frame that must not be anywhere.
+
+    Returns:
+        The byte strings to look for.
+    """
+    escaped = repr(payload)[2:-1].encode("ascii")
+    hexed = payload.hex().encode("ascii")
+    return (payload, payload[:16], escaped, escaped[:32], hexed, hexed[:32])
 
 
 def test_a_session_binding_reaches_every_line_beneath_it() -> None:
@@ -198,6 +268,115 @@ async def test_a_credential_is_redacted_on_both_self_reporting_surfaces() -> Non
     assert response.json()["credential"] == REDACTED_SET
     assert OTHER_CREDENTIAL not in response.text
     assert CREDENTIAL not in response.text
+
+
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface
+#:% The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+#:% the deployment's trusted-network boundary while retaining at most one live JPEG
+#:% globally in application state, marking responses non-cacheable, never recording
+#:% or writing frames or emitting frame content through observability, enforcing a
+#:% finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+#:% of eligibility.
+@pytest.mark.asyncio
+async def test_no_camera_frame_reaches_a_log_a_metric_or_a_span() -> None:
+    """The feed retains a frame; nothing that records what happened may.
+
+    Everything an operator can read afterwards is checked at once, because the
+    way this goes wrong is that a payload is added to one surface — an error
+    detail, a span attribute, an exemplar — while the other two stay clean and
+    the test that only looked at logs stays green.
+
+    The malformed frame is here for the same reason: the report that a payload
+    would not decode is the message most likely to quote it back.
+    """
+    payload = jpeg_bytes()
+    malformed = b"\xff\xd8\xff\xe0 truncated"
+    feed = FeedRegistry()
+    obs, exporter = build_observability()
+    delivered: list[tuple[MessageKind, WireModel]] = []
+
+    async def _deliver(kind: MessageKind, message: WireModel) -> None:
+        """Record one message the pipeline decided to send.
+
+        Args:
+            kind: Which contract type it is.
+            message: The message itself.
+        """
+        delivered.append((kind, message))
+
+    pipeline = FramePipeline(
+        capabilities=[agreed(EchoCapability())],
+        deliver=_deliver,
+        settings=make_settings(),
+        obs=obs,
+        session_id="0123456789abcdef",
+        feed=feed,
+        clock=lambda: 0.0,
+    )
+
+    with captured_logs() as logs, feed.authenticated_session():
+        for sequence, frame in enumerate((payload, malformed)):
+            await pipeline.process(
+                QueuedFrame(
+                    header=make_header(sequence),
+                    payload=frame,
+                    received_at=0.0,
+                ),
+            )
+        retained = await feed.next_frame(after=0)
+
+    exposition, _content_type = render_metrics(
+        obs.metrics,
+        "application/openmetrics-text; version=1.0.0",
+    )
+    surfaces = {
+        "log": _searchable(logs),
+        "metric": exposition,
+        "span": _searchable(
+            [span.attributes for span in exporter.get_finished_spans()],
+        ),
+        # The serialised form and not the objects: what a message exposes is
+        # what goes over the wire, and a field that never renders is not a leak.
+        "message": _searchable(
+            [(kind.value, message.model_dump_json()) for kind, message in delivered],
+        ),
+    }
+
+    # The feed did its job, so the absence below is about what was recorded and
+    # not about a frame that never arrived.
+    assert retained is not None
+    assert retained.payload == payload
+    for name, surface in surfaces.items():
+        for needle in (*_needles(payload), *_needles(malformed), b"truncated"):
+            assert needle not in surface, name
+
+
+def test_the_frame_search_finds_a_payload_in_every_shape_one_could_leak_in() -> None:
+    """The absence above is evidence only if the search can see a presence.
+
+    This is the test the surfaces above did not have, and its absence is what
+    let them be checked with `repr`: `repr` escapes every byte a JPEG is made
+    of, so looking for raw bytes in one always succeeds and three of the four
+    surfaces could not have reported a leak at all.
+
+    The three shapes below are the ones a change would plausibly produce — the
+    bytes written into a record, the bytes decoded into text on the way into an
+    attribute, and the bytes quoted back by something that rendered them — and
+    the clean surface at the end is what stops this passing by finding a payload
+    in anything whatsoever.
+    """
+    payload = jpeg_bytes()
+    leaks = (
+        [{"event": "frame.decoded", "payload": payload}],
+        [{"frame.payload": payload.decode("latin-1")}],
+        [("frame.rejected", f"could not decode {payload!r}")],
+    )
+    for leak in leaks:
+        surface = _searchable(leak)
+        assert any(needle in surface for needle in _needles(payload))
+
+    clean = _searchable([{"event": "frame.decoded", "bytes": len(payload)}])
+    assert not any(needle in clean for needle in _needles(payload))
 
 
 def test_the_two_surfaces_render_through_the_same_function() -> None:
