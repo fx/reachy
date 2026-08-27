@@ -30,11 +30,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from satellite_support import address_of_length
 
+from reachy_contracts.settings import SESSION_URL_MAX_LENGTH
 from reachy_mini_ha_satellite.config import (
     BOOTSTRAP_SETTINGS,
     COMPATIBILITY_SETTINGS,
     ENV_PREFIX,
+    GROUNDSTATION_URL_MAX_LENGTH,
+    GROUNDSTATION_URL_SETTING,
     IDENTITY_SETTING,
     LIVE_SETTINGS,
     OVERRIDES_FILENAME,
@@ -50,10 +54,12 @@ from reachy_mini_ha_satellite.config import (
     load_settings,
     log_resolved_configuration,
     overrides_path,
+    resolve_submission,
     resolved_configuration,
     setting_names,
     state_directory,
     unrecognised_variables,
+    validate_groundstation_url_length,
     variable_for,
 )
 from reachy_mini_ha_satellite.timing import MIN_BEHAVIOUR_TICK_SECONDS
@@ -1039,3 +1045,200 @@ class TestRenderingAValueBackToAString:
         assert canonical_string("groundstation_credential", AWKWARD_CREDENTIAL) == (
             AWKWARD_CREDENTIAL
         )
+
+
+# The smallest environment that resolves *and* opens a session, which is what
+# makes the address below load-bearing rather than unread.
+_TRACKING = {
+    f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1",
+    f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": "example-credential",
+}
+
+
+class TestTheGroundstationAddressBound:
+    """One 255-character contract, refused rather than truncated."""
+
+    def test_the_declared_maximum_is_the_shared_one(self) -> None:
+        """Not a number of this application's own — see `config`'s own comment."""
+        assert GROUNDSTATION_URL_MAX_LENGTH == SESSION_URL_MAX_LENGTH
+        assert (
+            Settings.model_fields[GROUNDSTATION_URL_SETTING].metadata[0].max_length
+            == GROUNDSTATION_URL_MAX_LENGTH
+        )
+
+    def test_the_boundary_length_resolves(self) -> None:
+        """255 is the limit, so 255 is a value that starts the application."""
+        url = address_of_length(GROUNDSTATION_URL_MAX_LENGTH)
+
+        resolution = load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
+
+        assert resolution.settings.groundstation_url == url
+
+    @pytest.mark.parametrize("length", [256, 400, 512])
+    def test_a_legacy_environment_value_refuses_startup(self, length: int) -> None:
+        """REQ-095's legacy scenario, from the layer a deployment writes.
+
+        Args:
+            length: How long the released address is.
+        """
+        url = address_of_length(length)
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
+
+        message = str(raised.value)
+        assert variable_for(GROUNDSTATION_URL_SETTING) in message
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+        assert "environment" in message
+        assert "start the application again" in message
+
+    @pytest.mark.parametrize("length", [256, 512])
+    def test_a_legacy_persisted_value_names_the_overrides_file(
+        self,
+        length: int,
+    ) -> None:
+        """The other layer, whose remedy is a different file and a different act.
+
+        Args:
+            length: How long the released address is.
+        """
+        environ = {**_TRACKING, f"{ENV_PREFIX}STATE_DIR": "/reachy-satellite-legacy"}
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings(
+                environ,
+                {GROUNDSTATION_URL_SETTING: address_of_length(length)},
+            )
+
+        message = str(raised.value)
+        assert "override" in message
+        assert "/reachy-satellite-legacy/settings.json" in message
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+
+    def test_the_refusal_never_repeats_the_address(self) -> None:
+        """`groundstation_url` is rendered by value everywhere it is reported.
+
+        A refusal that quoted it would put a value nothing can represent into
+        the boot log, which is the one place an operator is certain to paste.
+        """
+        url = address_of_length(400)
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings({**_TRACKING, f"{ENV_PREFIX}GROUNDSTATION_URL": url})
+
+        message = str(raised.value)
+        assert url not in message
+        assert "192.0.2.10" not in message
+
+    @pytest.mark.parametrize("length", [0, 40, GROUNDSTATION_URL_MAX_LENGTH])
+    def test_a_runtime_submission_within_the_bound_is_accepted(
+        self,
+        length: int,
+    ) -> None:
+        """The check both paths reach through the owner, on the values it passes.
+
+        Args:
+            length: How long the submitted address is.
+        """
+        validate_groundstation_url_length("a" * length)
+
+    @pytest.mark.parametrize("length", [256, 512])
+    def test_a_runtime_submission_over_the_bound_is_refused(
+        self,
+        length: int,
+    ) -> None:
+        """Stated as the limit and the length, never as the address.
+
+        Args:
+            length: How long the submitted address is.
+        """
+        url = address_of_length(length)
+
+        with pytest.raises(ConfigurationError) as raised:
+            validate_groundstation_url_length(url)
+
+        message = str(raised.value)
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+        assert str(length) in message
+        assert url not in message
+
+    def test_the_address_is_a_live_setting(self) -> None:
+        """What the set means to an operator is "no restart", which is now true.
+
+        Its adoption is `groundstation_url.GroundstationUrlOwner`'s rather than
+        `apply_live`'s, and that is the one entry in the set of which that is
+        so — see the comment beside `LIVE_SETTINGS`.
+        """
+        assert GROUNDSTATION_URL_SETTING in LIVE_SETTINGS
+
+    @pytest.mark.parametrize("length", [256, 512])
+    def test_resolving_a_submission_gives_the_runtime_remedy(
+        self,
+        length: int,
+    ) -> None:
+        """The ordering that keeps a submission off the migration's wording.
+
+        Every surface resolves a submitted set of overrides through this, so
+        which of the two refusals an operator reads is decided here once rather
+        than by each caller remembering to check the length first.
+
+        Args:
+            length: How long the submitted address is.
+        """
+        with pytest.raises(ConfigurationError) as raised:
+            resolve_submission(
+                _TRACKING,
+                {GROUNDSTATION_URL_SETTING: address_of_length(length)},
+            )
+
+        message = str(raised.value)
+        assert str(GROUNDSTATION_URL_MAX_LENGTH) in message
+        assert str(length) in message
+        assert "Nothing was changed." in message
+        assert "overrides file" not in message
+        assert "start the application again" not in message
+
+    def test_the_same_overrides_at_startup_give_the_migration_remedy(self) -> None:
+        """The other half, so the two are shown to differ rather than assumed to.
+
+        A released 256-character address really is in a file at startup, and
+        removing it really does need a restart — which is why a submission must
+        not be told the same thing.
+        """
+        overlong = {GROUNDSTATION_URL_SETTING: address_of_length(256)}
+
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings(_TRACKING, overlong)
+
+        message = str(raised.value)
+        assert "overrides file" in message
+        assert "start the application again" in message
+
+    def test_apply_settings_change_refuses_before_it_writes(
+        self,
+        fs: FakeFilesystem,
+    ) -> None:
+        """One of the two functions that persist a submitted address.
+
+        It resolves through `resolve_submission`, so a caller that forgot the
+        check cannot write an address no surface could report. The other writer
+        is `GroundstationUrlOwner._replace`, and the evidence for that one is
+        `test_satellite_groundstation_url.py`'s
+        `test_the_owners_own_commit_is_never_reached_by_an_overlong_address` —
+        named there because it is that module's code that does the writing.
+
+        Args:
+            fs: The in-memory filesystem.
+        """
+        del fs
+        store = OverrideStore(Path("/reachy-satellite-submission/settings.json"))
+
+        with pytest.raises(ConfigurationError) as raised:
+            apply_settings_change(
+                {GROUNDSTATION_URL_SETTING: address_of_length(256)},
+                store=store,
+                environ=_TRACKING,
+            )
+
+        assert "Nothing was changed." in str(raised.value)
+        assert store.load() == {}

@@ -48,8 +48,10 @@ A secret's raw value does still travel, and it is worth saying where rather than
 claiming it never leaves this module. Three paths carry it and none of them is a
 rendering: `canonical_string` hands it back unchanged so a submission can be
 *compared* against it, `OverrideStore.save` writes it to a file owner-only, and
-`main.build_perception_source` reveals it once into a `Credential`, which is the
-type that will not print itself. Everywhere else it is read only to be tested for
+`main.build_remote_source` reveals it once into a `Credential`, which is the
+type that will not print itself — and it is the one reveal site because it is
+also the one place a session client is constructed, at startup and for every
+later replacement alike. Everywhere else it is read only to be tested for
 emptiness and discarded — `resolved_configuration` choosing between `<set>` and
 `<unset>`, and the coherence check refusing a session with no credential.
 `test_satellite_config.py` and `test_satellite_web_settings.py` assert that a
@@ -80,7 +82,7 @@ from pydantic import (  # noqa: TID253  # configuration, not a wire type: `Secre
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from reachy_contracts.settings import ROBOT_SETTINGS
+from reachy_contracts.settings import ROBOT_SETTINGS, SESSION_URL_MAX_LENGTH
 from reachy_mini_ha_satellite.adapters.output_gain import (
     DEFAULT_BOOST_PERCENT,
     MAX_BOOST_PERCENT,
@@ -97,6 +99,8 @@ __all__ = [
     "BOOTSTRAP_SETTINGS",
     "COMPATIBILITY_SETTINGS",
     "ENV_PREFIX",
+    "GROUNDSTATION_URL_MAX_LENGTH",
+    "GROUNDSTATION_URL_SETTING",
     "IDENTITY_SETTING",
     "LIVE_SETTINGS",
     "OVERRIDES_FILENAME",
@@ -104,6 +108,7 @@ __all__ = [
     "REDACTED_UNSET",
     "SECRET_SETTINGS",
     "ConfigurationError",
+    "OverrideMerge",
     "OverrideStore",
     "Resolution",
     "SettingSource",
@@ -117,20 +122,50 @@ __all__ = [
     "load_settings",
     "log_resolved_configuration",
     "overrides_path",
+    "resolve_submission",
     "resolved_configuration",
     "setting_names",
     "state_directory",
     "unrecognised_variables",
+    "validate_groundstation_url_length",
     "variable_for",
 ]
 
 _LOGGER: Final = logging.getLogger(__name__)
+
+# What a writer hands to whatever performs the write: the overrides as they are
+# when it begins, in; the complete set to store, out. A function rather than a
+# ready-made mapping because the read has to happen inside the operation that
+# commits — a set computed from a copy read earlier is a set that drops whatever
+# another surface committed in between. On a running robot the thing that
+# performs the write is `GroundstationUrlOwner`, and its lock is what "inside"
+# means; a settings interface with no application behind it has no owner to hand
+# this to and calls it itself. Declared here, beside `OverrideStore`, because it
+# is the shape of a change to that file rather than a detail of either caller.
+#
+# A `type` statement rather than an assignment: `Callable` is imported for type
+# checking only, and an assigned alias would evaluate it at import time.
+type OverrideMerge = Callable[[Mapping[str, str]], Mapping[str, str]]
 
 ENV_PREFIX: Final = "REACHY_SATELLITE_"
 
 # The one setting with no default, named here so the message that explains why
 # and the model that declares it cannot drift apart.
 IDENTITY_SETTING: Final = "device_name"
+
+# The setting Home Assistant can also write, named for the same reason.
+GROUNDSTATION_URL_SETTING: Final = "groundstation_url"
+
+# How long that address may be, on every surface that accepts one: the field
+# below, the settings page's input, the Home Assistant text entity's declared
+# maximum and both submission paths. It is `reachy_contracts`' declaration
+# rather than a number of this application's own, so `reachyctl config`,
+# provisioning validation and this application cannot come to disagree — which
+# is the whole point of the shared vocabulary. It is Home Assistant's limit:
+# an ESPHome text state carries at most 255 characters, so a longer value is one
+# the entity could not report truthfully, and the released 512-character bound
+# narrows to it. Nothing truncates: see `_overlong_url_message`.
+GROUNDSTATION_URL_MAX_LENGTH: Final = SESSION_URL_MAX_LENGTH
 
 # What a secret looks like on every surface. The settings page is reachable by
 # anything that can reach the robot, so the question it answers is "is it set?"
@@ -201,8 +236,20 @@ LIVE_SETTINGS: Final[frozenset[str]] = frozenset(
         "behaviour_tick_seconds",
         "idle_seconds",
         "speaker_boost_percent",
+        GROUNDSTATION_URL_SETTING,
     }
 )
+
+# ⚠️ `groundstation_url` is live and is **not** adopted by
+# `SatelliteApplication.apply_live`, which is the one entry in this set that is
+# not. Changing it means building a session client and a perception source and
+# retiring the one running, so it is owned by
+# `groundstation_url.GroundstationUrlOwner` — a serialized transition that
+# prepares and starts the replacement before the durable file is written and
+# compensates back to the preceding address if any step fails. It is in this set
+# because what the set means to an operator is "this takes effect without a
+# restart", which is true of it, and `apply_settings_change`'s docstring records
+# the one path a change of it may travel.
 
 # ⚠️ `face_tracking_enabled` is deliberately NOT in that set, and the reason is
 # worth stating because the behaviour layer can adopt it in isolation and looks
@@ -290,7 +337,10 @@ class Settings(BaseSettings):
             while live body calibration remains provisional.
         detection_source: Which detector answers — see ha-satellite REQ-047.
         groundstation_url: Where the groundstation serves its session endpoint.
-            Required by every selection but `local`.
+            Required by every selection but `local`. Capped at
+            `GROUNDSTATION_URL_MAX_LENGTH` because Home Assistant's text entity
+            reports it, and changeable while the application runs — see
+            `groundstation_url.GroundstationUrlOwner`.
         groundstation_credential: The shared secret presented to open a session.
         frame_interval_seconds: How long between frames submitted to the
             groundstation.
@@ -378,7 +428,7 @@ class Settings(BaseSettings):
     #:% The source of face detections MUST be selectable between the groundstation, the
     #:% robot's own detector, and the groundstation with local fallback.
     detection_source: SourceSelection = SourceSelection.REMOTE
-    groundstation_url: str = Field(default="", max_length=512)
+    groundstation_url: str = Field(default="", max_length=GROUNDSTATION_URL_MAX_LENGTH)
     groundstation_credential: SecretStr = SecretStr("")
     frame_interval_seconds: float = Field(default=0.1, gt=0.0, le=60.0)
 
@@ -654,6 +704,128 @@ def _identity_is_unset_message() -> str:
     )
 
 
+def _overlong_url_message(source: SettingSource, environ: Mapping[str, str]) -> str:
+    """Refuse a released address longer than Home Assistant can report.
+
+    **Nothing is truncated and nothing is rewritten.** An address of 256 to 512
+    characters was accepted by the released model, so an upgrade meets one that is
+    still in a file or in the daemon's environment. Shortening it silently would
+    open a session to somewhere the operator never configured; hiding it from
+    Home Assistant would leave one surface reporting a value another cannot. So
+    the application refuses to start and says which layer to change.
+
+    Args:
+        source: Which layer supplied the offending value.
+        environ: The environment, read only to locate the overrides file.
+
+    Returns:
+        The refusal an operator reads. **It quotes no address**: this one is
+        already too long to read back on any surface, and `_check_session_url`
+        records why a groundstation address is never repeated into a message.
+    """
+    variable = variable_for(GROUNDSTATION_URL_SETTING)
+    remedy = (
+        f"Set {variable} to an address of {GROUNDSTATION_URL_MAX_LENGTH} "
+        f"characters or fewer, or unset it, and start the application again."
+        if source is SettingSource.ENVIRONMENT
+        else (
+            f"The settings interface wrote it. Remove the "
+            f"{GROUNDSTATION_URL_SETTING!r} entry from the overrides file at "
+            f"{overrides_path(environ)} — or replace it with an address of "
+            f"{GROUNDSTATION_URL_MAX_LENGTH} characters or fewer — and start "
+            f"the application again."
+        )
+    )
+    return (
+        f"{variable} is longer than {GROUNDSTATION_URL_MAX_LENGTH} characters, "
+        f"which is the most a Home Assistant text entity can report. It came "
+        f"from the {source.value} layer. Nothing was truncated: a shortened "
+        f"address is a different groundstation. {remedy}"
+    )
+
+
+def _check_url_length(
+    values: Mapping[str, str],
+    sources: Mapping[str, SettingSource],
+    environ: Mapping[str, str],
+) -> None:
+    """Refuse a legacy overlong address before the model reports a bare length.
+
+    The model's own `max_length` would refuse it too, and with a message that
+    names the variable and says "at most 255 characters" — true, and silent
+    about which of the two layers holds the value and about what to do next.
+    That is the difference between an operator who can fix it and one who has to
+    go looking.
+
+    Args:
+        values: The raw strings the layers supplied.
+        sources: Which layer supplied each.
+        environ: The environment, for locating the overrides file.
+
+    Raises:
+        ConfigurationError: If the resolved address is too long.
+    """
+    raw = values.get(GROUNDSTATION_URL_SETTING)
+    if raw is None or len(raw) <= GROUNDSTATION_URL_MAX_LENGTH:
+        return
+    source = sources.get(GROUNDSTATION_URL_SETTING, SettingSource.DEFAULT)
+    raise ConfigurationError(_overlong_url_message(source, environ))
+
+
+def validate_groundstation_url_length(url: str) -> None:
+    """Refuse a runtime submission before anything is built or written.
+
+    Every path that can receive a submitted address reaches this before anything
+    that could produce migration wording, and all but one reach it through
+    `resolve_submission`, which is where that ordering is kept:
+
+    - the Home Assistant text entity, through
+      `GroundstationUrlOwner.reserve_submission`, which is the one place that
+      calls this directly: it runs in the protocol's message loop, which cannot
+      await, so it refuses before it schedules anything;
+    - the settings page with an application attached, through
+      `GroundstationUrlOwner._apply`;
+    - the same page with none, through `web/app.py`'s own write;
+    - the same page's speaker-boost control, through
+      `GroundstationUrlOwner.reserve_merge` and `_apply`;
+    - and `apply_settings_change`, which resolves through
+      `resolve_submission` rather than through `load_settings`.
+
+    **Two functions persist a submitted set of overrides, and both resolve
+    through `resolve_submission` before they write.** `apply_settings_change` is
+    one; `GroundstationUrlOwner._replace` is the other, writing through
+    `self._store.save` at its commit point — reached only from `_apply`, which
+    has resolved already. Naming both is the honest form of this invariant: it
+    is what the code does, a reader can check it, and it does not quietly become
+    false the next time something else learns to write. A third writer joins the
+    list rather than invalidating the statement.
+
+    So an overlong address never reaches source construction or the durable
+    file, and the preceding effective value stays the read-back.
+
+    **Not `_check_url_length`**, which refuses the same length at startup and
+    says to edit the overrides file and restart. That remedy is right for a
+    released value being migrated and wrong for a submission: nothing has been
+    written, there is no entry to remove, and the application is running.
+
+    Args:
+        url: What was submitted.
+
+    Raises:
+        ConfigurationError: If it is longer than the shared bound. The message
+            states the limit and the length; it never quotes the address.
+    """
+    if len(url) <= GROUNDSTATION_URL_MAX_LENGTH:
+        return
+    message = (
+        f"{variable_for(GROUNDSTATION_URL_SETTING)} accepts at most "
+        f"{GROUNDSTATION_URL_MAX_LENGTH} characters, which is the most a Home "
+        f"Assistant text entity can report; that address has {len(url)}. "
+        f"Nothing was changed."
+    )
+    raise ConfigurationError(message)
+
+
 def _declared_values(
     environ: Mapping[str, str],
     overrides: Mapping[str, str],
@@ -714,8 +886,9 @@ def load_settings(
 
     Raises:
         ConfigurationError: If a prefixed variable is not recognised, if the
-            announced identity is unset, or if a recognised value does not
-            parse. Every message names the variable.
+            announced identity is unset, if a released groundstation address is
+            longer than `GROUNDSTATION_URL_MAX_LENGTH`, or if a recognised value
+            does not parse. Every message names the variable.
     """
     source = os.environ if environ is None else environ
     written = {} if overrides is None else overrides
@@ -734,6 +907,10 @@ def load_settings(
 
     if not values.get(IDENTITY_SETTING, "").strip():
         raise ConfigurationError(_identity_is_unset_message())
+
+    # Before the model, so the refusal names the layer and the remedy rather
+    # than only the length. See `_check_url_length`.
+    _check_url_length(values, sources, source)
 
     try:
         settings = Settings.model_validate(values)
@@ -758,6 +935,51 @@ def load_settings(
     )
 
 
+def resolve_submission(
+    environ: Mapping[str, str] | None,
+    wanted: Mapping[str, str],
+) -> Resolution:
+    """Resolve overrides that were **submitted**, refusing an over-long address.
+
+    The difference from `load_settings` is not what it refuses but what it says
+    to do about it. Both stop the same 256-character address; `load_settings`
+    speaks to an operator upgrading an installation, and tells them to remove
+    the entry from the overrides file and start the application again. Not one
+    clause of that is true of a submission: nothing has been written, there is
+    no entry, and the robot is running. So a submission runs
+    `validate_groundstation_url_length` first, which states the limit and the
+    length and says nothing was changed.
+
+    **The ordering lives here rather than in each caller**, and that is the
+    point of the function existing at all. Every surface that can receive an
+    address — the settings page with an application behind it, the same page
+    with none, and the Home Assistant control — resolves through this; and so
+    does **each of the two functions that persist a submitted address**,
+    `apply_settings_change` and `GroundstationUrlOwner._replace`, the second
+    by way of `_apply`. That is the invariant: not that there is one writer,
+    because there are two, but that no writer is reachable without having
+    resolved here first. Getting it wrong by omission is what put the migration
+    wording on a runtime refusal twice.
+
+    Args:
+        environ: The environment to resolve against, or `None` for the process
+            environment.
+        wanted: The complete set of overrides submitted, by setting name.
+
+    Returns:
+        The settings the submission resolves to.
+
+    Raises:
+        ConfigurationError: If the submitted address is longer than
+            `GROUNDSTATION_URL_MAX_LENGTH`, or for anything `load_settings`
+            refuses.
+    """
+    submitted = wanted.get(GROUNDSTATION_URL_SETTING)
+    if submitted is not None:
+        validate_groundstation_url_length(submitted)
+    return load_settings(environ, wanted)
+
+
 def apply_settings_change(
     wanted: Mapping[str, str],
     *,
@@ -777,7 +999,20 @@ def apply_settings_change(
     Merging is the caller's, deliberately: a form submits every field and drops
     the ones equal to the layers below, while an entity submits the single name
     it owns. Both then hand the whole `wanted` mapping here, because the store
-    holds a complete set rather than a patch.
+    holds a complete set rather than a patch. *When* that merge runs is not the
+    caller's, though — see `OverrideMerge`: the file has to be read inside
+    whatever serializes writes to it, and on a running robot that is
+    `GroundstationUrlOwner`.
+
+    **`groundstation_url` does not travel this path**, and that is the one
+    exception worth stating here rather than leaving a reader to discover.
+    Changing it retires a running session client and starts another, so the
+    durable write cannot come first: a submission this application then refused
+    would be the file the next start reads. `groundstation_url.
+    GroundstationUrlOwner.submit` is the ordering that address uses — prepare,
+    retire, start, *then* commit — and it calls this function for every
+    submission that leaves the address alone. Nothing else may write that
+    setting.
 
     `apply_live` is a callable rather than a `SettingsHost`, and the reason that
     matters is **not** the import cycle. A cycle is avoidable — a one-method
@@ -809,7 +1044,11 @@ def apply_settings_change(
             for the reason `OverrideStore.save` records: a change that appears
             to have been accepted and was not is the worst outcome available.
     """
-    resolved = load_settings(environ, wanted)
+    # `resolve_submission` and not `load_settings`: this function persists a
+    # submission, so the runtime refusal belongs on it rather than on each
+    # caller's memory of needing one. `GroundstationUrlOwner._replace` is the
+    # other function that persists one and does the same, through `_apply`.
+    resolved = resolve_submission(environ, wanted)
     store.save(wanted)
     if apply_live is not None:
         apply_live(resolved.settings)

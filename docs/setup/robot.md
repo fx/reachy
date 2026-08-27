@@ -186,6 +186,17 @@ Environment="REACHY_SATELLITE_GROUNDSTATION_URL=ws://192.0.2.10:8080/v1/session"
 Environment="REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL=the-credential-you-generated"
 ```
 
+`REACHY_SATELLITE_GROUNDSTATION_URL` accepts **at most 255 characters**. That is
+what a Home Assistant text entity can report, and the satellite announces the
+address as one. An installation upgrading from a release that accepted 512
+refuses to start on a longer value rather than truncating it, and says whether
+the offending value came from this drop-in or from the settings page's overrides
+file. Once the satellite is running, the address is changeable from the settings
+page and from Home Assistant without a restart — this drop-in remains what a
+re-imaged robot starts from. See
+[`docs/ops/satellite-deployment.md`](../ops/satellite-deployment.md) for the
+remedy and for what a live replacement does.
+
 **That file holds a credential, so give it root-only permissions.** systemd
 reads unit configuration as root and needs nothing more:
 

@@ -19,10 +19,13 @@ same reason.
 **One of the two sends something unprompted, and only one.** Each entity answers
 the message it was handed and yields the responses that answer goes back in; the
 vendored protocol layer's own fan-out is what delivers a message to every entity,
-and what writes the replies. The boost is the exception, because it is the one of
-the two values that changes without Home Assistant having asked for it: the
-application's own settings page writes it too, and a slider showing the old
-number until the next reconnect is this control not working. So
+and what writes the replies. The boost is the exception, and for two reasons
+rather than one. It is the one of the two values that changes without Home
+Assistant having asked for it, because the application's own settings page
+writes it too. And a change Home Assistant *did* ask for does not finish before
+the answer to that request is written: the write is reserved and performed
+afterwards, so the reply carries the preceding value. Either way a slider
+showing the old number until the next reconnect is this control not working. So
 `SpeakerBoostNumberEntity.publish` pushes the value in effect through
 `ServerState.broadcast`, which reaches every connected client rather than
 whichever connection an entity happens to hold — `self.server` is `None` for both
@@ -290,17 +293,32 @@ class SpeakerBoostNumberEntity(ESPHomeEntity):
     input and output so its tests need no filesystem.
 
     **The response carries a read-back, not an echo.** What is yielded after a
-    set is what the getter says afterwards, so a value the setter refused — an
-    overrides file that cannot be written is the case that exists — is reported
-    as the value actually in effect rather than as the one that was asked for.
+    set is what the getter says at that moment, never the number that arrived.
+    The set does not complete before the reply is built: `main.build_boost_setter`
+    *reserves* the write through the owner that serializes changes to the
+    overrides file, because this runs in the protocol's synchronous message loop
+    and cannot await one. So the reply carries the **preceding** value, and the
+    value chosen arrives at Home Assistant through the push below.
 
     **It pushes, and it is the only one of the two that does.** `publish` is what
     `SatelliteApplication.apply_live` calls once a setting has been adopted,
     whichever surface chose it — so a boost changed on the application's own
     settings page moves Home Assistant's slider then rather than at the next
-    reconnect. On the Home-Assistant-originated path that push carries the same
-    value as the reply below, which costs one message and keeps the adoption with
-    exactly one call site. See the module docstring.
+    reconnect.
+
+    ⚠️ **On the Home-Assistant-originated path that push is not a duplicate of
+    the reply, and must not be removed as one.** It once was: while the setter
+    persisted and adopted before this method yielded, the two carried the same
+    number and the push cost one redundant message. It no longer does. The reply
+    is built before the reserved write lands, so it carries the preceding value
+    and *this push is the message that corrects the slider*. Deleting it would
+    leave Home Assistant showing the old number after every change made from
+    Home Assistant, until the next reconnect — which is the failure the module
+    docstring says `publish` exists to prevent, arrived at from the one direction
+    that docstring did not have to worry about. `test_satellite_main.py` pins the
+    relationship so this paragraph is checked rather than believed.
+
+    See the module docstring.
     """
 
     def __init__(
@@ -321,7 +339,9 @@ class SpeakerBoostNumberEntity(ESPHomeEntity):
             key: The identifier Home Assistant addresses this entity by.
             get_percent: What the boost is now. Read at message time rather than
                 once, so a boost changed from the settings page is what Home
-                Assistant is told.
+                Assistant is told — and so a boost chosen here, whose write is
+                still only reserved, reads back as the value that is genuinely
+                still in effect.
             set_percent: How to change it. Whatever this does with the value is
                 the setter's business; this class only clamps and reads back.
             server: The connection this entity was built from, when it was built

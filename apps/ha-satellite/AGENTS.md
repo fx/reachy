@@ -50,6 +50,8 @@ that apply here.
 | `src/reachy_mini_ha_satellite/behaviour/` | The pure decision layer: pipeline expression, source-qualified face selection, predictive gaze estimation, bounded coordinated trajectories and head arbitration |
 | `src/reachy_mini_ha_satellite/wake_word.py` | What actually *runs* the wake-word models over captured audio — the thresholds, the refractory window and the mute check, with only the model calls behind a seam |
 | `src/reachy_mini_ha_satellite/config.py` | Settings, their three layers, and the one place a secret is declared to be one |
+| `src/reachy_mini_ha_satellite/groundstation_url.py` | The serialized replacement of the groundstation address: the source factory, the transition order, the durable commit, compensation and bounded reconstruction |
+| `src/reachy_mini_ha_satellite/groundstation_entities.py` | The Home Assistant text control over that address |
 | `src/reachy_mini_ha_satellite/web/` | The settings interface REQ-049 requires |
 | `src/reachy_mini_ha_satellite/main.py` | The composition root: ports to adapters, the loop, and the four services |
 | `src/reachy_mini_ha_satellite/daemon_app.py` | The `reachy_mini_apps` entry point, and the ONLY module that imports the SDK |
@@ -167,6 +169,100 @@ deployment can get irreversibly wrong.
   starting, but predictive control reads none of them. They stay outside
   `LIVE_SETTINGS`, are read-only and marked `legacy compatibility; ignored` on
   the settings surface, and an ordinary save drops stale override copies.
+- **The groundstation address has one bound and one write path.**
+  `reachy_contracts.settings.SESSION_URL_MAX_LENGTH` is the 255 characters a
+  Home Assistant text state can carry, and `config.GROUNDSTATION_URL_MAX_LENGTH`
+  is that constant rather than a second number: the settings model, the settings
+  page's field, the text entity's declared maximum and both submission paths all
+  read it. A released 256–512-character value refuses startup, naming the layer
+  that holds it, and is never truncated. **The two refusals are not
+  interchangeable**: `load_settings` speaks to an upgrade — remove the entry
+  from the overrides file and restart — and `validate_groundstation_url_length`
+  speaks to a submission, where nothing was written, there is no entry and the
+  robot is running. Every surface that receives an address therefore resolves
+  through `config.resolve_submission`, which runs the runtime check before
+  `load_settings` can produce the migration wording. **Two functions persist a
+  submitted set of overrides and both resolve through it first**:
+  `config.apply_settings_change`, and `GroundstationUrlOwner._replace`, which
+  writes through `self._store.save` at its commit point and is reached only
+  from `_apply`. The invariant is not that there is one writer — there are two
+  — but that no writer is reachable without having resolved through
+  `resolve_submission`, so a new caller cannot persist an address no surface
+  could report. A third writer joins that list rather than invalidating it.
+  `reserve_submission` is the single direct caller of
+  the validator, because it runs in the protocol's message loop and cannot
+  await. Resolving a submission with bare `load_settings` is the defect this
+  arrangement exists to make impossible. `groundstation_url.
+  GroundstationUrlOwner` is the only thing that writes the setting, because the
+  order matters — prepare, retire, start, **commit the durable file**, publish —
+  and `config.apply_settings_change` persists first, which for this setting
+  would let a restart adopt what runtime rejected. It owns the bounded,
+  cancellable reconstruction of a source that failed before it existed, since
+  the connectivity supervisor cannot supervise an object that does not exist.
+  Anything that reaches around it, or a second `RemotePerception` alongside
+  `ReplaceableRemoteSource`'s one delegate, is the overlap this ordering exists
+  to exclude. Five rules keep that true and each is enforced in the owner
+  rather than at its call sites. **Every await inside the transition is
+  followed by a validity check** before the next externally visible act, because
+  `aclose` marks the owner closed before it takes the lock and shutdown
+  therefore lands between two statements; losing the check closes what was built
+  rather than proceeding. **And the condition each check asks about is
+  invalidated before the await, not after** — `cancel` requests rather than
+  compels, so `_cancel_restoration` advances the generation *first* and a
+  restoration that swallowed its own cancellation is stale by construction
+  instead of by a check that ran too early; `_unwanted` adds the structural
+  half, refusing to install over a delegate that already exists. **An
+  unconfirmed close is unavailability, not retirement** — a source whose
+  `aclose` raised may still hold a session, so it is recorded as outstanding,
+  one further close is attempted at the next transition, and nothing is built or
+  installed until it is gone. **A candidate that opens no session while one is
+  running is refused**, decided from the factory's answer rather than from a
+  list of the settings that produce it, so a save changing the address together
+  with a restart-bound detection setting cannot retire the running source into
+  nothing and report success. And **in a running application every write to the
+  overrides file goes through the owner's lock, and the file is read there
+  too**: the page hands over a merge (`submit_merged`), the address entity an
+  address (`submit_url`), and the speaker-boost entity a merge as well
+  (`reserve_merge`) — a map computed before the lock drops whatever another
+  surface committed in between, in whichever order they arrive. The boost is
+  there **not because it is an address** but because the owner's transition is
+  the only writer that suspends between its read and its commit, so any writer
+  outside the lock has its setting discarded when the transition commits the map
+  it computed beforehand. **The one supported exception is a settings interface
+  with no application behind it** (`create_app(application=None)`, which the
+  composition root never produces): it writes non-address settings straight
+  through `apply_settings_change`, unserialized — there is no owner to serialize
+  against and no transition to race — and it refuses an address change for the
+  same reason it is unserialized, that nothing is there to adopt one.
+- **Write a claim about that file from the list of paths, never from the change
+  in front of you.** Three successive corrections to the sentences above were
+  each nearly true and each failed on a path the author had not enumerated:
+  "the one path that persists a submission" (two do), "every read happens under
+  the owner's lock" (a third writer's did not), "every write is serialized by
+  the owner" (the no-owner page's is not). The habit that produces them is
+  describing the shape of the code just edited. Before writing "every", "the
+  one" or "both" about writers, reads, locks or persistence here, grep out
+  every `store.save`, `store.load`, `apply_settings_change` and `load_settings`
+  call site and write the sentence from what that list says — including the
+  exceptions, named by their cause, so the sentence survives the next writer.
+  **`store.load` is in that list because the claim has a read half**: the
+  sentence above says every write goes through the owner's lock *and that the
+  file is read there too*, and only `store.load` shows where it is read.
+  `load_settings` takes the overrides as an argument and reads no file, so a
+  grep of the other three checks one half of a two-part sentence — which is the
+  same nearly-right that this rule exists to stop.
+- **Changing *how* something happens invalidates docstrings in modules you did
+  not touch.** The same three passes produced a fourth instance one level down:
+  making the boost write asynchronous falsified `audio_entities.py`, which was
+  not in the diff and therefore was not swept — and the sentence it falsified
+  was the recorded reason the push beside it is *not* redundant, so a reader
+  trusting it would have deleted the message that corrects Home Assistant's
+  slider. Sweeping the files you edited is not sweeping the change. After
+  altering timing, ordering, or who performs an operation, grep the package for
+  the callers and collaborators of what you changed and ask of each docstring
+  "was this written against the old behaviour?" — a claim that something is
+  redundant, immediate, or a duplicate is the kind that rots silently, and the
+  kind whose rotting deletes code.
 - **The announced Home Assistant identity has no default.** `device_name` is
   required and the application refuses to start without it. Home Assistant keys
   a device on what it announces, so a derived default would be correct on a

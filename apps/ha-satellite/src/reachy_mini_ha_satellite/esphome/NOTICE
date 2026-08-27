@@ -108,6 +108,16 @@ enumerable. It is:
    and only the final authenticated loss disconnects. Player-stop failures on
    that final transition log static stage text without exception payloads.
 
+9. `satellite.py` routes `TextCommandRequest` to the entity list, by importing
+   that message and adding it to the tuple the existing entity fan-out branch
+   already matches. Upstream declares no text entity, so it never had a reason
+   to route the message; this application announces one for the groundstation
+   address, and an unrouted command would leave that control inert with nothing
+   saying why. The delta is one import and one name in a tuple — the branch, its
+   ordering and every other message it carries are upstream's — and it is here
+   rather than outside the directory because message routing is the one thing
+   this file owns and no application-side hook exists to extend it.
+
 Nothing beyond the changes enumerated above was touched. In particular the code
 is not reformatted, its docstrings are not rewritten, and its typing is not
 modernised — the shared ruff and mypy configuration names these files and stands

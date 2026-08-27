@@ -369,36 +369,39 @@ Only commands and output actually observed are transcribed.
   - [x] Run the focused satellite suites and repository checks required above
         (PR #31)
 
-- [ ] Add persisted live groundstation URL replacement
-  - [ ] Define one 255-character URL bound shared by the settings model, settings
-        page, text entity metadata and both submission paths
-  - [ ] Refuse legacy 256–512-character environment and persisted values at startup
+- [x] Add persisted live groundstation URL replacement (PR #32)
+  - [x] Define one 255-character URL bound shared by the settings model, settings
+        page, text entity metadata and both submission paths (PR #32)
+  - [x] Refuse legacy 256–512-character environment and persisted values at startup
         without truncation, naming their source and actionable replace/remove path
-  - [ ] Add the stable Configuration text entity using the shared session-URL
-        validator and settings store
-  - [ ] Route both the settings page and entity through one stable serialized
+        (PR #32)
+  - [x] Add the stable Configuration text entity using the shared session-URL
+        validator and settings store (PR #32)
+  - [x] Route both the settings page and entity through one stable serialized
         replacement owner retaining the source factory, preceding resolution,
-        optional source, generation and optional reconstruction task
-  - [ ] Prepare and start the candidate before atomic durable commit, publish only
+        optional source, generation and optional reconstruction task (PR #32)
+  - [x] Prepare and start the candidate before atomic durable commit, publish only
         after commit, and compensate every failure to one preceding effective URL
-        and at most one eligible source
-  - [ ] Own bounded, capped and cancellable reconstruction retries above the
+        and at most one eligible source (PR #32)
+  - [x] Own bounded, capped and cancellable reconstruction retries above the
         connectivity supervisor; close partial sources and hand off exactly one
-        successfully constructed source for ordinary reconnect behavior
-  - [ ] Serialize a later operator write with cancellation and awaiting of prior
+        successfully constructed source for ordinary reconnect behavior (PR #32)
+  - [x] Serialize a later operator write with cancellation and awaiting of prior
         reconstruction, and cancel/await the same state during shutdown so no late
-        factory result installs a client
-  - [ ] Preserve single-client reconnect, staleness and local-fallback behavior
+        factory result installs a client (PR #32)
+  - [x] Preserve single-client reconnect, staleness and local-fallback behavior
         across successful, refused, compensated, exhausted and cancelled recovery
-  - [ ] Cover boundary lengths 255/256/512, both legacy sources, no truncation,
+        (PR #32)
+  - [x] Cover boundary lengths 255/256/512, both legacy sources, no truncation,
         preparation/close/start/commit failures, repeated reconstruction failures
         followed by success, retry exhaustion, partial-source cleanup, operator
         supersession, shutdown cancellation, late factory results, rapid writes,
         restart/runtime agreement and both UI read-backs without sockets or a Home
-        Assistant instance
-  - [ ] Update configuration and operator documentation for the new limit,
-        migration refusal, transaction ordering and remediation
-  - [ ] Run the focused satellite suites and repository checks required above
+        Assistant instance (PR #32)
+  - [x] Update configuration and operator documentation for the new limit,
+        migration refusal, transaction ordering and remediation (PR #32)
+  - [x] Run the focused satellite suites and repository checks required above
+        (PR #32)
 
 - [ ] Add the bounded MJPEG feed, documentation and final traceability
   - [ ] Add one global optional latest-original-JPEG value beside session
