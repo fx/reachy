@@ -612,6 +612,14 @@ async def test_initial_disabled_body_is_quiesced_before_registration() -> None:
     assert robot.automatic_body_yaw == [False]
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-094-motor-groups-change-safely-at-run-time
+#:% The satellite MUST apply independent head, body and antenna motor-group switches
+#:% immediately by quiescing every application- and daemon-owned command producer for
+#:% the group before torque-off, establishing exclusive body-command ownership when
+#:% needed, confirming each physical grouped-torque transition, and reacquiring and
+#:% seeding measured state before movement or the preceding ownership policy resumes,
+#:% without weakening existing trajectory, workspace, safe-hold or terminal-release
+#:% guarantees.
 @pytest.mark.asyncio
 async def test_disable_closes_gate_before_daemon_call_and_isolates_unrelated_group() -> (
     None
@@ -765,6 +773,14 @@ async def test_motion_adapter_gates_gaze_pipeline_head_and_antennas_independentl
     assert robot.targets[-1][1] == [-0.3, 0.3]
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-094-motor-groups-change-safely-at-run-time
+#:% The satellite MUST apply independent head, body and antenna motor-group switches
+#:% immediately by quiescing every application- and daemon-owned command producer for
+#:% the group before torque-off, establishing exclusive body-command ownership when
+#:% needed, confirming each physical grouped-torque transition, and reacquiring and
+#:% seeding measured state before movement or the preceding ownership policy resumes,
+#:% without weakening existing trajectory, workspace, safe-hold or terminal-release
+#:% guarantees.
 @pytest.mark.asyncio
 @pytest.mark.parametrize("face_tracking", [False, True])
 @pytest.mark.parametrize("body_motion", [False, True])

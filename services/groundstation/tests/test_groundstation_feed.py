@@ -198,6 +198,12 @@ async def test_the_retained_bytes_are_the_bytes_that_arrived() -> None:
     assert frame.payload == payload
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-096-mjpeg-is-a-bounded-latest-frame-view
+#:% The groundstation MUST retain at most one original payload globally for a
+#:% standards-compatible MJPEG stream only after both explicit JPEG-format signature
+#:% validation and successful image decode, replace rather than queue that payload
+#:% for slow viewers, and add no robot connection, stream-only decode or re-encode,
+#:% or capability-processing blockage.
 @pytest.mark.asyncio
 async def test_a_slow_viewer_is_handed_the_newest_frame_and_not_a_backlog() -> None:
     """Replacement rather than queueing is what keeps a slow viewer live."""
@@ -221,6 +227,12 @@ def test_a_second_session_clears_the_frame_rather_than_keeping_one_each() -> Non
             assert feed.publish(jpeg_bytes(fill=200)) is False
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-097-feed-eligibility-is-deterministic
+#:% The groundstation MUST serve `/stream.mjpg` only after exactly one active
+#:% authenticated robot session has supplied a fresh validated JPEG while it is the
+#:% sole session, clear all feed frame state and end viewers whenever authenticated
+#:% session cardinality is zero or greater than one, and require another fresh
+#:% validated JPEG after cardinality returns to one.
 def test_returning_to_one_session_does_not_resurrect_the_earlier_frame() -> None:
     """The room the operator would be shown is the one they last saw."""
     feed = FeedRegistry()
@@ -337,6 +349,12 @@ async def test_the_pipeline_publishes_a_frame_it_decoded() -> None:
     assert capability.seen  # the capability still answered the same frame
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-096-mjpeg-is-a-bounded-latest-frame-view
+#:% The groundstation MUST retain at most one original payload globally for a
+#:% standards-compatible MJPEG stream only after both explicit JPEG-format signature
+#:% validation and successful image decode, replace rather than queue that payload
+#:% for slow viewers, and add no robot connection, stream-only decode or re-encode,
+#:% or capability-processing blockage.
 @pytest.mark.asyncio
 async def test_a_decodable_png_is_never_published() -> None:
     """It decodes, the capabilities answer it, and it is not the feed's."""
@@ -396,6 +414,12 @@ async def test_publishing_never_blocks_the_capability_pipeline() -> None:
 # What a request that is not given a stream is told.
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-097-feed-eligibility-is-deterministic
+#:% The groundstation MUST serve `/stream.mjpg` only after exactly one active
+#:% authenticated robot session has supplied a fresh validated JPEG while it is the
+#:% sole session, clear all feed frame state and end viewers whenever authenticated
+#:% session cardinality is zero or greater than one, and require another fresh
+#:% validated JPEG after cardinality returns to one.
 @pytest.mark.asyncio
 async def test_a_request_with_no_robot_connected_is_refused_as_unavailable() -> None:
     """No stream is held open waiting for a robot that may never connect."""
@@ -418,6 +442,13 @@ async def test_a_request_with_two_robots_connected_is_refused_as_ambiguous() -> 
     assert response.headers["cache-control"] == "no-store"
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface
+#:% The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+#:% the deployment's trusted-network boundary while retaining at most one live JPEG
+#:% globally in application state, marking responses non-cacheable, never recording
+#:% or writing frames or emitting frame content through observability, enforcing a
+#:% finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+#:% of eligibility.
 @pytest.mark.asyncio
 async def test_a_request_beyond_the_viewer_bound_is_refused_as_at_capacity() -> None:
     """Capacity is not unavailability: the robot is fine and the service is busy."""

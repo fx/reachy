@@ -170,6 +170,13 @@ class _HeadResponse(Response):
         del self.headers["content-length"]
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface
+#:% The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+#:% the deployment's trusted-network boundary while retaining at most one live JPEG
+#:% globally in application state, marking responses non-cacheable, never recording
+#:% or writing frames or emitting frame content through observability, enforcing a
+#:% finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+#:% of eligibility.
 class _ViewerStream(StreamingResponse):
     """A stream that gives its viewer slot back whenever the response ends.
 
@@ -207,6 +214,13 @@ class _ViewerStream(StreamingResponse):
             self._feed.release_viewer()
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface
+#:% The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+#:% the deployment's trusted-network boundary while retaining at most one live JPEG
+#:% globally in application state, marking responses non-cacheable, never recording
+#:% or writing frames or emitting frame content through observability, enforcing a
+#:% finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+#:% of eligibility.
 def stream_response(feed: FeedRegistry, method: str) -> Response:
     """Answer one request for the feed.
 

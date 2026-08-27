@@ -61,6 +61,16 @@ GROUNDSTATION_URL_OBJECT_ID: Final = "groundstation_url"
 _MINIMUM_LENGTH: Final = 0
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-093-home-assistant-configuration-reports-effective-state
+#:% The satellite MUST expose stable Home Assistant Configuration entities for the
+#:% head motors, body motor, antenna motors and groundstation session URL that report
+#:% only confirmed effective state, announce each Boolean motor switch only after an
+#:% initial agreeing correlated daemon acknowledgement and physical grouped-torque
+#:% read-back, publish a new Boolean only from a later successful read-back including
+#:% the actual value when it contradicts a request, and otherwise reject the request,
+#:% retain the last-confirmed Boolean without publishing the requested value, keep the
+#:% group's command gate closed and surface bounded identifier-free confirmation
+#:% diagnostics.
 class GroundstationUrlTextEntity(ESPHomeEntity):
     """One stable text control over the address the owner holds."""
 

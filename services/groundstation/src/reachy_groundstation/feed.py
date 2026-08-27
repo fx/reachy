@@ -161,6 +161,12 @@ class FeedRegistry:
             self._sessions -= 1
             self._settle()
 
+    #:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-097-feed-eligibility-is-deterministic
+    #:% The groundstation MUST serve `/stream.mjpg` only after exactly one active
+    #:% authenticated robot session has supplied a fresh validated JPEG while it is the
+    #:% sole session, clear all feed frame state and end viewers whenever authenticated
+    #:% session cardinality is zero or greater than one, and require another fresh
+    #:% validated JPEG after cardinality returns to one.
     def _settle(self) -> None:
         """Apply the cardinality rule after the count changed, and wake viewers.
 
@@ -179,6 +185,12 @@ class FeedRegistry:
         changed, self._changed = self._changed, asyncio.Event()
         changed.set()
 
+    #:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-096-mjpeg-is-a-bounded-latest-frame-view
+    #:% The groundstation MUST retain at most one original payload globally for a
+    #:% standards-compatible MJPEG stream only after both explicit JPEG-format signature
+    #:% validation and successful image decode, replace rather than queue that payload
+    #:% for slow viewers, and add no robot connection, stream-only decode or re-encode,
+    #:% or capability-processing blockage.
     def publish(self, payload: bytes) -> bool:
         """Retain one payload, replacing whatever was retained before.
 
@@ -203,6 +215,12 @@ class FeedRegistry:
         self._wake()
         return True
 
+    #:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-097-feed-eligibility-is-deterministic
+    #:% The groundstation MUST serve `/stream.mjpg` only after exactly one active
+    #:% authenticated robot session has supplied a fresh validated JPEG while it is the
+    #:% sole session, clear all feed frame state and end viewers whenever authenticated
+    #:% session cardinality is zero or greater than one, and require another fresh
+    #:% validated JPEG after cardinality returns to one.
     def availability(self) -> FeedAvailability:
         """Say whether a stream may be opened, and why not when it may not.
 

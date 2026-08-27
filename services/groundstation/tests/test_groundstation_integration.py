@@ -561,6 +561,12 @@ async def _stream_status(port: int) -> int:
         return response.status_code
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-096-mjpeg-is-a-bounded-latest-frame-view
+#:% The groundstation MUST retain at most one original payload globally for a
+#:% standards-compatible MJPEG stream only after both explicit JPEG-format signature
+#:% validation and successful image decode, replace rather than queue that payload
+#:% for slow viewers, and add no robot connection, stream-only decode or re-encode,
+#:% or capability-processing blockage.
 @pytest.mark.enable_socket  # a real server and a real client; see the module docstring
 @pytest.mark.asyncio
 async def test_the_feed_sends_the_frame_the_robot_sent_as_a_multipart_part() -> None:
@@ -598,6 +604,13 @@ async def test_a_viewer_arriving_late_gets_the_newest_frame_and_no_backlog() -> 
     assert body == jpeg_bytes(fill=40)
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface
+#:% The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+#:% the deployment's trusted-network boundary while retaining at most one live JPEG
+#:% globally in application state, marking responses non-cacheable, never recording
+#:% or writing frames or emitting frame content through observability, enforcing a
+#:% finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+#:% of eligibility.
 @pytest.mark.enable_socket  # a real server and a real client; see the module docstring
 @pytest.mark.asyncio
 async def test_the_viewer_bound_refuses_a_further_viewer_and_frees_on_disconnect() -> (
@@ -647,6 +660,12 @@ async def test_the_feed_ends_when_the_robot_session_closes() -> None:
         assert await viewer.ended() is True
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-097-feed-eligibility-is-deterministic
+#:% The groundstation MUST serve `/stream.mjpg` only after exactly one active
+#:% authenticated robot session has supplied a fresh validated JPEG while it is the
+#:% sole session, clear all feed frame state and end viewers whenever authenticated
+#:% session cardinality is zero or greater than one, and require another fresh
+#:% validated JPEG after cardinality returns to one.
 @pytest.mark.enable_socket  # a real server and a real client; see the module docstring
 @pytest.mark.asyncio
 async def test_a_second_robot_ends_the_feed_and_refuses_the_next_viewer() -> None:

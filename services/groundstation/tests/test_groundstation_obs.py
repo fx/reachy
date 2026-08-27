@@ -270,6 +270,13 @@ async def test_a_credential_is_redacted_on_both_self_reporting_surfaces() -> Non
     assert CREDENTIAL not in response.text
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface
+#:% The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+#:% the deployment's trusted-network boundary while retaining at most one live JPEG
+#:% globally in application state, marking responses non-cacheable, never recording
+#:% or writing frames or emitting frame content through observability, enforcing a
+#:% finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+#:% of eligibility.
 @pytest.mark.asyncio
 async def test_no_camera_frame_reaches_a_log_a_metric_or_a_span() -> None:
     """The feed retains a frame; nothing that records what happened may.

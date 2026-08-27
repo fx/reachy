@@ -931,6 +931,14 @@ class ReachyMotion:
         return result
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-094-motor-groups-change-safely-at-run-time
+#:% The satellite MUST apply independent head, body and antenna motor-group switches
+#:% immediately by quiescing every application- and daemon-owned command producer for
+#:% the group before torque-off, establishing exclusive body-command ownership when
+#:% needed, confirming each physical grouped-torque transition, and reacquiring and
+#:% seeding measured state before movement or the preceding ownership policy resumes,
+#:% without weakening existing trajectory, workspace, safe-hold or terminal-release
+#:% guarantees.
 class _ReachyMotionLifecycle(MotorGroupLifecycle):
     """Generation-check motion state around blocking daemon and sampling calls."""
 

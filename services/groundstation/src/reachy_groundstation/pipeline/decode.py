@@ -37,6 +37,12 @@ class DecodeError(ValueError):
     """The payload was not an image this service can decode."""
 
 
+#:= docs/specs/home-assistant-configuration-and-camera-feed/index.md#req-096-mjpeg-is-a-bounded-latest-frame-view
+#:% The groundstation MUST retain at most one original payload globally for a
+#:% standards-compatible MJPEG stream only after both explicit JPEG-format signature
+#:% validation and successful image decode, replace rather than queue that payload
+#:% for slow viewers, and add no robot connection, stream-only decode or re-encode,
+#:% or capability-processing blockage.
 def is_jpeg(payload: bytes) -> bool:
     """Say whether a payload is in the format the feed labels `image/jpeg`.
 

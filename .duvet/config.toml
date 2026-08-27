@@ -29,15 +29,14 @@
 # EVERY IMPLEMENTED SPEC IS REGISTERED. THIS IS THE STATE THIS COMMENT HAS BEEN
 # DESCRIBING AS THE GOAL SINCE BEFORE ANY CODE EXISTED.
 #
-# `docs/specs/` holds 10 specs. Nine implemented specs carry 92 requirements and
-# all nine are registered below, so `duvet query -c implementation` and `duvet
-# report --ci` cover every implemented requirement. The proposed Home Assistant
-# configuration and camera-feed spec carries REQ-093–098 and is deliberately
-# unregistered until change 0020 completes their implementation and annotations.
-# Its omission here is what keeps this proposal from making the gate red before
-# implementation exists.
+# `docs/specs/` holds 10 specs. All ten are implemented, carry 98 requirements
+# between them and are registered below, so `duvet query -c implementation` and
+# `duvet report --ci` cover every implemented requirement. There is no
+# unregistered proposal left: change 0020 implemented REQ-093–098 and registered
+# the spec that owns them in the same pull request, which is the rule the rest of
+# this comment states.
 #
-# The nine implemented and registered specs are:
+# The ten implemented and registered specs are:
 #
 #   - perception, whose 8 requirements are implemented and annotated by
 #     docs/changes/0005-perception-capability.md;
@@ -81,7 +80,18 @@
 #     final safety evidence. It is registered by 0019's final implementation,
 #     which completes the deterministic acceptance matrix, bounded diagnostics,
 #     recovery validation and rollout contract without claiming live canary
-#     outcome evidence that does not yet exist.
+#     outcome evidence that does not yet exist;
+#   - home-assistant-configuration-and-camera-feed, whose 6 — REQ-093 to REQ-098
+#     — are implemented across change 0020's three reviewed tasks and registered
+#     by the last of them. There was no earlier point at which to register it:
+#     the first task's motor switches make REQ-093 and REQ-094 true, the second's
+#     replacement owner makes REQ-095 true, and the third's bounded feed makes
+#     REQ-096 to REQ-098 true, so registering before that last task would have
+#     been a red job waiting on work that did not exist. The motor half also
+#     depends on a `reachy-mini` torque-confirmation API no released version
+#     carries — `README.md` records which build the robot runs and why — and the
+#     annotations describe what the application does when it is absent, which is
+#     announce no switch at all rather than invent one.
 #
 # The rule that governed the order also governs anything added later: a new spec
 # is registered by the change that completes it, not by the change that writes
@@ -192,6 +202,22 @@ format = "markdown"
 # than a substitute for implementation evidence.
 [[specification]]
 source = "docs/specs/gaze-control/index.md"
+format = "markdown"
+
+# --- HA configuration and camera feed: implemented across change 0020 --------
+# Registered by 0020's final task, which is the one that completes the spec: the
+# bounded MJPEG feed makes REQ-096, REQ-097 and REQ-098 true, and REQ-093 to
+# REQ-095 were annotated as the motor-group and groundstation-URL tasks made
+# them true. Registering the spec is what turns all six annotations from
+# documentation into a gate. The motor switches additionally require a
+# `reachy-mini` build carrying correlated selective-torque acknowledgement and
+# per-motor physical read-back; no released version has one, so the robot runs
+# the fork branch `README.md` names until an upstream release carries the API.
+# That is an operational fact about the deployment rather than a gap in the
+# implementation — without it the satellite announces no motor switch at all,
+# which is exactly what REQ-093 requires of an unconfirmed group.
+[[specification]]
+source = "docs/specs/home-assistant-configuration-and-camera-feed/index.md"
 format = "markdown"
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses

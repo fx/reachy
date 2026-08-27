@@ -295,8 +295,15 @@ convention = "google"
 # heading, which is one unbreakable token — and the specs are frozen, so the
 # heading cannot be shortened to fit. The alternative is a `# noqa` on the
 # annotation itself, which duvet would then read as part of the anchor.
+#
+# 131 is that longest token, measured rather than chosen: the
+# `home-assistant-configuration-and-camera-feed` directory plus REQ-098's
+# heading. It was 120 until change 0020 registered that spec. Raising it is what
+# a longer spec name costs, and the number moves again the next time one is
+# longer still — which is a deliberate edit and a review, rather than a limit
+# set high enough that nothing ever trips it.
 [tool.ruff.lint.pycodestyle]
-max-line-length = 120
+max-line-length = 131
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"

@@ -262,6 +262,59 @@ SPECIFICATION: [HA Satellite](docs/specs/ha-satellite/index.md)
     TEXT[!MUST,implementation]: On receiving a termination signal the application MUST stop commanding movement,
     TEXT[!MUST,implementation]: release the media interface, and exit.
 
+SPECIFICATION: [Home Assistant Configuration and Camera Feed](docs/specs/home-assistant-configuration-and-camera-feed/index.md)
+  SECTION: [REQ-093: Home Assistant configuration reports effective state](#req-093-home-assistant-configuration-reports-effective-state)
+    TEXT[!MUST,implementation]: The satellite MUST expose stable Home Assistant Configuration entities for the
+    TEXT[!MUST,implementation]: head motors, body motor, antenna motors and groundstation session URL that report
+    TEXT[!MUST,implementation]: only confirmed effective state, announce each Boolean motor switch only after an
+    TEXT[!MUST,implementation]: initial agreeing correlated daemon acknowledgement and physical grouped-torque
+    TEXT[!MUST,implementation]: read-back, publish a new Boolean only from a later successful read-back including
+    TEXT[!MUST,implementation]: the actual value when it contradicts a request, and otherwise reject the request,
+    TEXT[!MUST,implementation]: retain the last-confirmed Boolean without publishing the requested value, keep the
+    TEXT[!MUST,implementation]: group's command gate closed and surface bounded identifier-free confirmation
+    TEXT[!MUST,implementation]: diagnostics.
+
+  SECTION: [REQ-094: Motor groups change safely at run time](#req-094-motor-groups-change-safely-at-run-time)
+    TEXT[!MUST,implementation]: The satellite MUST apply independent head, body and antenna motor-group switches
+    TEXT[!MUST,implementation]: immediately by quiescing every application- and daemon-owned command producer for
+    TEXT[!MUST,implementation]: the group before torque-off, establishing exclusive body-command ownership when
+    TEXT[!MUST,implementation]: needed, confirming each physical grouped-torque transition, and reacquiring and
+    TEXT[!MUST,implementation]: seeding measured state before movement or the preceding ownership policy resumes,
+    TEXT[!MUST,implementation]: without weakening existing trajectory, workspace, safe-hold or terminal-release
+    TEXT[!MUST,implementation]: guarantees.
+
+  SECTION: [REQ-095: Groundstation replacement is persisted and isolated](#req-095-groundstation-replacement-is-persisted-and-isolated)
+    TEXT[!MUST,implementation]: The satellite MUST apply one shared session-URL contract across every
+    TEXT[!MUST,implementation]: configuration surface that accepts at most 255 characters without truncation,
+    TEXT[!MUST,implementation]: refuses a legacy overlong value with actionable remediation, and changes an
+    TEXT[!MUST,implementation]: accepted URL immediately through a compensating transition in which the durable
+    TEXT[!MUST,implementation]: value, sole eligible remote source and effective read-back advance together only
+    TEXT[!MUST,implementation]: after adoption succeeds or remain together on the preceding value after any
+    TEXT[!MUST,implementation]: failure, while making source restoration bounded and cancellable, preserving
+    TEXT[!MUST,implementation]: local fallback and bounded reconnection, and excluding overlap and late results.
+
+  SECTION: [REQ-096: MJPEG is a bounded latest-frame view](#req-096-mjpeg-is-a-bounded-latest-frame-view)
+    TEXT[!MUST,implementation]: The groundstation MUST retain at most one original payload globally for a
+    TEXT[!MUST,implementation]: standards-compatible MJPEG stream only after both explicit JPEG-format signature
+    TEXT[!MUST,implementation]: validation and successful image decode, replace rather than queue that payload
+    TEXT[!MUST,implementation]: for slow viewers, and add no robot connection, stream-only decode or re-encode,
+    TEXT[!MUST,implementation]: or capability-processing blockage.
+
+  SECTION: [REQ-097: Feed eligibility is deterministic](#req-097-feed-eligibility-is-deterministic)
+    TEXT[!MUST,implementation]: The groundstation MUST serve `/stream.mjpg` only after exactly one active
+    TEXT[!MUST,implementation]: authenticated robot session has supplied a fresh validated JPEG while it is the
+    TEXT[!MUST,implementation]: sole session, clear all feed frame state and end viewers whenever authenticated
+    TEXT[!MUST,implementation]: session cardinality is zero or greater than one, and require another fresh
+    TEXT[!MUST,implementation]: validated JPEG after cardinality returns to one.
+
+  SECTION: [REQ-098: The unauthenticated feed has a bounded privacy surface](#req-098-the-unauthenticated-feed-has-a-bounded-privacy-surface)
+    TEXT[!MUST,implementation]: The groundstation MUST keep `/stream.mjpg` intentionally unauthenticated within
+    TEXT[!MUST,implementation]: the deployment's trusted-network boundary while retaining at most one live JPEG
+    TEXT[!MUST,implementation]: globally in application state, marking responses non-cacheable, never recording
+    TEXT[!MUST,implementation]: or writing frames or emitting frame content through observability, enforcing a
+    TEXT[!MUST,implementation]: finite viewer bound, and promptly cancelling viewer work on disconnect or loss
+    TEXT[!MUST,implementation]: of eligibility.
+
 SPECIFICATION: [Perception](docs/specs/perception/index.md)
   SECTION: [REQ-032: Detection models are permissively licensed](#req-032-detection-models-are-permissively-licensed)
     TEXT[!MUST,implementation]: Every model shipped in the published artifact MUST be redistributable under a
