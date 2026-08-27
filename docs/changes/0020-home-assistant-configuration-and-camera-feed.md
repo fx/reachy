@@ -325,19 +325,19 @@ Only commands and output actually observed are transcribed.
 ## Tasks
 
 - [x] Add safe live motor-group Configuration switches (PR #31)
-  - [ ] **Deferred: verify a released daemon/SDK provides correlated
-        selective-torque acknowledgement and physical read-back for every
-        motor.** Not ticked, and deliberately not ticked. No released
-        `reachy-mini` exposes `enable_motors_confirmed`,
-        `disable_motors_confirmed` or `read_motor_torque`, so the pin stays
-        `>=1.9,<2` and a robot reaches the capability only by running branch
-        `feat/correlated-motor-torque-readback` of the `reachy_mini` fork this
-        change was written against. That branch is reviewed; it is neither
-        released nor merged, and no upstream pull request is open for it. The
-        satellite fails closed rather than assuming the capability:
-        `MotorGroupCoordinator.initialize` registers a group only after an
-        agreeing initial physical read-back, so on a released SDK no switch is
-        announced and every command gate stays shut.
+  - [ ] **Not satisfied as written, and deliberately not ticked.** Before entity
+        registration, verify a daemon/SDK release provides correlated
+        selective-torque acknowledgement and physical read-back for every motor;
+        contribute that capability upstream or hold this task if it does not. **No
+        released `reachy-mini` provides it.** The capability was implemented and
+        reviewed, and it lives on the branch
+        `feat/correlated-motor-torque-readback` of the fork at
+        https://github.com/fx/reachy_mini, which the robot runs. That branch is
+        neither released nor merged and **no upstream pull request is open yet**,
+        so the "contribute that capability upstream" half is outstanding. The
+        operator's decision was to ship against that build and record the
+        dependency rather than hold the task. Nothing was substituted for
+        optimistic state — a robot without that build gets no switch at all
   - [x] Extend `RobotHandle` and deterministic fakes with acknowledged grouped
         enable, disable and read-back results without importing the SDK outside its
         existing entry point (PR #31)
