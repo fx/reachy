@@ -39,6 +39,14 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import httpx
 import numpy as np
 import pytest
+
+# pylint: disable=no-name-in-module
+from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message classes inside
+    ListEntitiesRequest,
+    SubscribeHomeAssistantStatesRequest,
+    SwitchCommandRequest,
+    SwitchStateResponse,
+)
 from satellite_support import (
     FakeAudio,
     FakeCapture,
@@ -52,14 +60,19 @@ from satellite_support import (
     connected,
     face,
     inline,
+    motor_worker_threads,
     no_sleep,
     pushed_numbers,
+    until,
     vendored_server_state,
 )
 
 from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.adapters.groundstation import RemotePerception
-from reachy_mini_ha_satellite.adapters.motion_reachy import ReachyMotion
+from reachy_mini_ha_satellite.adapters.motion_reachy import (
+    ReachyMotion,
+    head_pose_matrix,
+)
 from reachy_mini_ha_satellite.adapters.perception_local import LocalPerception
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.adapters.pipeline_events import PipelineEventTap
@@ -108,6 +121,17 @@ from reachy_mini_ha_satellite.main import (
     load_preferences,
     run,
 )
+from reachy_mini_ha_satellite.motor_control import (
+    ANTENNA_MOTOR_IDS,
+    BODY_MOTOR_IDS,
+    HEAD_MOTOR_IDS,
+    MotorConfirmation,
+    MotorConfirmationOutcome,
+    MotorEvidence,
+    MotorGroup,
+    MotorGroupCoordinator,
+)
+from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -132,6 +156,7 @@ if TYPE_CHECKING:
 
     from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
     from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
+    from reachy_mini_ha_satellite.config import Resolution
     from reachy_mini_ha_satellite.ports import PerceptionPort
 
 # The RFC 5737 documentation range. This repository is public.
@@ -211,6 +236,42 @@ def _settings(**overrides: str) -> Settings:
         The settings.
     """
     return load_settings(_ENVIRONMENT, dict(overrides)).settings
+
+
+def assembled(
+    resolution: Resolution,
+    handle: RobotHandle,
+    *,
+    identity: NetworkIdentity | None = None,
+) -> SatelliteApplication:
+    """Assemble the application from a synchronous test, confirmation and all.
+
+    `build_application` awaits the initial motor confirmation off the loop, so
+    it needs one. A loop per assembly is what a synchronous test can give it,
+    and the coordinator it builds outlives that loop the same way it outlives
+    `run`'s.
+
+    Args:
+        resolution: The settings in effect and where they came from.
+        handle: What the daemon hands a running application.
+        identity: What to announce on the network.
+
+    Returns:
+        The assembled application.
+    """
+    return asyncio.run(build_application(resolution, handle, identity=identity))
+
+
+def _motor_confirmation(
+    names: tuple[str, ...],
+    enabled: bool,
+) -> MotorConfirmation:
+    """Build complete grouped physical evidence for composition tests."""
+    return MotorConfirmation(
+        True,
+        MotorConfirmationOutcome.CONFIRMED,
+        tuple(MotorEvidence(name=name, enabled=enabled) for name in names),
+    )
 
 
 class RecordingService:
@@ -462,6 +523,7 @@ def _application(
     motion: FakeMotion,
     perception: FakePerception,
     behaviour: SatelliteBehaviour | None = None,
+    motor_groups: MotorGroupCoordinator | None = None,
     services: Sequence[Any] = (),
     stop_after: int = 2,
 ) -> tuple[SatelliteApplication, asyncio.Event]:
@@ -472,6 +534,7 @@ def _application(
         motion: The head and the antennas.
         perception: What is in front of the robot.
         behaviour: The pure behavior owner, or a fresh default.
+        motor_groups: Optional asynchronous motor-operation owner.
         services: The things with lifetimes.
         stop_after: How many ticks to run before the stop event is set. The
             loop's wait is what sets it, so no wall time is spent, and the
@@ -504,6 +567,7 @@ def _application(
         motion=motion,
         perception=perception,
         behaviour=behaviour or SatelliteBehaviour(now=0.0),
+        motor_groups=motor_groups,
         services=services,
         clock=_advancing(),
         sleep=_wait,
@@ -538,7 +602,7 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(resolution: object, handle: object) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -576,7 +640,7 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(resolution: object, handle: object) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -612,7 +676,7 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(resolution: object, handle: object) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -659,7 +723,7 @@ class TestControlledWakeBeforeStartup:
                 del stop
                 events.append("application.run")
 
-        def _build(resolution: object, handle: object) -> _Application:
+        async def _build(resolution: object, handle: object) -> _Application:
             """Record composition without constructing any real service."""
             del resolution
             assert handle is robot
@@ -708,7 +772,10 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        def _must_not_build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _must_not_build(
+            resolution: object,
+            handle: object,
+        ) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after wake failed")
@@ -721,17 +788,113 @@ class TestControlledWakeBeforeStartup:
         assert events == ["enable_motors", "wake_up"]
 
 
+@pytest.mark.asyncio
+async def test_a_stop_during_composition_abandons_it_before_anything_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Composition is where the gates open, so the stop has to reach it.
+
+    A confirmation that runs to completion after the daemon asked for shutdown
+    is a robot finishing the job of energising the motors it is being told to
+    let go of, and then starting an ESPHome server to advertise them.
+    """
+    events: list[str] = []
+    robot = FakeRobot()
+    stop = asyncio.Event()
+    monkeypatch.setattr(
+        robot,
+        "enable_motors",
+        lambda: events.append("enable_motors"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        robot,
+        "wake_up",
+        lambda: events.append("wake_up"),
+        raising=False,
+    )
+    composing = asyncio.Event()
+
+    async def _offload(work: Callable[[], object]) -> object:
+        return work()
+
+    async def _build(resolution: object, handle: object) -> SatelliteApplication:
+        """Stand where initial motor confirmation blocks, and never finish."""
+        del resolution, handle
+        events.append("build_application")
+        composing.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("assembly.abandoned")
+            raise
+        raise AssertionError("composition finished after it was abandoned")
+
+    _patch_startup(monkeypatch, build=_build, offload=_offload)
+    running = asyncio.create_task(run(robot, stop))
+    await composing.wait()
+
+    stop.set()
+    await running
+
+    assert events == [
+        "enable_motors",
+        "wake_up",
+        "build_application",
+        "assembly.abandoned",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_landing_with_a_finished_assembly_closes_it_unstarted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one case cancellation cannot cover: both landed, so close what exists."""
+    events: list[str] = []
+    robot = FakeRobot()
+    stop = asyncio.Event()
+    monkeypatch.setattr(robot, "enable_motors", lambda: None, raising=False)
+    monkeypatch.setattr(robot, "wake_up", lambda: None, raising=False)
+
+    async def _offload(work: Callable[[], object]) -> object:
+        return work()
+
+    class _Application:
+        async def run(self, stop: asyncio.Event) -> None:
+            """Record a start that must never happen."""
+            del stop
+            events.append("application.run")
+
+        async def aclose(self) -> None:
+            """Record the only correct thing left to do with this application."""
+            events.append("application.aclose")
+
+    async def _build(resolution: object, handle: object) -> _Application:
+        """Finish composing at the same moment the daemon asks for shutdown."""
+        del resolution, handle
+        events.append("build_application")
+        stop.set()
+        return _Application()
+
+    _patch_startup(monkeypatch, build=_build, offload=_offload)
+
+    await run(robot, stop)
+
+    assert events == ["build_application", "application.aclose"]
+
+
 def _patch_startup(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    build: Callable[..., object],
+    build: Callable[..., Awaitable[object]],
     offload: Callable[[Callable[[], object]], Awaitable[object]],
 ) -> None:
     """Replace startup's configuration edges, leaving lifecycle order real.
 
     Args:
         monkeypatch: Installs the inert edges.
-        build: What stands in for normal application composition.
+        build: What stands in for normal application composition, awaited the
+            way the real one is.
         offload: What runs SDK calls without starting a worker thread.
     """
 
@@ -3585,6 +3748,200 @@ class TestWritingABoostChosenFromHomeAssistant:
         assert "the speaker boost could not be saved" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault() -> (
+    None
+):
+    """A paused SDK worker leaves behavior cadence and controller health intact."""
+
+    class PausedRobot(FakeRobot):
+        """Pause one confirmed disable without blocking the event loop."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+            self.release_confirmation = threading.Event()
+
+        def disable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+            self.started.set()
+            self.release_confirmation.wait()
+            return super().disable_motors_confirmed(ids)
+
+    robot = PausedRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    await groups.initialize()
+    robot.motor_disables_confirmed.append(_motor_confirmation(HEAD_MOTOR_IDS, False))
+    motion = FakeMotion()
+    application, stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=FakePerception(),
+        motor_groups=groups,
+        stop_after=60,
+    )
+    published: list[bool] = []
+    assert groups.reserve_transition(
+        MotorGroup.HEAD,
+        False,
+        lambda: published.append(True),
+    )
+
+    # Park the worker before the behavior loop starts, so what the ticks below
+    # are measured against is a confirmation that is already in flight. Waiting
+    # for the pause on a helper thread rather than counting loop turns keeps the
+    # loop free for the operation's own executor callbacks, which is what lets
+    # the worker reach the pause at all.
+    await asyncio.get_running_loop().run_in_executor(None, robot.started.wait)
+    running = asyncio.create_task(application.run(stop))
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    controller = cast("dict[str, object]", application.status()["controller"])
+    assert controller["fault"] == "none"
+    assert controller["safe_hold"] is False
+    assert len(motion.observed) >= 2
+    assert not running.done()
+
+    # Wait for shutdown to have become terminal rather than assuming the ticks
+    # above got it there. Releasing the worker first is a different scenario —
+    # the operation completes, publishes, and this test asserts the outcome of
+    # the ordering it did not set up. Which of the two lands first is otherwise
+    # nothing's decision: the tick loop reaching `stop_after` and the released
+    # worker's continuation are independently scheduled.
+    await until(lambda: groups.terminal_requested, "shutdown asking for terminal")
+    robot.release_confirmation.set()
+    await running
+
+    controller = cast("dict[str, object]", application.status()["controller"])
+    assert controller["fault"] == "none"
+    assert controller["safe_hold"] is False
+    assert published == []
+
+
+@pytest.mark.asyncio
+async def test_tracking_owns_motion_before_the_first_calibration_or_yields_no_face() -> (
+    None
+):
+    """Both hops that keep `calibrate`'s ownership fallback out of production.
+
+    `ReachyMotion.calibrate` takes ownership itself when it has none, and that
+    acquisition advances the generation an in-flight measured reseed is checked
+    against — the strand
+    `test_satellite_motor_groups.py` removed. What stops it happening is a
+    coupling across two files that nothing else pins: this application acquires
+    at startup whenever tracking is enabled, and the behavior layer stands down
+    rather than yielding a face to calibrate when it is not. Either half
+    changing is what makes that fallback reachable again.
+    """
+    motion = FakeMotion()
+    perception = FakePerception()
+    perception.see(face(0.2, 0.0), source=DetectionSource.REMOTE)
+    application, stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=perception,
+        stop_after=3,
+    )
+
+    await application.run(stop)
+
+    assert application.settings.face_tracking_enabled
+    assert motion.acquired
+    assert motion.calibrated
+    assert motion.acquired[0] < motion.calibrated[0][1]
+
+    stood_down = SatelliteBehaviour(tracking_enabled=False, now=0.0)
+    prepared = stood_down.prepare(perception.latest(), 1.0)
+
+    assert prepared.directive.face is None
+
+
+@pytest.mark.asyncio
+async def test_a_stop_set_before_startup_starts_nothing_and_still_cleans_up() -> None:
+    """The last boundary a stop can arrive at, and it is still a boundary.
+
+    An application handed an already-set event has nothing to gain by acquiring
+    the head and opening a listening socket in order to close them again on the
+    next line, and a robot being shut down has something to lose by it.
+    """
+    robot = FakeRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    await groups.initialize()
+    motion = FakeMotion()
+    service = RecordingService()
+    application, stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=FakePerception(),
+        motor_groups=groups,
+        services=[service],
+    )
+    stop.set()
+
+    await application.run(stop)
+
+    assert motion.acquired == []
+    assert service.started == 0
+    assert service.closed == 1
+    assert motion.released
+    assert all(not groups.gate_open(group) for group in MotorGroup)
+
+
+@pytest.mark.asyncio
+async def test_application_shutdown_drains_reserved_target_before_motion_release() -> (
+    None
+):
+    """Terminal is responsive but cleanup cannot release beneath an active target."""
+    events: list[str] = []
+    started = threading.Event()
+    release_target = threading.Event()
+    robot = FakeRobot()
+    groups = MotorGroupCoordinator(robot, clock=ManualClock())
+    await groups.initialize()
+
+    class RecordingMotion(FakeMotion):
+        def release(self) -> None:
+            events.append("motion.release")
+            super().release()
+
+    motion = RecordingMotion()
+    application, _stop = _application(
+        audio=FakeAudio(),
+        motion=motion,
+        perception=FakePerception(),
+        motor_groups=groups,
+    )
+
+    def _target() -> None:
+        events.append("target.start")
+        started.set()
+        release_target.wait()
+        events.append("target.finish")
+
+    producer = threading.Thread(
+        target=lambda: groups.command((MotorGroup.HEAD,), _target),
+        name="paused-application-target",
+    )
+    producer.start()
+    started.wait()
+
+    closing = asyncio.create_task(application.aclose())
+    await asyncio.sleep(0)
+    assert events == ["target.start"]
+    assert not motion.released
+    assert not groups.command((MotorGroup.HEAD,), lambda: None)
+
+    closing.cancel()
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release_target.set()
+    producer.join()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    assert events == ["target.start", "target.finish", "motion.release"]
+
+
 @pytest.mark.filesystem
 class TestTheWiringAgainstTheWheelsOwnAssets:
     """The assembly, reading the wake-word models and sounds the wheel ships.
@@ -3594,6 +3951,28 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
     Home Assistant, and a fake asset directory would pin whatever the fake was
     told to contain rather than what the wheel carries.
     """
+
+    @staticmethod
+    async def _composed_head_switch(
+        robot: FakeRobot,
+    ) -> tuple[SatelliteApplication, ServerState, MotorSwitchEntity]:
+        """Assemble production wiring and return its registered head control."""
+        application = await build_application(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        control = next(
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+        )
+        return application, esphome._state, control
 
     def test_the_server_state_announces_the_configured_identity(self) -> None:
         """REQ-040, at the place the announcement is actually assembled."""
@@ -3692,7 +4071,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
 
     def test_the_daemons_volume_service_is_wired_in(self) -> None:
         """R7: a service nothing starts is a requirement nothing satisfies."""
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT),
             cast("RobotHandle", FakeRobot()),
             identity=_identity(),
@@ -3710,7 +4089,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         else failing anywhere — so this pins the wiring rather than the entity,
         which `test_satellite_audio_entities.py` covers on its own.
         """
-        application = build_application(
+        application = assembled(
             load_settings(_ENVIRONMENT),
             cast("RobotHandle", FakeRobot()),
             identity=_identity(),
@@ -3737,11 +4116,454 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
 
         assert pushed_numbers(client, boost.key) == pytest.approx([640.0])
 
+
+@pytest.mark.filesystem
+class TestMotorComposition:
+    """Production motor wiring over deterministic fakes and the wheel's assets.
+
+    The daemon and the robot are fakes; the assembly around them is not.
+    Assembling the application reads the wake-word models and the sounds the
+    wheel ships off a real disk, so every test here is a contract test and says
+    so — a runner splitting on `-m "not filesystem"` would otherwise run nine
+    tests that need those files present, and watch them fail for a reason
+    nothing in them mentions.
+    """
+
+    _composed_head_switch = staticmethod(
+        TestTheWiringAgainstTheWheelsOwnAssets._composed_head_switch
+    )
+
+    @pytest.mark.asyncio
+    async def test_a_cancelled_initial_confirmation_registers_and_leaks_nothing(
+        self,
+    ) -> None:
+        """Assembly owns the coordinator until the application is handed it.
+
+        A confirmation cancelled part-way therefore has exactly one thing that
+        can close its worker, and it is here. Nothing downstream exists yet to
+        do it, so a startup that let the exception past would leave a thread
+        holding the robot for the life of the process.
+        """
+        workers_before = motor_worker_threads()
+        started = threading.Event()
+        release = threading.Event()
+
+        class _ParkedRobot(FakeRobot):
+            """Park the first correlated read until this test releases it."""
+
+            def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
+                started.set()
+                release.wait()
+                return super().read_motor_torque(ids)
+
+        robot = _ParkedRobot()
+        assembling = asyncio.create_task(
+            build_application(
+                load_settings(_ENVIRONMENT),
+                robot,
+                identity=_identity(),
+            )
+        )
+        await asyncio.get_running_loop().run_in_executor(None, started.wait)
+
+        assembling.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await assembling
+
+        assert motor_worker_threads() <= workers_before
+
+    def test_confirmed_motor_switches_are_composed_after_stable_audio_entities(
+        self,
+    ) -> None:
+        """All three exact groups are present only after their initial read-back."""
+        application = assembled(
+            load_settings(_ENVIRONMENT),
+            FakeRobot(),
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        motors = [
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+        ]
+
+        assert [entity.key for entity in motors] == [2, 3, 4]
+        motion = cast("ReachyMotion", application._motion)
+        assert application.motor_groups is motion._coordinator
+        assert "motors" in application.status()
+
+    def test_enabled_startup_reseeds_measured_targets_before_policy_and_registration(
+        self,
+    ) -> None:
+        """All enabled groups start from hardware with no hidden target jump."""
+        measured_head = head_pose_matrix(HeadPose(yaw=0.4, pitch=0.2))
+        measured_joints = ([0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], [0.3, -0.4])
+        robot = FakeRobot(
+            measured_head_poses=[measured_head, measured_head],
+            measured_joints=[measured_joints, measured_joints, measured_joints],
+        )
+        application = assembled(
+            load_settings(_ENVIRONMENT, {"body_motion_enabled": "true"}),
+            robot,
+            identity=_identity(),
+        )
+        groups = application.motor_groups
+        assert groups is not None
+        motion = cast("ReachyMotion", application._motion)
+        behaviour = application._behaviour
+
+        head_read = robot.events.index("motors.read")
+        first_pose = robot.events.index("motion.pose", head_read)
+        body_quiesce = robot.events.index("motion.auto_yaw.false", first_pose)
+        body_read = robot.events.index("motors.read", body_quiesce)
+        body_pose = robot.events.index("motion.pose", body_read)
+        body_joints = robot.events.index("motion.joints", body_pose)
+        body_restore = robot.events.index("motion.auto_yaw.true", body_joints)
+        antenna_read = robot.events.index("motors.read", body_restore)
+        antenna_joints = robot.events.index("motion.joints", antenna_read)
+
+        assert (
+            head_read
+            < first_pose
+            < body_quiesce
+            < body_read
+            < body_pose
+            < body_joints
+            < body_restore
+            < antenna_read
+            < antenna_joints
+        )
+        assert all(groups.gate_open(group) for group in MotorGroup)
+        assert behaviour._last_head is not None
+        assert behaviour._last_head.yaw == pytest.approx(0.3)
+        assert behaviour._last_head.pitch == pytest.approx(0.2)
+        assert behaviour._last_head.roll == 0.0
+        assert behaviour._last_antennas == AntennaPose(right=0.3, left=-0.4)
+        controller = behaviour.controller_state
+        assert controller.world_yaw.position == pytest.approx(0.4)
+        assert controller.elevation.position == pytest.approx(0.2)
+        assert controller.body_yaw.position == pytest.approx(0.1)
+        assert motion._cache == {}
+        assert motion._deferred == {}
+        assert robot.targets == []
+
+    def test_confirmed_disabled_startup_registers_false_without_movement_reseed(
+        self,
+    ) -> None:
+        """A physically off group is truthful and closed without sampling its target."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+            ]
+        )
+        application = assembled(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        head = next(
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+            and entity._group is MotorGroup.HEAD
+        )
+        groups = application.motor_groups
+        assert groups is not None
+
+        assert head.state_message() == SwitchStateResponse(key=head.key, state=False)
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert robot.events[:2] == ["motors.read", "motion.auto_yaw.false"]
+        assert robot.targets == []
+
+    @pytest.mark.asyncio
+    async def test_composed_reconnect_refreshes_once_without_list_reads_or_broadcast(
+        self,
+    ) -> None:
+        """Reconnect returns retained state while one worker read completes later."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+            ]
+        )
+        application, state, control = await self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        clients = connected(state, 2)
+        before = len(robot.motor_requests)
+
+        listed = list(control.handle_message(ListEntitiesRequest()))
+        first = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert len(listed) == 1
+        assert first == [SwitchStateResponse(key=control.key, state=True)]
+        assert len(robot.motor_requests) == before
+        assert all(client.sent == [] for client in clients)
+        await groups.wait_idle()
+        assert robot.motor_requests[before:] == [("read", HEAD_MOTOR_IDS)]
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(
+            client.sent == [SwitchStateResponse(key=control.key, state=False)]
+            for client in clients
+        )
+
+        second = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert second == [SwitchStateResponse(key=control.key, state=False)]
+        assert robot.motor_requests[before:] == [("read", HEAD_MOTOR_IDS)]
+        await groups.wait_idle()
+        assert robot.motor_requests[before:] == [
+            ("read", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is True
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(
+            client.sent
+            == [
+                SwitchStateResponse(key=control.key, state=False),
+                SwitchStateResponse(key=control.key, state=True),
+            ]
+            for client in clients
+        )
+        await groups.aclose()
+
+    @pytest.mark.asyncio
+    async def test_composed_failed_command_refreshes_once_and_yields_fresh_readback(
+        self,
+    ) -> None:
+        """A failed command returns retained state while one recovery read runs."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+            ],
+            motor_disables_confirmed=[MotorConfirmation.failed()],
+        )
+        application, state, control = await self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        clients = connected(state, 2)
+        before = len(robot.motor_requests)
+
+        responses = list(
+            control.handle_message(
+                SwitchCommandRequest(key=control.key, state=False),
+            )
+        )
+
+        assert responses == [SwitchStateResponse(key=control.key, state=True)]
+        assert len(robot.motor_requests) == before
+        assert not groups.gate_open(MotorGroup.HEAD)
+        await groups.wait_idle()
+        assert robot.motor_requests[before:] == [
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert all(
+            client.sent == [SwitchStateResponse(key=control.key, state=False)]
+            for client in clients
+        )
+        await groups.aclose()
+
+    @pytest.mark.asyncio
+    async def test_composed_incomplete_refresh_retains_until_one_later_attempt(
+        self,
+    ) -> None:
+        """Incomplete recovery remains closed and another request gets one attempt."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                MotorConfirmation.failed(),
+                _motor_confirmation(HEAD_MOTOR_IDS, False),
+            ],
+            motor_disables_confirmed=[
+                MotorConfirmation.failed(),
+                MotorConfirmation.failed(),
+            ],
+        )
+        application, state, control = await self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        clients = connected(state, 2)
+        before = len(robot.motor_requests)
+
+        retained = list(
+            control.handle_message(
+                SwitchCommandRequest(key=control.key, state=False),
+            )
+        )
+
+        assert retained == [SwitchStateResponse(key=control.key, state=True)]
+        await groups.wait_idle()
+        assert robot.motor_requests[before:] == [
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is True
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(client.sent == [] for client in clients)
+
+        updated = list(
+            control.handle_message(
+                SwitchCommandRequest(key=control.key, state=False),
+            )
+        )
+
+        assert updated == [SwitchStateResponse(key=control.key, state=True)]
+        await groups.wait_idle()
+        assert robot.motor_requests[before:] == [
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+            ("disable", HEAD_MOTOR_IDS),
+            ("read", HEAD_MOTOR_IDS),
+        ]
+        assert groups.last_confirmed(MotorGroup.HEAD) is False
+        assert not groups.gate_open(MotorGroup.HEAD)
+        assert all(
+            client.sent == [SwitchStateResponse(key=control.key, state=False)]
+            for client in clients
+        )
+        await groups.aclose()
+
+    @pytest.mark.asyncio
+    async def test_composed_body_refresh_true_keeps_policy_quiesced_and_gate_closed(
+        self,
+    ) -> None:
+        """Independent truth cannot restore automatic yaw or reopen body producers."""
+        robot = FakeRobot(
+            motor_reads=[
+                _motor_confirmation(HEAD_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(ANTENNA_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+                _motor_confirmation(BODY_MOTOR_IDS, True),
+            ],
+            motor_disables_confirmed=[MotorConfirmation.failed()],
+        )
+        application = await build_application(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+        controls = [
+            entity
+            for entity in esphome._state.entities
+            if isinstance(entity, MotorSwitchEntity)
+        ]
+        body = controls[1]
+        groups = application.motor_groups
+        assert groups is not None
+        reconnect_requests = len(robot.motor_requests)
+        reconnect_policy = len(robot.automatic_body_yaw)
+
+        reconnect = list(body.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert reconnect == [SwitchStateResponse(key=body.key, state=True)]
+        await groups.wait_idle()
+        assert robot.motor_requests[reconnect_requests:] == [("read", BODY_MOTOR_IDS)]
+        assert robot.automatic_body_yaw[reconnect_policy:] == [False, True]
+        assert groups.gate_open(MotorGroup.BODY)
+
+        before_requests = len(robot.motor_requests)
+        before_policy = len(robot.automatic_body_yaw)
+        responses = list(
+            body.handle_message(SwitchCommandRequest(key=body.key, state=False))
+        )
+
+        assert responses == [SwitchStateResponse(key=body.key, state=True)]
+        assert not groups.gate_open(MotorGroup.BODY)
+        await groups.wait_idle()
+        assert robot.motor_requests[before_requests:] == [
+            ("disable", BODY_MOTOR_IDS),
+            ("read", BODY_MOTOR_IDS),
+        ]
+        assert robot.automatic_body_yaw[before_policy:] == [False]
+        assert groups.last_confirmed(MotorGroup.BODY) is True
+        assert not groups.gate_open(MotorGroup.BODY)
+        await groups.aclose()
+
+    @pytest.mark.asyncio
+    async def test_composed_terminal_reconnect_performs_no_hardware_read(self) -> None:
+        """A reconnect racing shutdown reports retained state without new work."""
+        robot = FakeRobot()
+        application, _state, control = await self._composed_head_switch(robot)
+        groups = application.motor_groups
+        assert groups is not None
+        groups.terminal()
+        before = len(robot.motor_requests)
+
+        responses = list(control.handle_message(SubscribeHomeAssistantStatesRequest()))
+
+        assert responses == [SwitchStateResponse(key=control.key, state=True)]
+        assert len(robot.motor_requests) == before
+        assert not groups.gate_open(MotorGroup.HEAD)
+
+    def test_unconfirmed_motor_groups_register_no_operable_switch(self) -> None:
+        """Compatibility with the released SDK gates entities closed, not optimistic."""
+        robot = FakeRobot(
+            motor_reads=[MotorConfirmation.unavailable() for _group in range(3)]
+        )
+        application = assembled(
+            load_settings(_ENVIRONMENT),
+            robot,
+            identity=_identity(),
+        )
+        esphome = next(
+            service
+            for service in application.services
+            if isinstance(service, EsphomeService)
+        )
+
+        assert not any(
+            isinstance(entity, MotorSwitchEntity) for entity in esphome._state.entities
+        )
+        assert all(
+            not cast("dict[str, object]", group)["gate_open"]
+            for group in cast(
+                "dict[str, object]",
+                cast("dict[str, object]", application.status()["motors"])["groups"],
+            ).values()
+        )
+
+
+@pytest.mark.filesystem
+class TestRemainingWheelAssembly:
+    """Composition checks that intentionally load committed wheel assets."""
+
     def test_the_whole_application_assembles_over_a_fake_robot(self) -> None:
         """Ports to adapters, the behaviour layer, and the services it owns."""
         resolution = load_settings(_ENVIRONMENT, {})
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -3761,7 +4583,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
             {"staleness_seconds": "0.2"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -3781,7 +4603,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
             {"face_tracking_enabled": "false"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -3796,7 +4618,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
             {"advertise": "false"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -3818,7 +4640,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
         environ = {**_ENVIRONMENT, f"{ENV_PREFIX}WEB_ENABLED": "true"}
         resolution = load_settings(environ, {})
 
-        application = build_application(
+        application = await build_application(
             resolution,
             FakeRobot(),
             identity=_identity(),
@@ -3849,7 +4671,7 @@ class TestTheWiringAgainstTheWheelsOwnAssets:
             {"advertise": "true", "web_enabled": "false"},
         )
 
-        application = build_application(
+        application = assembled(
             resolution,
             FakeRobot(),
             identity=_identity(),

@@ -192,6 +192,9 @@ class TestDaemonSurfaceIsNarrow:
 
         assert public == {
             "enable_motors",
+            "enable_motors_confirmed",
+            "disable_motors_confirmed",
+            "read_motor_torque",
             "wake_up",
             "media",
             "set_target",

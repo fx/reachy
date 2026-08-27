@@ -114,7 +114,14 @@ from reachy_mini_ha_satellite.esphome.wake_word import (
 )
 from reachy_mini_ha_satellite.esphome.webrtc import WebRTCProcessor
 from reachy_mini_ha_satellite.esphome.zeroconf import HomeAssistantZeroconf
+from reachy_mini_ha_satellite.motor_control import (
+    MotorGroup,
+    MotorGroupCoordinator,
+    MotorGroupLifecycle,
+)
+from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
+    AntennaPose,
     CalibrationStatus,
     Detections,
     MotionCommandResult,
@@ -610,6 +617,7 @@ class SatelliteApplication:
         motion: MotionPort,
         perception: PerceptionPort,
         behaviour: SatelliteBehaviour,
+        motor_groups: MotorGroupCoordinator | None = None,
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -623,6 +631,7 @@ class SatelliteApplication:
             motion: The head and the antennas.
             perception: What is in front of the robot.
             behaviour: What to do about it.
+            motor_groups: Confirmed torque state and producer gates, when available.
             services: The things with lifetimes, started in order and stopped
                 in reverse.
             clock: The monotonic source the behaviour layer is given.
@@ -636,6 +645,7 @@ class SatelliteApplication:
         self._motion = motion
         self._perception = perception
         self._behaviour = behaviour
+        self._motor_groups = motor_groups
         self._services = tuple(services)
         self._clock = clock
         self._sleep = sleep
@@ -707,6 +717,11 @@ class SatelliteApplication:
         """
         return self._settings
 
+    @property
+    def motor_groups(self) -> MotorGroupCoordinator | None:
+        """Return the application-owned coordinator for entities and diagnostics."""
+        return self._motor_groups
+
     def status(self) -> dict[str, object]:
         """Say what the robot is doing, for the settings interface to report.
 
@@ -716,7 +731,7 @@ class SatelliteApplication:
         """
         report = self._behaviour.status(self._clock())
         controller = self._behaviour.controller_state
-        return {
+        status: dict[str, object] = {
             "pipeline": report.state.value,
             "gaze": report.outcome.value,
             "tracking": report.tracking,
@@ -727,6 +742,9 @@ class SatelliteApplication:
                 "safe_hold": controller.safe_hold,
             },
         }
+        if self._motor_groups is not None:
+            status["motors"] = self._motor_groups.status()
+        return status
 
     def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
         """Return the behavior layer's bounded private controller evidence."""
@@ -870,12 +888,23 @@ class SatelliteApplication:
     async def run(self, stop: asyncio.Event) -> None:
         """Start everything, tick until asked to stop, then leave the robot safe.
 
+        A stop already requested when this is entered starts nothing at all: the
+        motion port is left unacquired and no service is started. Cleanup still
+        runs, so whatever assembly opened is closed.
+
         Args:
             stop: Set by the daemon's termination signal, or by the settings
                 interface asking it to stop.
         """
         self._stop = stop
         try:
+            if stop.is_set():
+                # Before acquisition and before any service, because both are
+                # hardware and network the robot is being told to let go of.
+                # The cleanup below still runs, which is what closes the gates
+                # assembly opened.
+                _LOGGER.info("satellite.start skipped; stop requested before startup")
+                return
             if self._gaze_enabled:
                 acquired_at = self._clock()
                 self._motion.acquire(acquired_at)
@@ -909,10 +938,18 @@ class SatelliteApplication:
             return
         self._closed = True
 
+        cancelled: asyncio.CancelledError | None = None
+        if self._motor_groups is not None:
+            self._motor_groups.terminal()
+            try:
+                await self._motor_groups.aclose()
+            except asyncio.CancelledError as error:
+                cancelled = error
+            except Exception:
+                _LOGGER.error("motor confirmation failed to stop cleanly")
         _guard("motion", self._motion.release)
         _guard("the media interface", self._audio.stop)
 
-        cancelled: asyncio.CancelledError | None = None
         for service in reversed(self._services):
             try:
                 await _aguard(
@@ -2085,13 +2122,25 @@ def build_boost_setter(
     return _set_boost
 
 
-def build_application(
+async def build_application(
     resolution: Resolution,
     handle: RobotHandle,
     *,
     identity: NetworkIdentity | None = None,
 ) -> SatelliteApplication:
     """Wire the ports to the adapters and assemble everything that runs.
+
+    Awaited because initial motor confirmation is. That confirmation decides
+    which switches exist, so it has to finish before they are appended and
+    before anything that serves them starts — and it is several blocking daemon
+    calls, which the event loop must be free of while they run or the stop
+    watcher cannot set its event.
+
+    It stays *here*, rather than becoming an awaited step of its own between
+    this and `SatelliteApplication.run`, because registration is the thing it
+    gates: an application object that knows nothing about `ServerState` would
+    have to be handed the entity list to append to, and the ordering a reader
+    now finds on consecutive lines would become two halves to reassemble.
 
     Args:
         resolution: The settings in effect and where they came from.
@@ -2134,9 +2183,11 @@ def build_application(
         body_enabled=settings.body_motion_enabled,
         require_motion_measurements=True,
     )
+    motor_groups = MotorGroupCoordinator(handle, clock=time.monotonic)
     motion = ReachyMotion(
         handle,
         controller_config=controller_config,
+        coordinator=motor_groups,
         tick_seconds=settings.behaviour_tick_seconds,
     )
     perception: PerceptionPort = (
@@ -2148,6 +2199,48 @@ def build_application(
         controller_config=controller_config,
         now=time.monotonic(),
     )
+
+    def _motor_lifecycle(group: MotorGroup) -> MotorGroupLifecycle:
+        """Capture loop generations before any blocking motor lifecycle phase.
+
+        The generation captured here is the one the behavior layer advances when
+        it *reseeds*, not when it expresses. An expression produced while this
+        group is transitioning either reached a different group — which this
+        reseed does not write — or was refused by this group's own closed gate,
+        and a refused command must not be able to stop measured truth replacing
+        the hidden target it left behind.
+        """
+        behaviour_generation = behaviour.reseed_generation
+
+        def _finalize(
+            head: HeadMeasurement | None,
+            body: BodyMeasurement | None,
+            antennas: AntennaPose | None,
+        ) -> None:
+            if not behaviour.reseed_motion(
+                head=head,
+                body=body,
+                antennas=antennas,
+                expected_generation=behaviour_generation,
+            ):
+                raise RuntimeError("newer measured reseed superseded this one")
+
+        return motion.motor_lifecycle(group, time.monotonic, _finalize)
+
+    for group in MotorGroup:
+        motor_groups.set_hooks(
+            group,
+            lifecycle=functools.partial(_motor_lifecycle, group),
+        )
+    try:
+        registered_motor_groups = await motor_groups.initialize()
+    except BaseException:
+        # Nothing owns the coordinator until the application below is handed it,
+        # so a cancelled or failed confirmation closes it here. Otherwise its
+        # worker outlives the startup that created it, with no application left
+        # to call `aclose`.
+        await motor_groups.aclose()
+        raise
 
     state = build_server_state(
         settings,
@@ -2162,6 +2255,7 @@ def build_application(
         motion=motion,
         perception=perception,
         behaviour=behaviour,
+        motor_groups=motor_groups,
     )
 
     # The same file `run` read the overrides out of, and the same by
@@ -2192,6 +2286,15 @@ def build_application(
         ),
     )
     state.entities.append(boost)
+    for group in registered_motor_groups:
+        state.entities.append(
+            MotorSwitchEntity(
+                state=state,
+                coordinator=motor_groups,
+                group=group,
+                key=len(state.entities),
+            )
+        )
     # The other direction, and the reason the boost control needs one where the
     # volume control does not: the settings page can change this value without
     # Home Assistant having asked. `apply_live` is what every change of it
@@ -2240,6 +2343,51 @@ def build_application(
     return application
 
 
+async def _assemble(
+    resolution: Resolution,
+    handle: RobotHandle,
+    stop: asyncio.Event,
+) -> SatelliteApplication | None:
+    """Assemble the application, abandoning it if a stop arrives first.
+
+    Assembly is where initial motor confirmation happens, and confirmation is
+    what *opens* the gates: a stop the daemon sets while a five-second daemon
+    read is in flight has to reach it, or the robot finishes energising the
+    motors it is being told to shut down. Racing the two is what makes
+    `build_application`'s own cancellation path — which closes the coordinator
+    and registers nothing — the shutdown path as well, rather than a second one
+    written beside it.
+
+    Args:
+        resolution: The settings in effect and where they came from.
+        handle: What the daemon hands a running application.
+        stop: Set by the daemon's termination signal.
+
+    Returns:
+        The assembled application, or None if the stop won.
+    """
+    assembling = asyncio.ensure_future(build_application(resolution, handle))
+    stopping = asyncio.ensure_future(stop.wait())
+    try:
+        await asyncio.wait(
+            (assembling, stopping),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        stopping.cancel()
+        if not assembling.done():
+            assembling.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        application = await assembling
+        if not stop.is_set():
+            return application
+        # The confirmation and the stop landed together, so there is a whole
+        # application here with its gates open. Closing it is the only thing
+        # left that is correct to do with it.
+        await application.aclose()
+    return None
+
+
 async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     """Read the configuration, build everything, and run until asked to stop.
 
@@ -2249,8 +2397,13 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
 
     A stop requested before motor enable, between motor enable and controlled
     wake, or after controlled wake prevents the next hardware or composition
-    boundary. The blocking SDK call already running on a worker thread is allowed
-    to finish; Python cannot safely cancel it in the middle.
+    boundary. One requested *during* assembly reaches the same place: initial
+    motor confirmation is awaited off this loop, so the daemon's stop watcher
+    can still set this event while it runs, and `_assemble` abandons the
+    assembly when it does — leaving every gate closed, no group registered,
+    motion unacquired and no service started. The blocking SDK call already
+    running on a worker thread is allowed to finish; Python cannot safely cancel
+    it in the middle.
 
     Raises:
         ConfigurationError: If the environment is not usable. Raised rather
@@ -2275,5 +2428,8 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     if stop.is_set():
         _LOGGER.info("satellite.start skipped; stop requested during controlled wake")
         return
-    application = build_application(resolution, handle)
+    application = await _assemble(resolution, handle, stop)
+    if application is None:
+        _LOGGER.info("satellite.start skipped; stop requested during composition")
+        return
     await application.run(stop)

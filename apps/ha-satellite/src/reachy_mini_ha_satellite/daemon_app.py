@@ -36,20 +36,28 @@ import os
 import signal
 import sys
 import threading
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final, cast
+from uuid import UUID
 
 from reachy_mini.apps.app import ReachyMiniApp
 
-from reachy_mini_ha_satellite.adapters.daemon import RobotHandle
 from reachy_mini_ha_satellite.config import (
     ConfigurationError,
     Settings,
     variable_for,
 )
 from reachy_mini_ha_satellite.main import run
+from reachy_mini_ha_satellite.motor_control import (
+    MOTOR_IDENTIFIERS,
+    MotorConfirmation,
+    MotorConfirmationOutcome,
+    MotorEvidence,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from reachy_mini_ha_satellite.adapters.daemon import MediaInterface, PoseMatrix
 
 __all__ = ["DEFAULT_SETTINGS_URL", "ReachyMiniHaSatellite", "main"]
 
@@ -97,6 +105,187 @@ def _settings_port() -> str:
     return configured if configured.isdigit() else default
 
 
+_TORQUE_OUTCOMES: Final = {
+    outcome.value: outcome
+    for outcome in MotorConfirmationOutcome
+    if outcome is not MotorConfirmationOutcome.UNAVAILABLE
+}
+_MISSING: Final = object()
+_MOTOR_CONFIRMATION_TIMEOUT_SECONDS: Final = 5.0
+
+
+def _enum_value(value: object) -> str:
+    """Read one SDK enum's bounded wire value without importing its type."""
+    raw = getattr(value, "value", value)
+    return raw if isinstance(raw, str) else ""
+
+
+class _ConfirmedRobotHandle:
+    """Translate the optional canary SDK torque surface at the sole SDK boundary."""
+
+    def __init__(self, raw: object) -> None:
+        self._raw: Any = raw
+
+    @property
+    def media(self) -> MediaInterface:
+        return cast("MediaInterface", self._raw.media)
+
+    def enable_motors(self, ids: list[str] | None = None) -> None:
+        self._raw.enable_motors(ids)
+
+    def enable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        return self._confirmed("enable_motors_confirmed", ids, "set", True)
+
+    def disable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        return self._confirmed("disable_motors_confirmed", ids, "set", False)
+
+    def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
+        return self._confirmed("read_motor_torque", ids, "read", None)
+
+    def _confirmed(
+        self,
+        method_name: str,
+        ids: list[str],
+        operation: str,
+        requested_enabled: bool | None,
+    ) -> MotorConfirmation:
+        method = getattr(self._raw, method_name, None)
+        if not callable(method):
+            return MotorConfirmation.unavailable()
+        return self._translate(
+            method(list(ids), timeout=_MOTOR_CONFIRMATION_TIMEOUT_SECONDS),
+            ids,
+            operation,
+            requested_enabled,
+        )
+
+    @staticmethod
+    def _translate(
+        result: object,
+        expected: list[str],
+        expected_operation: str,
+        expected_enabled: bool | None,
+    ) -> MotorConfirmation:
+        """Validate the complete SDK envelope before constructing local evidence."""
+        request_id = getattr(result, "request_id", _MISSING)
+        operation_value = getattr(result, "operation", _MISSING)
+        requested_names = getattr(result, "requested_names", _MISSING)
+        requested_enabled = getattr(result, "requested_enabled", _MISSING)
+        acknowledged = getattr(result, "acknowledged", _MISSING)
+        terminal = getattr(result, "terminal", _MISSING)
+        outcome_value = getattr(result, "outcome", _MISSING)
+        states = getattr(result, "states", _MISSING)
+        missing_names = getattr(result, "missing_names", _MISSING)
+        result_error = getattr(result, "error", _MISSING)
+        outcome = _TORQUE_OUTCOMES.get(_enum_value(outcome_value))
+        if (
+            not isinstance(request_id, UUID)
+            or _enum_value(operation_value) != expected_operation
+            or not isinstance(requested_names, list)
+            or requested_names != expected
+            or len(requested_names) != len(frozenset(requested_names))
+            or requested_enabled is not expected_enabled
+            or acknowledged is not True
+            or terminal is not True
+            or outcome is None
+            or not isinstance(states, list)
+            or not isinstance(missing_names, list)
+            or missing_names
+            or result_error is not None
+        ):
+            return MotorConfirmation.failed()
+        if expected_operation == "read":
+            if (
+                expected_enabled is not None
+                or outcome is not MotorConfirmationOutcome.CONFIRMED
+            ):
+                return MotorConfirmation.failed()
+        elif expected_operation == "set":
+            if type(expected_enabled) is not bool or outcome not in {
+                MotorConfirmationOutcome.CONFIRMED,
+                MotorConfirmationOutcome.CONTRADICTED,
+            }:
+                return MotorConfirmation.failed()
+        else:
+            return MotorConfirmation.failed()
+
+        translated: list[MotorEvidence] = []
+        expected_names = frozenset(expected)
+        for state in states:
+            name = getattr(state, "name", _MISSING)
+            motor_id = getattr(state, "motor_id", _MISSING)
+            enabled = getattr(state, "enabled", _MISSING)
+            error_value = getattr(state, "error", _MISSING)
+            expected_id = MOTOR_IDENTIFIERS.get(name) if isinstance(name, str) else None
+            if (
+                not isinstance(name, str)
+                or name not in expected_names
+                or expected_id is None
+                or type(motor_id) is not int
+                or motor_id != expected_id
+                or type(enabled) is not bool
+                or error_value is not None
+            ):
+                return MotorConfirmation.failed()
+            translated.append(
+                MotorEvidence(name=name, motor_id=motor_id, enabled=enabled)
+            )
+
+        confirmation = MotorConfirmation(True, outcome, tuple(translated))
+        actual = confirmation.physical_value(
+            expected,
+            allow_contradiction=expected_operation == "set",
+        )
+        if actual is None:
+            return MotorConfirmation.failed()
+        if expected_operation == "set" and (
+            (outcome is MotorConfirmationOutcome.CONFIRMED)
+            != (actual is expected_enabled)
+        ):
+            return MotorConfirmation.failed()
+        return confirmation
+
+    def wake_up(self) -> None:
+        self._raw.wake_up()
+
+    def set_target(
+        self,
+        head: PoseMatrix | None = None,
+        antennas: list[float] | None = None,
+        body_yaw: float | None = None,
+    ) -> None:
+        self._raw.set_target(head=head, antennas=antennas, body_yaw=body_yaw)
+
+    def get_current_head_pose(self) -> PoseMatrix:
+        return cast("PoseMatrix", self._raw.get_current_head_pose())
+
+    def get_current_joint_positions(self) -> tuple[list[float], list[float]]:
+        return cast(
+            "tuple[list[float], list[float]]",
+            self._raw.get_current_joint_positions(),
+        )
+
+    def look_at_image(
+        self,
+        u: int,
+        v: int,
+        duration: float = 1.0,
+        perform_movement: bool = True,
+    ) -> PoseMatrix:
+        return cast(
+            "PoseMatrix",
+            self._raw.look_at_image(
+                u,
+                v,
+                duration=duration,
+                perform_movement=perform_movement,
+            ),
+        )
+
+    def set_automatic_body_yaw(self, enabled: bool) -> None:
+        self._raw.set_automatic_body_yaw(enabled)
+
+
 #:= docs/specs/ha-satellite/index.md#req-041-the-application-is-discoverable-by-the-robot-daemon
 #:% The application MUST advertise itself through the daemon's application entry
 #:% point mechanism so that installing the wheel is sufficient for the daemon to
@@ -123,7 +312,7 @@ class ReachyMiniHaSatellite(ReachyMiniApp):
         super().__init__(running_on_wireless)
         self.custom_app_url = f"http://0.0.0.0:{_settings_port()}"
 
-    def run(self, reachy_mini: RobotHandle, stop_event: threading.Event) -> None:
+    def run(self, reachy_mini: object, stop_event: threading.Event) -> None:
         """Run the satellite until the daemon asks it to stop.
 
         Args:
@@ -138,7 +327,7 @@ class ReachyMiniHaSatellite(ReachyMiniApp):
         asyncio.run(_run_until(reachy_mini, stop_event))
 
 
-async def _run_until(handle: RobotHandle, stop_event: threading.Event) -> None:
+async def _run_until(handle: object, stop_event: threading.Event) -> None:
     """Run the application, translating the daemon's stop signal as it goes.
 
     Args:
@@ -164,7 +353,7 @@ async def _run_until(handle: RobotHandle, stop_event: threading.Event) -> None:
     watcher = threading.Thread(target=_watch, name="satellite-stop", daemon=True)
     watcher.start()
     try:
-        await run(handle, stop)
+        await run(_ConfirmedRobotHandle(handle), stop)
     finally:
         # The application may have finished for its own reasons — the settings
         # interface asked it to stop, or something raised. Setting the daemon's

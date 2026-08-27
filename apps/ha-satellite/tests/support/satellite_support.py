@@ -26,7 +26,9 @@ certain about exactly the property it was checking.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -40,6 +42,11 @@ from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated p
 from reachy_contracts import FaceDetection, NormalisedPoint
 from reachy_mini_ha_satellite.adapters.sounds import Sound
 from reachy_mini_ha_satellite.esphome.models import AvailableWakeWord, WakeWordType
+from reachy_mini_ha_satellite.motor_control import (
+    MotorConfirmation,
+    MotorConfirmationOutcome,
+    MotorEvidence,
+)
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
     CalibratedGaze,
@@ -283,6 +290,76 @@ def immediately(work: Callable[[], None]) -> None:
         work: What to run.
     """
     work()
+
+
+#: How many loop turns a bounded yield loop may spend before it reports what it
+#: waited for lost. Generous, because these wait across a thread and how many
+#: turns that takes is a property of how loaded the machine is. A ceiling all
+#: the same: a yield loop that cannot end hangs the suite rather than failing
+#: it, and a named failure after a known number of turns is worth having in
+#: place of an indefinite wait.
+#:
+#: **What is bounded is scheduling turns, not elapsed time.** A zero-delay yield
+#: schedules no timer, but each one still waits for the event loop to come round
+#: and for this process to be scheduled, so what exhausting this budget costs in
+#: seconds depends on the load — and a loaded runner is exactly the situation in
+#: which something hangs and the ceiling is reached at all. Timing it on an idle
+#: machine measures that machine; it does not bound this.
+YIELD_TURNS: Final = 100_000
+
+
+async def until(condition: Callable[[], bool], what: str) -> int:
+    """Yield to the event loop until something has happened, or say it never did.
+
+    This is what a test reaches for instead of a fixed turn budget whenever the
+    outcome it goes on to assert depends on one thing having happened before
+    another. A budget that is usually enough is a happens-before relationship
+    that usually holds, which is indistinguishable from a flaky merge gate — and
+    the way it fails is to assert the *other* ordering's outcome, which reads
+    like a real defect.
+
+    A budget is still right where the turns are the measurement rather than a
+    stand-in for an ordering: "the loop ran ten more turns" is a fact about the
+    loop, not a race.
+
+    **This bounds the wait; it does not create the ordering.** What establishes
+    one is the condition being the thing the later assertion actually depends
+    on, and being irreversible once true. Waiting on something merely correlated
+    with it — a flag set nearby, a count that usually gets there first — makes
+    the race rarer rather than absent, which is the failure this replaces
+    wearing a longer wait.
+
+    Args:
+        condition: What is being waited for. Polled, so it must be cheap.
+        what: Named in the failure, so an exhausted budget says what was lost.
+
+    Returns:
+        How many loop turns passed before the condition held.
+
+    Raises:
+        AssertionError: If the condition never held within the ceiling above.
+    """
+    for turns in range(YIELD_TURNS):
+        if condition():
+            return turns
+        await asyncio.sleep(0)
+    message = f"{what} never happened within {YIELD_TURNS} loop turns"
+    raise AssertionError(message)
+
+
+def motor_worker_threads() -> set[threading.Thread]:
+    """Return every live motor-coordinator worker thread in this process.
+
+    Thread objects rather than names, and compared as a subset rather than for
+    equality: a coordinator another test in this session built and never closed
+    is still enumerable here, so "no thread leaked" is "no thread this test
+    started is still alive", not "the process has none".
+    """
+    return {
+        thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("satellite-motors")
+    }
 
 
 # --- Time --------------------------------------------------------------------
@@ -1215,6 +1292,9 @@ class FakeRobot:
         measured_head_poses: Iterable[PoseMatrix | BaseException] = (),
         measured_joints: Iterable[tuple[list[float], list[float]] | BaseException] = (),
         image_gaze_poses: Iterable[PoseMatrix | BaseException] = (),
+        motor_reads: Iterable[MotorConfirmation | BaseException] = (),
+        motor_enables_confirmed: Iterable[MotorConfirmation | BaseException] = (),
+        motor_disables_confirmed: Iterable[MotorConfirmation | BaseException] = (),
         events: list[str] | None = None,
     ) -> None:
         """Wrap media and load deterministic feedback scripts.
@@ -1224,6 +1304,9 @@ class FakeRobot:
             measured_head_poses: Values or failures returned by measured-pose reads.
             measured_joints: Values or failures returned by measured-joint reads.
             image_gaze_poses: Values or failures returned by calibration queries.
+            motor_reads: Confirmed physical read results or failures.
+            motor_enables_confirmed: Confirmed enable results or failures.
+            motor_disables_confirmed: Confirmed disable results or failures.
             events: Optional shared lifecycle event record.
         """
         self._media = media if media is not None else FakeMedia()
@@ -1232,6 +1315,9 @@ class FakeRobot:
         self.measured_head_poses = list(measured_head_poses)
         self.measured_joints = list(measured_joints)
         self.image_gaze_poses = list(image_gaze_poses)
+        self.motor_reads = list(motor_reads)
+        self.motor_enables_confirmed = list(motor_enables_confirmed)
+        self.motor_disables_confirmed = list(motor_disables_confirmed)
         self.events = events if events is not None else []
         self.heads: list[PoseMatrix] = []
         self.antennas: list[list[float]] = []
@@ -1242,6 +1328,7 @@ class FakeRobot:
         self.image_gaze: list[tuple[int, int, float, bool]] = []
         self.automatic_body_yaw: list[bool] = []
         self.motor_enables = 0
+        self.motor_requests: list[tuple[str, tuple[str, ...]]] = []
         self.wake_ups = 0
 
     def enable_motors(self, ids: list[str] | None = None) -> None:
@@ -1249,6 +1336,41 @@ class FakeRobot:
         del ids
         self.motor_enables += 1
         self.events.append("motors.enable")
+
+    def enable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        """Return a scripted complete physical enable confirmation."""
+        self.motor_requests.append(("enable", tuple(ids)))
+        self.events.append("motors.enable.confirmed")
+        return self._motor_confirmation(self.motor_enables_confirmed, ids, True)
+
+    def disable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        """Return a scripted complete physical disable confirmation."""
+        self.motor_requests.append(("disable", tuple(ids)))
+        self.events.append("motors.disable.confirmed")
+        return self._motor_confirmation(self.motor_disables_confirmed, ids, False)
+
+    def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
+        """Return a scripted independent complete physical torque read."""
+        self.motor_requests.append(("read", tuple(ids)))
+        self.events.append("motors.read")
+        return self._motor_confirmation(self.motor_reads, ids, True)
+
+    @staticmethod
+    def _motor_confirmation(
+        script: list[MotorConfirmation | BaseException],
+        ids: list[str],
+        enabled: bool,
+    ) -> MotorConfirmation:
+        scripted = script.pop(0) if script else None
+        if isinstance(scripted, BaseException):
+            raise scripted
+        if scripted is not None:
+            return scripted
+        return MotorConfirmation(
+            True,
+            MotorConfirmationOutcome.CONFIRMED,
+            tuple(MotorEvidence(name=name, enabled=enabled) for name in ids),
+        )
 
     def wake_up(self) -> None:
         """Record the SDK-controlled wake sequence."""

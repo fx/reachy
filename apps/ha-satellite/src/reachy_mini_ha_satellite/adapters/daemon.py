@@ -30,6 +30,8 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 import numpy.typing as npt
 
+from reachy_mini_ha_satellite.motor_control import MotorConfirmation
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -208,6 +210,18 @@ class RobotHandle(Protocol):
         Args:
             ids: Motor identifiers, or `None` for every motor.
         """
+        ...
+
+    def enable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        """Enable exactly these motors and return correlated physical evidence."""
+        ...
+
+    def disable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
+        """Disable exactly these motors and return correlated physical evidence."""
+        ...
+
+    def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
+        """Read physical torque state independently for exactly these motors."""
         ...
 
     def wake_up(self) -> None:

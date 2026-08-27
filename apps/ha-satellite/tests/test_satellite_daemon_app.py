@@ -22,11 +22,19 @@ import importlib
 import runpy
 import sys
 import threading
-from types import ModuleType
+from itertools import product
+from types import ModuleType, SimpleNamespace
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pytest
-from satellite_support import FakeRobot
+
+# pylint: disable=no-name-in-module
+from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]  # generated protobuf module, which mypy cannot see the message classes inside
+    SwitchCommandRequest,
+    SwitchStateResponse,
+)
+from satellite_support import FakeRobot, ManualClock, vendored_server_state
 
 from reachy_mini_ha_satellite import main as satellite_main
 from reachy_mini_ha_satellite.config import (
@@ -36,6 +44,15 @@ from reachy_mini_ha_satellite.config import (
     overrides_path,
     variable_for,
 )
+from reachy_mini_ha_satellite.motor_control import (
+    BODY_MOTOR_IDS,
+    HEAD_MOTOR_IDS,
+    MOTOR_IDENTIFIERS,
+    MotorGroup,
+    MotorGroupCoordinator,
+    MotorGroupLifecycle,
+)
+from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -44,6 +61,43 @@ if TYPE_CHECKING:
 
 _SDK_MODULES = ("reachy_mini", "reachy_mini.apps", "reachy_mini.apps.app")
 _UNDER_TEST = "reachy_mini_ha_satellite.daemon_app"
+
+
+def _torque_result(
+    ids: list[str],
+    *,
+    operation: str,
+    requested_names: list[str] | None = None,
+    requested_enabled: bool | None,
+    acknowledged: bool = True,
+    terminal: bool = True,
+    outcome: str = "confirmed",
+    result_error: object | None = None,
+    missing_names: list[str] | None = None,
+    evidence_enabled: bool = True,
+) -> SimpleNamespace:
+    """Build one complete SDK-shaped result envelope for boundary tests."""
+    names = list(ids) if requested_names is None else requested_names
+    return SimpleNamespace(
+        request_id=uuid4(),
+        operation=SimpleNamespace(value=operation),
+        requested_names=names,
+        requested_enabled=requested_enabled,
+        acknowledged=acknowledged,
+        terminal=terminal,
+        outcome=SimpleNamespace(value=outcome),
+        missing_names=[] if missing_names is None else missing_names,
+        error=result_error,
+        states=[
+            SimpleNamespace(
+                name=name,
+                motor_id=MOTOR_IDENTIFIERS[name],
+                enabled=evidence_enabled,
+                error=None,
+            )
+            for name in ids
+        ],
+    )
 
 
 class StubReachyMiniApp:
@@ -246,7 +300,8 @@ class TestBridgingTheStopSignal:
 
         application.wrapped_run()
 
-        assert seen == [application.handle]
+        assert len(seen) == 1
+        assert vars(seen[0])["_raw"] is application.handle
 
     def test_finishing_for_its_own_reasons_leaves_no_thread_on_a_closed_loop(
         self,
@@ -582,3 +637,500 @@ class TestBeingExecutedTheWayTheDaemonExecutesIt:
             runpy.run_module(_UNDER_TEST, run_name="__main__")
 
         assert raised.value.code == 0
+
+
+class TestConfirmedTorqueBoundary:
+    """SDK results become bounded local evidence only in the daemon entry point."""
+
+    def test_missing_canary_method_reports_unavailable(
+        self, daemon_app: ModuleType
+    ) -> None:
+        """Released SDK 1.9 stays runnable but exposes no optimistic switch."""
+        bridge = daemon_app._ConfirmedRobotHandle(SimpleNamespace())
+
+        result = bridge.read_motor_torque(["one"])
+
+        assert result.outcome.value == "unavailable"
+        assert not result.acknowledged
+        assert result.evidence == ()
+
+    def test_canary_result_retains_only_ids_needed_for_internal_validation(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """Correlation IDs disappear while motor IDs remain available for matching."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda ids, **_kwargs: SimpleNamespace(
+                request_id=uuid4(),
+                operation=SimpleNamespace(value="read"),
+                requested_names=list(ids),
+                requested_enabled=None,
+                acknowledged=True,
+                terminal=True,
+                outcome=SimpleNamespace(value="confirmed"),
+                missing_names=[],
+                error=None,
+                states=[
+                    SimpleNamespace(
+                        name=name,
+                        motor_id=MOTOR_IDENTIFIERS[name],
+                        enabled=True,
+                        error=None,
+                    )
+                    for name in ids
+                ],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        result = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert result.physical_value(HEAD_MOTOR_IDS) is True
+        assert not hasattr(result, "request_id")
+        assert [item.motor_id for item in result.evidence] == [
+            MOTOR_IDENTIFIERS[name] for name in HEAD_MOTOR_IDS
+        ]
+
+    @pytest.mark.parametrize(
+        (
+            "operation",
+            "names_kind",
+            "requested_enabled",
+            "acknowledged",
+            "terminal",
+            "outcome",
+            "has_error",
+            "has_missing",
+            "evidence_enabled",
+        ),
+        list(
+            product(
+                ("read", "set"),
+                ("exact", "reversed", "duplicate", "missing", "extra"),
+                (None, False, True),
+                (False, True),
+                (False, True),
+                ("confirmed", "contradicted", "partial", "failed"),
+                (False, True),
+                (False, True),
+                (False, True),
+            )
+        ),
+    )
+    def test_read_result_envelope_cartesian_matrix(
+        self,
+        daemon_app: ModuleType,
+        operation: str,
+        names_kind: str,
+        requested_enabled: bool | None,
+        acknowledged: bool,
+        terminal: bool,
+        outcome: str,
+        has_error: bool,
+        has_missing: bool,
+        evidence_enabled: bool,
+    ) -> None:
+        """Only one complete READ envelope class may cross the SDK boundary."""
+        expected = list(HEAD_MOTOR_IDS)
+        requested_names = {
+            "exact": expected,
+            "reversed": list(reversed(expected)),
+            "duplicate": [*expected[:-1], expected[0]],
+            "missing": expected[:-1],
+            "extra": [*expected, BODY_MOTOR_IDS[0]],
+        }[names_kind]
+        result = _torque_result(
+            expected,
+            operation=operation,
+            requested_names=requested_names,
+            requested_enabled=requested_enabled,
+            acknowledged=acknowledged,
+            terminal=terminal,
+            outcome=outcome,
+            result_error=(SimpleNamespace(value="read_failed") if has_error else None),
+            missing_names=[expected[-1]] if has_missing else [],
+            evidence_enabled=evidence_enabled,
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
+        )
+
+        translated = bridge.read_motor_torque(expected)
+
+        valid = (
+            operation == "read"
+            and names_kind == "exact"
+            and requested_enabled is None
+            and acknowledged
+            and terminal
+            and outcome == "confirmed"
+            and not has_error
+            and not has_missing
+        )
+        assert (translated.outcome.value == "confirmed") is valid
+        assert translated.physical_value(HEAD_MOTOR_IDS) is (
+            evidence_enabled if valid else None
+        )
+
+    @pytest.mark.parametrize(
+        ("requested", "evidence", "outcome", "valid"),
+        [
+            (True, True, "confirmed", True),
+            (False, False, "confirmed", True),
+            (True, False, "contradicted", True),
+            (False, True, "contradicted", True),
+            (True, False, "confirmed", False),
+            (False, True, "confirmed", False),
+            (True, True, "contradicted", False),
+            (False, False, "contradicted", False),
+            (True, True, "partial", False),
+            (False, False, "failed", False),
+        ],
+    )
+    def test_set_result_envelope_requires_outcome_to_match_physical_agreement(
+        self,
+        daemon_app: ModuleType,
+        requested: bool,
+        evidence: bool,
+        outcome: str,
+        valid: bool,
+    ) -> None:
+        """Confirmed means agreement and contradicted means actual disagreement."""
+        result = _torque_result(
+            list(BODY_MOTOR_IDS),
+            operation="set",
+            requested_enabled=requested,
+            outcome=outcome,
+            evidence_enabled=evidence,
+        )
+        method_name = (
+            "enable_motors_confirmed" if requested else "disable_motors_confirmed"
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(**{method_name: lambda _ids, **_kwargs: result})
+        )
+
+        translated = (
+            bridge.enable_motors_confirmed(list(BODY_MOTOR_IDS))
+            if requested
+            else bridge.disable_motors_confirmed(list(BODY_MOTOR_IDS))
+        )
+
+        assert translated.outcome.value == (outcome if valid else "failed")
+        assert translated.physical_value(BODY_MOTOR_IDS) is (
+            evidence if valid else None
+        )
+
+    @pytest.mark.asyncio
+    async def test_invalid_set_envelope_cannot_advance_any_coordinator_effect(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """Envelope failure retains state and blocks reseed, restore and publication."""
+        invalid = _torque_result(
+            list(BODY_MOTOR_IDS),
+            operation="set",
+            requested_enabled=False,
+            outcome="confirmed",
+            evidence_enabled=False,
+        )
+        delattr(invalid.states[0], "motor_id")
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(disable_motors_confirmed=lambda _ids, **_kwargs: invalid)
+        )
+        translated = bridge.disable_motors_confirmed(list(BODY_MOTOR_IDS))
+        assert translated.outcome.value == "failed"
+
+        robot = FakeRobot()
+        groups = MotorGroupCoordinator(robot, clock=ManualClock())
+        assert MotorGroup.BODY in await groups.initialize()
+        events: list[str] = []
+
+        class _Recording(MotorGroupLifecycle):
+            def prepare_worker(self) -> object:
+                events.append("prepare")
+                return None
+
+            def sample_worker(self) -> object:
+                events.append("reseed")
+                return None
+
+            def restore_worker(self, policy: bool | None) -> object:
+                del policy
+                events.append("restore")
+                return None
+
+        groups.set_hooks(MotorGroup.BODY, lifecycle=_Recording)
+        robot.motor_disables_confirmed.append(translated)
+        robot.motor_reads.append(translated)
+        control = MotorSwitchEntity(
+            state=vendored_server_state(),
+            coordinator=groups,
+            group=MotorGroup.BODY,
+            key=7,
+        )
+
+        responses = list(
+            control.handle_message(SwitchCommandRequest(key=7, state=False))
+        )
+
+        assert responses == [SwitchStateResponse(key=7, state=True)]
+        assert events == []
+        assert not groups.gate_open(MotorGroup.BODY)
+        await groups.wait_idle()
+        assert events == ["prepare"]
+        assert groups.last_confirmed(MotorGroup.BODY) is True
+        assert not groups.gate_open(MotorGroup.BODY)
+        await groups.aclose()
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "request_id",
+            "operation",
+            "requested_names",
+            "requested_enabled",
+            "acknowledged",
+            "terminal",
+            "outcome",
+            "states",
+            "missing_names",
+            "error",
+        ],
+    )
+    def test_missing_required_result_field_fails_closed(
+        self,
+        daemon_app: ModuleType,
+        field: str,
+    ) -> None:
+        """Missing fields cannot accidentally equal a nullable valid value."""
+        result = _torque_result(
+            list(HEAD_MOTOR_IDS),
+            operation="read",
+            requested_enabled=None,
+        )
+        delattr(result, field)
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
+        )
+
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert translated.outcome.value == "failed"
+        assert translated.physical_value(HEAD_MOTOR_IDS) is None
+
+    @pytest.mark.parametrize("field", ["name", "motor_id", "enabled", "error"])
+    def test_missing_required_per_state_field_fails_closed(
+        self,
+        daemon_app: ModuleType,
+        field: str,
+    ) -> None:
+        """Absent state fields never inherit the semantics of explicit null."""
+        result = _torque_result(
+            list(HEAD_MOTOR_IDS),
+            operation="read",
+            requested_enabled=None,
+        )
+        delattr(result.states[0], field)
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
+        )
+
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert translated.outcome.value == "failed"
+        assert translated.evidence == ()
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("name", None),
+            ("name", 11),
+            ("name", BODY_MOTOR_IDS[0]),
+            ("motor_id", None),
+            ("motor_id", True),
+            ("motor_id", "11"),
+            ("motor_id", 11.0),
+            ("motor_id", MOTOR_IDENTIFIERS[HEAD_MOTOR_IDS[1]]),
+            ("enabled", None),
+            ("enabled", 1),
+            ("enabled", "true"),
+            ("error", "read_failed"),
+            ("error", SimpleNamespace(value="read_failed")),
+        ],
+        ids=[
+            "null-name",
+            "integer-name",
+            "wrong-group-name",
+            "explicit-null-id",
+            "bool-id",
+            "string-id",
+            "float-id",
+            "mismatched-id",
+            "null-enabled",
+            "integer-enabled",
+            "string-enabled",
+            "string-error",
+            "enum-like-error",
+        ],
+    )
+    def test_wrong_per_state_field_type_or_value_fails_closed(
+        self,
+        daemon_app: ModuleType,
+        field: str,
+        value: object,
+    ) -> None:
+        """Every SDK state is explicit, typed and matched to its fixed motor."""
+        result = _torque_result(
+            list(HEAD_MOTOR_IDS),
+            operation="read",
+            requested_enabled=None,
+        )
+        setattr(result.states[0], field, value)
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
+        )
+
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert translated.outcome.value == "failed"
+        assert translated.evidence == ()
+
+    @pytest.mark.parametrize(
+        "replacement",
+        [
+            object(),
+            {
+                "name": HEAD_MOTOR_IDS[0],
+                "motor_id": MOTOR_IDENTIFIERS[HEAD_MOTOR_IDS[0]],
+                "enabled": True,
+                "error": None,
+            },
+        ],
+        ids=["opaque-object", "mapping"],
+    )
+    def test_non_attribute_state_variants_fail_closed(
+        self,
+        daemon_app: ModuleType,
+        replacement: object,
+    ) -> None:
+        """The translator supports SDK attribute objects only, never loose mappings."""
+        result = _torque_result(
+            list(HEAD_MOTOR_IDS),
+            operation="read",
+            requested_enabled=None,
+        )
+        result.states[0] = replacement
+        bridge = daemon_app._ConfirmedRobotHandle(
+            SimpleNamespace(read_motor_torque=lambda _ids, **_kwargs: result)
+        )
+
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert translated.outcome.value == "failed"
+        assert translated.evidence == ()
+
+    @pytest.mark.parametrize(
+        ("outcome", "acknowledged", "terminal"),
+        [
+            (outcome, acknowledged, terminal)
+            for outcome in ("confirmed", "contradicted", "partial", "failed")
+            for acknowledged in (False, True)
+            for terminal in (False, True)
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_every_outcome_acknowledgement_and_terminal_combination_fails_closed(
+        self,
+        daemon_app: ModuleType,
+        outcome: str,
+        acknowledged: bool,
+        terminal: bool,
+    ) -> None:
+        """Only terminal acknowledged confirmed reads can register or open a gate."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda ids, **_kwargs: SimpleNamespace(
+                request_id=uuid4(),
+                operation=SimpleNamespace(value="read"),
+                requested_names=list(ids),
+                requested_enabled=None,
+                acknowledged=acknowledged,
+                terminal=terminal,
+                outcome=SimpleNamespace(value=outcome),
+                missing_names=[],
+                error=None,
+                states=[
+                    SimpleNamespace(
+                        name=name,
+                        motor_id=MOTOR_IDENTIFIERS[name],
+                        enabled=True,
+                        error=None,
+                    )
+                    for name in ids
+                ],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+        translated = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+        robot = FakeRobot(motor_reads=[translated])
+        groups = MotorGroupCoordinator(robot, clock=ManualClock())
+
+        registered = await groups.initialize()
+
+        accepted = outcome == "confirmed" and acknowledged and terminal
+        assert (MotorGroup.HEAD in registered) is accepted
+        assert groups.gate_open(MotorGroup.HEAD) is accepted
+        assert groups.last_confirmed(MotorGroup.HEAD) is (True if accepted else None)
+
+    def test_absent_per_motor_boolean_fails_closed(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """A named motor with neither a physical value nor error is incomplete."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda ids, **_kwargs: SimpleNamespace(
+                request_id=uuid4(),
+                operation=SimpleNamespace(value="read"),
+                requested_names=list(ids),
+                requested_enabled=None,
+                acknowledged=True,
+                terminal=True,
+                outcome=SimpleNamespace(value="confirmed"),
+                missing_names=[],
+                error=None,
+                states=[
+                    SimpleNamespace(
+                        name=name,
+                        motor_id=MOTOR_IDENTIFIERS[name],
+                        enabled=None if index == 0 else True,
+                        error=None,
+                    )
+                    for index, name in enumerate(ids)
+                ],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        result = bridge.read_motor_torque(list(HEAD_MOTOR_IDS))
+
+        assert result.outcome.value == "failed"
+        assert result.physical_value(HEAD_MOTOR_IDS) is None
+
+    def test_malformed_or_unexpected_sdk_evidence_fails_closed(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """Unknown enum values and motors cannot be smuggled into local policy."""
+        raw = SimpleNamespace(
+            read_motor_torque=lambda _ids, **_kwargs: SimpleNamespace(
+                acknowledged=True,
+                outcome=SimpleNamespace(value="future-outcome"),
+                states=[SimpleNamespace(name="unexpected", enabled=True, error=None)],
+            )
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        result = bridge.read_motor_torque(["one"])
+
+        assert result.outcome.value == "failed"
+        assert result.physical_value(("one",)) is None
