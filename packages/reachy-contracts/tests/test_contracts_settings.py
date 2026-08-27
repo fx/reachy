@@ -245,14 +245,40 @@ def _url_of_length(length: int) -> str:
     """Build a session address of exactly this many characters.
 
     Args:
-        length: How long it must be.
+        length: How long it must be. At least as long as the address prefix the
+            declared pattern requires, since padding can only lengthen it.
 
     Returns:
         An address matching the declared pattern, padded in its path. From the
         RFC 5737 documentation range.
+
+    Raises:
+        ValueError: If `length` is shorter than that prefix. Padding by a
+            negative count is silently empty, so the alternative is a helper
+            that returns something longer than it was asked for and a test
+            that passes for the wrong reason.
     """
     prefix = "ws://192.0.2.10:8080/v1/session/"
+    if length < len(prefix):
+        message = (
+            f"cannot build a session address of {length} characters; "
+            f"the declared pattern needs at least {len(prefix)}"
+        )
+        raise ValueError(message)
     return prefix + "a" * (length - len(prefix))
+
+
+def test_the_address_helper_refuses_a_length_its_prefix_cannot_express() -> None:
+    """A helper that quietly returns the wrong length makes its tests lie.
+
+    Padding by a negative count is an empty string rather than an error, so
+    without this precondition a bound test asking for a short address would be
+    handed a longer one and would go on passing while measuring nothing.
+    """
+    with pytest.raises(ValueError, match="at least") as raised:
+        _url_of_length(4)
+
+    assert "4" in str(raised.value)
 
 
 def test_the_session_address_declares_the_shared_maximum_length() -> None:
