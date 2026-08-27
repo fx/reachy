@@ -340,7 +340,8 @@ Only commands and output actually observed are transcribed.
         so the "contribute that capability upstream" half is outstanding. The
         operator's decision was to ship against that build and record the
         dependency rather than hold the task. Nothing was substituted for
-        optimistic state — a robot without that build gets no switch at all
+        optimistic state — a robot without that build gets no switch at all; the
+        root `README.md` and the completion notes record the same dependency
   - [x] Extend `RobotHandle` and deterministic fakes with acknowledged grouped
         enable, disable and read-back results without importing the SDK outside its
         existing entry point (PR #31)
@@ -406,28 +407,29 @@ Only commands and output actually observed are transcribed.
   - [x] Run the focused satellite suites and repository checks required above
         (PR #32)
 
-- [x] Add the bounded MJPEG feed, documentation and final traceability
+- [x] Add the bounded MJPEG feed, documentation and final traceability (PR #33)
   - [x] Add one global optional latest-original-JPEG value beside session
-        cardinality metadata, with no per-session JPEG mapping
+        cardinality metadata, with no per-session JPEG mapping (PR #33)
   - [x] Wire authentication and finalization to clear the global value on zero or
-        multiple sessions and require a post-ambiguity validated frame
+        multiple sessions and require a post-ambiguity validated frame (PR #33)
   - [x] Add explicit JPEG signature/format validation beside successful general
-        image decode, publishing original bytes only when both checks pass
+        image decode, publishing original bytes only when both checks pass (PR #33)
   - [x] Serve `/stream.mjpg` with standard multipart JPEG framing, no-store
         responses and four bounded viewer slots, without another robot connection,
         stream-only decode/re-encode, capability blockage or per-viewer frame queue
+        (PR #33)
   - [x] Cover zero, one and multiple sessions, post-ambiguity freshness, malformed
         JPEG, decodable PNG and other non-JPEG payloads, slow viewers, replacement,
         disconnect, cancellation, capacity and application shutdown using unit
-        fakes and marked in-process transport tests
+        fakes and marked in-process transport tests (PR #33)
   - [x] Prove logs, metrics, traces, errors and deployment storage contain no frame
-        body, credential or installation identifier
+        body, credential or installation identifier (PR #33)
   - [x] Extend the existing container image verification with one authenticated
         fixture session and actual-JPEG multipart read while outbound network stays
         unavailable — the extension is written and unit-covered; see the completion
-        notes for where it was and was not executed
+        notes for where it was and was not executed (PR #33)
   - [x] Update setup and operations runbooks for the four entities, standard Home
-        Assistant MJPEG integration and trusted-network video boundary
+        Assistant MJPEG integration and trusted-network video boundary (PR #33)
   - [ ] **Deferred, and deliberately not ticked.** Run staged live verification
         only after hardware-free acceptance, record scrubbed outcomes, and leave
         any unrun step marked pending rather than inventing output. Nothing in this
@@ -440,13 +442,13 @@ Only commands and output actually observed are transcribed.
         `format = "markdown"`, regenerate the duvet snapshot from the repository
         root and run the repository gates this environment can run — `just check`,
         `just contracts-check`, `just duvet`, `just leak-scan` and
-        `just secret-scan`
+        `just secret-scan` (PR #33)
   - [ ] **Not ticked, because it was not run here.** `just image-verify`, the
         local equivalent of the `images.yml` gate, needs a Docker daemon this
         environment does not have, so the gate runs on the pull request rather
         than locally; see the completion notes
   - [x] Update exhaustive spec and requirement counts, mark 0020 complete and
-        synchronize `docs/index.yml` and `docs/index.md`
+        synchronize `docs/index.yml` and `docs/index.md` (PR #33)
 
 ## Verification Stages
 

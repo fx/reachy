@@ -372,9 +372,6 @@ async def read_feed_part(base_url: str) -> tuple[Mapping[str, str], bytes]:
     inside a chunked encoding this would then have to unwrap. What is being
     checked is the multipart framing, not a transfer encoding.
 
-    Args:
-        base_url: Where the service is listening.
-
     The scheme decides the transport, the same way it decides the WebSocket
     scheme in `session_url`: an `https://` base URL is reached over TLS and on
     443 unless the URL names a port. This connection is opened by hand rather
