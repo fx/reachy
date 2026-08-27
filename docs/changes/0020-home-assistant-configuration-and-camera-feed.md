@@ -438,7 +438,13 @@ Only commands and output actually observed are transcribed.
         satisfied. The outstanding list is [`docs/tasks.md`](../tasks.md)
   - [x] Add exact annotations for REQ-093 through REQ-098, register the spec with
         `format = "markdown"`, regenerate the duvet snapshot from the repository
-        root and run every repository gate
+        root and run the repository gates this environment can run — `just check`,
+        `just contracts-check`, `just duvet`, `just leak-scan` and
+        `just secret-scan`
+  - [ ] **Not ticked, because it was not run here.** `just image-verify`, the
+        local equivalent of the `images.yml` gate, needs a Docker daemon this
+        environment does not have, so the gate runs on the pull request rather
+        than locally; see the completion notes
   - [x] Update exhaustive spec and requirement counts, mark 0020 complete and
         synchronize `docs/index.yml` and `docs/index.md`
 
