@@ -3819,7 +3819,6 @@ async def test_long_motor_confirmation_does_not_trigger_controller_timing_fault(
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_tracking_owns_motion_before_the_first_calibration_or_yields_no_face() -> (
     None
 ):

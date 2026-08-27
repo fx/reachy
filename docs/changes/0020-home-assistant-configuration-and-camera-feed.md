@@ -324,36 +324,50 @@ Only commands and output actually observed are transcribed.
 
 ## Tasks
 
-- [ ] Add safe live motor-group Configuration switches
-  - [ ] Before entity registration, verify a daemon/SDK release provides correlated
-        selective-torque acknowledgement and physical read-back for every motor;
-        contribute that capability upstream or hold this task if it does not
-  - [ ] Extend `RobotHandle` and deterministic fakes with acknowledged grouped
+- [x] Add safe live motor-group Configuration switches (PR #31)
+  - [ ] **Deferred: verify a released daemon/SDK provides correlated
+        selective-torque acknowledgement and physical read-back for every
+        motor.** Not ticked, and deliberately not ticked. No released
+        `reachy-mini` exposes `enable_motors_confirmed`,
+        `disable_motors_confirmed` or `read_motor_torque`, so the pin stays
+        `>=1.9,<2` and a robot reaches the capability only by running branch
+        `feat/correlated-motor-torque-readback` of the `reachy_mini` fork this
+        change was written against. That branch is reviewed; it is neither
+        released nor merged, and no upstream pull request is open for it. The
+        satellite fails closed rather than assuming the capability:
+        `MotorGroupCoordinator.initialize` registers a group only after an
+        agreeing initial physical read-back, so on a released SDK no switch is
+        announced and every command gate stays shut.
+  - [x] Extend `RobotHandle` and deterministic fakes with acknowledged grouped
         enable, disable and read-back results without importing the SDK outside its
-        existing entry point
-  - [ ] Add one serialized coordinator for the exact head, body and antenna
+        existing entry point (PR #31)
+  - [x] Add one serialized coordinator for the exact head, body and antenna
         mappings with an optional initial value, one last-confirmed Boolean and
-        bounded identifier-free confirmation diagnostics per group
-  - [ ] Gate gaze, pipeline-head and antenna expression commands and every other
-        application producer before torque-off
-  - [ ] Inventory daemon-owned move, tracking, expression and automatic-yaw
+        bounded identifier-free confirmation diagnostics per group (PR #31)
+  - [x] Gate gaze, pipeline-head and antenna expression commands and every other
+        application producer before torque-off (PR #31)
+  - [x] Inventory daemon-owned move, tracking, expression and automatic-yaw
         producers; prove each inactive or acquire and quiesce it before torque-off
-  - [ ] Acquire exclusive body ownership and quiesce daemon automatic yaw for all
+        (PR #31)
+  - [x] Acquire exclusive body ownership and quiesce daemon automatic yaw for all
         `face_tracking_enabled` and `body_motion_enabled` combinations, then seed
         measured state before restoring the prior policy after confirmed enable
-  - [ ] Insert each stable switch object ID only after an agreeing initial physical
+        (PR #31)
+  - [x] Insert each stable switch object ID only after an agreeing initial physical
         read-back, using the existing Boolean switch messages without a protocol
-        extension or custom Home Assistant component
-  - [ ] Publish only successful physical read-back Booleans and actual state on
+        extension or custom Home Assistant component (PR #31)
+  - [x] Publish only successful physical read-back Booleans and actual state on
         contradiction; on failure reject the requested value, keep confirmation
         evidence unchanged and repeat only the retained Boolean when the protocol
         requires a response, then allow a later successful read-back to advance it
-  - [ ] Cover absent initial confirmation, missing, late and contradictory later
+        (PR #31)
+  - [x] Cover absent initial confirmation, missing, late and contradictory later
         acknowledgement, partial group read-back, retained-state diagnostics,
         subsequent successful read-back, in-flight application and daemon
         producers, automatic-yaw ownership, reseeding, hidden targets, failure,
-        cancellation, safe hold, release and shutdown
-  - [ ] Run the focused satellite suites and repository checks required above
+        cancellation, safe hold, release and shutdown (PR #31)
+  - [x] Run the focused satellite suites and repository checks required above
+        (PR #31)
 
 - [ ] Add persisted live groundstation URL replacement
   - [ ] Define one 255-character URL bound shared by the settings model, settings
