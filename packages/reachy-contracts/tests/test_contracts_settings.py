@@ -245,24 +245,27 @@ def _url_of_length(length: int) -> str:
     """Build a session address of exactly this many characters.
 
     Args:
-        length: How long it must be. At least as long as the address prefix the
-            declared pattern requires, since padding can only lengthen it.
+        length: How long it must be. At least as long as this helper's own
+            prefix, which padding can lengthen but never shorten. That floor is
+            the fixture's, not the schema's: the declared pattern accepts
+            addresses far shorter than any this helper can build.
 
     Returns:
         An address matching the declared pattern, padded in its path. From the
         RFC 5737 documentation range.
 
     Raises:
-        ValueError: If `length` is shorter than that prefix. Padding by a
-            negative count is silently empty, so the alternative is a helper
-            that returns something longer than it was asked for and a test
-            that passes for the wrong reason.
+        ValueError: If `length` is shorter than this helper's prefix. Padding
+            by a negative count is silently empty, so the alternative is a
+            helper that returns something longer than it was asked for and a
+            test that passes for the wrong reason.
     """
     prefix = "ws://192.0.2.10:8080/v1/session/"
     if length < len(prefix):
         message = (
             f"cannot build a session address of {length} characters; "
-            f"the declared pattern needs at least {len(prefix)}"
+            f"this helper's own prefix is {len(prefix)} and padding "
+            f"cannot shorten it"
         )
         raise ValueError(message)
     return prefix + "a" * (length - len(prefix))
@@ -275,7 +278,7 @@ def test_the_address_helper_refuses_a_length_its_prefix_cannot_express() -> None
     without this precondition a bound test asking for a short address would be
     handed a longer one and would go on passing while measuring nothing.
     """
-    with pytest.raises(ValueError, match="at least") as raised:
+    with pytest.raises(ValueError, match="padding cannot shorten") as raised:
         _url_of_length(4)
 
     assert "4" in str(raised.value)
