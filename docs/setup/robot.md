@@ -13,7 +13,8 @@ Assistant. There is no repair for that after the fact worth the name.
   [running groundstation](groundstation.md), and this repository checked out on
   the machine you are working from.
 - **You get:** a robot running the satellite, with `doctor` reporting every link
-  as passed.
+  as passed — and, if its daemon environment carries the forked `reachy-mini`
+  described below, the three Home Assistant motor switches as well.
 - **Then go to:** [Home Assistant](home-assistant.md).
 
 ---
@@ -38,6 +39,41 @@ converged; what it cannot prove is anything about hardware, the vendor's real
 daemon, or aarch64.
 
 The outstanding list is [`docs/tasks.md`](../tasks.md).
+
+---
+
+## ⚠️ The motor switches need a forked `reachy-mini`, for now
+
+Everything on this page works against a stock robot **except the three Home
+Assistant motor switches** — head, body and antennas. Those turn physical torque
+off, so the satellite refuses to announce one until it can prove what the torque
+is: a daemon call that correlates a selective torque request with its completion,
+and reads physical torque back for each motor in the group by name. **No released
+`reachy-mini` provides that.** The published torque methods send and return
+`None`, and the daemon's aggregate motor mode is not per-group physical state.
+
+Until an upstream release carries the API, the daemon's application environment
+on the robot has to hold the branch **`feat/correlated-motor-torque-readback`**
+from the fork at **https://github.com/fx/reachy_mini**. That branch is reviewed
+but neither released nor merged, and no upstream pull request is open yet, which
+is why the dependency pins in `pyproject.toml` and
+`apps/ha-satellite/pyproject.toml` still name the released range rather than the
+fork. Replacing what is installed on a robot's daemon environment is outside this
+runbook and outside the provisioning roles.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** Installing that branch on a robot has not
+> been performed here — nothing in this repository has a Reachy Mini attached —
+> so no command or output for it is recorded. Inventing one is what the marker
+> exists to prevent.
+
+**On a stock robot the satellite fails closed, and only there.** The daemon
+boundary finds no confirmation method, every motor group stays unconfirmed, and
+the application announces **no motor switch at all** rather than one whose state
+it invented; bounded, identifier-free diagnostics record the missing
+confirmation. Home Assistant simply shows three fewer controls. The groundstation
+URL text control, its live replacement behaviour, the settings page, the voice
+pipeline and the groundstation camera feed are all unaffected — none of them
+touches motor torque.
 
 ---
 

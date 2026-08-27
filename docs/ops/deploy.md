@@ -192,6 +192,27 @@ in memory and the model files are in the image.
 
 ## Updating the robot
 
+### ⚠️ Upgrading the satellite does not bring the motor switches with it
+
+The three Home Assistant motor switches — head, body and antennas — need a
+`reachy-mini` in the daemon's application environment that correlates a selective
+torque request with its completion and reads physical torque back per motor. **No
+released version has that API**, so a robot whose daemon environment holds a
+released `reachy-mini` will come back from this upgrade with the groundstation URL
+control and everything else, and with no motor switches — the satellite fails
+closed and announces nothing it cannot confirm, recording bounded
+identifier-free diagnostics instead. That is the designed outcome, not a failed
+deployment, and no `doctor` check reports it.
+
+Until an upstream release carries the API, the switches need the branch
+`feat/correlated-motor-torque-readback` from the fork at
+https://github.com/fx/reachy_mini installed in that environment. It is reviewed
+but neither released nor merged, and no upstream pull request is open yet, which
+is why nothing in this repository pins it and neither `deploy` nor the
+provisioning roles install it. When an official release does carry it, move the
+pins in `pyproject.toml` and `apps/ha-satellite/pyproject.toml` to that release
+and drop this note.
+
 ### 1. Get the wheel, and check it is the one that was published
 
 Every release publishes a `SHA256SUMS` file beside its wheels, written by the

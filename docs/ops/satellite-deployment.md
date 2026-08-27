@@ -167,6 +167,16 @@ advertised while its robot is still asleep. The movement and sound are therefore
 expected effects of starting the application, not evidence that Home Assistant
 has begun a voice pipeline.
 
+Startup then reads physical torque back for each of the three motor groups —
+head, body, antennas — and announces a Home Assistant switch **only for a group
+that answered**. A group that did not is left with its command gate closed and no
+entity, which is why the switches are the one part of this application that
+depends on which `reachy-mini` the daemon environment holds: the released
+versions send torque commands fire-and-forget and return `None`, so nothing
+answers and no switch appears. See
+[the README](../../README.md#-the-three-motor-switches-need-a-forked-reachy-mini-for-now)
+for the build that does answer and for when this note stops being true.
+
 **⚠️ The daemon does not report why an application stopped.** It reports
 `state: done` with a **null error** whether the application ran and finished, or
 refused to start and exited non-zero, or raised. An exception the application

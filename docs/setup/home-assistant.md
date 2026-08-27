@@ -368,6 +368,53 @@ No reconnection took place between those two readings.
 > [change 0016](../changes/0016-audible-playback.md) answered, and the 500%
 > default is inherited from it unchanged.
 
+### The motor and groundstation controls are in the same group
+
+Four more controls sit in **Configuration** beside the two above:
+
+| Control | Object ID | What it is |
+|---|---|---|
+| **Head Motors** | `head_motors` | Torque on the six Stewart actuators, as one group |
+| **Body Motor** | `body_motor` | Torque on `body_rotation` |
+| **Antenna Motors** | `antenna_motors` | Torque on both antennas, as one group |
+| **Groundstation URL** | `groundstation_url` | The session address, at most 255 characters |
+
+**Groundstation URL** applies at once and survives a restart: it is written to
+the same `settings.json` the boost is, so the robot's own settings page shows
+what you set here and the other way round. A refused address leaves the control
+reporting the one still in effect.
+[`docs/ops/satellite-deployment.md`](../ops/satellite-deployment.md) has the
+ordering, the failure behaviour and the 255-character migration.
+
+**The three motor switches turn physical torque off**, so the robot goes limp for
+that group — hold the head before you switch it off. Turning one back on
+reacquires measured state before anything moves again, so there is no jump. Each
+switch reports only torque state that was physically read back: a request the
+robot contradicts publishes what the robot actually did, not what was asked for.
+
+> ### ⚠️ The motor switches need a forked `reachy-mini`
+>
+> They appear only if the robot's daemon application environment holds a
+> `reachy-mini` that acknowledges a selective torque request and reads physical
+> torque back per motor. **No released version has that API**, so on a stock
+> robot the satellite announces **no motor switch at all** rather than one whose
+> state it invented — three fewer rows in Configuration, and nothing else
+> affected. Until an upstream release carries it, the switches need the branch
+> `feat/correlated-motor-torque-readback` from the fork at
+> https://github.com/fx/reachy_mini, which is reviewed but neither released nor
+> merged, with no upstream pull request open yet. The
+> [robot runbook](robot.md#-the-motor-switches-need-a-forked-reachy-mini-for-now)
+> says the same thing where the robot is set up.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No readings are recorded for these four
+> controls. The motor switches need a robot carrying that forked build and
+> nothing in this repository has a Reachy Mini attached; the address control
+> needs a real Home Assistant. What is covered without hardware is every one of
+> their behaviours, in
+> `apps/ha-satellite/tests/test_satellite_motor_entities.py`,
+> `apps/ha-satellite/tests/test_satellite_motor_groups.py` and
+> `apps/ha-satellite/tests/test_satellite_groundstation_entities.py`.
+
 ## 5. Watch the robot, not the screen
 
 The point of a robot satellite is that you can tell what it is doing from across
