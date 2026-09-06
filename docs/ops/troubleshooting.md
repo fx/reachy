@@ -192,11 +192,17 @@ resolved](#when-the-interpreter-cannot-be-resolved).
 
 The daemon's API answers about the application it is **currently** running, and
 it runs one at a time. So *the daemon is running `<something-else>` instead* is
-this check working: the satellite is not running because something displaced it.
-*The daemon is running no application* is the ordinary stopped case, and
-`starting`, `stopping`, `done` and `error` are the other states it can report —
-none of them is running, and `starting` in particular is an application that may
-never finish starting.
+this check working: the satellite is not running because something displaced it,
+and the name is the one to go and look for. *The daemon is running no
+application* is the ordinary stopped case, and `starting`, `stopping`, `done`
+and `error` are the other states it can report — none of them is running, and
+`starting` in particular is an application that may never finish starting.
+
+*The daemon did not say which application it is running* is none of those, and
+the distinction is worth the sentence: the daemon answered, it reported an
+application, and its answer carried no name. **Nothing has been displaced** —
+go and look at the daemon rather than hunting an application that may not
+exist. The message names the field that was missing.
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript, and no `app logs`
 > transcript at all.

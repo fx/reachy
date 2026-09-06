@@ -444,6 +444,13 @@ class DaemonClient:
         operator whose satellite was displaced by another application needs to
         be told that rather than left with "not running".
 
+        **Three outcomes, not two, and the third is the one worth spelling
+        out.** The daemon may answer that it is running an application and not
+        say which. That is not evidence of a different application: it is an
+        incomplete answer, a different fault with a different fix, and telling
+        an operator their robot is running something else sends them hunting a
+        rogue application that may not exist. Each case says only what it knows.
+
         Args:
             outcome: What the request did.
 
@@ -492,12 +499,17 @@ class DaemonClient:
         if isinstance(failure, str) and failure:
             detail = f"{detail}: {failure}"
         info = decoded.get("info")
-        current = info.get("name") if isinstance(info, dict) else None
+        if not isinstance(info, dict):
+            return _unnamed("info", detail)
+        current = info.get("name")
+        if not isinstance(current, str) or not current:
+            # `null`, a number, an empty string — a JSON API can put any of them
+            # here, and none of them is the name of another application.
+            return _unnamed("info.name", detail)
         if current != self._layout.application:
-            named = current if isinstance(current, str) and current else "something"
             return ApplicationState(
                 running=False,
-                detail=f"the daemon is running {named} instead, {detail}",
+                detail=f"the daemon is running {current} instead, {detail}",
             )
         return ApplicationState(running=state == _RUNNING, detail=detail)
 
@@ -1174,6 +1186,27 @@ class DaemonClient:
         if not outcome.ok:
             raise RobotAccessError(f"{complaint}: {outcome.complaint()}")
         return outcome
+
+
+def _unnamed(field: str, detail: str) -> ApplicationState:
+    """Say the daemon named no application, which is not the same as another one.
+
+    Args:
+        field: The part of the answer that carried no name, so an operator
+            reading this knows which half of the document to go and look at.
+        detail: What the daemon did manage to say about the state it is in.
+
+    Returns:
+        Not running — because nothing said this application is — with a detail
+        that claims only what the answer supports.
+    """
+    return ApplicationState(
+        running=False,
+        detail=(
+            f"the daemon did not say which application it is running — "
+            f"{field} was absent or not a name — and reported {detail}"
+        ),
+    )
 
 
 def _unreachable(outcome: CommandOutcome) -> bool:

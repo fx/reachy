@@ -1094,9 +1094,15 @@ async def test_an_api_answering_with_an_error_status_is_a_fault() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_status_document_missing_its_parts_is_read_for_what_it_has() -> None:
-    """A daemon that named no state and no application has still answered."""
-    robot = FakeRobot(daemon_api=True, api_stdout='{"state": null, "error": "boom"}')
+async def test_a_status_document_missing_its_state_is_read_for_what_it_has() -> None:
+    """A daemon that named the application but not its state has still answered."""
+    robot = FakeRobot(
+        daemon_api=True,
+        api_stdout=(
+            '{"info": {"name": "' + DEFAULT_APPLICATION + '"}, '
+            '"state": null, "error": "boom"}'
+        ),
+    )
     daemon, _access = daemon_for(robot)
 
     state = await daemon.application_state()
@@ -1104,6 +1110,47 @@ async def test_a_status_document_missing_its_parts_is_read_for_what_it_has() -> 
     assert state.running is False
     assert "did not name" in state.detail
     assert "boom" in state.detail
+
+
+@pytest.mark.parametrize(
+    ("answer", "field"),
+    [
+        ('{"state": "running"}', "info"),
+        ('{"info": null, "state": "running"}', "info"),
+        ('{"info": "reachy", "state": "running"}', "info"),
+        ('{"info": [], "state": "running"}', "info"),
+        ('{"info": {}, "state": "running"}', "info.name"),
+        ('{"info": {"name": null}, "state": "running"}', "info.name"),
+        ('{"info": {"name": 7}, "state": "running"}', "info.name"),
+        ('{"info": {"name": ""}, "state": "running"}', "info.name"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_answer_that_names_no_application_is_not_a_different_one(
+    answer: str,
+    field: str,
+) -> None:
+    """An incomplete answer is a different fault from a displaced application.
+
+    We know the daemon is running something and we know it did not say what.
+    We do NOT know it is another application, and telling an operator it is
+    sends them hunting a rogue one that may not exist — a different problem
+    with a different fix. A JSON API can put `null`, a number or an empty
+    string in that field, and none of them is a name.
+
+    Args:
+        answer: The status document the daemon returned.
+        field: The part of it the message has to point at.
+    """
+    robot = FakeRobot(daemon_api=True, api_stdout=answer)
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is False
+    assert "did not say which application" in state.detail
+    assert field in state.detail
+    assert "instead" not in state.detail
 
 
 @pytest.mark.asyncio
