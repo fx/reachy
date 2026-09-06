@@ -99,14 +99,17 @@ _EXEC_PATH: Final = re.compile(r"path=(\S+)")
 # resolution is that nothing unproven is handed a program to run, and `-V` asks
 # a question no interpreter can misread and no launcher is given the chance to.
 #
-# The answer is matched as a real version and not as the word alone. This step
-# is the one that ESTABLISHES what everything after it assumes, so it has to be
-# something a program cannot pass by accident: a wrapper that exits zero having
-# written the word `Python` — or nothing but a banner containing it — is not an
-# interpreter, and admitting it would hand `-c '<python source>'` to whatever it
-# really is.
+# The answer has to be the WHOLE of what came back, matched as a real version.
+# This step is the one that ESTABLISHES what everything after it assumes, so it
+# has to be something a program cannot pass by accident, and each weaker form
+# leaves a gap the next one has to close: the exit status alone admits anything
+# that exits zero, the word alone admits a banner, and a version-shaped PREFIX
+# admits `Python 3.12.3 — wrapper usage: ...`. Anchoring both ends ends that
+# sequence rather than tightening it again, and it costs nothing: `-V` makes
+# CPython print exactly this and nothing else. Anything that prints more is
+# something else, and admitting it would hand `-c '<python source>'` to it.
 _VERSION_FLAG: Final = "-V"
-_VERSION_ANSWER: Final = re.compile(r"\APython \d+(?:\.\d+)*")
+_VERSION_ANSWER: Final = re.compile(r"Python \d+(?:\.\d+)*")
 
 # systemd's own spelling for "this unit is running".
 _ACTIVE: Final = "active"
@@ -439,10 +442,10 @@ class DaemonClient:
                 claim an interpreter, unless an operator named it themselves.
 
         Returns:
-            True when it answered with an actual version — `Python 3.12.3`, not
-            merely the word. A path that is not there, is not executable, or
-            answered with anything else is not an interpreter and the next
-            candidate is tried.
+            True when everything it said is a version — `Python 3.12.3`, which
+            is exactly what `-V` makes CPython print. A path that is not there,
+            is not executable, or said one word more is not an interpreter, and
+            the next candidate is tried.
         """
         outcome = await self._run([path, _VERSION_FLAG])
         if not outcome.ok:
@@ -450,7 +453,7 @@ class DaemonClient:
         # Python 3 writes the version to standard output; older ones wrote it to
         # standard error, and a robot is not this tool's choice of interpreter.
         answer = (outcome.stdout or outcome.stderr).strip()
-        return _VERSION_ANSWER.match(answer) is not None
+        return _VERSION_ANSWER.fullmatch(answer) is not None
 
     async def installed_versions(self, *distributions: str) -> dict[str, str]:
         """Ask the daemon's environment what versions it holds.

@@ -235,18 +235,31 @@ async def test_an_environment_with_no_interpreter_in_it_is_named_not_guessed_at(
     assert robot.wrapper_runs == []
 
 
+@pytest.mark.parametrize(
+    "answer",
+    ["", "3.12.3 — wrapper usage: --help for options", "3.12.3\nstarting daemon"],
+)
 @pytest.mark.asyncio
-async def test_a_program_that_answers_with_the_word_and_no_version_is_not_one() -> None:
+async def test_a_program_that_says_one_word_more_than_a_version_is_not_one(
+    answer: str,
+) -> None:
     """The probe establishes what everything after it assumes, so it cannot be lax.
 
-    A program named `python` that exits zero having written the word — a banner,
-    a wrapper's usage line — is not an interpreter, and admitting it would hand
-    `-c '<python source>'` to whatever it really is. The next candidate is tried
-    instead, which here is the environment the launcher is installed in.
+    `-V` makes CPython print a version and nothing else, so anything that
+    prints more is something else — a banner, a wrapper's usage line, a
+    launcher announcing what it is about to start. Admitting one would hand it
+    `-c '<python source>'` next. The next candidate is tried instead, which
+    here is the environment the launcher is installed in.
+
+    Args:
+        answer: What the impostor writes after the word.
     """
     robot = FakeRobot(
         exec_start=STOCK_LAUNCHER,
-        interpreters={"/venvs/impostor/bin/python": "", STOCK_INTERPRETER: "3.12.3"},
+        interpreters={
+            "/venvs/impostor/bin/python": answer,
+            STOCK_INTERPRETER: "3.12.3",
+        },
         environment={"VIRTUAL_ENV": "/venvs/impostor"},
     )
     daemon, _access = daemon_for(robot)
