@@ -298,9 +298,13 @@ deployment can get irreversibly wrong.
   machinery was never constructed keeps holding as services are added. Do not
   reintroduce announcing under a placeholder, and do not stand the announcing
   surface up mid-process: `SatelliteApplication` reports `announcing` from what
-  was *built*, and the settings page's four-way note — the two states where the
-  configured identity and the announced one disagree are the ones only the
-  application can distinguish — depends on that being what it says.
+  was *built*, and it carries the **identity** rather than a boolean because the
+  configured value and the announced one can disagree in either direction: one
+  supplied to a process that started without it is configured and not announced,
+  and one changed on a running robot leaves Home Assistant keyed on the
+  preceding one. `/status` reports both (`announcing`, `announced_as`), and the
+  settings page's five-way identity note and its "Announced to Home Assistant
+  as" sentence are rendered from what was announced, never from the settings.
 - **An unresolved groundstation is unconfigured, not failed.**
   `config.groundstation_is_resolved` needs both the address and the credential,
   `main.build_remote_source` builds nothing without them, and `/status` reports

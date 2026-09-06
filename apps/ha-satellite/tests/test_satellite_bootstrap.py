@@ -463,7 +463,7 @@ class TestNothingIsAnnouncedWhileTheIdentityIsUnresolved:
             motion=FakeMotion(),
             perception=FakePerception(),
             behaviour=SatelliteBehaviour(now=0.0),
-            announcing=False,
+            announced_identity=None,
             clock=lambda: float(next(elapsed)),
             sleep=_one_tick,
         )
@@ -491,10 +491,37 @@ class TestNothingIsAnnouncedWhileTheIdentityIsUnresolved:
             status={},
             overrides_path=str(_STATE_DIR / OVERRIDES_FILENAME),
             announcing=False,
+            announced_identity=None,
         )
 
-        assert "still announcing" in page
+        assert "Nothing is announced to Home Assistant yet." in page
+        assert "started without one" in page
         assert UNCONFIGURED_HEADING not in page
+
+    def test_a_changed_identity_is_not_reported_as_the_announced_one(self) -> None:
+        """The other direction of the same gap, and the one that reads as done.
+
+        The identity is restart-bound, so a running satellite saved with a new
+        `device_name` goes on announcing the old one and Home Assistant stays
+        keyed on it. A page that read the sentence "Announced to Home Assistant
+        as ..." off the configuration would describe a rename that has not
+        happened — on the page whose standing hazard is that very key, and
+        whose reader would then not restart.
+        """
+        renamed = load_settings(NAMED, {IDENTITY_SETTING: "reachy-mini-2"})
+
+        page = render_settings_page(
+            renamed,
+            configuration_report(renamed),
+            status={},
+            overrides_path=str(_STATE_DIR / OVERRIDES_FILENAME),
+            announcing=True,
+            announced_identity="reachy-mini-1",
+        )
+
+        assert "Announced to Home Assistant as <code>reachy-mini-1</code>." in page
+        assert "The configured identity is now <code>reachy-mini-2</code>" in page
+        assert "still keyed on the one this application started with" in page
 
     def test_clearing_a_live_identity_does_not_claim_an_embargo_it_has_not_got(
         self,
@@ -521,6 +548,7 @@ class TestNothingIsAnnouncedWhileTheIdentityIsUnresolved:
             status={},
             overrides_path=str(_STATE_DIR / OVERRIDES_FILENAME),
             announcing=True,
+            announced_identity="reachy-mini-1",
         )
 
         assert not identity_is_resolved(cleared.settings)

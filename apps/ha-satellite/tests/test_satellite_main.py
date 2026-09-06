@@ -577,9 +577,9 @@ def _application(
         behaviour=behaviour or SatelliteBehaviour(now=0.0),
         motor_groups=motor_groups,
         # The configured robot these tests are about: an announcing surface was
-        # built, so capture is started and there is something to feed. A robot
-        # with none is `test_satellite_bootstrap.py`.
-        announcing=True,
+        # built for this identity, so capture is started and there is something
+        # to feed. A robot with none is `test_satellite_bootstrap.py`.
+        announced_identity="reachy-mini-1",
         services=services,
         clock=_advancing(),
         sleep=_wait,
@@ -1137,6 +1137,7 @@ class TestTheLoop:
             "idle",
             "identity",
             "announcing",
+            "announced_as",
             "remote",
             "controller",
             "motion_gating",

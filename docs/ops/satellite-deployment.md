@@ -63,9 +63,14 @@ safe to start on.
 
 The identity is read while the announcement is being built, so it takes effect at
 the next start: set it, press **Stop** on the settings page, and start the
-application again from the robot's own dashboard. No shell, and no reinstall. The
-page says which of the two states the robot is in — no identity at all, or an
-identity this process started without.
+application again from the robot's own dashboard. No shell, and no reinstall.
+
+Because it is read at startup, the configured identity and the announced one are
+two different facts and the page keeps them apart. It says *Announced to Home
+Assistant as* whatever this process actually announces — never what the
+configuration now says — and names the pending value beside it when the two
+disagree. So a robot that has just been renamed is not described as renamed, and
+one whose identity has been cleared is not described as announcing nothing.
 
 ### Upgrading an existing installation
 
@@ -572,7 +577,7 @@ credential and useless for learning one. A separate control unsets it.
 |---|---|
 | `/` | The settings form and the resolved configuration |
 | `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once, which bootstrap values are read-only and which compatibility inputs are ignored |
-| `/status` | What the robot is doing: pipeline and gaze state, controller mode, fault and derived safe hold, whether the announced identity is `resolved` or `unresolved`, whether this process is `announcing`, the remote detector's state, and the motion-gating mode in force with the bounded reason for it |
+| `/status` | What the robot is doing: pipeline and gaze state, controller mode, fault and derived safe hold, whether the configured identity is `resolved` or `unresolved`, whether this process is `announcing` and `announced_as` which identity, the remote detector's state, and the motion-gating mode in force with the bounded reason for it |
 | `/diagnostics/controller` | `GET` — bounded scalar controller events with no image, credential or installation identity |
 | `/diagnostics/controller/reset` | `POST` — same-origin diagnostics-only reset; it does not move the robot or change controller state |
 | `/stop` | `POST` — stops the application so a restart-required change can take effect |

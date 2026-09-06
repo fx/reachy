@@ -824,12 +824,14 @@ def _page(
     # is not the same state as "something is running and announcing nothing".
     # See `render._identity_note`.
     announcing = None if application is None else bool(running.get("announcing"))
+    announced = running.get("announced_as")
     return render_settings_page(
         resolution,
         configuration_report(resolution),
         status=running,
         overrides_path=str(store.path),
         announcing=announcing,
+        announced_identity=announced if isinstance(announced, str) else None,
         error=error,
         saved=saved,
         restart_needed=restart_needed,

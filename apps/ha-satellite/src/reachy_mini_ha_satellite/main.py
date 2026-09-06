@@ -641,7 +641,7 @@ class SatelliteApplication:
         behaviour: SatelliteBehaviour,
         motor_groups: MotorGroupCoordinator | None = None,
         motion_gating: MotionGating | None = None,
-        announcing: bool = False,
+        announced_identity: str | None = None,
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -661,13 +661,18 @@ class SatelliteApplication:
                 daemon — a test building an application directly — and then
                 derived from whether a coordinator was supplied, which is the
                 same decision with the less specific reason.
-            announcing: Whether an announcing surface was built for this
-                process. **What was built, not what the settings say**, and the
-                two can differ: `device_name` is restart-bound, so an identity
+            announced_identity: The identity an announcing surface was built
+                for, or `None` when none was built. **What was announced, not
+                what the settings say**, and the two can differ in both
+                directions because `device_name` is restart-bound: an identity
                 supplied to a process that started without one is resolved
-                configuration and still nothing announced. Reporting the
-                settings here would tell an operator the robot was on Home
-                Assistant while REQ-102's embargo was still in force.
+                configuration and still nothing announced, and an identity
+                changed on a running robot leaves Home Assistant keyed on the
+                preceding one until the next start. A surface reporting the
+                settings would be wrong about the first in the direction that
+                says a robot is on Home Assistant while REQ-102's embargo holds,
+                and wrong about the second in the direction that says a rename
+                has happened when Home Assistant has not seen it.
             services: The things with lifetimes, started in order and stopped
                 in reverse.
             clock: The monotonic source the behaviour layer is given.
@@ -696,7 +701,7 @@ class SatelliteApplication:
             message = "the reported motion gating must match the coordinator supplied"
             raise ValueError(message)
         self._motion_gating = motion_gating
-        self._announcing = announcing
+        self._announced_identity = announced_identity
         self._services = tuple(services)
         self._clock = clock
         self._sleep = sleep
@@ -854,9 +859,10 @@ class SatelliteApplication:
 
         Several of these keys are about configuration rather than behaviour, and
         they are here because "why is this robot not doing what I expect?" is a
-        question the behaviour report cannot answer. `identity` and `announcing`
-        are separate for the reason the constructor records — an identity can be
-        resolved in a process that never built an announcing surface — and
+        question the behaviour report cannot answer. `identity` is what is
+        *configured*; `announcing` and `announced_as` are what was *built*, and
+        they are separate from it for the reason the constructor records — the
+        two can differ in both directions, so one field could not say which.
         `remote` distinguishes *never supplied* from *broken*, which is this
         repository's standing rule for a health surface.
 
@@ -874,9 +880,9 @@ class SatelliteApplication:
 
         Returns:
             The pipeline state, why the head is where it is, whether the robot
-            has settled into idling, whether it announces anything, what the
-            remote detector's state is, and which motion-gating mode is in
-            force.
+            has settled into idling, whether it announces anything and under
+            what identity, what the remote detector's state is, and which
+            motion-gating mode is in force.
         """
         report = self._behaviour.status(self._clock())
         controller = self._behaviour.controller_state
@@ -888,7 +894,8 @@ class SatelliteApplication:
             "identity": (
                 "resolved" if identity_is_resolved(self._settings) else "unresolved"
             ),
-            "announcing": self._announcing,
+            "announcing": self._announced_identity is not None,
+            "announced_as": self._announced_identity,
             "remote": self._remote_state(),
             "controller": {
                 "mode": controller.mode.value,
@@ -1103,7 +1110,7 @@ class SatelliteApplication:
                 acquired_at = self._clock()
                 self._motion.acquire(acquired_at)
                 self._last_tick_at = acquired_at
-            if self._announcing:
+            if self._announced_identity is not None:
                 # Capture exists to feed two things and both of them are the
                 # announcing surface: the ESPHome session Home Assistant
                 # listens on, and the wake-word detector that starts one.
@@ -2547,7 +2554,11 @@ async def build_application(
         behaviour=behaviour,
         motor_groups=motor_groups,
         motion_gating=gating,
-        announcing=announcing,
+        # The identity, not the fact — every surface that reports on the
+        # announcement needs to say *which* one, because a later save can leave
+        # the configuration naming a different one while this process goes on
+        # announcing this.
+        announced_identity=settings.device_name if announcing else None,
     )
 
     # The same file `run` read the overrides out of, and the same by

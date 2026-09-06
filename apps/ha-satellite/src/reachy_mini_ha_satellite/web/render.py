@@ -226,51 +226,77 @@ def _lede(
     settings: Settings,
     *,
     resolved_identity: bool,
-    announcing: bool | None,
+    announced_identity: str | None,
 ) -> str:
     """Say what this robot announces itself as, or that it announces nothing.
+
+    **The authoritative sentence on the page, so it states what is announced
+    rather than what is configured.** The two are different facts — the identity
+    is restart-bound — and rendering the configured one here was wrong in the
+    direction that matters: a robot saved with a new `device_name` would be
+    described as announced under it while Home Assistant was still keyed on the
+    preceding one, on the page whose standing hazard is that very key.
 
     Args:
         settings: The settings in effect.
         resolved_identity: Whether an identity has been supplied.
-        announcing: Whether an announcing surface was built, or `None` when
-            nothing is running behind this page.
+        announced_identity: What this process announces, or `None` when it
+            announces nothing — including when there is no application behind
+            this page at all.
 
     Returns:
         The first sentence of the page.
     """
-    if not resolved_identity:
-        if announcing:
-            return (
-                "The announced identity has been cleared, and this application "
-                "is still announcing under the one it started with."
-            )
+    if announced_identity is None:
+        if resolved_identity:
+            # A page with an application that built no announcing surface, or
+            # with no application at all. `_identity_note` tells the two apart;
+            # neither is announcing, which is all this sentence claims.
+            return "Nothing is announced to Home Assistant yet."
         return (
             "Nothing is announced to Home Assistant: this robot has no "
             "announced identity yet."
         )
-    return (
-        f"Announced to Home Assistant as <code>{_escape(settings.device_name)}</code>."
+    announced = (
+        f"Announced to Home Assistant as <code>{_escape(announced_identity)}</code>."
     )
+    if not resolved_identity:
+        return (
+            f"{announced} The configured identity has been cleared, so the next "
+            f"start announces nothing."
+        )
+    if settings.device_name != announced_identity:
+        return (
+            f"{announced} The configured identity is now <code>"
+            f"{_escape(settings.device_name)}</code>, which takes effect at the "
+            f"next start."
+        )
+    return announced
 
 
 #:= docs/specs/stock-robot-installation/index.md#req-102-nothing-is-announced-while-the-identity-is-unresolved
 #:% The satellite MUST NOT announce itself to Home Assistant, or serve a Home
 #:% Assistant connection, while its announced identity is unresolved.
-def _identity_note(*, resolved_identity: bool, announcing: bool | None) -> str:
+def _identity_note(
+    *,
+    resolved_identity: bool,
+    announcing: bool | None,
+    renamed: bool,
+) -> str:
     """Render the standing note about the announced identity.
 
-    Four states rather than one, and they are four because the identity is
+    Five states rather than one, and they are five because the identity is
     **restart-bound**: what a process announces is fixed when it is built, so
-    the configured identity and the announced one are two facts and either can
-    move without the other.
+    the configured identity and the announced one are two facts, and either can
+    move without the other in either direction.
 
     | Configured | Announcing | What the operator is told |
     |---|---|---|
     | unresolved | no | the embargo, and how to leave it |
     | unresolved | **yes** | the identity was *cleared* and this process is still announcing under the one it started with |
     | resolved | no | an identity is set and this process started without one |
-    | resolved | yes | the standing hazard: do not change it |
+    | resolved, **changed** | yes | the change has not happened yet, and what it will do when it does |
+    | resolved, unchanged | yes | the standing hazard: do not change it |
 
     **The second row is the one worth reading, because getting it wrong is a
     lie in the direction that matters.** Clearing `device_name` on a robot that
@@ -298,6 +324,8 @@ def _identity_note(*, resolved_identity: bool, announcing: bool | None) -> str:
         resolved_identity: Whether an identity has been supplied.
         announcing: Whether an announcing surface was built, or `None` when
             nothing is running behind this page.
+        renamed: Whether the configured identity differs from the one this
+            process announces. Only meaningful while announcing.
 
     Returns:
         One note.
@@ -338,6 +366,18 @@ def _identity_note(*, resolved_identity: bool, announcing: bool | None) -> str:
             "nothing.</strong> Press <em>Stop</em> below and start it again "
             "from the robot dashboard — the daemon leaves a cleanly-stopped "
             "application stopped.</div>"
+        )
+    if renamed:
+        return (
+            '<div class="note hazard"><strong>The announced identity has been '
+            "changed, and Home Assistant is still keyed on the one this "
+            "application started with.</strong> When it next starts it will "
+            "announce the new one, and Home Assistant will register a "
+            "<em>second</em> device: every entity identifier gains a suffix, "
+            "history stays with the old device and automations referencing the "
+            "old identifiers stop matching. Nothing has happened yet — set "
+            f"<code>{_escape(IDENTITY_SETTING)}</code> back below if that was "
+            "not what you meant.</div>"
         )
     return (
         '<div class="note hazard"><strong>Do not change '
@@ -406,6 +446,7 @@ def render_settings_page(
     status: Mapping[str, object],
     overrides_path: str,
     announcing: bool | None = None,
+    announced_identity: str | None = None,
     error: str | None = None,
     saved: Sequence[str] = (),
     restart_needed: Sequence[str] = (),
@@ -423,6 +464,11 @@ def render_settings_page(
             the identity is restart-bound: one supplied a moment ago is resolved
             configuration and still nothing announced, and that gap is precisely
             what an operator on this page needs told.
+        announced_identity: *Which* identity it announces, or `None` when it
+            announces none. The gap runs the other way too — an identity changed
+            on a running robot leaves Home Assistant keyed on the preceding one
+            — so the sentence that says what Home Assistant sees is rendered
+            from this rather than from the settings.
         error: What went wrong with the last submission, if anything.
         saved: Which settings the last submission changed.
         restart_needed: Which of those need the application restarted.
@@ -436,7 +482,17 @@ def render_settings_page(
     # not even the display name, since heading it with one would imply a
     # configured robot. The title is the heading on its own in those states,
     # because "This robot is not configured yet settings" is nobody's tab.
-    if resolved_identity:
+    renamed = announced_identity is not None and (
+        settings.device_name != announced_identity
+    )
+    if renamed:
+        # A fact rather than a label: the display name is configuration too and
+        # would be as stale as the identity beside it, so while the two disagree
+        # the page is headed by what Home Assistant is actually keyed on. The
+        # friendly name is a display value and its own one-restart staleness is
+        # not worth a second carried string.
+        heading = str(announced_identity)
+    elif resolved_identity:
         heading = settings.announced_friendly_name
     elif announcing:
         heading = CLEARED_IDENTITY_HEADING
@@ -497,9 +553,9 @@ def render_settings_page(
         f"<style>{_STYLE}</style></head><body>"
         f"<h1>{_escape(heading)}</h1>"
         f'<p class="lede">'
-        f"{_lede(settings, resolved_identity=resolved_identity, announcing=announcing)}"
+        f"{_lede(settings, resolved_identity=resolved_identity, announced_identity=announced_identity)}"
         f" {state}</p>"
-        f"{_identity_note(resolved_identity=resolved_identity, announcing=announcing)}"
+        f"{_identity_note(resolved_identity=resolved_identity, announcing=announcing, renamed=renamed)}"
         f"{_groundstation_note(settings)}"
         f"{''.join(notes)}{ignored}{unread}"
         '<form method="post" action="settings">'
