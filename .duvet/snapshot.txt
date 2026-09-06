@@ -469,3 +469,14 @@ SPECIFICATION: [Robot Link](docs/specs/robot-link/index.md)
   SECTION: [REQ-021: Detection geometry is resolution-independent](#req-021-detection-geometry-is-resolution-independent)
     TEXT[!MUST,implementation]: Positions in results MUST be expressed in normalised image coordinates rather
     TEXT[!MUST,implementation]: than pixels.
+
+SPECIFICATION: [Stock Robot Installation](docs/specs/stock-robot-installation/index.md)
+  SECTION: [REQ-099: Motion survives a daemon without torque confirmation](#req-099-motion-survives-a-daemon-without-torque-confirmation)
+    TEXT[implementation]: The satellite MUST command motion on a robot whose daemon offers no correlated
+    TEXT[implementation]: grouped-torque confirmation capability, treating that absence as nothing to gate
+    TEXT[implementation]: rather than as a motor group whose torque state could not be confirmed.
+
+  SECTION: [REQ-100: The motion-gating mode in force is reported](#req-100-the-motion-gating-mode-in-force-is-reported)
+    TEXT[implementation]: The satellite MUST report which motion-gating mode is in force and why, so that
+    TEXT[implementation]: an operator can tell an ungated stock robot from a confirmed one without
+    TEXT[implementation]: inferring it from whether the robot moved.

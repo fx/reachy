@@ -1126,7 +1126,14 @@ class TestTheLoop:
 
         status = application.status()
         assert status["pipeline"] == "idle"
-        assert set(status) == {"pipeline", "gaze", "tracking", "idle", "controller"}
+        assert set(status) == {
+            "pipeline",
+            "gaze",
+            "tracking",
+            "idle",
+            "controller",
+            "motion_gating",
+        }
         assert status["controller"] == {
             "mode": "unknown",
             "fault": "none",

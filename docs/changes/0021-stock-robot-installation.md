@@ -348,27 +348,27 @@ makes the stock-robot route real end to end, and registering the spec before its
 requirements have implementations to annotate would be a red traceability job
 waiting on work that does not exist.
 
-- [ ] Task 1 — Degrade to ungated motion on a daemon without torque
+- [x] Task 1 — Degrade to ungated motion on a daemon without torque
       confirmation (`apps/ha-satellite`)
-  - [ ] Expose the wrapped handle's correlated-torque surface on the
+  - [x] Expose the wrapped handle's correlated-torque surface on the
         `RobotHandle` protocol in `adapters/daemon.py` and update the fakes, so
         the probe answers for the object `_ConfirmedRobotHandle` wraps rather
         than for the wrapper, which always defines all three methods
-  - [ ] Probe it once at composition in `main.py` and build no coordinator when
+  - [x] Probe it once at composition in `main.py` and build no coordinator when
         the surface is absent, taking the existing ungated command path rather
         than adding a second one; deviate from this shape only with a reason
         stated in the pull request
-  - [ ] Leave the confirmed path's gating, quiescing, reseeding, ownership and
+  - [x] Leave the confirmed path's gating, quiescing, reseeding, ownership and
         terminal-release behaviour unchanged, and leave switch registration
         governed by the unconfirmed-group contract it already has
-  - [ ] Report the mode in force and the reason for it in `/status` and on the
+  - [x] Report the mode in force and the reason for it in `/status` and on the
         settings page's health surface, beside the bounded identifier-free motor
         diagnostics, with no credential or installation identifier
-  - [ ] Cover both modes, a present-but-failing capability, a partially
+  - [x] Cover both modes, a present-but-failing capability, a partially
         answering capability, motion under the ungated mode, the absence of
         switches under it, and shutdown and safe-hold behaviour in both, with
         fakes and no hardware
-  - [ ] Run the focused satellite suites and the repository checks required
+  - [x] Run the focused satellite suites and the repository checks required
         above
 
 - [ ] Task 2 — Start and configure without a shell on the robot

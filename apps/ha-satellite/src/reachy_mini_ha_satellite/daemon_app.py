@@ -52,6 +52,7 @@ from reachy_mini_ha_satellite.motor_control import (
     MotorConfirmation,
     MotorConfirmationOutcome,
     MotorEvidence,
+    TorqueConfirmationSupport,
 )
 
 if TYPE_CHECKING:
@@ -113,6 +114,16 @@ _TORQUE_OUTCOMES: Final = {
 _MISSING: Final = object()
 _MOTOR_CONFIRMATION_TIMEOUT_SECONDS: Final = 5.0
 
+# The whole of the correlated grouped-torque surface. All three are needed for a
+# confirmed transition — the two writes and the independent read that startup
+# and every refresh go through — so the capability is the set rather than any
+# one of them.
+_CONFIRMED_TORQUE_METHODS: Final = (
+    "enable_motors_confirmed",
+    "disable_motors_confirmed",
+    "read_motor_torque",
+)
+
 
 def _enum_value(value: object) -> str:
     """Read one SDK enum's bounded wire value without importing its type."""
@@ -141,6 +152,34 @@ class _ConfirmedRobotHandle:
 
     def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
         return self._confirmed("read_motor_torque", ids, "read", None)
+
+    #:= docs/specs/stock-robot-installation/index.md#req-099-motion-survives-a-daemon-without-torque-confirmation
+    #:% The satellite MUST command motion on a robot whose daemon offers no correlated
+    #:% grouped-torque confirmation capability, treating that absence as nothing to gate
+    #:% rather than as a motor group whose torque state could not be confirmed.
+    def torque_confirmation_support(self) -> TorqueConfirmationSupport:
+        """Report what the wrapped daemon object offers, not what this class does.
+
+        This is the only place that can answer it. Every method above exists on
+        this wrapper whatever the daemon can do, which is what lets an absent
+        surface produce an *unavailable* confirmation instead of an error — and
+        it is also what makes a `hasattr` against this object answer "yes" on a
+        stock robot, which is the wrong answer and the one that leaves the robot
+        standing still.
+
+        Returns:
+            `AVAILABLE` when the daemon has all three methods, `ABSENT` when it
+            has none, and `PARTIAL` in between.
+        """
+        present = sum(
+            callable(getattr(self._raw, name, None))
+            for name in _CONFIRMED_TORQUE_METHODS
+        )
+        if present == len(_CONFIRMED_TORQUE_METHODS):
+            return TorqueConfirmationSupport.AVAILABLE
+        if present == 0:
+            return TorqueConfirmationSupport.ABSENT
+        return TorqueConfirmationSupport.PARTIAL
 
     def _confirmed(
         self,

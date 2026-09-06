@@ -46,6 +46,7 @@ from reachy_mini_ha_satellite.motor_control import (
     MotorConfirmation,
     MotorConfirmationOutcome,
     MotorEvidence,
+    TorqueConfirmationSupport,
 )
 from reachy_mini_ha_satellite.ports import (
     AntennaPose,
@@ -1326,6 +1327,9 @@ class FakeRobot:
         motor_reads: Iterable[MotorConfirmation | BaseException] = (),
         motor_enables_confirmed: Iterable[MotorConfirmation | BaseException] = (),
         motor_disables_confirmed: Iterable[MotorConfirmation | BaseException] = (),
+        torque_confirmation_support: TorqueConfirmationSupport = (
+            TorqueConfirmationSupport.AVAILABLE
+        ),
         events: list[str] | None = None,
     ) -> None:
         """Wrap media and load deterministic feedback scripts.
@@ -1338,6 +1342,10 @@ class FakeRobot:
             motor_reads: Confirmed physical read results or failures.
             motor_enables_confirmed: Confirmed enable results or failures.
             motor_disables_confirmed: Confirmed disable results or failures.
+            torque_confirmation_support: What this fake daemon reports offering,
+                which is what the composition root's one probe reads. The
+                default is a daemon with the whole surface, so a test that says
+                nothing about it gets the confirmed path.
             events: Optional shared lifecycle event record.
         """
         self._media = media if media is not None else FakeMedia()
@@ -1349,6 +1357,8 @@ class FakeRobot:
         self.motor_reads = list(motor_reads)
         self.motor_enables_confirmed = list(motor_enables_confirmed)
         self.motor_disables_confirmed = list(motor_disables_confirmed)
+        self.torque_support = torque_confirmation_support
+        self.torque_probes = 0
         self.events = events if events is not None else []
         self.heads: list[PoseMatrix] = []
         self.antennas: list[list[float]] = []
@@ -1385,6 +1395,16 @@ class FakeRobot:
         self.motor_requests.append(("read", tuple(ids)))
         self.events.append("motors.read")
         return self._motor_confirmation(self.motor_reads, ids, True)
+
+    def torque_confirmation_support(self) -> TorqueConfirmationSupport:
+        """Report the scripted daemon capability the composition root probes.
+
+        Counted rather than recorded in `events`, which is an ordered record of
+        what this fake did *to the robot*. A probe touches no hardware, and
+        putting it there would move every index a lifecycle-ordering test takes.
+        """
+        self.torque_probes += 1
+        return self.torque_support
 
     @staticmethod
     def _motor_confirmation(

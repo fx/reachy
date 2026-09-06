@@ -61,7 +61,11 @@ Without that build the satellite **fails closed, and only there**: the daemon
 boundary finds no confirmation method, every group stays unconfirmed, and the
 application announces **no motor switch at all** rather than a switch whose state
 it made up. Bounded, identifier-free diagnostics record the missing confirmation.
-Nothing else changes. The groundstation URL text control, the live replacement
+Nothing else changes — **the robot still moves.** A daemon that cannot report
+torque has nothing to gate, so the satellite runs its ungated command path and
+says so: `/status` carries `motion_gating` as `{"mode": "ungated", "reason":
+"daemon_confirmation_absent"}`, and reports `"mode": "confirmed"` on a robot
+carrying the branch below. The groundstation URL text control, the live replacement
 behind it, and the groundstation's `/stream.mjpg` camera feed are unaffected by
 which `reachy-mini` the robot runs — they do not touch motors.
 

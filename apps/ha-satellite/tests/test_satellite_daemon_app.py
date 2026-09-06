@@ -51,6 +51,7 @@ from reachy_mini_ha_satellite.motor_control import (
     MotorGroup,
     MotorGroupCoordinator,
     MotorGroupLifecycle,
+    TorqueConfirmationSupport,
 )
 from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 
@@ -637,6 +638,100 @@ class TestBeingExecutedTheWayTheDaemonExecutesIt:
             runpy.run_module(_UNDER_TEST, run_name="__main__")
 
         assert raised.value.code == 0
+
+
+class TestTheCapabilityProbeAnswersForTheDaemon:
+    """REQ-099: which daemon this is, asked of the daemon and not of the wrapper."""
+
+    def test_a_stock_daemon_reports_the_surface_absent(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """A released `reachy-mini` offers none of the three, and says so.
+
+        The `hasattr` assertion is the whole reason this method exists: every
+        confirmed method is defined on the wrapper whatever the daemon can do,
+        so asking the wrapper for its attributes answers "yes" on a robot that
+        can confirm nothing — which is the answer that leaves it frozen.
+
+        Args:
+            daemon_app: The module under test.
+        """
+        bridge = daemon_app._ConfirmedRobotHandle(SimpleNamespace())
+
+        assert bridge.torque_confirmation_support() is TorqueConfirmationSupport.ABSENT
+        assert hasattr(bridge, "read_motor_torque")
+        assert hasattr(bridge, "enable_motors_confirmed")
+        assert hasattr(bridge, "disable_motors_confirmed")
+
+    def test_a_daemon_with_the_whole_surface_reports_it_available(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """The forked build, which is the one whose gating stays exactly as it is.
+
+        Args:
+            daemon_app: The module under test.
+        """
+        raw = SimpleNamespace(
+            enable_motors_confirmed=lambda _ids, **_kwargs: None,
+            disable_motors_confirmed=lambda _ids, **_kwargs: None,
+            read_motor_torque=lambda _ids, **_kwargs: None,
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        support = bridge.torque_confirmation_support()
+
+        assert support is TorqueConfirmationSupport.AVAILABLE
+
+    @pytest.mark.parametrize(
+        "present",
+        [
+            ("enable_motors_confirmed",),
+            ("read_motor_torque",),
+            ("enable_motors_confirmed", "disable_motors_confirmed"),
+            ("disable_motors_confirmed", "read_motor_torque"),
+        ],
+    )
+    def test_a_daemon_with_part_of_the_surface_reports_it_partial(
+        self,
+        daemon_app: ModuleType,
+        present: tuple[str, ...],
+    ) -> None:
+        """Some of the surface is not none of it, and is gated with the rest.
+
+        Args:
+            daemon_app: The module under test.
+            present: Which of the three methods this daemon offers.
+        """
+        raw = SimpleNamespace(
+            **{name: lambda _ids, **_kwargs: None for name in present}
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        support = bridge.torque_confirmation_support()
+
+        assert support is TorqueConfirmationSupport.PARTIAL
+
+    def test_an_attribute_that_is_not_callable_is_not_the_capability(
+        self,
+        daemon_app: ModuleType,
+    ) -> None:
+        """A name that happens to exist is not a method the coordinator can call.
+
+        Args:
+            daemon_app: The module under test.
+        """
+        raw = SimpleNamespace(
+            enable_motors_confirmed=object(),
+            disable_motors_confirmed=object(),
+            read_motor_torque=object(),
+        )
+        bridge = daemon_app._ConfirmedRobotHandle(raw)
+
+        support = bridge.torque_confirmation_support()
+
+        assert support is TorqueConfirmationSupport.ABSENT
 
 
 class TestConfirmedTorqueBoundary:
