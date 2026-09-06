@@ -7,23 +7,32 @@ the wheel and the release workflow attaches it to a GitHub release;
 is what puts the directory where the daemon can fetch it. Nothing about the
 application is duplicated: the Space is metadata pointing at one artifact.
 
-**Every refusal happens before anything is contacted**, and that is deliberate.
-There is no Hugging Face account, token or network in this repository's
-development environment, so the refusals are what can be — and are — covered by
-`scripts/tests/test_publish_app_source.py` without one. What cannot be covered
-there is the upload itself, which is why it is the last thing this file does and
-why `--dry-run` stops immediately before it.
+**Every refusal happens before the Space is created or written to**, and three
+of the four happen before anything at all is contacted. The four, in the order
+they are decided:
 
-The three things it refuses on, in order:
-
-- **No token.** Publishing needs one; the runbook says how to make it.
+- **No token.** Publishing needs one; the runbook says how to make it. Decided
+  locally.
 - **No target, or the wrong one.** The Space's repository name has to be the
   application's entry-point name. The daemon saves an installed application's
   metadata under the Space's name and reads it back under the entry-point name,
   so a Space called anything else installs and then loses its own metadata.
+  Decided locally.
 - **A source that does not agree with this checkout.** Publishing a source
   naming a version this repository has not released produces a Space that
-  installs nothing, and the operator finds out on the robot.
+  installs nothing, and the operator finds out on the robot. Decided locally,
+  by reading the committed files.
+- **A release that does not carry the wheel the source names.** This one *does*
+  reach the network: it is one `HEAD` request to the release asset, and it is
+  the only request any refusal makes. The alternative is a Space that downloads
+  and then fails to resolve its one requirement, minutes later, on the robot.
+
+There is no Hugging Face account, token or network in this repository's
+development environment, so the refusals are what can be — and are — covered by
+`scripts/tests/test_publish_app_source.py` without one: the three local ones
+directly, and the fourth through the opener it is handed. What cannot be covered
+there is the upload itself, which is why it is the last thing this file does and
+why `--dry-run` stops immediately before it.
 
 `--dry-run` performs all of it, including asking the release for the wheel, and
 stops before creating or writing to the Space.

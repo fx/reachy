@@ -517,6 +517,14 @@ waiting on work that does not exist.
   address or a path with an account in it, and the readings above are the whole
   of what they say that is not specific to one installation.
 
+- **What was executed off the robot.** The committed source was installed into an
+  empty virtual environment the way the daemon installs it — `uv pip install`
+  over the directory — and it built, installed, and reported
+  `Requires: reachy-mini-ha-satellite`. Only the requirement's resolution needs
+  the release that does not exist yet; the packaging half of REQ-104 is
+  therefore evidence rather than expectation, and what remains untested is the
+  download and the robot.
+
 - **The application source is published from here and has not been published.**
   That is the recorded prerequisite rather than a gap discovered late: there is
   no Hugging Face account or token in this development environment, so the

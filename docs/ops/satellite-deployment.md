@@ -219,8 +219,8 @@ Both answer with a job identifier — `{"job_id": "..."}` — and do the work in
 background.
 
 **What the daemon then does**, because it is worth knowing before reading an
-install log: it downloads the Space, checks the directory has a `pyproject.toml`
-or a `setup.py` in its root, and runs `uv pip install` over the directory
+install log: it downloads the Space, warns if the directory it got has neither a
+`pyproject.toml` nor a `setup.py` in its root, and runs `uv pip install` over it
 (falling back to `pip` when `uv` is absent) against the interpreter of the
 robot's **shared application environment** — a sibling of the daemon's own, which
 it creates and pre-populates with `reachy-mini` the first time an application is
@@ -401,8 +401,14 @@ is committed: both name an account, and this repository is public.
 
 ### What it refuses, and what that looks like
 
-Every refusal happens before anything is contacted, which is why they are
-covered by tests in a workspace with no account. Three of them, run here:
+Every refusal happens before the Space is created or written to, and the first
+three of the four — no token, a Space named something else, a source that has
+drifted from the checkout — before anything at all is contacted. The fourth
+makes one `HEAD` request to the release asset and nothing more. That is why all
+four are covered by tests in a workspace with no account.
+
+Three of them, run here with nothing exported, so each command carries what it
+needs:
 
 ```
 $ just publish-app-source --dry-run
@@ -410,20 +416,22 @@ publish-app-source: no Hugging Face token: set HF_TOKEN or HUGGING_FACE_HUB_TOKE
 ```
 
 ```
-$ REACHY_APP_SPACE_ID=<owner>/ha-satellite just publish-app-source --dry-run
+$ HF_TOKEN=<placeholder> REACHY_APP_SPACE_ID=<owner>/ha-satellite just publish-app-source --dry-run
 publish-app-source: REACHY_APP_SPACE_ID names the Space 'ha-satellite', and it has to be 'reachy-mini-ha-satellite': the daemon saves an installed application's metadata under the Space's name and reads it back under the entry-point name, so any other name installs and then cannot find what it recorded
 ```
 
 ```
-$ just publish-app-source --dry-run
+$ HF_TOKEN=<placeholder> REACHY_APP_SPACE_ID=<owner>/reachy-mini-ha-satellite just publish-app-source --dry-run
 publish-app-source: https://github.com/<owner>/<repository>/releases/download/v<version>/reachy_mini_ha_satellite-<version>-py3-none-any.whl answered 404: the release this source names does not carry that wheel yet. Publish the Space after the release, not before
 ```
 
 Those are transcripts, with the owner, the repository and the version replaced
-by their placeholders and the `just` invocation line cut. **The third one is the
-current state of this repository**: no release has been published yet, so the
-wheel the committed source names does not exist and publishing is correctly
-refused until one does.
+by their placeholders, the token that was passed replaced by the word
+`<placeholder>` — it never was one, and no request carrying it was made — and
+`just`'s own echo of the command it runs cut. **The third one is the current
+state of this repository**: no release has been published yet, so the wheel the
+committed source names does not exist and publishing is correctly refused until
+one does.
 
 It also refuses a source whose version has drifted from this checkout's, which
 is what a half-applied release bump looks like.

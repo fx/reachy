@@ -3,13 +3,14 @@
 Publishing itself cannot be tested here — there is no Hugging Face account in
 this repository's development environment, which is the recorded reason the
 Space is published by a person rather than by continuous integration. What can
-be tested is everything that happens before anything is contacted, and that is
-the part an operator meets: a missing token, a Space named something the daemon
-will not find its own metadata under, a source that has drifted from the wheel
-it names, and a release that does not carry that wheel yet.
+be tested is every refusal, and that is the part an operator meets: a missing
+token, a Space named something the daemon will not find its own metadata under,
+a source that has drifted from the wheel it names, and a release that does not
+carry that wheel yet.
 
-The last of those reaches a URL in the real script and a supplied function here,
-which is what the `Opener` protocol exists for.
+The first three are decided locally. The last one asks the release, which in the
+real script is one `HEAD` request and here is a supplied function — that is what
+the `Opener` protocol exists for, and it is the only reason the script has one.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -36,6 +37,7 @@ from publish_app_source import (
     resolve_space_id,
     resolve_token,
 )
+from pyfakefs.fake_filesystem import FakeFilesystem
 
 _VERSION: Final = "1.2.3"
 _WHEEL: Final = (
@@ -43,6 +45,13 @@ _WHEEL: Final = (
     "reachy_mini_ha_satellite-1.2.3-py3-none-any.whl"
 )
 _NAME: Final = "reachy-mini-ha-satellite"
+
+# Where the scaffolded sources below live. It is an in-memory filesystem, so any
+# absolute path works and none of this reaches a disk — which is why these are
+# ordinary unit tests and carry no `filesystem` marker. The bytes here are
+# scaffolding rather than a contract; the two tests that read the COMMITTED
+# source are the marked ones.
+_FAKE_ROOT: Final = Path("/publish-app-source-tests")
 
 
 def _manifest(directory: Path, requirement: str, version: str = _VERSION) -> Path:
@@ -120,10 +129,11 @@ class TestTheEntryPointName:
 
     def test_a_manifest_declaring_no_single_entry_point_is_refused(
         self,
-        tmp_path: Path,
+        fs: FakeFilesystem,
     ) -> None:
         """Two of them, or none, and there is no name for the Space to take."""
-        manifest = tmp_path / "pyproject.toml"
+        fs.create_dir(_FAKE_ROOT)
+        manifest = _FAKE_ROOT / "pyproject.toml"
         manifest.write_text("[project]\nname = 'x'\n", encoding="utf-8")
         with pytest.raises(
             PublishRefusalError, match="0 reachy_mini_apps entry points"
@@ -136,17 +146,21 @@ class TestTheCommittedSource:
 
     def test_one_requirement_naming_a_release_asset_is_read(
         self,
-        tmp_path: Path,
+        fs: FakeFilesystem,
     ) -> None:
         """The name half is dropped; the URL is what is checked and published."""
-        source = read_source(_manifest(tmp_path / "source", f"{_NAME} @ {_WHEEL}"))
+        fs.create_dir(_FAKE_ROOT)
+
+        source = read_source(_manifest(_FAKE_ROOT / "source", f"{_NAME} @ {_WHEEL}"))
 
         assert source == AppSource(version=_VERSION, wheel_url=_WHEEL)
 
-    def test_a_missing_source_is_refused_by_path(self, tmp_path: Path) -> None:
+    def test_a_missing_source_is_refused_by_path(self, fs: FakeFilesystem) -> None:
         """A refusal naming the path beats a traceback naming the same path."""
+        fs.create_dir(_FAKE_ROOT)
+
         with pytest.raises(PublishRefusalError, match="no application source at"):
-            read_source(tmp_path / "absent")
+            read_source(_FAKE_ROOT / "absent")
 
     @pytest.mark.parametrize(
         ("requirement", "expected"),
@@ -157,12 +171,13 @@ class TestTheCommittedSource:
     )
     def test_a_requirement_of_another_shape_is_refused(
         self,
-        tmp_path: Path,
+        fs: FakeFilesystem,
         requirement: str,
         expected: str,
     ) -> None:
         """A local path or an index lookup installs something unreleased."""
-        source_directory = _manifest(tmp_path / "source", requirement)
+        fs.create_dir(_FAKE_ROOT)
+        source_directory = _manifest(_FAKE_ROOT / "source", requirement)
         with pytest.raises(PublishRefusalError, match=expected):
             check_agrees_with_repository(read_source(source_directory), _VERSION)
 
