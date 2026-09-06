@@ -46,11 +46,10 @@ INTERPRETER: Final = "/venvs/mini_daemon/bin/python"
         "/usr/bin/python3.13t",
         "/usr/bin/python3.12d",
         "/usr/bin/python3.13td",
-        # Accepted on shape alone. There is no CPython 0 and no 3.100 yet, and
-        # encoding today's version numbers into a gate that has to outlive them
-        # would be the narrower mistake — the program still has to exist, be
-        # executable, and answer `-V` with a version.
-        "/usr/bin/python0",
+        # No CPython has shipped these yet. The gate has to outlive today's
+        # version numbers, so a future major and a distant minor both pass on
+        # shape; what it will not do is guess at a major that cannot exist.
+        "/usr/bin/python4",
         "/usr/bin/python3.100",
     ],
 )
@@ -86,6 +85,9 @@ def test_a_name_cpython_gives_an_interpreter_is_one(path: str) -> None:
         "/usr/bin/python27",
         "/usr/bin/python03",
         "/usr/bin/python3123",
+        # The one major version that cannot exist. Refusing it is not encoding
+        # today's version numbers — `python4` and `python9` still pass.
+        "/usr/bin/python0",
         # An ABI flag floating free of a full version. CPython names its
         # free-threaded and debug executables after `major.minor` —
         # `python3.13t`, never `python3t`.
