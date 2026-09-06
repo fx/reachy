@@ -860,10 +860,15 @@ different things produce this reading and they need different fixes.
 belongs to a setting that no longer exists. The message lists every variable the
 application does recognise.
 
-**It starts but Home Assistant never finds it.** Check `REACHY_SATELLITE_ADVERTISE`
-is on and that the robot and Home Assistant are on the same layer-2 network —
-mDNS does not cross a router. The boot log records the interface, the address and
-the port it advertised.
+**It starts but Home Assistant never finds it.** `/status` answers this before
+anything else does. `announcing: false` means nothing announcing was ever built,
+and `identity` says whether that is because nobody has named the robot — the
+state at the top of this page — or because the name was supplied to a process
+that had already started, in which case stop it and start it again. With
+`announcing: true`, check `REACHY_SATELLITE_ADVERTISE` is on and that the robot
+and Home Assistant are on the same layer-2 network — mDNS does not cross a
+router. The boot log records the interface, the address and the port it
+advertised.
 
 **Home Assistant found it, but as a new device.** The announced identity changed.
 Set `REACHY_SATELLITE_DEVICE_NAME` — and `REACHY_SATELLITE_MAC_ADDRESS` — back to

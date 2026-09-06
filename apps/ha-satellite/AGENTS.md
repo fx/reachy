@@ -308,6 +308,14 @@ deployment can get irreversibly wrong.
   preceding one. `/status` reports both (`announcing`, `announced_as`), and the
   settings page's five-way identity note and its "Announced to Home Assistant
   as" sentence are rendered from what was announced, never from the settings.
+  **This decision and the motion-gating one are independent, and a robot out of
+  its box is in both states at once**: no identity, so nothing announced, and a
+  released daemon with nothing to correlate, so motion ungated. Deriving either
+  from the other would be wrong on exactly that robot — a stock daemon says
+  nothing about whether anybody has named the robot, and a fork that can confirm
+  torque says nothing about whether it is safe to announce one.
+  `test_satellite_bootstrap.py` pins the intersection, which is the state
+  neither change could see on its own.
 - **An unresolved groundstation is unconfigured, not failed.**
   `config.groundstation_is_resolved` needs both the address and the credential,
   `main.build_remote_source` builds nothing without them, and `/status` reports

@@ -75,6 +75,7 @@ from reachy_mini_ha_satellite.main import (
     build_perception_source,
     build_remote_source,
 )
+from reachy_mini_ha_satellite.motor_control import TorqueConfirmationSupport
 from reachy_mini_ha_satellite.ports import SourceSelection
 from reachy_mini_ha_satellite.web import (
     CLEARED_IDENTITY_HEADING,
@@ -612,6 +613,105 @@ class TestNothingIsAnnouncedWhileTheIdentityIsUnresolved:
 
         assert application.status()["identity"] == "resolved"
         assert application.status()["announcing"] is False
+
+
+class TestTheStateAStockRobotIsActuallyIn:
+    """Both halves of a stock robot's first boot, which is one robot.
+
+    REQ-099/100 and REQ-101/102/103 were implemented as separate changes, and
+    each could only test its own half against a robot that was otherwise
+    ordinary: a configured robot on a stock daemon, or an unconfigured robot on
+    a daemon that confirms torque. **Neither is a robot anybody owns.** A Reachy
+    Mini out of its box has no announced identity *and* a released daemon with
+    no correlated-torque surface, so the two decisions land in the same process
+    on the same boot.
+
+    They are independent, and this is where that is pinned. The composition root
+    makes them separately — one probes the handle, the other reads the settings
+    — and reading either from the other would be wrong on exactly this robot:
+    a stock daemon says nothing about whether somebody has named the robot, and
+    an unnamed robot says nothing about what its daemon can confirm.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_reports_being_unconfigured_and_ungated_at_once(self) -> None:
+        """The first boot of a robot out of its box, in one status document."""
+        resolution = load_settings(STOCK, {})
+        robot = FakeRobot(
+            torque_confirmation_support=TorqueConfirmationSupport.ABSENT,
+        )
+
+        application = await build_application(
+            resolution,
+            robot,
+            identity=_identity(),
+        )
+        status = application.status()
+
+        assert status["identity"] == "unresolved"
+        assert status["announcing"] is False
+        assert status["announced_as"] is None
+        assert status["remote"] == "unconfigured"
+        assert status["motion_gating"] == {
+            "mode": "ungated",
+            "reason": "daemon_confirmation_absent",
+        }
+        # No coordinator, so no `motors` key — which is the reason
+        # `motion_gating` is top-level rather than nested under it.
+        assert "motors" not in status
+        assert application.motor_groups is None
+        assert _services(application) == {VolumeService, WebService}
+
+    @pytest.mark.asyncio
+    async def test_naming_it_does_not_gate_its_motion(self) -> None:
+        """The two decisions are independent, and one of the two ways to show it.
+
+        An identity is what an operator supplies from the settings page; it says
+        nothing about what the robot's daemon can confirm. A robot named on a
+        stock daemon announces, and still commands motion ungated.
+        """
+        robot = FakeRobot(
+            torque_confirmation_support=TorqueConfirmationSupport.ABSENT,
+        )
+
+        application = await build_application(
+            load_settings(NAMED, {}),
+            robot,
+            identity=_identity(),
+        )
+        status = application.status()
+
+        assert status["announcing"] is True
+        assert status["motion_gating"]["mode"] == "ungated"  # type: ignore[index]  # `status()` is a `dict[str, object]`; this key's shape is asserted whole above
+        assert application.motor_groups is None
+
+    @pytest.mark.asyncio
+    async def test_a_confirming_daemon_does_not_announce_an_unnamed_robot(
+        self,
+    ) -> None:
+        """And the other way, which is the direction that would be unsafe.
+
+        A daemon that can confirm torque says nothing about whether anybody has
+        named the robot. Deriving the embargo from the probe would announce an
+        unconfigured robot to Home Assistant the moment its daemon was capable
+        enough, which is REQ-102 failing on the robot the fork is installed on.
+        """
+        robot = FakeRobot(
+            torque_confirmation_support=TorqueConfirmationSupport.AVAILABLE,
+        )
+
+        application = await build_application(
+            load_settings(STOCK, {}),
+            robot,
+            identity=_identity(),
+        )
+        status = application.status()
+
+        assert status["announcing"] is False
+        assert status["motion_gating"]["mode"] == "confirmed"  # type: ignore[index]  # as above: the shape is asserted whole in the first test of this class
+        assert application.motor_groups is not None
+        assert _services(application) == {VolumeService, WebService}
+        await application.aclose()
 
 
 class TestRemotePerceptionIsOptionalAtFirstStart:
