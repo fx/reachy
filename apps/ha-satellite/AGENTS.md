@@ -306,11 +306,18 @@ deployment can get irreversibly wrong.
   `unconfigured` — the same distinction `reachy_checks` draws between a skipped
   check and a failed one. The first groundstation an operator supplies is adopted
   by `groundstation_url.GroundstationUrlOwner`, the transition REQ-095 already
-  owns, and not by a second path: supplying an address changes one and is
-  `_replace`, supplying the missing credential changes none and is
-  `_restore_if_unavailable`. The composition the perception chain gets is still
-  what `detection_source` declares, because `ReplaceableRemoteSource` has to stay
-  in that chain for the eventual source to be swapped in behind it.
+  owns, and not by a second path: **supplying or removing either half reaches
+  `_replace`**, because what selects that path is
+  `GroundstationUrlOwner._opens_a_different_session` and not the address on its
+  own. The address alone was the released condition and it is the wrong question
+  — a session needs both halves, so a submission that supplies or removes the
+  credential changes whether one exists while leaving the address untouched, and
+  sending it down the released branch left the running client answering under a
+  revoked secret with every surface reporting the source as available. Rotating a
+  credential from one value to another is deliberately not a transition and stays
+  restart-bound. The composition the perception chain gets is still what
+  `detection_source` declares, because `ReplaceableRemoteSource` has to stay in
+  that chain for the eventual source to be swapped in behind it.
 - **The overrides layer cannot supply a setting the settings page depends on.**
   An override sits above the environment, so it can only be undone by writing
   another one — and a page that had written one of these wrongly is the page

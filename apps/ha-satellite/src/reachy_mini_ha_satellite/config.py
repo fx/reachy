@@ -74,7 +74,8 @@ type that will not print itself — and it is the one reveal site because it is
 also the one place a session client is constructed, at startup and for every
 later replacement alike. Everywhere else it is read only to be tested for
 emptiness and discarded — `resolved_configuration` choosing between `<set>` and
-`<unset>`, and the coherence check refusing a session with no credential.
+`<unset>`, and `groundstation_is_resolved` deciding whether a session can be
+opened at all.
 `test_satellite_config.py` and `test_satellite_web_settings.py` assert that a
 credential carrying a tab, a newline and a backslash appears in no rendering of
 any surface — raw, escaped, or `repr`'d.
@@ -362,11 +363,16 @@ class Settings(BaseSettings):
             while live body calibration remains provisional.
         detection_source: Which detector answers — see ha-satellite REQ-047.
         groundstation_url: Where the groundstation serves its session endpoint.
-            Required by every selection but `local`. Capped at
+            **Not required.** Empty is the unresolved state, in which no session
+            is opened and every surface reports the remote detector as
+            *unconfigured* — see `groundstation_is_resolved`. Capped at
             `GROUNDSTATION_URL_MAX_LENGTH` because Home Assistant's text entity
             reports it, and changeable while the application runs — see
             `groundstation_url.GroundstationUrlOwner`.
         groundstation_credential: The shared secret presented to open a session.
+            Not required either, and unresolved on the same terms: one half
+            without the other opens nothing, so a configuration holding only one
+            of them is as unconfigured as one holding neither.
         frame_interval_seconds: How long between frames submitted to the
             groundstation.
         staleness_seconds: How long a detection stays worth acting on. Past it
