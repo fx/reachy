@@ -9,8 +9,11 @@ a source that has drifted from the wheel it names, and a release that does not
 carry that wheel yet.
 
 The first three are decided locally. The last one asks the release, which in the
-real script is one `HEAD` request and here is a supplied function — that is what
+real script is a `HEAD` request and here is a supplied function — that is what
 the `Opener` protocol exists for, and it is the only reason the script has one.
+The one thing a supplied function cannot see is what happens to the redirect
+GitHub answers a release asset with, so `TestFollowingTheRedirect` asks the
+redirect handler directly.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -18,8 +21,11 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import io
 import re
 import urllib.error
+import urllib.request
+from http.client import HTTPMessage
 from pathlib import Path
 from typing import Any, Final
 
@@ -29,6 +35,7 @@ from publish_app_source import (
     SOURCE_DIRECTORY,
     SPACE_VARIABLE,
     AppSource,
+    KeepHeadOnRedirect,
     PublishRefusalError,
     check_agrees_with_repository,
     check_release_asset,
@@ -261,3 +268,39 @@ class TestTheReleaseAsset:
 
         with pytest.raises(PublishRefusalError, match="answered 302"):
             check_release_asset(_WHEEL, opener)
+
+
+class TestFollowingTheRedirect:
+    """A release asset is always a redirect, and a `GET` would download it.
+
+    Neither test opens anything: `redirect_request` is asked directly what
+    follow-up request it would build, which is the whole of the behaviour that
+    matters and the only part a supplied opener cannot see.
+    """
+
+    @staticmethod
+    def _follow(handler: urllib.request.HTTPRedirectHandler) -> str | None:
+        """Ask a handler what method it would follow a redirected `HEAD` with."""
+        original = urllib.request.Request(
+            "https://example.invalid/asset.whl",
+            method="HEAD",
+        )
+
+        redirected = handler.redirect_request(
+            original,
+            io.BytesIO(b""),
+            302,
+            "Found",
+            HTTPMessage(),
+            "https://example.invalid/elsewhere/asset.whl",
+        )
+
+        return None if redirected is None else redirected.get_method()
+
+    def test_the_handler_keeps_the_method(self) -> None:
+        """Otherwise `--dry-run` downloads the wheel it is asking about."""
+        assert self._follow(KeepHeadOnRedirect()) == "HEAD"
+
+    def test_the_standard_library_does_not(self) -> None:
+        """Which is why the subclass exists — and when it can be deleted."""
+        assert self._follow(urllib.request.HTTPRedirectHandler()) == "GET"

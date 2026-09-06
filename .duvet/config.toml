@@ -101,7 +101,8 @@
 #     REQ-104 is about. REQ-104 is additionally the third requirement in this
 #     repository cited from a file that is neither Python nor a workflow — the
 #     `Justfile` recipe that publishes the source — because the source directory
-#     itself is two files duvet is not pointed at, and the recipe plus the
+#     itself is a manifest, a Space card and a static page, in none of the
+#     comment syntaxes duvet is pointed at, and the recipe plus the
 #     contract test over the committed bytes are the mechanism.
 #
 # The rule that governed the order also governs anything added later: a new spec
@@ -240,8 +241,8 @@ format = "markdown"
 # point at which every requirement had an implementation to annotate.
 #
 # REQ-104 is cited from the `Justfile` and from the contract test over the
-# committed source. The published source is two files — a project manifest and a
-# Space card — in neither of the comment syntaxes duvet is pointed at here, and
+# committed source. The published source is a project manifest, a Space card and
+# a static page, in none of the comment syntaxes duvet is pointed at here, and
 # adding a `[[source]]` block for a directory whose files carry no annotations
 # would register a pattern that can never match. The recipe that publishes it and
 # the test that holds its bytes to the wheel it names are the mechanism, and they

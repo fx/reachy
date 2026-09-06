@@ -54,7 +54,7 @@ that apply here.
 | `src/reachy_mini_ha_satellite/web/` | The settings interface REQ-049 requires |
 | `src/reachy_mini_ha_satellite/main.py` | The composition root: ports to adapters, the loop, and the four services |
 | `src/reachy_mini_ha_satellite/daemon_app.py` | The `reachy_mini_apps` entry point, and the ONLY module that imports the SDK |
-| `app-source/` | The published application source: two files and no code, naming the released wheel, which is what the robot's own daemon installs |
+| `app-source/` | The published application source: a manifest, a Space card and a static page — no code — naming the released wheel, which is what the robot's own daemon installs |
 | `tests/support/satellite_support.py` | The fake for every port, plus the fakes the adapters' own tests need |
 | `tests/` | The carried upstream tests, with their own `LICENSE` and `NOTICE`, plus this repository's own |
 

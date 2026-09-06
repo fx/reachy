@@ -157,8 +157,9 @@ daemon's dashboard where the dashboard offers it.
 ### A1. Know the Space
 
 The application source is published as a Hugging Face Space named
-`<owner>/reachy-mini-ha-satellite`. It is a directory of two files and no code:
-it names one released wheel, and installing it installs that wheel. It is
+`<owner>/reachy-mini-ha-satellite`. It is three files and no code — a project
+manifest, the Space's card, and the static page the Space serves — and the
+manifest names one released wheel, so installing it installs that wheel. It is
 committed at [`apps/ha-satellite/app-source/`](../../apps/ha-satellite/app-source/)
 and published from there, so what a robot installs is reviewable here —
 [Publishing the application source](#publishing-the-application-source) is how it
@@ -404,8 +405,10 @@ is committed: both name an account, and this repository is public.
 Every refusal happens before the Space is created or written to, and the first
 three of the four — no token, a Space named something else, a source that has
 drifted from the checkout — before anything at all is contacted. The fourth
-makes one `HEAD` request to the release asset and nothing more. That is why all
-four are covered by tests in a workspace with no account.
+asks the release asset with `HEAD`, follows GitHub's redirect for it as a `HEAD`
+as well, and reads no body: a dry run cannot download the wheel it is asking
+about. That is why all four are covered by tests in a workspace with no
+account.
 
 Three of them, run here with nothing exported, so each command carries what it
 needs:

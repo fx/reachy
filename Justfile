@@ -831,10 +831,11 @@ publish := "uv run --locked --all-packages --group publish"
 # Every refusal — no token, a Space whose name the daemon will not find its own
 # metadata under, a source that has drifted from this checkout, a release that
 # does not carry the wheel yet — happens before the Space is created or written
-# to, and the first three before anything at all is contacted. The fourth makes
-# one `HEAD` request to the release asset, which is the only request a refusal
-# makes and the only reason a test needs a fake for one. `--dry-run` runs all of
-# it and stops before creating or writing to the Space.
+# to, and the first three before anything at all is contacted. The fourth asks
+# the release asset with `HEAD` — following GitHub's redirect as a `HEAD` too,
+# so a dry run can never download the wheel it is asking about — and that is the
+# only network any refusal touches. `--dry-run` runs all of it and stops before
+# creating or writing to the Space.
 #
 # Publishing follows a release rather than preceding it: the source names a
 # release asset, and a Space published first points at a wheel that is not

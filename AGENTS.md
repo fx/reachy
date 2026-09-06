@@ -20,7 +20,7 @@ one-line import of this file and holds no content of its own.
 | `packages/reachy-contracts/` | Shared wire types and golden fixtures (`reachy_contracts`) |
 | `packages/reachy-checks/` | The one definition of what a healthy installation is (`reachy_checks`) |
 | `packages/reachy-session-client/` | The one client half of the robot link (`reachy_session_client`) |
-| `apps/ha-satellite/` | Robot-side ESPHome voice satellite (`reachy_mini_ha_satellite`). Its `app-source/` is the published application source the robot's own daemon installs — two files naming the released wheel, and no second copy of the code |
+| `apps/ha-satellite/` | Robot-side ESPHome voice satellite (`reachy_mini_ha_satellite`). Its `app-source/` is the published application source the robot's own daemon installs — a manifest naming the released wheel, the Space's card and a static page, and no second copy of the code |
 | `services/groundstation/` | Off-robot capability host (`reachy_groundstation`) |
 | `cli/reachyctl/` | Command-line tool (`reachyctl`) |
 | `bench/` | Performance suite, the committed baseline and the regression gate (`reachy_bench`); a member, never published |

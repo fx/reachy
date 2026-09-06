@@ -23,9 +23,11 @@ they are decided:
   installs nothing, and the operator finds out on the robot. Decided locally,
   by reading the committed files.
 - **A release that does not carry the wheel the source names.** This one *does*
-  reach the network: it is one `HEAD` request to the release asset, and it is
-  the only request any refusal makes. The alternative is a Space that downloads
-  and then fails to resolve its one requirement, minutes later, on the robot.
+  reach the network — a `HEAD` request to the release asset, and the redirect
+  GitHub answers it with, followed as a `HEAD` so that nothing is ever
+  downloaded. It is the only network any refusal touches. The alternative is a
+  Space that downloads, builds, and then fails to resolve its one requirement,
+  minutes later, on the robot.
 
 There is no Hugging Face account, token or network in this repository's
 development environment, so the refusals are what can be — and are — covered by
@@ -48,12 +50,13 @@ import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from http.client import HTTPMessage
 from pathlib import Path
-from typing import Final, Protocol
+from typing import IO, Final, Protocol
 
 from reachy_contracts import __version__
 
-# Where the two files this publishes live, relative to this script.
+# Where the directory this publishes lives, relative to this script.
 _REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 SOURCE_DIRECTORY: Final = _REPOSITORY_ROOT / "apps" / "ha-satellite" / "app-source"
 APPLICATION_MANIFEST: Final = (
@@ -90,8 +93,8 @@ _RELEASE_ASSET: Final = re.compile(
 )
 
 # The one status that means the release carries the wheel. A redirect is not
-# it: `urlopen` follows those already, so anything else arriving here is the
-# asset being somewhere other than where the source says.
+# it — `KeepHeadOnRedirect` follows those, as `HEAD` — so anything else arriving
+# here is the asset being somewhere other than where the source says.
 _FOUND: Final = 200
 
 # The requirement's `name @ url` form, split rather than parsed with a
@@ -108,8 +111,8 @@ class Opener(Protocol):
     """Answers whether a URL is there, without reading it.
 
     A protocol so the release-asset check is exercised without a network: the
-    real implementation makes one `HEAD` request, and a test supplies a function
-    that returns a status.
+    real implementation asks with `HEAD` and reads no body, and a test supplies
+    a function that returns a status.
     """
 
     def __call__(self, url: str, /) -> int:
@@ -245,16 +248,52 @@ def check_agrees_with_repository(source: AppSource, version: str) -> str:
     return version
 
 
-def _head(url: str) -> int:
-    """Ask a URL for its status and read nothing of it.
+class KeepHeadOnRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect with the method the original request used.
 
-    The two suppressions below are the audited-URL rule, and what audits this
-    one is `check_agrees_with_repository`: nothing reaches here that
-    `_RELEASE_ASSET` has not already matched, so the scheme is `https` and the
-    host is `github.com` by construction rather than by trust.
+    `HTTPRedirectHandler.redirect_request` builds the follow-up request without
+    a method, so `urlopen` retries a redirected `HEAD` as a `GET`. A GitHub
+    release asset is *always* a redirect to a content host, so without this the
+    question "is that wheel published" would answer itself by downloading the
+    wheel — several megabytes, from a `--dry-run`, in a command whose whole
+    contract is that it reads nothing.
+
+    `test_publish_app_source.py` pins both halves: that this preserves the
+    method, and that the base class does not. If the second ever fails, the
+    standard library has fixed it and this class can go.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        """Return the base class's follow-up request, with the method restored."""
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            redirected.method = req.get_method()
+        return redirected
+
+
+# Built once. `build_opener` drops the default redirect handler in favour of a
+# subclass of it, which is exactly what this is.
+_OPENER: Final = urllib.request.build_opener(KeepHeadOnRedirect())
+
+
+def _head(url: str) -> int:
+    """Ask a URL for its status, following redirects as `HEAD`, and read nothing.
+
+    The suppression below is the audited-URL rule, and what audits this one is
+    `check_agrees_with_repository`: nothing reaches here that `_RELEASE_ASSET`
+    has not already matched, so the scheme is `https` and the host is
+    `github.com` by construction rather than by trust.
     """
     request = urllib.request.Request(url, method="HEAD")  # noqa: S310  # see above
-    with urllib.request.urlopen(request, timeout=30) as answer:  # noqa: S310  # ditto
+    with _OPENER.open(request, timeout=30) as answer:
         status: int = answer.status
         return status
 
