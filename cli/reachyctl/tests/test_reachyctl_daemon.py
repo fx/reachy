@@ -1128,15 +1128,17 @@ async def test_an_environment_that_changed_under_the_client_is_named() -> None:
     assert "--python" in str(raised.value)
 
 
-@pytest.mark.parametrize("version", ["3.12.3", "3.13.0rc1"])
+@pytest.mark.parametrize("version", ["3.12.3", "3.13.0rc1", "3.13.0rc1+"])
 @pytest.mark.asyncio
 async def test_a_complete_version_is_accepted_including_a_pre_release(
     version: str,
 ) -> None:
-    """The pattern is the shape `-V` produces, and a pre-release is one of them.
+    """The pattern is the shape `-V` produces, and these are all of them.
 
-    Narrower than what CPython prints would refuse a real interpreter, which
-    costs an operator a `--python` for no safety at all.
+    A pre-release carries a release-level suffix and one built from a checkout
+    carries a `+`. Narrower than what CPython prints would refuse a real
+    interpreter, which costs an operator a link and a `--python` for no safety
+    at all.
 
     Args:
         version: What the interpreter answers with.

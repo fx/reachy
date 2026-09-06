@@ -175,14 +175,22 @@ _EXEC_PATH: Final = re.compile(r"path=(\S+)")
 # split across them, and an OPTIONAL minor and patch admit the eight characters
 # `Python 3`, which any wrapper can print by accident.
 #
-# So the pattern is the shape `-V` actually produces and nothing else: major,
-# minor and patch, and the release-level suffix CPython appends to a
-# pre-release — `Python 3.12.3`, `Python 3.13.0rc1`. Anything an interpreter
-# would not print is refused, and refusal is safe: the next candidate is tried,
-# and a robot where none answers gets a named error rather than a program handed
-# Python source on the strength of two characters.
+# So the pattern is the shape `-V` produces: major, minor and patch, then the
+# release-level suffix CPython appends to a pre-release, then the `+` one built
+# from a checkout appends — `Python 3.12.3`, `Python 3.13.0rc1`,
+# `Python 3.13.0rc1+`. The last two are why this is not simply three numbers:
+# refusing a real interpreter is a failure too, and a source-built one is a
+# robot somebody has.
+#
+# It does not claim the converse. A string no interpreter prints may still fit
+# the shape, and that costs nothing — the program still had to exist, be
+# executable, and answer with it. What matters is that everything an
+# interpreter DOES print is accepted and that `Python 3` is not, and where a
+# build prints something else again the refusal is visible: the next candidate
+# is tried, and a robot where none answers gets a named error rather than a
+# program handed Python source on the strength of two characters.
 _VERSION_FLAG: Final = "-V"
-_VERSION_ANSWER: Final = re.compile(r"Python \d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?")
+_VERSION_ANSWER: Final = re.compile(r"Python \d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?\+?")
 
 # systemd's own spelling for "this unit is running".
 _ACTIVE: Final = "active"

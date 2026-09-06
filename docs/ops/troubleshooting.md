@@ -511,7 +511,8 @@ resolves it from the robot, in this order:
 
 1. what `--python` names, when an operator named one;
 2. the unit's start program, **only** when its file name is one CPython gives an
-   interpreter — `python`, `python3`, `python3.12`;
+   interpreter — `python`, `python3`, `python3.12`, or one of those carrying
+   a build's ABI flags, such as `python3.13t`;
 3. the `VIRTUAL_ENV` the unit declares;
 4. the environment the start program is installed in, read off a
    `…/lib/pythonX.Y/site-packages/…` path.
