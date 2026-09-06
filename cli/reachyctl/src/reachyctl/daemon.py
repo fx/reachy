@@ -98,8 +98,15 @@ _EXEC_PATH: Final = re.compile(r"path=(\S+)")
 # answers. A flag, deliberately, and never source: the point of the whole
 # resolution is that nothing unproven is handed a program to run, and `-V` asks
 # a question no interpreter can misread and no launcher is given the chance to.
+#
+# The answer is matched as a real version and not as the word alone. This step
+# is the one that ESTABLISHES what everything after it assumes, so it has to be
+# something a program cannot pass by accident: a wrapper that exits zero having
+# written the word `Python` — or nothing but a banner containing it — is not an
+# interpreter, and admitting it would hand `-c '<python source>'` to whatever it
+# really is.
 _VERSION_FLAG: Final = "-V"
-_VERSION_ANSWER: Final = "Python "
+_VERSION_ANSWER: Final = re.compile(r"\APython \d+(?:\.\d+)*")
 
 # systemd's own spelling for "this unit is running".
 _ACTIVE: Final = "active"
@@ -432,9 +439,10 @@ class DaemonClient:
                 claim an interpreter, unless an operator named it themselves.
 
         Returns:
-            True when it answered with a version line. A path that is not there,
-            is not executable, or answered with anything else is not an
-            interpreter and the next candidate is tried.
+            True when it answered with an actual version — `Python 3.12.3`, not
+            merely the word. A path that is not there, is not executable, or
+            answered with anything else is not an interpreter and the next
+            candidate is tried.
         """
         outcome = await self._run([path, _VERSION_FLAG])
         if not outcome.ok:
@@ -442,7 +450,7 @@ class DaemonClient:
         # Python 3 writes the version to standard output; older ones wrote it to
         # standard error, and a robot is not this tool's choice of interpreter.
         answer = (outcome.stdout or outcome.stderr).strip()
-        return answer.startswith(_VERSION_ANSWER)
+        return _VERSION_ANSWER.match(answer) is not None
 
     async def installed_versions(self, *distributions: str) -> dict[str, str]:
         """Ask the daemon's environment what versions it holds.

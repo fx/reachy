@@ -108,9 +108,11 @@ class FakeRobot:
         exec_start: The program in the unit's `ExecStart`, or empty when the
             unit declares none. It is the daemon's entry point, which on some
             images is an interpreter and on the stock one is a launcher.
-        interpreters: Every path on this robot that really is a Python
-            interpreter, and the version it answers with. Anything else asked
-            for its version says there is no such file.
+        interpreters: Every path on this robot that answers `-V`, and the
+            version it answers with. Anything else asked for its version says
+            there is no such file. An EMPTY version models the impostor: a
+            program that exits zero having written the word and no version,
+            which is not an interpreter and must not be treated as one.
         wrapper_runs: Every command sent to the unit's start program while that
             program is not an interpreter. Each one started a second daemon, so
             a test asserting REQ-106 asserts this is empty.

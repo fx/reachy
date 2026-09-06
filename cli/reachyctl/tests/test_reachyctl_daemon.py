@@ -236,6 +236,25 @@ async def test_an_environment_with_no_interpreter_in_it_is_named_not_guessed_at(
 
 
 @pytest.mark.asyncio
+async def test_a_program_that_answers_with_the_word_and_no_version_is_not_one() -> None:
+    """The probe establishes what everything after it assumes, so it cannot be lax.
+
+    A program named `python` that exits zero having written the word — a banner,
+    a wrapper's usage line — is not an interpreter, and admitting it would hand
+    `-c '<python source>'` to whatever it really is. The next candidate is tried
+    instead, which here is the environment the launcher is installed in.
+    """
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={"/venvs/impostor/bin/python": "", STOCK_INTERPRETER: "3.12.3"},
+        environment={"VIRTUAL_ENV": "/venvs/impostor"},
+    )
+    daemon, _access = daemon_for(robot)
+
+    assert await daemon.interpreter() == STOCK_INTERPRETER
+
+
+@pytest.mark.asyncio
 async def test_a_declared_interpreter_that_is_not_there_is_reported_as_tried() -> None:
     """The unit's start program was a candidate on its name and still had to answer.
 
