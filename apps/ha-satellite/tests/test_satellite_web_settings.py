@@ -53,7 +53,12 @@ from reachy_mini_ha_satellite.groundstation_url import (
     GroundstationUrlOwner,
     ReplaceableRemoteSource,
 )
-from reachy_mini_ha_satellite.web import CLEAR_PREFIX, create_app, form_value
+from reachy_mini_ha_satellite.web import (
+    CLEAR_PREFIX,
+    UNCONFIGURED_HEADING,
+    create_app,
+    form_value,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -94,6 +99,11 @@ class RecordingHost:
         # write beginning, or `None` for a write nothing raced.
         self.interleaved: Mapping[str, str] | None = None
         self.stops = 0
+        # Whether an announcing surface was built. True is the configured robot
+        # every test but the bootstrap ones is about; the page reads it to tell
+        # "an identity was just supplied" from "this process announces under
+        # one", which is a distinction only the application can make.
+        self.announcing = True
         self.events: tuple[dict[str, object], ...] = (
             public_controller_diagnostic_event(),
         )
@@ -110,6 +120,9 @@ class RecordingHost:
             "gaze": "unknown",
             "tracking": False,
             "idle": True,
+            "identity": "resolved",
+            "announcing": self.announcing,
+            "remote": "available",
         }
 
     def apply_live(self, settings: Settings) -> None:
@@ -656,10 +669,15 @@ class TestRotatingTheCredential:
         assert host.applied[-1].groundstation_credential.get_secret_value() == ""
 
     @pytest.mark.asyncio
-    async def test_unsetting_one_a_session_needs_is_refused_with_a_reason(
-        self,
-    ) -> None:
-        """Rather than accepted and found later as a robot connecting to nothing."""
+    async def test_unsetting_one_leaves_the_groundstation_unconfigured(self) -> None:
+        """REQ-103. It used to be refused; now the page says what it left behind.
+
+        Removing the credential is how an operator un-configures a
+        groundstation, and refusing it made that impossible without a shell. The
+        submission is accepted, the address is left exactly as it was, and the
+        page comes back saying the remote detector is unconfigured rather than
+        failed — which is the state the robot is now in.
+        """
         host = RecordingHost()
         settings = load_settings(ENVIRONMENT, {}).settings
         fields = {f"{CLEAR_PREFIX}groundstation_credential": "1"}
@@ -670,10 +688,12 @@ class TestRotatingTheCredential:
                 content=_form(settings, **fields),
                 headers=_FORM_HEADERS,
             )
+            page = (await client.get("/")).text
 
-        assert response.status_code == 400
-        assert "GROUNDSTATION_CREDENTIAL" in response.text
-        assert host.applied == []
+        assert response.status_code == 303
+        assert host.applied[-1].groundstation_credential.get_secret_value() == ""
+        assert host.applied[-1].groundstation_url == settings.groundstation_url
+        assert "unconfigured</strong> rather than failed" in page
 
 
 class TestResettingAndRestarting:
@@ -955,17 +975,40 @@ class TestWhenTheChangeCannotBeWritten:
         assert host.applied == []
 
     @pytest.mark.asyncio
-    async def test_resetting_into_an_unusable_environment_is_refused(self) -> None:
-        """A robot configured entirely from this page must not be able to brick itself."""
+    async def test_resetting_away_the_only_identity_leaves_it_unresolved(self) -> None:
+        """REQ-101. It resolves — to the unresolved state — so it is not refused.
+
+        This used to be a refusal, on the grounds that a robot configured
+        entirely from this page must not be able to brick itself. There is
+        nothing left to brick: an environment with no identity starts, serves
+        this page and announces nothing, so the honest outcome is a reset that
+        succeeds and a page that says so.
+        """
         environ = {f"{ENV_PREFIX}FACE_TRACKING_ENABLED": "false"}
         _store().save({"device_name": "reachy-mini-1"})
 
         async with _client(_app(RecordingHost(), environ=environ)) as client:
             response = await client.post("/reset")
+            page = (await client.get("/")).text
+
+        assert response.status_code == 303
+        assert _store().load() == {}
+        assert UNCONFIGURED_HEADING in page
+
+    @pytest.mark.asyncio
+    async def test_resetting_into_an_unusable_environment_is_still_refused(
+        self,
+    ) -> None:
+        """Unresolved is not unusable, and a value the model rejects is refused."""
+        environ = {f"{ENV_PREFIX}IDLE_SECONDS": "not-a-number"}
+        _store().save({"idle_seconds": "6.0"})
+
+        async with _client(_app(RecordingHost(), environ=environ)) as client:
+            response = await client.post("/reset")
 
         assert response.status_code == 400
-        assert "DEVICE_NAME" in response.text
-        assert _store().load() == {"device_name": "reachy-mini-1"}
+        assert "IDLE_SECONDS" in response.text
+        assert _store().load() == {"idle_seconds": "6.0"}
 
 
 class TestTheFormIsUsableWithoutSeeingIt:

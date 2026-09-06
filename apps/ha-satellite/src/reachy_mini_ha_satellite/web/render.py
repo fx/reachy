@@ -20,12 +20,16 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Literal, get_args, get_origin
 
 from reachy_mini_ha_satellite.config import (
+    GROUNDSTATION_CREDENTIAL_SETTING,
     GROUNDSTATION_URL_MAX_LENGTH,
     GROUNDSTATION_URL_SETTING,
+    IDENTITY_SETTING,
     LIVE_SETTINGS,
     SECRET_SETTINGS,
     Settings,
     as_configured_string,
+    groundstation_is_resolved,
+    identity_is_resolved,
 )
 
 if TYPE_CHECKING:
@@ -35,10 +39,17 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CLEAR_PREFIX",
+    "UNCONFIGURED_HEADING",
     "field_choices",
     "form_value",
     "render_settings_page",
 ]
+
+#: What the page calls a robot that has not been given an identity yet. A robot
+#: with no announced name has no name to head the page with either, and heading
+#: it with an empty string would leave an operator on a page that looks broken
+#: at exactly the moment they most need it to look deliberate.
+UNCONFIGURED_HEADING: Final = "This robot is not configured yet"
 
 #: How a form asks for a secret to be unset rather than left alone. An empty
 #: password field means "leave it as it is", because that is what a browser
@@ -204,6 +215,112 @@ def _field(report: SettingReport, settings: Settings) -> str:
     )
 
 
+def _lede(settings: Settings, *, resolved_identity: bool) -> str:
+    """Say what this robot announces itself as, or that it announces nothing.
+
+    Args:
+        settings: The settings in effect.
+        resolved_identity: Whether an identity has been supplied.
+
+    Returns:
+        The first sentence of the page.
+    """
+    if not resolved_identity:
+        return (
+            "Nothing is announced to Home Assistant: this robot has no "
+            "announced identity yet."
+        )
+    return (
+        f"Announced to Home Assistant as <code>{_escape(settings.device_name)}</code>."
+    )
+
+
+#:= docs/specs/stock-robot-installation/index.md#req-102-nothing-is-announced-while-the-identity-is-unresolved
+#:% The satellite MUST NOT announce itself to Home Assistant, or serve a Home
+#:% Assistant connection, while its announced identity is unresolved.
+def _identity_note(*, resolved_identity: bool, announcing: bool | None) -> str:
+    """Render the standing note about the announced identity.
+
+    Three states rather than one, and they are three because the identity is
+    restart-bound. A robot with no identity is being told what the embargo is
+    and how to leave it; a robot with an identity supplied to a process that
+    started without one is being told the embargo is still in force and why; a
+    robot that is announcing is being told the thing it has always been told,
+    which is not to change the value.
+
+    `announcing` is `None` for a page with no application behind it — the
+    rendering-only composition the composition root never produces. There is
+    nothing running to be announcing or not, so the middle state is not one that
+    page can be in and it renders the standing hazard instead.
+
+    Args:
+        resolved_identity: Whether an identity has been supplied.
+        announcing: Whether an announcing surface was built, or `None` when
+            nothing is running behind this page.
+
+    Returns:
+        One note.
+    """
+    if not resolved_identity:
+        return (
+            '<div class="note hazard"><strong>Nothing is announced to Home '
+            "Assistant until <code>"
+            f"{_escape(IDENTITY_SETTING)}</code> is set.</strong> No device is "
+            "registered, no entity exists and no Home Assistant connection is "
+            "served, so there is nothing here for a later identity to collide "
+            "with. Set it below and save.<br><br>Choose the name now and never "
+            "change it: Home Assistant keys the device on it, so a later change "
+            "registers a second device, every entity identifier gains a suffix, "
+            "history detaches and automations referencing the old identifiers "
+            "stop matching. Upgrading an existing installation means setting it "
+            "to whatever the previous application announced.<br><br>The "
+            "announcing surface is built when the application starts, so after "
+            "saving press <em>Stop</em> below and start it again from the robot "
+            "dashboard — no shell, and no reinstall.</div>"
+        )
+    if announcing is False:
+        return (
+            '<div class="note hazard"><strong>An identity is set, and this '
+            "application started without one, so it is still announcing "
+            "nothing.</strong> Press <em>Stop</em> below and start it again "
+            "from the robot dashboard — the daemon leaves a cleanly-stopped "
+            "application stopped.</div>"
+        )
+    return (
+        '<div class="note hazard"><strong>Do not change '
+        "<code>device_name</code> on a robot Home Assistant already knows.</strong> "
+        "Home Assistant keys the device on it: a new name registers a new "
+        "device, every entity identifier gains a suffix, history detaches, and "
+        "automations referencing the old identifiers stop matching.</div>"
+    )
+
+
+#:= docs/specs/stock-robot-installation/index.md#req-103-remote-perception-is-optional-at-first-start
+#:% The satellite MUST start with an unresolved groundstation address or credential
+#:% and run on local detection until both are supplied through a configuration
+#:% surface.
+def _groundstation_note(settings: Settings) -> str:
+    """Say that an unsupplied groundstation is unconfigured rather than broken.
+
+    Args:
+        settings: The settings in effect.
+
+    Returns:
+        The note, or nothing at all when a groundstation is configured.
+    """
+    if groundstation_is_resolved(settings):
+        return ""
+    return (
+        '<div class="note">No groundstation is configured, so the remote '
+        "detector is <strong>unconfigured</strong> rather than failed: no "
+        "session is opened, nothing is connecting and nothing is being retried. "
+        f"Set both <code>{_escape(GROUNDSTATION_URL_SETTING)}</code> and "
+        f"<code>{_escape(GROUNDSTATION_CREDENTIAL_SETTING)}</code> below — one "
+        "without the other opens nothing — and a running application adopts "
+        "them without a restart.</div>"
+    )
+
+
 def _resolved_table(report: Sequence[SettingReport]) -> str:
     """Render the resolved configuration, defaults included.
 
@@ -225,12 +342,17 @@ def _resolved_table(report: Sequence[SettingReport]) -> str:
     )
 
 
+#:= docs/specs/stock-robot-installation/index.md#req-101-an-unresolved-identity-starts-the-application-rather-than-stopping-it
+#:% The satellite MUST start and serve its settings interface when no announced
+#:% identity has been configured, reporting the identity as unresolved rather than
+#:% refusing to start.
 def render_settings_page(
     resolution: Resolution,
     report: Sequence[SettingReport],
     *,
     status: Mapping[str, object],
     overrides_path: str,
+    announcing: bool | None = None,
     error: str | None = None,
     saved: Sequence[str] = (),
     restart_needed: Sequence[str] = (),
@@ -242,6 +364,12 @@ def render_settings_page(
         report: The same, rendered with secrets redacted.
         status: What the robot is doing right now.
         overrides_path: Where a change written here is kept.
+        announcing: Whether the application behind this page built an announcing
+            surface, or `None` when there is no application behind it. Taken
+            from the application rather than inferred from the settings, because
+            the identity is restart-bound: one supplied a moment ago is resolved
+            configuration and still nothing announced, and that gap is precisely
+            what an operator on this page needs told.
         error: What went wrong with the last submission, if anything.
         saved: Which settings the last submission changed.
         restart_needed: Which of those need the application restarted.
@@ -250,6 +378,15 @@ def render_settings_page(
         One self-contained HTML document.
     """
     settings = resolution.settings
+    resolved_identity = identity_is_resolved(settings)
+    # A robot with no announced identity has no name to head the page with —
+    # not even the display name, since heading it with one would imply a
+    # configured robot. The title is the heading on its own in that state,
+    # because "This robot is not configured yet settings" is nobody's tab.
+    heading = (
+        settings.announced_friendly_name if resolved_identity else UNCONFIGURED_HEADING
+    )
+    title = f"{heading} settings" if resolved_identity else heading
     notes: list[str] = []
     if error is not None:
         notes.append(
@@ -300,16 +437,13 @@ def render_settings_page(
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{_escape(settings.announced_friendly_name)} settings</title>"
+        f"<title>{_escape(title)}</title>"
         f"<style>{_STYLE}</style></head><body>"
-        f"<h1>{_escape(settings.announced_friendly_name)}</h1>"
-        f'<p class="lede">Announced to Home Assistant as '
-        f"<code>{_escape(settings.device_name)}</code>. {state}</p>"
-        '<div class="note hazard"><strong>Do not change '
-        "<code>device_name</code> on a robot Home Assistant already knows.</strong> "
-        "Home Assistant keys the device on it: a new name registers a new "
-        "device, every entity identifier gains a suffix, history detaches, and "
-        "automations referencing the old identifiers stop matching.</div>"
+        f"<h1>{_escape(heading)}</h1>"
+        f'<p class="lede">{_lede(settings, resolved_identity=resolved_identity)} '
+        f"{state}</p>"
+        f"{_identity_note(resolved_identity=resolved_identity, announcing=announcing)}"
+        f"{_groundstation_note(settings)}"
         f"{''.join(notes)}{ignored}{unread}"
         '<form method="post" action="settings">'
         "<table><thead><tr><th>Setting</th><th>Value</th><th></th></tr></thead>"

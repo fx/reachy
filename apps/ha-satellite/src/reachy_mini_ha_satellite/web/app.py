@@ -45,6 +45,17 @@ So the button stops the satellite and the operator starts it again from the
 daemon's own dashboard — which is a web interface, so REQ-049's "without a
 shell" holds either way. Claiming a restart the daemon does not perform would
 leave an operator looking at a robot that had gone quiet.
+
+**This page is also the first-time configuration surface**, which is stock-robot
+installation REQ-101 and is the reason it is served before the announced identity
+exists. On a robot reached only through the surfaces its shipped image exposes,
+this and the daemon's own dashboard are the whole of what an operator has, so a
+refusal to start without an identity made the identity unsuppliable. It now
+renders an explicit unconfigured state instead — see `render._identity_note` and
+`render._groundstation_note` — and saving one is the ordinary restart-bound path
+the *Stop* button already exists for. Nothing is announced in the meantime, which
+is REQ-102 and is enforced in `main.build_application` rather than here: this
+page's job is to say so, not to hold the line.
 """
 
 from __future__ import annotations
@@ -194,8 +205,10 @@ def _default_string(name: str) -> str:
         name: Which setting.
 
     Returns:
-        The default as a string, or the empty string for the one setting that
-        has no default and for every secret — whose value is never rendered.
+        The default as a string, and the empty string for every secret — whose
+        value is never rendered. The announced identity's own default *is* the
+        empty string, which is the unresolved state rather than a name, so it
+        needs no special case here.
     """
     if name in SECRET_SETTINGS:
         return ""
@@ -496,10 +509,15 @@ def create_app(
             request: The form submission, read only for where it came from.
 
         Returns:
-            A redirect to the page, or the page again with the refusal on it —
-            which is what happens when the environment on its own is not usable,
-            because the announced identity was only ever set from here. Nothing
-            is written in that case: the resolve comes first.
+            A redirect to the page, or the page again with the refusal on it
+            when the environment on its own does not resolve. Nothing is written
+            in that case: the resolve comes first.
+
+            **Discarding an identity that was only ever set from here is not
+            such a case.** It resolves, to the unresolved state — REQ-101 — so
+            the reset succeeds and the page comes back saying nothing is
+            announced. Which is honest: the value is gone, and the process
+            announcing under it is still doing so until it is stopped.
         """
         if not _from_this_page(request):
             return _refuse_cross_site()
@@ -801,11 +819,17 @@ def _page(
     running: dict[str, object] = (
         {"running": False} if application is None else application.status()
     )
+    # `None` rather than False when there is no application, because the page
+    # renders three different things and "nothing is running behind this page"
+    # is not the same state as "something is running and announcing nothing".
+    # See `render._identity_note`.
+    announcing = None if application is None else bool(running.get("announcing"))
     return render_settings_page(
         resolution,
         configuration_report(resolution),
         status=running,
         overrides_path=str(store.path),
+        announcing=announcing,
         error=error,
         saved=saved,
         restart_needed=restart_needed,

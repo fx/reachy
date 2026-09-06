@@ -576,6 +576,10 @@ def _application(
         perception=perception,
         behaviour=behaviour or SatelliteBehaviour(now=0.0),
         motor_groups=motor_groups,
+        # The configured robot these tests are about: an announcing surface was
+        # built, so capture is started and there is something to feed. A robot
+        # with none is `test_satellite_bootstrap.py`.
+        announcing=True,
         services=services,
         clock=_advancing(),
         sleep=_wait,
@@ -1131,6 +1135,9 @@ class TestTheLoop:
             "gaze",
             "tracking",
             "idle",
+            "identity",
+            "announcing",
+            "remote",
             "controller",
             "motion_gating",
         }

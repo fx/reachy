@@ -480,3 +480,17 @@ SPECIFICATION: [Stock Robot Installation](docs/specs/stock-robot-installation/in
     TEXT[implementation]: The satellite MUST report which motion-gating mode is in force and why, so that
     TEXT[implementation]: an operator can tell an ungated stock robot from a confirmed one without
     TEXT[implementation]: inferring it from whether the robot moved.
+
+  SECTION: [REQ-101: An unresolved identity starts the application rather than stopping it](#req-101-an-unresolved-identity-starts-the-application-rather-than-stopping-it)
+    TEXT[implementation]: The satellite MUST start and serve its settings interface when no announced
+    TEXT[implementation]: identity has been configured, reporting the identity as unresolved rather than
+    TEXT[implementation]: refusing to start.
+
+  SECTION: [REQ-102: Nothing is announced while the identity is unresolved](#req-102-nothing-is-announced-while-the-identity-is-unresolved)
+    TEXT[implementation]: The satellite MUST NOT announce itself to Home Assistant, or serve a Home
+    TEXT[implementation]: Assistant connection, while its announced identity is unresolved.
+
+  SECTION: [REQ-103: Remote perception is optional at first start](#req-103-remote-perception-is-optional-at-first-start)
+    TEXT[implementation]: The satellite MUST start with an unresolved groundstation address or credential
+    TEXT[implementation]: and run on local detection until both are supplied through a configuration
+    TEXT[implementation]: surface.

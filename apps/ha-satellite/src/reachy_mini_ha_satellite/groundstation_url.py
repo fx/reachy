@@ -56,13 +56,28 @@ leaves remote health unavailable with the preceding address durable and local
 detection working, which is the honest state rather than a second client
 alongside a first that may be alive.
 
-**A transition that would leave no source at all is refused.** Whether a session
-exists is decided by settings that take effect at the next start, so a
-submission changing one of them together with the address would close the
-running source, install nothing, commit and report success. The decision is read
-off the factory's own answer — no candidate while one is running — rather than
-off a list of the settings that produce it, which is a list that goes stale
-without anything noticing.
+**A transition that would leave no source at all is refused, unless it is an
+operator unconfiguring the groundstation.** Whether a session exists is decided
+by settings that take effect at the next start, so a submission changing one of
+them together with the address would close the running source, install nothing,
+commit and report success. The decision is read off the factory's own answer — no
+candidate while one is running — rather than off a list of the settings that
+produce it, which is a list that goes stale without anything noticing. Clearing
+the address itself is the one submission for which that outcome is what was
+asked for: stock-robot installation REQ-103 makes an unresolved groundstation a
+state the robot can be in, and a robot that could enter it only at startup would
+be one an operator could point at a wrong groundstation and not un-point without
+a restart.
+
+**Arriving at the first groundstation is this same transition and not another
+one.** REQ-103 lets the application start with the address or the credential
+unsupplied, so `main.build_remote_source` answers `None` and the chain begins
+with no delegate. Supplying an address then changes it, which is `_replace` — the
+path REQ-095 already owns — and supplying a credential beside an address already
+in the environment changes no address, which is `_restore_if_unavailable`
+building the source the preceding resolution could not. Neither is a second write
+path, and that is deliberate: a first resolution that bypassed this owner would
+be one whose durable value could outrun what the robot adopted.
 
 **In a running application, every write to the overrides file goes through this
 owner's lock, and serializing them is a separate job from owning the address.**
@@ -111,6 +126,7 @@ from reachy_mini_ha_satellite.config import (
     ConfigurationError,
     OverrideMerge,
     apply_settings_change,
+    groundstation_is_resolved,
     resolve_submission,
     validate_groundstation_url_length,
 )
@@ -632,8 +648,24 @@ class GroundstationUrlOwner:
             return applied
         return await self._replace(wanted, resolved)
 
+    #:= docs/specs/stock-robot-installation/index.md#req-103-remote-perception-is-optional-at-first-start
+    #:% The satellite MUST start with an unresolved groundstation address or credential
+    #:% and run on local detection until both are supplied through a configuration
+    #:% surface.
     async def _restore_if_unavailable(self) -> None:
         """Begin one fresh restoration for a submission that changed no address.
+
+        **It is also how the first groundstation arrives when only the
+        credential was missing.** REQ-103 starts the application with an
+        unresolved groundstation, and an address already in the daemon's
+        environment with no credential beside it is exactly that state: the
+        factory answered `None`, so there is no delegate. Supplying the
+        credential changes no address, so `_apply` takes its released branch and
+        arrives here — where `remote_available` is False and the resolution now
+        in effect is the one carrying the credential, so the attempt builds the
+        source the preceding one could not. Nothing had to be written for this
+        case; it falls out of the resolution being replaced before the attempt
+        reads it, and the test suite pins that ordering.
 
         Resubmitting the address already in effect is what an operator does once
         a groundstation they were told is unreachable comes back, and short of a
@@ -724,7 +756,11 @@ class GroundstationUrlOwner:
         # retired, so closing the candidate is the whole compensation.
         await self._abort_if_overtaken(generation, candidate)
 
-        if candidate is None and self._source.delegate is not None:
+        if (
+            candidate is None
+            and self._source.delegate is not None
+            and groundstation_is_resolved(resolved.settings)
+        ):
             # The submitted configuration opens no session while one is running.
             # Retiring into nothing would close the live source, install
             # nothing, commit and report success — a satellite that has stopped
@@ -732,6 +768,15 @@ class GroundstationUrlOwner:
             # from the factory's own answer rather than from a list of the
             # settings that produce it, so it keeps holding when that list
             # grows.
+            #
+            # **Unless the submission is an operator unconfiguring the
+            # groundstation**, which REQ-103 makes a representable state rather
+            # than an accident. Clearing the address is a request to retire into
+            # nothing, said in as many words, and refusing it would leave a
+            # robot that had been pointed at the wrong groundstation unable to
+            # stop pointing at it without a restart. The condition asks the
+            # submitted configuration rather than counting the settings that
+            # changed, so it stays a question about what was asked for.
             raise ConfigurationError(_RETIRES_INTO_NOTHING_MESSAGE)
 
         retired = self._source.detach()

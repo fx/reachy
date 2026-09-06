@@ -280,10 +280,37 @@ deployment can get irreversibly wrong.
   "was this written against the old behaviour?" — a claim that something is
   redundant, immediate, or a duplicate is the kind that rots silently, and the
   kind whose rotting deletes code.
-- **The announced Home Assistant identity has no default.** `device_name` is
-  required and the application refuses to start without it. Home Assistant keys
-  a device on what it announces, so a derived default would be correct on a
-  fresh install and silently destructive on an upgrade. Do not add one.
+- **The announced Home Assistant identity has no default, and an unresolved one
+  is a state rather than a refusal.** Home Assistant keys a device on what it
+  announces, so a default derived from the package name, the host name or the
+  hardware address would be correct on a fresh install and silently destructive
+  on an upgrade. **Do not add one.** What changed with stock-robot installation
+  REQ-101 is where the refusal lands: `device_name` defaults to the empty string,
+  `config.identity_is_resolved` is the one question anything asks about it, and
+  the application starts, serves its settings interface and serves `/status`
+  without one. An identity the model *rejects* is still fatal — "not supplied"
+  and "not acceptable" are different answers.
+  **The embargo that makes that safe is structural and lives in one place.**
+  `main.build_application` builds no `ServerState` when the identity is
+  unresolved, so there is no entity, no pipeline tap, no ESPHome listener and no
+  mDNS record to have been suppressed — REQ-102 is an absence of machinery
+  rather than a guard at each announcing call site, and a test that asserts the
+  machinery was never constructed keeps holding as services are added. Do not
+  reintroduce announcing under a placeholder, and do not stand the announcing
+  surface up mid-process: `SatelliteApplication` reports `announcing` from what
+  was *built*, and the settings page's three-way note depends on that being what
+  it says.
+- **An unresolved groundstation is unconfigured, not failed.**
+  `config.groundstation_is_resolved` needs both the address and the credential,
+  `main.build_remote_source` builds nothing without them, and `/status` reports
+  `unconfigured` — the same distinction `reachy_checks` draws between a skipped
+  check and a failed one. The first groundstation an operator supplies is adopted
+  by `groundstation_url.GroundstationUrlOwner`, the transition REQ-095 already
+  owns, and not by a second path: supplying an address changes one and is
+  `_replace`, supplying the missing credential changes none and is
+  `_restore_if_unavailable`. The composition the perception chain gets is still
+  what `detection_source` declares, because `ReplaceableRemoteSource` has to stay
+  in that chain for the eventual source to be swapped in behind it.
 - **The overrides layer cannot supply a setting the settings page depends on.**
   An override sits above the environment, so it can only be undone by writing
   another one — and a page that had written one of these wrongly is the page

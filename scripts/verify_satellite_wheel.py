@@ -77,10 +77,30 @@ ENTRY_POINT_TARGET = "reachy_mini_ha_satellite.daemon_app:ReachyMiniHaSatellite"
 ENTRY_POINT_MODULE = ENTRY_POINT_TARGET.split(":", 1)[0]
 
 # What the entry module's `main` returns when the configuration is unusable:
-# EX_CONFIG. It is the status the launch check expects, because a satellite
-# started with nothing configured refuses to start and says why — see
-# `_execution_problems`.
+# EX_CONFIG. It is the status the launch check expects, because the launch below
+# hands it a configuration it must refuse — see `_execution_problems`.
 EX_CONFIG = 78
+
+# The unusable configuration the launch is given, and the reason the check needs
+# one at all.
+#
+# This used to be the *empty* configuration: `device_name` had no default, so a
+# satellite started with nothing set refused before it reached anything a robot
+# would be needed for. Stock-robot installation REQ-101 removed that refusal on
+# purpose — an application that will not start cannot serve the settings page an
+# identity is supplied through — so an empty configuration now starts, reaches
+# for the robot handle, and fails somewhere in the SDK stub with whatever status
+# that produces. That is not a signal; it is an accident that happens to be
+# non-zero.
+#
+# A variable matching the prefix that names no setting is the refusal that
+# survives, and it is a better one: architecture REQ-009 makes it fatal by
+# contract rather than by a default the next change might supply, and the
+# refusal happens in exactly the same place — `load_settings`, before the handle
+# is touched. So the evidence the launch check rests on is unchanged: reaching
+# EX_CONFIG with something written to standard error means the `__main__` guard
+# ran, called `main`, and got as far as the code that reads a configuration.
+UNRECOGNISED_VARIABLE = f"{ENV_PREFIX}NOT_A_SETTING"
 
 # How long the entry module gets before the check gives up on it. It refuses
 # within about a second, because the refusal happens before anything is built;
@@ -336,16 +356,18 @@ def _launch_environment(
     `site-packages` still supplies the third-party dependencies, exactly as the
     daemon's shared application environment does on the robot.
 
-    **Every `REACHY_SATELLITE_*` variable is dropped.** The check reads a
-    refusal to start as the proof that the module runs, so a machine that
-    happens to have the satellite configured must not turn that refusal into a
-    real startup.
+    **Every `REACHY_SATELLITE_*` variable is dropped, and exactly one bogus one
+    is put back.** The check reads a refusal to start as the proof that the
+    module runs, so a machine that happens to have the satellite configured must
+    not turn that refusal into a real startup — and since REQ-101 an *empty*
+    configuration is no longer refused at all. `UNRECOGNISED_VARIABLE` records
+    why the refusal is now an unrecognised name rather than a missing identity.
 
     **The state directory is pointed at somewhere empty.** `state_dir` is a
     bootstrap setting read straight from the environment, and it is where the
     settings interface's overrides file lives. Left alone, a robot's real
-    overrides would be read and could supply the one setting whose absence this
-    relies on.
+    overrides would be read, and this check would be reporting on that robot's
+    configuration rather than on the wheel.
 
     Args:
         stub_root: The directory holding the stand-in SDK.
@@ -365,6 +387,7 @@ def _launch_environment(
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment[variable_for("state_dir")] = str(state_dir)
+    environment[UNRECOGNISED_VARIABLE] = "1"
     return environment
 
 
@@ -584,12 +607,14 @@ def _execution_problems(
     """Say whether the daemon's launch actually starts anything.
 
     **The distinction this rests on, and why it needs no robot.** The module is
-    run with nothing configured, which the satellite refuses: `device_name` has
-    no default and cannot have one, so `main` catches the `ConfigurationError`,
-    writes it to standard error and returns EX_CONFIG. That refusal is not a
-    disappointment here — it is the evidence, because reaching it means the
-    module's `__main__` guard ran, called `main`, and got as far as the code
-    that reads a configuration.
+    run with a configuration the satellite must refuse — one prefixed variable
+    naming no setting, which architecture REQ-009 makes fatal — so `main` catches
+    the `ConfigurationError`, writes it to standard error and returns EX_CONFIG.
+    That refusal is not a disappointment here: it is the evidence, because
+    reaching it means the module's `__main__` guard ran, called `main`, and got
+    as far as the code that reads a configuration. `UNRECOGNISED_VARIABLE`
+    records why it is that refusal rather than the missing-identity one this
+    check used before REQ-101.
 
     A module with no `__main__` guard cannot produce any of that. Under
     `python -m` it imports, finds nothing to do and exits **0, silently**. The
@@ -621,7 +646,7 @@ def _execution_problems(
     if completed.returncode != EX_CONFIG:
         return [
             f"`python -m {module}` exited {completed.returncode} rather than "
-            f"refusing an empty configuration with {EX_CONFIG}: "
+            f"refusing an unusable configuration with {EX_CONFIG}: "
             f"{_tail(completed.stderr)}",
         ]
     if not completed.stderr.strip():
@@ -822,8 +847,8 @@ def main(argv: list[str]) -> int:
     print(
         f"satellite wheel: {path.name} carries {len(ASSETS)} registered assets, "
         f"their licence texts, and the {ENTRY_POINT_GROUP} entry point, whose "
-        f"module {ENTRY_POINT_MODULE} starts and refuses an empty configuration "
-        f"when run the way the daemon runs it",
+        f"module {ENTRY_POINT_MODULE} starts and refuses an unusable "
+        f"configuration when run the way the daemon runs it",
     )
     return 0
 

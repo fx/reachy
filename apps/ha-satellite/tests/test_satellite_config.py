@@ -5,8 +5,14 @@ Four things are under test here and they are not the same thing.
 **Refusing.** A variable under this application's prefix that names no setting
 is fatal and says which one it was — architecture REQ-009, and the direct remedy
 for the predecessor bug where every override was inert because the function
-reading them was never called. The announced identity being unset is fatal too,
-and its message has to explain *why* rather than merely that it is missing.
+reading them was never called.
+
+**Resolving, which is not refusing.** The announced identity and the
+groundstation may be *unresolved*, which stock-robot installation REQ-101 and
+REQ-103 make states rather than failures: `load_settings` returns them, and the
+notices that explain them still have to say *why* rather than merely that
+something is missing. An identity the contract rejects is a different answer and
+is still fatal.
 
 **Layering.** Defaults, then the environment, then the overrides the settings
 interface writes — in that order, so REQ-049 holds for a setting somebody has
@@ -51,6 +57,10 @@ from reachy_mini_ha_satellite.config import (
     canonical_string,
     configuration_report,
     declared_elsewhere,
+    groundstation_is_resolved,
+    groundstation_unresolved_notice,
+    identity_is_resolved,
+    identity_unresolved_notice,
     load_settings,
     log_resolved_configuration,
     overrides_path,
@@ -208,33 +218,81 @@ class TestTheSharedVocabularyIsNotATypo:
 
 
 class TestTheAnnouncedIdentity:
-    """ha-satellite REQ-040: no default, and a refusal that explains why."""
+    """ha-satellite REQ-040 and REQ-101: no derived default, and no refusal."""
 
-    def test_startup_fails_when_the_identity_is_unset(self) -> None:
-        """There is no derived default, so there is nothing to fall back to."""
-        with pytest.raises(ConfigurationError) as raised:
-            load_settings({}, {})
+    def test_an_unset_identity_resolves_rather_than_refusing(self) -> None:
+        """REQ-101. The surface that supplies it is the one a refusal hid."""
+        resolution = load_settings({}, {})
 
-        assert variable_for(IDENTITY_SETTING) in str(raised.value)
+        assert resolution.settings.device_name == ""
+        assert not identity_is_resolved(resolution.settings)
 
-    def test_the_refusal_explains_the_hazard_rather_than_the_omission(self) -> None:
+    def test_the_notice_explains_the_hazard_rather_than_the_omission(self) -> None:
         """A message saying only "missing" would invite somebody to invent one."""
-        with pytest.raises(ConfigurationError) as raised:
-            load_settings({}, {})
+        message = identity_unresolved_notice()
 
-        message = str(raised.value)
+        assert variable_for(IDENTITY_SETTING) in message
         assert "registers a new one" in message
         assert "history detaches" in message
         assert "repackaged" in message
 
-    def test_a_blank_identity_is_refused_like_an_absent_one(self) -> None:
-        """Because an operator who cleared it did not mean to disable the check."""
-        with pytest.raises(ConfigurationError):
-            load_settings({f"{ENV_PREFIX}DEVICE_NAME": "   "}, {})
+    def test_the_notice_leads_with_the_embargo(self) -> None:
+        """The fact that makes an unconfigured robot safe, said first."""
+        assert "Nothing is announced to Home Assistant until it is" in (
+            identity_unresolved_notice()
+        )
 
-    def test_the_model_declares_no_default_for_it(self) -> None:
-        """Stated here so that adding one is a red run rather than a review miss."""
-        assert Settings.model_fields[IDENTITY_SETTING].is_required()
+    def test_a_blank_identity_is_unresolved_like_an_absent_one(self) -> None:
+        """Because an operator who cleared it did not mean to announce spaces."""
+        resolution = load_settings({f"{ENV_PREFIX}DEVICE_NAME": "   "}, {})
+
+        assert not identity_is_resolved(resolution.settings)
+
+    def test_an_identity_the_contract_rejects_is_still_refused(self) -> None:
+        """REQ-101's third scenario. Absent and invalid are different answers."""
+        with pytest.raises(ConfigurationError) as raised:
+            load_settings({f"{ENV_PREFIX}DEVICE_NAME": "r" * 65}, {})
+
+        assert variable_for(IDENTITY_SETTING) in str(raised.value)
+
+    def test_the_model_derives_no_default_for_it(self) -> None:
+        """Stated here so that adding one is a red run rather than a review miss.
+
+        The empty default is the unresolved state and not a name: anything
+        derived from the package name, the host name or the hardware address
+        would be correct on a fresh installation and silently destructive on an
+        upgrade, which is what REQ-040 exists to prevent and what REQ-101 did
+        not change.
+        """
+        assert Settings.model_fields[IDENTITY_SETTING].default == ""
+        assert not identity_is_resolved(load_settings({}, {}).settings)
+
+    def test_a_supplied_identity_is_resolved(self) -> None:
+        """The other half of the same question, so neither can be vacuous."""
+        assert identity_is_resolved(load_settings(MINIMAL, {}).settings)
+
+    def test_the_boot_log_says_both_states_out_loud(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A dump of settings at their defaults does not say what is embargoed.
+
+        An operator reading a boot log has to be able to tell "nothing is
+        announced because nothing has been configured" from "the announcement
+        failed", and the same for the groundstation. Neither is visible in the
+        resolved values themselves.
+
+        Args:
+            caplog: Where the boot log is captured.
+        """
+        resolution = load_settings({}, {})
+
+        with caplog.at_level(logging.INFO):
+            log_resolved_configuration(resolution)
+
+        assert "configuration.identity_unresolved" in caplog.text
+        assert "configuration.groundstation_unresolved" in caplog.text
+        assert "unconfigured rather than failed" in caplog.text
 
     def test_the_display_name_falls_back_to_the_announced_one(self) -> None:
         """A display name is safe to change; the announced identity is not."""
@@ -414,12 +472,40 @@ class TestSecretsAreNeverReported:
 class TestCoherence:
     """Combinations that parse and then produce a robot that does nothing."""
 
-    def test_remote_detection_without_an_address_is_refused(self) -> None:
-        """Rather than a robot that silently never tracks anything."""
-        with pytest.raises(ConfigurationError) as raised:
-            load_settings({f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1"}, {})
+    def test_remote_detection_without_an_address_resolves_unconfigured(self) -> None:
+        """REQ-103. It used to be refused, which stopped a stock robot dead."""
+        resolution = load_settings({f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1"}, {})
 
-        assert variable_for("groundstation_url") in str(raised.value)
+        assert not groundstation_is_resolved(resolution.settings)
+
+    def test_an_address_without_a_credential_is_unresolved_too(self) -> None:
+        """One half opens nothing, so it is not a configured groundstation."""
+        environ = {
+            f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1",
+            f"{ENV_PREFIX}GROUNDSTATION_URL": "ws://192.0.2.10:8080/v1/session",
+        }
+
+        resolution = load_settings(environ, {})
+
+        assert not groundstation_is_resolved(resolution.settings)
+
+    def test_a_credential_without_an_address_is_unresolved_too(self) -> None:
+        """The mirror of it, so neither half can be mistaken for the whole."""
+        environ = {
+            f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1",
+            f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": "example-credential",
+        }
+
+        resolution = load_settings(environ, {})
+
+        assert not groundstation_is_resolved(resolution.settings)
+
+    def test_the_unconfigured_notice_says_unconfigured_not_failed(self) -> None:
+        """The distinction the whole of REQ-103's health reporting turns on."""
+        message = groundstation_unresolved_notice()
+
+        assert "unconfigured rather than failed" in message
+        assert variable_for(GROUNDSTATION_URL_SETTING) in message
 
     def test_local_detection_without_a_model_is_refused(self) -> None:
         """The weights are not in the wheel, so the path has to be supplied."""
@@ -964,17 +1050,31 @@ class TestTheGroundstationAddressCarriesNoCredential:
 
         assert "hunter2" not in str(raised.value)
 
-    def test_a_session_source_with_no_credential_is_refused(self) -> None:
-        """It would raise out of the client three layers down instead."""
+    def test_an_address_is_still_checked_while_its_credential_is_missing(
+        self,
+    ) -> None:
+        """REQ-103 stops the credential being fatal; it does not stop this check.
+
+        The reason the address is refused is redaction rather than coherence —
+        it is rendered by value on the boot log, the settings page and
+        `/config`, so one carrying user information has to be stopped before the
+        first of those is emitted. An unresolved credential does not make that
+        any less true, and skipping the check for a half-configured
+        groundstation would be the one arrangement in which a credential-bearing
+        address is both accepted and reported.
+        """
         environ = {
             f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1",
-            f"{ENV_PREFIX}GROUNDSTATION_URL": "ws://192.0.2.10:8080/v1/session",
+            f"{ENV_PREFIX}GROUNDSTATION_URL": (
+                "ws://someone:hunter2@192.0.2.10:8080/v1/session"
+            ),
         }
 
         with pytest.raises(ConfigurationError) as raised:
             load_settings(environ, {})
 
-        assert variable_for("groundstation_credential") in str(raised.value)
+        assert variable_for(GROUNDSTATION_URL_SETTING) in str(raised.value)
+        assert "hunter2" not in str(raised.value)
 
     def test_the_local_selection_needs_neither(self) -> None:
         """It opens no session, so there is nothing to authenticate."""

@@ -17,9 +17,9 @@ second is not what the entry point's spelling suggests:
 
 ## ⚠️ Before you install: pin the announced identity
 
-**`REACHY_SATELLITE_DEVICE_NAME` has no default, and the application refuses to
-start without it.** That refusal is deliberate and it is the single most
-important thing on this page.
+**`REACHY_SATELLITE_DEVICE_NAME` has no default, and nothing is announced to
+Home Assistant until it is set.** That embargo is deliberate and it is the single
+most important thing on this page.
 
 Home Assistant keys an ESPHome device on the identity it announces. If that
 identity changes, Home Assistant does not update the existing device — it
@@ -36,6 +36,36 @@ and silently destructive on an upgrade — and an upgrade from an application wi
 a different package name is exactly what this is. So there is no default, and
 being asked for the value is how the hazard becomes visible before it has
 happened rather than after.
+
+### Starting without one is safe, and it is how a stock robot is configured
+
+The application used to **refuse to start** without the identity. It no longer
+does, and the reason is that the refusal was the wrong shape rather than the
+wrong idea: on a robot reached only through the surfaces its shipped image
+exposes, the settings page is the only place the value can be typed, and a
+refusal to start meant the settings page was never served. There was no route to
+a first configuration that did not involve writing a systemd drop-in over `ssh`.
+
+What replaces it keeps the whole of the hazard closed. With no identity:
+
+- the application **starts**, and its settings page and `/status` answer;
+- **nothing announcing is built at all** — no ESPHome listener, no mDNS record,
+  no entities. Home Assistant discovers no device, so there is nothing for the
+  eventual correct identity to collide with, split from or orphan;
+- the settings page says so, in as many words, and takes the value;
+- the same is true after any number of restarts. An application left
+  unconfigured announces nothing indefinitely.
+
+An identity the model *rejects* — longer than 64 characters — is still refused at
+startup, and refused on the settings page with the constraint stated. "Not
+supplied" and "not acceptable" are different answers and only the first one is
+safe to start on.
+
+The identity is read while the announcement is being built, so it takes effect at
+the next start: set it, press **Stop** on the settings page, and start the
+application again from the robot's own dashboard. No shell, and no reinstall. The
+page says which of the two states the robot is in — no identity at all, or an
+identity this process started without.
 
 ### Upgrading an existing installation
 
@@ -267,7 +297,7 @@ never by value.
 
 | Variable | Default | What it is |
 |---|---|---|
-| `REACHY_SATELLITE_DEVICE_NAME` | **none — required** | The identity announced to Home Assistant. See the warning above. |
+| `REACHY_SATELLITE_DEVICE_NAME` | **none — nothing is announced until it is set** | The identity announced to Home Assistant. **Needs a restart.** See the warning above. |
 | `REACHY_SATELLITE_FRIENDLY_NAME` | the announced identity | The display name. Safe to change. |
 | `REACHY_SATELLITE_MAC_ADDRESS` | read from the interface | The hardware address announced. Home Assistant keys the device on it too. |
 | `REACHY_SATELLITE_NETWORK_INTERFACE` | the default route's | Which interface the address and the mDNS record are taken from. |
@@ -283,8 +313,8 @@ never by value.
 | `REACHY_SATELLITE_FACE_TRACKING_ENABLED` | `true` | Whether predictive gaze follows a face at all. **Needs a restart.** |
 | `REACHY_SATELLITE_BODY_MOTION_ENABLED` | `false` | Whether predictive gaze coordinates body yaw with its world head target. Provisional, explicit opt-in, and **needs a restart**. |
 | `REACHY_SATELLITE_DETECTION_SOURCE` | `remote` | `remote`, `local`, or `remote_with_local_fallback`. |
-| `REACHY_SATELLITE_GROUNDSTATION_URL` | none | Where the groundstation serves its session endpoint. `ws://` or `wss://`, with no user information, query or fragment, and **at most 255 characters** — see below. Required unless the source is `local`. **Applies at once**: it is changeable from the settings page and from Home Assistant without a restart. |
-| `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL` | none | **Secret.** The shared secret presented to open a session. Required whenever a session is opened. |
+| `REACHY_SATELLITE_GROUNDSTATION_URL` | none | Where the groundstation serves its session endpoint. `ws://` or `wss://`, with no user information, query or fragment, and **at most 255 characters** — see below. Unset means no session is opened, which is *unconfigured* rather than failed. **Applies at once**: it is changeable from the settings page and from Home Assistant without a restart. |
+| `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL` | none | **Secret.** The shared secret presented to open a session. One half without the other opens nothing, so an address with no credential is unconfigured too. |
 | `REACHY_SATELLITE_FRAME_INTERVAL_SECONDS` | `0.1` | How often a frame goes up to the groundstation. |
 | `REACHY_SATELLITE_STALENESS_SECONDS` | `2.0` | How long a detection stays worth acting on. Past it the head returns to neutral. |
 | `REACHY_SATELLITE_LOCAL_MODEL_PATH` | none | The face-detection weights the robot's own detector loads. Required unless the source is `remote`. |
@@ -457,10 +487,29 @@ control, audio and a wake-word model at the same time.
 The weights the local detector needs are **not shipped in the wheel** — they are
 somebody else's model under somebody else's terms — so `local` and
 `remote_with_local_fallback` both need `REACHY_SATELLITE_LOCAL_MODEL_PATH`
-pointing at a file on the robot. `remote` and `remote_with_local_fallback` both
-need an address *and* a credential. The application refuses to start if the
-selection needs something it has not been given, rather than starting and never
-tracking anything.
+pointing at a file on the robot, and the application refuses to start without it
+rather than starting and never tracking anything.
+
+**A missing groundstation is different, and it is not a refusal.** `remote` and
+`remote_with_local_fallback` both use an address *and* a credential, and either
+one unsupplied means no session is opened — which is *unconfigured* rather than
+failed, in the same sense `reachyctl doctor` distinguishes a skipped check from a
+failed one. Nothing connects, nothing retries, and `/status` reports
+`remote: unconfigured`. A `remote_with_local_fallback` composition runs on the
+robot's own detector in the meantime, which is what that selection is for; a
+plain `remote` one has nothing to fall back to and simply sees nothing until a
+groundstation arrives.
+
+Supplying both from the settings page is adopted **without a restart**, by the
+same transition that replaces an address on a running robot — so a first
+groundstation and a replacement are one code path rather than two. Clearing the
+address retires the running source the same way.
+
+The other three states `/status` can report are `available` (a source is
+connected or connecting), `disabled` (face tracking is off, or the robot's own
+detector is the selection, so there is deliberately no remote source) and
+`unavailable` (a groundstation is configured and there is no source, which is the
+one that means something went wrong).
 
 **The address carries no credential.** `ws://someone:secret@host/v1/session` is
 refused, as are a query and a fragment. The address is not a secret setting, so
@@ -491,6 +540,15 @@ a laptop on the same network happened to open it. Setting
 `REACHY_SATELLITE_WEB_ENABLED=false` switches the interface off entirely, leaving
 the environment as the only way to configure the application.
 
+**It is also the first-time configuration surface**, which is why it is served
+before an identity exists. On a robot with nothing configured it heads itself
+*This robot is not configured yet*, says that nothing is announced to Home
+Assistant until `device_name` is set, and takes the value; and when the
+groundstation is unsupplied it says that the remote detector is unconfigured
+rather than failed. An identity supplied here needs the application stopped and
+started again from the robot's dashboard before it is announced, and the page
+says that too.
+
 It reads **every** operator-facing setting, and writes every one but the four the
 page's own existence depends on — see above for why those are set in the
 environment. The credential is the
@@ -502,7 +560,7 @@ credential and useless for learning one. A separate control unsets it.
 |---|---|
 | `/` | The settings form and the resolved configuration |
 | `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once, which bootstrap values are read-only and which compatibility inputs are ignored |
-| `/status` | What the robot is doing: pipeline and gaze state, controller mode, fault and derived safe hold, and the motion-gating mode in force with the bounded reason for it |
+| `/status` | What the robot is doing: pipeline and gaze state, controller mode, fault and derived safe hold, whether the announced identity is `resolved` or `unresolved`, whether this process is `announcing`, the remote detector's state, and the motion-gating mode in force with the bounded reason for it |
 | `/diagnostics/controller` | `GET` — bounded scalar controller events with no image, credential or installation identity |
 | `/diagnostics/controller/reset` | `POST` — same-origin diagnostics-only reset; it does not move the robot or change controller state |
 | `/stop` | `POST` — stops the application so a restart-required change can take effect |
@@ -746,8 +804,15 @@ rather than under the daemon, `SIGINT` and `SIGTERM` do the same.
 
 ## Troubleshooting
 
-**It refuses to start and talks about the device name.** That is the warning at
-the top of this page. Read it; do not invent a name.
+**It starts, and the settings page says the robot is not configured yet.** That
+is the warning at the top of this page, and it is the intended state of a robot
+nobody has named. Read it; do not invent a name. Set
+`REACHY_SATELLITE_DEVICE_NAME` on the settings page, stop the application there
+and start it again from the robot's dashboard.
+
+**It refuses to start and talks about the device name.** Then the value it was
+given is one the identity contract does not accept — longer than 64 characters.
+That is a different answer from "not supplied", which starts.
 
 **The dashboard says it finished, successfully, seconds after starting, and it
 printed nothing at all.** `done` with no error is not evidence of a clean run:
