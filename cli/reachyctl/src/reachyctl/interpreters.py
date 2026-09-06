@@ -91,11 +91,10 @@ __all__ = [
 ]
 
 # The name `python`, optionally a SINGLE-DIGIT major version, optionally a dot
-# and a minor, optionally the ABI flags a build appends: `python`, `python3`,
-# `python3.12`, and the `t` and `d` spellings a free-threaded or a debug build
-# installs — `python3.13t`, `python3.12d`, `python3.13td`. Those last are real
-# CPython executables, so refusing them would refuse a real interpreter, and a
-# false refusal is a failure too.
+# and a minor, and — only on that fully versioned form — the ABI flags a build
+# appends: `python`, `python3`, `python3.12`, `python3.13t`, `python3.12d`,
+# `python3.13td`. The suffixed three are real CPython executables, so refusing
+# them would refuse a real interpreter, and a false refusal is a failure too.
 #
 # Each bound below is a decision rather than an accident, because this is a
 # gate on what may be EXECUTED at all:
@@ -104,6 +103,10 @@ __all__ = [
 #     `python27`, `python03` and `python3123` are refused. CPython never omits
 #     the separator, and a run of digits with no dot is the shape a wrapper
 #     picks precisely because it looks close enough.
+#   * The ABI flags attach to `major.minor` and to nothing else, so `python3t`,
+#     `python2d` and `python0td` are refused. CPython names its free-threaded
+#     and debug executables after the full version — `python3.13t`, never
+#     `python3t` — and a flag floating free of one is a name it does not issue.
 #   * The minor is unbounded, so a distant `python3.100` is not refused. What
 #     the gate is checking is the separator, not how far Python has got.
 #   * `python0` is accepted, on shape alone. There is no CPython 0, but
@@ -119,7 +122,7 @@ __all__ = [
 # cost the same: a real interpreter under a name CPython never gives one costs
 # an operator a link named `python`, and a wrapper admitted under a loose
 # pattern costs them a second daemon.
-_INTERPRETER_NAME: Final = re.compile(r"\Apython(?:\d(?:\.\d+)?t?d?)?\Z")
+_INTERPRETER_NAME: Final = re.compile(r"\Apython(?:\d(?:\.\d+t?d?)?)?\Z")
 
 # `<prefix>/lib/python3.12/site-packages/<package>/...`, which is where an
 # installed distribution's own files live. The prefix is the environment's root,

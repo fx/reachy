@@ -86,6 +86,13 @@ def test_a_name_cpython_gives_an_interpreter_is_one(path: str) -> None:
         "/usr/bin/python27",
         "/usr/bin/python03",
         "/usr/bin/python3123",
+        # An ABI flag floating free of a full version. CPython names its
+        # free-threaded and debug executables after `major.minor` —
+        # `python3.13t`, never `python3t`.
+        "/usr/bin/python3t",
+        "/usr/bin/python2d",
+        "/usr/bin/python0td",
+        "/usr/bin/pythont",
         "",
     ],
 )
