@@ -2237,6 +2237,26 @@ def build_perception_source(
 ) -> PerceptionPort | None:
     """Assemble the detector an operator asked for, or none at all.
 
+    **One selection is not always the one that was asked for**, and REQ-103 is
+    why. A robot whose groundstation nobody has supplied yet runs on its own
+    detector until somebody does — so a `remote` selection composes the fallback
+    instead, and the operator's choice reasserts itself as soon as a session
+    exists, because that is exactly what `FallbackPerception` does with a
+    connected source. Nothing about the chain has to be rebuilt for it: the
+    fallback holds the same `ReplaceableRemoteSource` every other composition
+    does, which is what lets the address owner swap a source in behind it — the
+    reason the composition is not simply rewritten to `local` here.
+
+    It needs a detector to fall back *to*, and the weights are not shipped in
+    this wheel. With no `local_model_path` there is nothing local to run, so the
+    `remote` selection is composed as asked and the robot sees nothing until a
+    groundstation arrives. That limit is the asset licensing one this package
+    records at `local_model_path`, not a decision taken here.
+
+    A process that started unconfigured therefore keeps the fallback for its
+    lifetime, which is a superset of `remote`: it answers from the groundstation
+    whenever the session is up, and from the robot when it is not.
+
     Args:
         settings: The settings in effect.
         media: The daemon's media interface, which frames come off.
@@ -2256,8 +2276,16 @@ def build_perception_source(
 
     remote = remote if remote is not None else build_remote_source(settings, media)
 
+    selection = settings.detection_source
+    if (
+        selection is SourceSelection.REMOTE
+        and not groundstation_is_resolved(settings)
+        and settings.local_model_path.strip()
+    ):
+        selection = SourceSelection.REMOTE_WITH_LOCAL_FALLBACK
+
     local = None
-    if settings.detection_source is not SourceSelection.REMOTE:
+    if selection is not SourceSelection.REMOTE:
         model_path = Path(settings.local_model_path).expanduser()
 
         def _detector() -> SdkFaceDetector:
@@ -2280,7 +2308,7 @@ def build_perception_source(
             offload=in_thread,
         )
 
-    return build_perception(settings.detection_source, remote=remote, local=local)
+    return build_perception(selection, remote=remote, local=local)
 
 
 class _NoPerception:

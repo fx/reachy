@@ -325,9 +325,16 @@ deployment can get irreversibly wrong.
   one is the same defect a step along, so it takes the transition too, and
   `groundstation_credential` is consequently the one secret in
   `config.LIVE_SETTINGS` — a page telling an operator to restart for a value the
-  robot has already adopted is as wrong as one telling them the opposite. The composition the perception chain gets is still what
-  `detection_source` declares, because `ReplaceableRemoteSource` has to stay in
-  that chain for the eventual source to be swapped in behind it.
+  robot has already adopted is as wrong as one telling them the opposite.
+  **Until a groundstation exists the robot runs on its own detector**, which is
+  REQ-103 in as many words, so a `remote` selection composes
+  `FallbackPerception` — never `local`, because `ReplaceableRemoteSource` has to
+  stay in that chain for the eventual source to be swapped in behind it, and the
+  fallback is the one composition that both holds it and answers from the robot
+  while it is empty. The substitution is keyed on the groundstation being
+  unresolved and needs `local_model_path`: the weights are not in this wheel, so
+  with none set there is nothing local to run and the honest outcome is no
+  detections and a surface saying `unconfigured`.
 - **The overrides layer cannot supply a setting the settings page depends on.**
   An override sits above the environment, so it can only be undone by writing
   another one — and a page that had written one of these wrongly is the page

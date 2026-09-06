@@ -75,6 +75,7 @@ from reachy_mini_ha_satellite.main import (
     build_perception_source,
     build_remote_source,
 )
+from reachy_mini_ha_satellite.ports import SourceSelection
 from reachy_mini_ha_satellite.web import (
     CLEARED_IDENTITY_HEADING,
     UNCONFIGURED_HEADING,
@@ -653,29 +654,68 @@ class TestRemotePerceptionIsOptionalAtFirstStart:
 
         assert body["remote"] == "unconfigured"
 
-    def test_a_local_fallback_composition_answers_from_the_robot(self) -> None:
-        """Running on local detection until both are supplied, composed.
+    def test_an_unconfigured_remote_selection_runs_on_local_detection(self) -> None:
+        """REQ-103's first scenario, for the selection a stock robot defaults to.
 
-        The composition is what `detection_source` declares and is not rewritten
-        here: `ReplaceableRemoteSource` has to stay in the chain for the
-        eventual groundstation to be swapped in behind it, which is REQ-095's
-        contract. With no delegate it reports itself disconnected, so a fallback
-        composition answers from the robot's own detector — which is the whole
-        of what an unconfigured groundstation changes about it.
+        `remote` says "the groundstation answers" and there is no groundstation,
+        so until one is supplied the robot runs on its own detector — which is
+        what the requirement asks for in as many words. The composition is the
+        fallback rather than `local`, and that is not a detail: it holds the
+        same `ReplaceableRemoteSource` every other composition does, so the
+        address owner can swap a source in behind it and the operator's `remote`
+        choice reasserts itself the moment a session exists. Rewriting the
+        composition to `local` would break exactly that.
+        """
+        environ = {**STOCK, f"{ENV_PREFIX}LOCAL_MODEL_PATH": "/models/face.onnx"}
+        settings = load_settings(environ, {}).settings
+        remote = ReplaceableRemoteSource(build_remote_source(settings, FakeMedia()))
+
+        composed = build_perception_source(settings, FakeMedia(), remote=remote)
+
+        assert settings.detection_source is SourceSelection.REMOTE
+        assert isinstance(composed, FallbackPerception)
+        assert remote.delegate is None
+        assert not remote.connected
+
+    def test_a_configured_remote_selection_is_left_alone(self) -> None:
+        """The fallback is for the unconfigured case and not a new default.
+
+        An operator who selected `remote` on a robot that has a groundstation
+        chose not to spend the robot's cores on a local model, and that choice
+        is untouched: the substitution is keyed on the groundstation being
+        unresolved, not on the model path being set.
         """
         environ = {
             **STOCK,
-            f"{ENV_PREFIX}DETECTION_SOURCE": "remote_with_local_fallback",
             f"{ENV_PREFIX}LOCAL_MODEL_PATH": "/models/face.onnx",
+            f"{ENV_PREFIX}GROUNDSTATION_URL": _GROUNDSTATION,
+            f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": _CREDENTIAL,
         }
         settings = load_settings(environ, {}).settings
         remote = ReplaceableRemoteSource(build_remote_source(settings, FakeMedia()))
 
         composed = build_perception_source(settings, FakeMedia(), remote=remote)
 
-        assert isinstance(composed, FallbackPerception)
-        assert remote.delegate is None
-        assert not remote.connected
+        assert composed is remote
+
+    def test_with_no_model_there_is_nothing_local_to_run_on(self) -> None:
+        """The limit REQ-103 meets on a stock robot, admitted rather than faked.
+
+        The face-detection weights are not shipped in this wheel — they are
+        somebody else's model under somebody else's terms, which is the licensing
+        limit `local_model_path` records. A fallback composed with no path would
+        be a detector that fails to load on every pass and logs about it, which
+        is worse than seeing nothing and saying so: `/status` reports the remote
+        detector as `unconfigured`, and the settings page says what to set.
+        """
+        settings = load_settings(STOCK, {}).settings
+        remote = ReplaceableRemoteSource(build_remote_source(settings, FakeMedia()))
+
+        composed = build_perception_source(settings, FakeMedia(), remote=remote)
+
+        assert settings.local_model_path == ""
+        assert composed is remote
+        assert not composed.latest().faces
 
     @pytest.mark.asyncio
     async def test_supplying_both_adopts_through_the_replacement_owner(

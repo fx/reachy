@@ -512,10 +512,19 @@ rather than starting and never tracking anything.
 one unsupplied means no session is opened — which is *unconfigured* rather than
 failed, in the same sense `reachyctl doctor` distinguishes a skipped check from a
 failed one. Nothing connects, nothing retries, and `/status` reports
-`remote: unconfigured`. A `remote_with_local_fallback` composition runs on the
-robot's own detector in the meantime, which is what that selection is for; a
-plain `remote` one has nothing to fall back to and simply sees nothing until a
-groundstation arrives.
+`remote: unconfigured`.
+
+**Until one is supplied, the robot runs on its own detector** — including under
+`remote`, which is the default. That selection means "the groundstation
+answers", and while there is no groundstation the honest reading is the robot's
+own camera rather than nothing, so the satellite composes the fallback instead
+and the `remote` choice reasserts itself the moment a session exists. It needs
+`REACHY_SATELLITE_LOCAL_MODEL_PATH` pointing at weights on the robot; with none
+set there is nothing local to run and the robot sees nothing until a
+groundstation arrives, which the settings page and `/status` both say. A process
+that started unconfigured keeps the fallback for its lifetime, which does strictly
+more than `remote` asked for: the groundstation while the session is up, the
+robot while it is not.
 
 Supplying both from the settings page is adopted **without a restart**, by the
 same transition that replaces an address on a running robot — so a first
