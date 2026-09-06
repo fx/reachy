@@ -494,3 +494,12 @@ SPECIFICATION: [Stock Robot Installation](docs/specs/stock-robot-installation/in
     TEXT[implementation]: The satellite MUST start with an unresolved groundstation address or credential
     TEXT[implementation]: and run on local detection until both are supplied through a configuration
     TEXT[implementation]: surface.
+
+  SECTION: [REQ-105: The daemon's start program is not assumed to be an interpreter](#req-105-the-daemon-s-start-program-is-not-assumed-to-be-an-interpreter)
+    TEXT[implementation]: `reachyctl` MUST NOT execute the program named by a robot's daemon service unit
+    TEXT[implementation]: as though it were a Python interpreter.
+
+  SECTION: [REQ-106: Diagnosis and deployment start no second daemon](#req-106-diagnosis-and-deployment-start-no-second-daemon)
+    TEXT[implementation]: `reachyctl` MUST NOT start another instance of the robot's daemon, or take any
+    TEXT[implementation]: device, port or lock from the running one, as a side effect of diagnosing or
+    TEXT[implementation]: deploying.

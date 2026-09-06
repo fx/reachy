@@ -35,6 +35,37 @@ that apply here.
   issues no mutating command at all. The test for one asserts the robot's
   after-state, never that a plan was printed: a command that printed a perfect
   plan and then applied it anyway would pass the second test.
+- **The daemon's start program is not an interpreter, and nothing here may
+  treat it as one.** `reachyctl.interpreters` derives candidates — what
+  `--python` named, a start program whose *file name* is one CPython gives an
+  interpreter, the `VIRTUAL_ENV` the unit declares, the environment the start
+  program is installed in — and `reachyctl.daemon` asks each `-V` before any
+  Python source goes near it. Every rule names an ENVIRONMENT: there is
+  deliberately none taking the `bin` a start program merely sits in, because
+  `/usr/local/bin/python` exists on plenty of robots and is not the daemon's.
+  There is no fallback: an unresolved interpreter is
+  `InterpreterResolutionError` and names `--python`. The name gate outranks the
+  order and the operator both: the one path `--python` may not name is the
+  unit's own start program, when that program's name does not claim an
+  interpreter. The rule exists because the stock image's unit starts a shell
+  launcher, and running it with `-c` started a **second daemon** that took the
+  first one's port, serial device and camera — see REQ-105 and REQ-106.
+- **The daemon's environment and the application's are two questions.** A
+  daemon does not have to run its applications where it runs itself, and the
+  released image does not — it installs them into a SIBLING virtual environment.
+  `interpreter()` answers the first, `application_interpreter()` the second, and
+  a wheel is installed through the same one its version is read back from.
+  Asking the daemon's own for the application reports a robot that is running
+  the satellite as not having it installed, which is a false negative and worse
+  than an error: an operator acts on it.
+- **There are two application-control interfaces and the robot decides which.**
+  The released image serves its control over the daemon's own HTTP API
+  (`--daemon-api`); the container target the provisioning gate runs against
+  implements the control module (`--daemon-control`), which change 0009 recorded
+  as provisional and which no released daemon has. Both are asked, API first, so
+  a stock robot needs no flag. An API that ANSWERED and refused is not an API
+  that is absent — only the second falls through to the other interface — and a
+  robot serving neither fails naming both.
 - **Configuration is validated locally, before anything is contacted.** The
   vocabulary is `reachy_contracts.settings`, shared with provisioning, so a
   value the robot would refuse costs no round trip. A second copy of a

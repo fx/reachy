@@ -93,8 +93,8 @@ from reachyctl.provision import execute as execute_provision
 from reachyctl.provision import resolve_directory as resolve_provisioning_directory
 from reachyctl.robot import (
     DEFAULT_APPLICATION,
+    DEFAULT_DAEMON_API,
     DEFAULT_DAEMON_CONTROL,
-    DEFAULT_PYTHON,
     RemoteAccess,
     RobotLayout,
     RobotTarget,
@@ -289,13 +289,24 @@ DaemonControlOption = Annotated[
         help="The module the daemon's application control is reached through.",
     ),
 ]
-PythonOption = Annotated[
+DaemonApiOption = Annotated[
     str,
+    typer.Option(
+        "--daemon-api",
+        help=(
+            "Where the daemon's own HTTP API answers, as reached from the "
+            "robot. The application control is asked here first."
+        ),
+    ),
+]
+PythonOption = Annotated[
+    str | None,
     typer.Option(
         "--python",
         help=(
-            "The application environment's interpreter, used only when the "
-            "daemon's unit does not say which one it runs."
+            "The interpreter that owns the daemon's package environment. "
+            "Given, it is the answer and it is tried first; otherwise the "
+            "interpreter is resolved from the daemon's own environment."
         ),
     ),
 ]
@@ -367,7 +378,8 @@ def _layout(
     application: str,
     daemon_unit: str,
     daemon_control: str,
-    python: str,
+    daemon_api: str,
+    python: str | None,
 ) -> RobotLayout:
     """Read the layout options into a layout.
 
@@ -375,7 +387,9 @@ def _layout(
         application: The distribution being operated.
         daemon_unit: The unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter an operator named, or `None` to resolve one
+            from the robot.
 
     Returns:
         The layout.
@@ -384,6 +398,7 @@ def _layout(
         application=application,
         daemon_unit=daemon_unit,
         daemon_control=daemon_control,
+        daemon_api=daemon_api,
         python=python,
     )
 
@@ -713,7 +728,8 @@ def doctor(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     url: Annotated[
         str | None,
         typer.Option(
@@ -801,7 +817,9 @@ def doctor(
         application: The distribution the application checks are about.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         url: The groundstation's session endpoint, if one is configured.
         capability: What to offer during negotiation.
         models_dir: Where the pinned model files are.
@@ -827,7 +845,7 @@ def doctor(
             addressed = target.describe()
             daemon, close = _connect(
                 target,
-                _layout(application, daemon_unit, daemon_control, python),
+                _layout(application, daemon_unit, daemon_control, daemon_api, python),
                 reporter,
             )
         plan = DoctorPlan(
@@ -882,7 +900,8 @@ def deploy(
     ] = None,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     preview: PreviewOption = False,
     member: Annotated[
         str | None,
@@ -917,7 +936,9 @@ def deploy(
             the one the wheel carries.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         preview: Report what this would do and do none of it.
         member: A workspace member to build.
         wheel: A wheel to send.
@@ -941,6 +962,7 @@ def deploy(
                 application or DEFAULT_APPLICATION,
                 daemon_unit,
                 daemon_control,
+                daemon_api,
                 python,
             ),
             reporter,
@@ -1098,7 +1120,8 @@ def config_get(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     name: Annotated[
         list[str] | None,
         typer.Option(
@@ -1122,7 +1145,9 @@ def config_get(
         application: The distribution being operated.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         name: Which settings to report.
 
     Raises:
@@ -1133,7 +1158,7 @@ def config_get(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            _layout(application, daemon_unit, daemon_control, daemon_api, python),
             reporter,
         )
         code = execute_get(daemon, name or [], reporter, target.describe(), close)
@@ -1154,7 +1179,8 @@ def config_diff(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     declaration: Annotated[
         Path | None,
         typer.Option(
@@ -1178,7 +1204,9 @@ def config_diff(
         application: The distribution being operated.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         declaration: Where the declaration is.
 
     Raises:
@@ -1191,7 +1219,7 @@ def config_diff(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            _layout(application, daemon_unit, daemon_control, daemon_api, python),
             reporter,
         )
         code = execute_diff(daemon, desired, reporter, target.describe(), close)
@@ -1212,7 +1240,8 @@ def config_apply(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     preview: PreviewOption = False,
     declaration: Annotated[
         Path | None,
@@ -1242,7 +1271,9 @@ def config_apply(
         application: The distribution being operated.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         preview: Report what this would do and do none of it.
         declaration: Where the declaration is.
 
@@ -1256,7 +1287,7 @@ def config_apply(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            _layout(application, daemon_unit, daemon_control, daemon_api, python),
             reporter,
         )
         code = execute_apply(
@@ -1291,7 +1322,8 @@ def config_set(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     preview: PreviewOption = False,
 ) -> None:
     """Change some settings and leave the rest of the managed region alone.
@@ -1314,7 +1346,9 @@ def config_set(
         application: The distribution being operated.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         preview: Report what this would do and do none of it.
 
     Raises:
@@ -1330,7 +1364,7 @@ def config_set(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            _layout(application, daemon_unit, daemon_control, daemon_api, python),
             reporter,
         )
         code = execute_apply(
@@ -1391,7 +1425,8 @@ def app_start(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     preview: PreviewOption = False,
 ) -> None:
     """Start the application, and confirm the robot reports it running.
@@ -1405,7 +1440,9 @@ def app_start(
         application: The distribution to start.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         preview: Report what this would do and do none of it.
 
     Raises:
@@ -1416,7 +1453,7 @@ def app_start(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            _layout(application, daemon_unit, daemon_control, daemon_api, python),
             reporter,
         )
         code = execute_start(
@@ -1443,7 +1480,8 @@ def app_stop(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     preview: PreviewOption = False,
 ) -> None:
     """Stop the application, and confirm the robot reports it stopped.
@@ -1457,7 +1495,9 @@ def app_stop(
         application: The distribution to stop.
         daemon_unit: The systemd unit carrying the environment.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         preview: Report what this would do and do none of it.
 
     Raises:
@@ -1468,7 +1508,7 @@ def app_stop(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            _layout(application, daemon_unit, daemon_control, daemon_api, python),
             reporter,
         )
         code = execute_stop(
@@ -1495,7 +1535,8 @@ def app_logs(
     application: ApplicationOption = DEFAULT_APPLICATION,
     daemon_unit: DaemonUnitOption = DEFAULT_DAEMON_UNIT,
     daemon_control: DaemonControlOption = DEFAULT_DAEMON_CONTROL,
-    python: PythonOption = DEFAULT_PYTHON,
+    daemon_api: DaemonApiOption = DEFAULT_DAEMON_API,
+    python: PythonOption = None,
     lines: Annotated[
         int,
         typer.Option("--lines", min=0, help="How many past lines to show first."),
@@ -1527,7 +1568,9 @@ def app_logs(
         application: Whose lines to show.
         daemon_unit: The systemd unit the application logs under.
         daemon_control: The daemon's application-control module.
-        python: The fallback interpreter.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+        python: The interpreter that owns the daemon's package environment,
+            or `None` to resolve one from the robot.
         lines: How many past lines to show first.
         follow: Whether to keep the stream open.
         since: Where to start from.
@@ -1540,7 +1583,7 @@ def app_logs(
         target = _target(robot, identity_file, known_hosts, sudo)
         daemon, close = _connect(
             target,
-            _layout(application, daemon_unit, daemon_control, python),
+            _layout(application, daemon_unit, daemon_control, daemon_api, python),
             reporter,
         )
         code = execute_logs(

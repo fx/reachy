@@ -14,12 +14,45 @@ of returning the value it read before the restart, which is precisely the
 outcome that looks identical to success. Every method asks the robot.
 
 **The interpreter is the daemon's, not a path this tool assumed.** Before asking
-what version of the application is installed, this client asks systemd which
-interpreter the daemon actually runs, and asks *that* one. Installing into a
-configured path and then verifying against the same configured path would agree
-with itself no matter which environment the daemon was really using, which is
-the shape of the original failure rather than a check on it. The configured path
-is a fallback for a unit whose `ExecStart` cannot be read, and it says so.
+what version of the application is installed, this client resolves which
+interpreter owns the environment the daemon's packages are installed in, and
+asks *that* one. Installing into a configured path and then verifying against
+the same configured path would agree with itself no matter which environment the
+daemon was really using, which is the shape of the original failure rather than
+a check on it.
+
+**The unit's start program is not that interpreter, and assuming it was one
+started a second daemon.** On ReachyMiniOS v0.2.3 the unit starts a shell launcher out
+of the daemon's own virtual environment; an earlier version of this module read
+that path as an interpreter and ran it with `-c '<python source>'`, which
+launched a second daemon that contended with the first for its network port, its
+serial device and its camera. `reachyctl.interpreters` derives the candidates
+instead — from what the operator supplied, from the environment the unit
+declares, and from the environment the start program is installed in — and this
+client confirms one of them before any Python source goes near it. Nothing
+whose file name does not claim to be an interpreter is ever executed at all.
+When nothing resolves, that is `InterpreterResolutionError` and not a fallback:
+a path that might not be an interpreter is exactly what produced the second
+daemon.
+
+**There are two environments, and asking the wrong one is a false answer
+rather than a failed one.** The daemon runs out of one and, on the released
+image, installs applications into a sibling of it — so the daemon's own version
+is read through `interpreter` and the application's through
+`application_interpreter`, and a wheel is installed through the same one its
+version is read back from. Asking the daemon's environment for the application
+reports a robot that is running the satellite as not having it installed, which
+is worse than an error: an operator acts on it by installing what is already
+there.
+
+**There are two application-control interfaces, and the robot has one of them.**
+The released image serves its control over the daemon's own HTTP API; the
+container target the provisioning gate runs against implements the control
+module change 0009 recorded as provisional. Both are asked, API first, and
+neither is a workaround for the other — a stock robot needs no flag, and a robot
+serving neither fails naming both rather than reporting the application stopped.
+Every request goes through an interpreter this client has already proven, so
+neither route can reach the unit's start program.
 
 **A question that could not be asked is not an answer.** A method here either
 returns what the robot said or raises. None of them returns an empty mapping, an
@@ -46,15 +79,21 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from reachy_checks import ApplicationState, DaemonInfo, InstalledApplication
+from reachyctl.interpreters import (
+    application_candidates,
+    candidates,
+    names_an_interpreter,
+)
 from reachyctl.managed import MalformedRegionError, parse_region
 from reachyctl.robot import CommandOutcome, RobotAccessError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
+    from reachyctl.interpreters import Candidate
     from reachyctl.robot import RemoteAccess, RobotLayout
 
-__all__ = ["DaemonClient", "DaemonControlError"]
+__all__ = ["DaemonClient", "DaemonControlError", "InterpreterResolutionError"]
 
 # Asked of the robot's own interpreter, so the answer is what that environment
 # holds rather than what a wheel's file name claims. One round trip answers for
@@ -72,10 +111,93 @@ _METADATA_SCRIPT: Final = (
     "sys.stdout.write(json.dumps(found))\n"
 )
 
+# One request to the daemon's own HTTP API, run through an interpreter this
+# client has already confirmed. It is Python source, so it goes only to a proven
+# interpreter — never to the unit's start program, which is the whole of
+# REQ-106 — and it needs nothing installed on the robot beyond that interpreter:
+# a `curl` this image happened not to ship would be one more thing to be wrong
+# about a machine we do not own.
+#
+# The two failure statuses are the point of it. A daemon that ANSWERED with an
+# error is a daemon whose control interface is there and refused, and falling
+# back to another interface would replace the reason with a second, unrelated
+# one. A daemon that could not be reached at all is an image that does not serve
+# this interface, and that is what the fallback is for.
+#
+# The body is written through UNCHANGED, and an empty one stays empty. An
+# earlier version substituted `null` for it, which made a daemon that answered
+# with nothing indistinguishable from one that answered "no application is
+# running" — a false sentence about a real robot, and one this tool would have
+# gone on to report. An empty body is not JSON and fails as not JSON. Nothing
+# parses the body of a start or a stop, so this costs those nothing.
+_API_SCRIPT: Final = (
+    "import sys, urllib.error, urllib.request\n"
+    "method, url = sys.argv[1], sys.argv[2]\n"
+    "request = urllib.request.Request(url, method=method)\n"
+    "try:\n"
+    "    with urllib.request.urlopen(request, timeout=10) as answer:\n"
+    "        sys.stdout.write(answer.read().decode('utf-8'))\n"
+    "except urllib.error.HTTPError as error:\n"
+    "    sys.stderr.write(f'{error.code} {error.reason}')\n"
+    "    raise SystemExit(3) from None\n"
+    "except OSError as error:\n"
+    "    sys.stderr.write(str(error))\n"
+    "    raise SystemExit(7) from None\n"
+)
+
+# What the daemon answered with an error status.
+_API_REFUSED: Final = 3
+
+# What the daemon's API could not be reached at all.
+_API_UNREACHABLE: Final = 7
+
+# The daemon's application-control endpoints, under `RobotLayout.daemon_api`.
+_APPS: Final = "/api/apps"
+
+# The one state in the daemon's application-state vocabulary that means the
+# application is up. `starting`, `stopping`, `done` and `error` are the others,
+# and none of them is running — a check that treated `starting` as running
+# would pass over an application that never finishes starting.
+_RUNNING: Final = "running"
+
 # systemd renders a command as `{ path=/usr/bin/x ; argv[]=... ; ... }`, one
 # such block per `ExecStart=` the unit declares. The first block's path is the
-# interpreter the daemon runs.
+# program the daemon is STARTED by, which is the daemon's entry point and not
+# necessarily an interpreter — see `reachyctl.interpreters`.
 _EXEC_PATH: Final = re.compile(r"path=(\S+)")
+
+# The flag a candidate is asked to identify itself with, and what an interpreter
+# answers. A flag, deliberately, and never source: the point of the whole
+# resolution is that nothing unproven is handed a program to run, and `-V` asks
+# a question no interpreter can misread and no launcher is given the chance to.
+#
+# The answer has to be the WHOLE of what came back, on ONE stream, and a
+# COMPLETE version. This step is the one that ESTABLISHES what everything after
+# it assumes, so it has to be something a program cannot pass by accident, and
+# each weaker form leaves a gap the next one has to close: the exit status alone
+# admits anything that exits zero, the word alone admits a banner, a
+# version-shaped PREFIX admits `Python 3.12.3 - wrapper usage: ...`, whichever
+# stream happens to be non-empty admits a program that prints the version on one
+# and announces itself on the other, a CONCATENATION of the two admits a version
+# split across them, and an OPTIONAL minor and patch admit the eight characters
+# `Python 3`, which any wrapper can print by accident.
+#
+# So the pattern is the shape `-V` produces: major, minor and patch, then the
+# release-level suffix CPython appends to a pre-release, then the `+` one built
+# from a checkout appends — `Python 3.12.3`, `Python 3.13.0rc1`,
+# `Python 3.13.0rc1+`. The last two are why this is not simply three numbers:
+# refusing a real interpreter is a failure too, and a source-built one is a
+# robot somebody has.
+#
+# It does not claim the converse. A string no interpreter prints may still fit
+# the shape, and that costs nothing — the program still had to exist, be
+# executable, and answer with it. What matters is that everything an
+# interpreter DOES print is accepted and that `Python 3` is not, and where a
+# build prints something else again the refusal is visible: the next candidate
+# is tried, and a robot where none answers gets a named error rather than a
+# program handed Python source on the strength of two characters.
+_VERSION_FLAG: Final = "-V"
+_VERSION_ANSWER: Final = re.compile(r"Python \d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?\+?")
 
 # systemd's own spelling for "this unit is running".
 _ACTIVE: Final = "active"
@@ -96,6 +218,21 @@ class DaemonControlError(RobotAccessError):
     robot answered, and what it said is not what this tool knows how to read.
     The most likely cause is a daemon whose control module is spelled
     differently from `RobotLayout.daemon_control`, which is an option away.
+    """
+
+
+class InterpreterResolutionError(RobotAccessError):
+    """No interpreter could be resolved for the daemon's environment.
+
+    Its own type for the same reason `DaemonControlError` is: the robot
+    answered, and what it said does not let this tool operate it. There is
+    deliberately no fallback behind this error. Falling back to a configured
+    path means installing into an environment the daemon may not be using, which
+    is the failure reachyctl REQ-051 exists to catch; falling back to the unit's
+    start program means running a launcher with Python arguments, which is the
+    failure that started a second daemon. The message names every path that was
+    tried and why, and it names `--python`, which is the answer an operator can
+    always give.
     """
 
 
@@ -216,27 +353,44 @@ class DaemonClient:
                     f"{_substate(properties)}"
                 ),
             )
-        versions = await self.installed_versions(self._layout.daemon_distribution)
+        versions = await self.installed_versions(
+            await self.interpreter(),
+            self._layout.daemon_distribution,
+        )
         return DaemonInfo(
             responding=True,
             version=versions.get(self._layout.daemon_distribution, ""),
         )
 
     async def installed_application(self) -> InstalledApplication:
-        """Ask what version of the application the daemon's environment holds.
+        """Ask what version of the application the robot has, where it keeps it.
+
+        **The daemon's environment and the application's are not the same
+        question, and on the released image they are not the same directory.**
+        ReachyMiniOS runs the daemon out of one virtual environment and installs
+        applications into a sibling of it, so this asks
+        `application_interpreter` rather than `interpreter`. Asking the daemon's
+        own would report a robot that is running the application as not having
+        it installed, which is a false negative and worse than the error it
+        replaced: an operator acts on it by installing something that is
+        already there.
 
         Returns:
             Whether it is installed and at what version, read through the
-            interpreter the daemon itself runs.
+            interpreter that owns the environment the daemon puts applications
+            in. A complaint names that environment, because "not installed" is
+            only useful with "and here is where I looked".
         """
-        versions = await self.installed_versions(self._layout.application)
+        python = await self.application_interpreter()
+        versions = await self.installed_versions(python, self._layout.application)
         version = versions.get(self._layout.application, "")
         if not version:
             return InstalledApplication(
                 installed=False,
                 complaint=(
                     f"{self._layout.application} is not installed in the "
-                    f"environment the daemon runs"
+                    f"environment the daemon runs applications from, which on "
+                    f"this robot is the one {python} owns"
                 ),
             )
         return InstalledApplication(installed=True, version=version)
@@ -244,21 +398,40 @@ class DaemonClient:
     async def application_state(self) -> ApplicationState:
         """Ask the daemon whether it is running the application.
 
+        Asked of the daemon's own HTTP API first, because that is the interface
+        the released image actually serves, and of the control module second —
+        see `_reach_control` for why there are two and why neither is a
+        workaround for the other.
+
         Returns:
             Whether it is, with whatever the daemon said about it. `running` is
-            false only when the daemon said so.
+            false only when the daemon said so, and the detail says which
+            application is running when it is not this one.
 
         Raises:
-            DaemonControlError: If the control could not be run, or answered
-                with something this tool cannot read. Returning "not running"
-                for either would make `app stop` report an application it never
-                asked about as already stopped, and exit zero.
+            DaemonControlError: If neither interface could be reached, or one
+                answered with something this tool cannot read. Returning "not
+                running" for either would make `app stop` report an application
+                it never asked about as already stopped, and exit zero.
+            InterpreterResolutionError: If there is no interpreter to reach
+                either through. Both need one, and a robot whose environment
+                cannot be resolved has said nothing about its application
+                either way.
         """
+        answered = await self._api("GET", f"{_APPS}/current-app-status")
+        if not _unreachable(answered):
+            return self._read_status(answered)
         outcome = await self._control("status", "--json")
         if not outcome.ok:
+            # Both interfaces named, because a robot serving neither is the one
+            # an operator has the hardest time diagnosing: told only about the
+            # module they would look for a module, and the reason the API was
+            # not there is the other half of the answer.
             message = (
-                f"the daemon's application control could not be run: "
-                f"{outcome.complaint()}"
+                f"neither of the daemon's application-control interfaces "
+                f"answered. Its API at {self._layout.daemon_api} could not be "
+                f"reached ({answered.complaint()}), and its control module "
+                f"could not be run: {outcome.complaint()}"
             )
             raise DaemonControlError(message)
         report = self._decode(outcome)
@@ -268,6 +441,86 @@ class DaemonClient:
             running=running is True,
             detail=detail if isinstance(detail, str) else "",
         )
+
+    def _read_status(self, outcome: CommandOutcome) -> ApplicationState:
+        """Read what the daemon's API said about the application it is running.
+
+        The endpoint answers about the CURRENT application rather than about the
+        one asked for, so a robot running something else is a robot on which
+        this application is not running — and the detail says which, because an
+        operator whose satellite was displaced by another application needs to
+        be told that rather than left with "not running".
+
+        **Three outcomes, not two, and the third is the one worth spelling
+        out.** The daemon may answer that it is running an application and not
+        say which. That is not evidence of a different application: it is an
+        incomplete answer, a different fault with a different fix, and telling
+        an operator their robot is running something else sends them hunting a
+        rogue application that may not exist. Each case says only what it knows.
+
+        Args:
+            outcome: What the request did.
+
+        Returns:
+            Whether this application is running, and what the daemon said.
+
+        Raises:
+            DaemonControlError: If the API answered with an error status, or
+                with something this tool cannot read.
+        """
+        if outcome.exit_status == _API_REFUSED:
+            message = (
+                f"the daemon's application API refused the request: "
+                f"{outcome.complaint()}"
+            )
+            raise DaemonControlError(message)
+        if not outcome.ok:
+            message = (
+                f"the daemon's application API could not be asked: "
+                f"{outcome.complaint()}"
+            )
+            raise DaemonControlError(message)
+        try:
+            decoded = json.loads(outcome.stdout)
+        except ValueError as error:
+            message = (
+                f"the daemon's application API answered "
+                f"{_APPS}/current-app-status with something that is not JSON"
+            )
+            raise DaemonControlError(message) from error
+        if decoded is None:
+            # A JSON `null`, which is what this endpoint answers when the daemon
+            # is running nothing. An EMPTY body cannot arrive here — the request
+            # script passes the body through unchanged, so an empty one fails
+            # above as not JSON rather than being read as this.
+            return ApplicationState(
+                running=False,
+                detail="the daemon is running no application",
+            )
+        if not isinstance(decoded, dict):
+            message = (
+                f"the daemon's application API answered "
+                f"{_APPS}/current-app-status with a {type(decoded).__name__} "
+                f"rather than an object"
+            )
+            raise DaemonControlError(message)
+        state = decoded.get("state")
+        detail = state if isinstance(state, str) else "in a state it did not name"
+        detail = _with_error(detail, decoded)
+        info = decoded.get("info")
+        if not isinstance(info, dict):
+            return _unnamed("info", detail)
+        current = info.get("name")
+        if not isinstance(current, str) or not current:
+            # `null`, a number, an empty string — a JSON API can put any of them
+            # here, and none of them is the name of another application.
+            return _unnamed("info.name", detail)
+        if current != self._layout.application:
+            return ApplicationState(
+                running=False,
+                detail=f"the daemon is running {current} instead, {detail}",
+            )
+        return ApplicationState(running=state == _RUNNING, detail=detail)
 
     async def effective_configuration(self) -> Mapping[str, str]:
         """Ask systemd what environment the daemon is actually running with.
@@ -310,19 +563,7 @@ class DaemonClient:
                 f"{outcome.status_only()}"
             )
             raise RobotAccessError(message)
-        settings: dict[str, str] = {}
-        # systemd prints the whole environment on one line, quoting an
-        # assignment that needs it. Splitting it the way a shell would is the
-        # closest available parse and not an exact one: systemd's own escaping
-        # is its own, and a value carrying something it escapes differently
-        # would come back subtly wrong. It is what there is — `systemctl show`
-        # offers no structured output — and the managed region itself is read
-        # from the file, where the format is this repository's own.
-        for assignment in shlex.split(outcome.stdout.strip()):
-            name, separator, value = assignment.partition("=")
-            if separator:
-                settings[name] = value
-        return settings
+        return _environment(outcome.stdout)
 
     async def announced_identity(self) -> str:
         """Ask what identity the satellite announces to Home Assistant.
@@ -341,27 +582,146 @@ class DaemonClient:
 
     # --- what the operating commands need ------------------------------------
 
+    #:= docs/specs/stock-robot-installation/index.md#req-105-the-daemon-s-start-program-is-not-assumed-to-be-an-interpreter
+    #:% `reachyctl` MUST NOT execute the program named by a robot's daemon service unit
+    #:% as though it were a Python interpreter.
+    #
+    #:= docs/specs/stock-robot-installation/index.md#req-106-diagnosis-and-deployment-start-no-second-daemon
+    #:% `reachyctl` MUST NOT start another instance of the robot's daemon, or take any
+    #:% device, port or lock from the running one, as a side effect of diagnosing or
+    #:% deploying.
     async def interpreter(self) -> str:
-        """Ask systemd which interpreter the daemon runs.
+        """Resolve the interpreter that owns the daemon's package environment.
+
+        One round trip reads the unit's start program and the environment it
+        declares; `reachyctl.interpreters` turns those into candidates, and each
+        is asked to identify itself before it is trusted. The unit's start
+        program is a candidate only when its file name says it is an
+        interpreter, so a shell launcher is never run — see the module
+        documentation for the robot that made this necessary.
 
         Returns:
-            The path in the unit's first `ExecStart`. The configured fallback is
-            used only when the unit declares none — a unit that is not installed
-            reports an empty property — and never to paper over a command that
-            failed. See the module documentation for why asking rather than
-            assuming is the point.
+            The first candidate that answered as an interpreter.
 
         Raises:
+            InterpreterResolutionError: If nothing did. Named and remediable:
+                the message lists what was tried and why, says what was
+                deliberately not run, and names `--python`.
             RobotAccessError: If the unit could not be read at all.
         """
-        properties = await self._show(self._layout.daemon_unit, "ExecStart")
+        properties = await self._show(
+            self._layout.daemon_unit,
+            "ExecStart",
+            "Environment",
+        )
         found = _EXEC_PATH.search(properties.get("ExecStart", ""))
-        return found.group(1) if found is not None else self._layout.python
+        exec_start = found.group(1) if found is not None else ""
+        considered = candidates(
+            configured=self._layout.python,
+            exec_start=exec_start,
+            environment=_environment(properties.get("Environment", "")),
+        )
+        for candidate in considered:
+            if await self._identifies_as_an_interpreter(candidate.path):
+                return candidate.path
+        raise InterpreterResolutionError(
+            _unresolved(
+                self._layout.daemon_unit,
+                exec_start,
+                self._layout.python,
+                considered,
+            ),
+        )
 
-    async def installed_versions(self, *distributions: str) -> dict[str, str]:
-        """Ask the daemon's environment what versions it holds.
+    async def application_interpreter(self) -> str:
+        """Resolve the interpreter of the environment applications are in.
+
+        A second question, and on the released image a second answer: the
+        daemon runs out of one virtual environment and installs applications
+        into a sibling of it. `reachyctl.interpreters.application_candidates`
+        derives both possibilities from where the daemon's own interpreter
+        turned out to be, and each is confirmed the same way.
+
+        Returns:
+            The first candidate that answered as an interpreter. The daemon's
+            own is always the last one tried, so an image that keeps a single
+            environment for both resolves to exactly what it did before.
+
+        Raises:
+            InterpreterResolutionError: If none answered — which means the
+                daemon's own interpreter stopped answering between one question
+                and the next, since it is always in the list.
+            RobotAccessError: If the unit could not be read at all.
+        """
+        daemon = await self.interpreter()
+        considered = application_candidates(daemon)
+        for candidate in considered:
+            if await self._identifies_as_an_interpreter(candidate.path):
+                return candidate.path
+        message = (
+            f"could not resolve the Python interpreter of the environment "
+            f"{self._layout.daemon_unit} runs applications from. Tried "
+            + "; ".join(candidate.describe() for candidate in considered)
+            + ". Name the interpreter with --python"
+        )
+        raise InterpreterResolutionError(message)
+
+    async def _identifies_as_an_interpreter(self, path: str) -> bool:
+        """Ask a candidate to say what it is.
+
+        `-V` and not source: this is the step that *establishes* the thing
+        everything downstream assumes, so it cannot itself assume it. The answer
+        is read rather than the exit status, because a program can exit zero
+        having done something else entirely, and only the version makes it an
+        interpreter.
 
         Args:
+            path: The candidate. `reachyctl.interpreters.candidates` has already
+                established that its file name is one CPython gives an
+                interpreter — every candidate, an operator's `--python`
+                included — so this is never the first thing to look at the name.
+                What that gate cannot see is a rename, which is why this step
+                exists and why what it runs is a flag rather than source.
+
+        Returns:
+            True when it spoke on exactly one stream and everything it said
+            there is a version — `Python 3.12.3`, which is exactly what `-V`
+            makes CPython print. A path that is not there, is not executable,
+            said one word more, or said something on both streams is not an
+            interpreter, and the next candidate is tried.
+        """
+        outcome = await self._run([path, _VERSION_FLAG])
+        if not outcome.ok:
+            return False
+        # ONE stream says the whole version and the other says nothing. Which
+        # one is not fixed here — Python 3 writes to standard output and Python
+        # 2 wrote to standard error, and a robot is not this tool's choice of
+        # interpreter — but that there is exactly one is. Preferring whichever
+        # stream is non-empty would admit a program that prints the version on
+        # one and a launcher's banner on the other; concatenating them would
+        # admit a version split across the two. Neither is what `-V` does.
+        spoken = [
+            stream
+            for stream in (outcome.stdout.strip(), outcome.stderr.strip())
+            if stream
+        ]
+        return len(spoken) == 1 and _VERSION_ANSWER.fullmatch(spoken[0]) is not None
+
+    async def installed_versions(
+        self,
+        python: str,
+        *distributions: str,
+    ) -> dict[str, str]:
+        """Ask one of the robot's environments what versions it holds.
+
+        The interpreter is an argument rather than resolved here, because there
+        are two environments and the caller is the one that knows which question
+        it is asking: the daemon's own for the daemon's version, and the one
+        applications are installed into for the application's.
+
+        Args:
+            python: The interpreter that owns the environment to ask, already
+                confirmed to be one.
             distributions: The distribution names to look up.
 
         Returns:
@@ -375,7 +735,6 @@ class DaemonClient:
                 exists to detect — a version that is not there — for a robot
                 that simply did not answer.
         """
-        python = await self.interpreter()
         outcome = await self._run([python, "-c", _METADATA_SCRIPT, *distributions])
         if not outcome.ok:
             message = (
@@ -566,7 +925,12 @@ class DaemonClient:
             )
 
     async def install_wheel(self, wheel: PurePosixPath) -> CommandOutcome:
-        """Install a wheel into the environment the daemon runs.
+        """Install a wheel into the environment the daemon runs applications from.
+
+        The same environment `installed_application` reads back, and that is
+        not a detail: installing into one and verifying against another is the
+        failure reachyctl REQ-051 exists to catch, arriving by the door the two
+        environments open.
 
         Args:
             wheel: Where the wheel is on the robot.
@@ -577,7 +941,7 @@ class DaemonClient:
             that failed — and because the install exiting zero is exactly the
             thing this change refuses to treat as success.
         """
-        python = await self.interpreter()
+        python = await self.application_interpreter()
         return await self._run(
             self._privileged(
                 [python, "-m", "pip", "install", "--upgrade", str(wheel)],
@@ -598,16 +962,30 @@ class DaemonClient:
         """Ask the daemon to start the application.
 
         Returns:
-            What the daemon's control did.
+            What the daemon's control did, through whichever interface this
+            robot serves.
         """
+        answered = await self._api(
+            "POST",
+            f"{_APPS}/start-app/{self._layout.application}",
+        )
+        if not _unreachable(answered):
+            return answered
         return await self._control("start")
 
     async def stop_application(self) -> CommandOutcome:
         """Ask the daemon to stop the application.
 
+        The API endpoint stops whatever is running rather than a named
+        application, which is what the daemon offers: it runs one at a time.
+
         Returns:
-            What the daemon's control did.
+            What the daemon's control did, through whichever interface this
+            robot serves.
         """
+        answered = await self._api("POST", f"{_APPS}/stop-current-app")
+        if not _unreachable(answered):
+            return answered
         return await self._control("stop")
 
     def journal(
@@ -668,6 +1046,39 @@ class DaemonClient:
         if not self._elevate:
             return list(command)
         return ["sudo", "-n", *command]
+
+    async def _api(self, method: str, path: str) -> CommandOutcome:
+        """Ask the daemon's own HTTP API, if this robot serves one.
+
+        **There are two application-control interfaces and neither is a
+        workaround for the other.** This one is what the released image serves
+        and what a stock robot has; `_control`'s module is what change 0009
+        recorded as provisional, what the provisioning roles use, and what the
+        container target the idempotency gate runs against implements. A robot
+        has one or the other, so the client asks for both rather than making an
+        operator tell it which — that is the same seam fixed once, not a
+        per-command special case.
+
+        Args:
+            method: The HTTP method.
+            path: The endpoint, below `RobotLayout.daemon_api`.
+
+        Returns:
+            What the request did. `_unreachable` reads it for whether this robot
+            serves such an API at all, which is the caller's signal to try the
+            other interface. An error STATUS is not that signal: a daemon that
+            answered and refused has an API, and replacing its reason with a
+            second interface's unrelated failure is how an operator ends up
+            debugging the wrong thing.
+
+        Raises:
+            InterpreterResolutionError: If no interpreter could be resolved to
+                make the request through.
+        """
+        python = await self.interpreter()
+        return await self._run(
+            [python, "-c", _API_SCRIPT, method, f"{self._layout.daemon_api}{path}"],
+        )
 
     async def _control(self, verb: str, *arguments: str) -> CommandOutcome:
         """Run one of the daemon's application-control verbs.
@@ -784,6 +1195,185 @@ class DaemonClient:
         if not outcome.ok:
             raise RobotAccessError(f"{complaint}: {outcome.complaint()}")
         return outcome
+
+
+def _with_error(detail: str, decoded: Mapping[str, object]) -> str:
+    """Add what the daemon said went wrong, and say so even when it cannot be shown.
+
+    A string is the daemon's own message and is quoted verbatim, unchanged, the
+    way every other thing a robot wrote is — see `CommandOutcome.complaint`.
+
+    Anything else is a daemon departing from its own model. Its PRESENCE and its
+    TYPE are reported, because silently dropping the only evidence that
+    something is wrong is how an operator is left with nothing to go on. Its
+    CONTENT is withheld, and that is not caution for its own sake: rendering it
+    would mean re-encoding it, and escaping a quote, a backslash or a newline is
+    exactly what stops a redactor seeded with a raw secret from matching it.
+    This field carries whatever went wrong, which includes whatever was being
+    sent at the time, so it is one of the likelier places for a credential to
+    surface — and this is the seam where robot text becomes operator-visible
+    output.
+
+    Withholding it costs little: an operator learns something is there and is
+    sent to the daemon's own log, which is where that evidence lives anyway and
+    where it never passed through this tool's redactor.
+
+    Args:
+        detail: What has been said about the state so far.
+        decoded: The status document.
+
+    Returns:
+        The detail, with the error appended when there is one.
+    """
+    failure = decoded.get("error")
+    if isinstance(failure, str):
+        return f"{detail}: {failure}" if failure else detail
+    if failure is None:
+        return detail
+    return (
+        f"{detail}: its error field was {_json_kind(failure)} rather than a "
+        f"message, and what it held is withheld — it cannot be scrubbed safely. "
+        f"Read the daemon's own log for it"
+    )
+
+
+def _json_kind(value: object) -> str:
+    """Name a JSON value's type the way the document that carried it would.
+
+    Args:
+        value: What was decoded.
+
+    Returns:
+        The type, with its article, so the sentence above reads. JSON's own
+        vocabulary rather than Python's: the operator is looking at an API
+        answer, not at this process.
+    """
+    if isinstance(value, bool):
+        # Before the number check: in Python a bool IS an int.
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, dict):
+        return "an object"
+    if isinstance(value, list):
+        return "an array"
+    return "neither a message nor anything else this tool can name"
+
+
+def _unnamed(field: str, detail: str) -> ApplicationState:
+    """Say the daemon named no application, which is not the same as another one.
+
+    Args:
+        field: The part of the answer that carried no name, so an operator
+            reading this knows which half of the document to go and look at.
+        detail: What the daemon did manage to say about the state it is in.
+
+    Returns:
+        Not running — because nothing said this application is — with a detail
+        that claims only what the answer supports.
+    """
+    return ApplicationState(
+        running=False,
+        detail=(
+            f"the daemon did not say which application it is running — "
+            f"{field} was absent or not a name — and reported {detail}"
+        ),
+    )
+
+
+def _unreachable(outcome: CommandOutcome) -> bool:
+    """Say whether the daemon's API is absent rather than unhappy.
+
+    Args:
+        outcome: What the request did.
+
+    Returns:
+        True only when the request could not reach anything at all, which is
+        the one answer that means "this robot serves the other interface". Every
+        other failure is a failure of an API that exists.
+    """
+    return outcome.exit_status == _API_UNREACHABLE
+
+
+def _environment(text: str) -> dict[str, str]:
+    """Read the environment out of systemd's rendering of it.
+
+    systemd prints the whole environment on one line, quoting an assignment that
+    needs it. Splitting it the way a shell would is the closest available parse
+    and not an exact one: systemd's own escaping is its own, and a value
+    carrying something it escapes differently would come back subtly wrong. It
+    is what there is — `systemctl show` offers no structured output — and the
+    managed region itself is read from the file, where the format is this
+    repository's own.
+
+    Args:
+        text: What systemd printed for the `Environment` property.
+
+    Returns:
+        The settings by name.
+    """
+    settings: dict[str, str] = {}
+    for assignment in shlex.split(text.strip()):
+        name, separator, value = assignment.partition("=")
+        if separator:
+            settings[name] = value
+    return settings
+
+
+def _unresolved(
+    unit: str,
+    exec_start: str,
+    configured: str | None,
+    considered: Sequence[Candidate],
+) -> str:
+    """Say why no interpreter could be resolved, and what to do about it.
+
+    Args:
+        unit: The daemon's unit, so the operator knows which robot and which
+            service this is about.
+        exec_start: The program that unit starts, or an empty string when it
+            declares none.
+        configured: What `--python` named, so an operator whose own answer was
+            refused is told that rather than left looking for it in a list it
+            is not in.
+        considered: Every candidate that was tried, in the order they were.
+
+    Returns:
+        The message. It names the paths and their reasons rather than only
+        counting them, says out loud what was deliberately *not* run, and ends
+        with the answer an operator can always give.
+    """
+    tried = (
+        "Tried " + "; ".join(candidate.describe() for candidate in considered) + "."
+        if considered
+        else "Nothing on this robot suggested one."
+    )
+    if not exec_start:
+        withheld = f"The unit {unit} declares no start program to derive one from."
+    elif names_an_interpreter(exec_start):
+        withheld = f"The unit {unit} starts {exec_start}."
+    else:
+        withheld = (
+            f"The unit {unit} starts {exec_start}, which was not run: a unit's "
+            f"start program is the daemon's entry point, and only on some "
+            f"images is that also an interpreter. Running it with Python "
+            f"arguments starts a second daemon that competes with the first for "
+            f"its port, its serial device and its camera."
+        )
+    if configured and not names_an_interpreter(configured):
+        refused = (
+            f" The path --python names, {configured}, was not run either: this "
+            f"tool only ever executes a program whose file name is one CPython "
+            f"gives an interpreter, which is what stops a launcher being run at "
+            f"all. Point --python at the interpreter itself, or at a link to it "
+            f"named python."
+        )
+    else:
+        refused = ""
+    return (
+        f"could not resolve the Python interpreter of the environment {unit} "
+        f"runs. {withheld}{refused} {tried} Name the interpreter with --python"
+    )
 
 
 def _substate(properties: Mapping[str, str]) -> str:

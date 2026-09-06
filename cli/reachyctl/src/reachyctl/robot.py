@@ -52,9 +52,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_APPLICATION",
+    "DEFAULT_DAEMON_API",
     "DEFAULT_DAEMON_CONTROL",
     "DEFAULT_DAEMON_DISTRIBUTION",
-    "DEFAULT_PYTHON",
     "DEFAULT_SSH_PORT",
     "DEFAULT_STAGING",
     "Closer",
@@ -115,11 +115,13 @@ DEFAULT_DAEMON_DISTRIBUTION: Final = "reachy-mini"
 # the deferred hardware session does.
 DEFAULT_DAEMON_CONTROL: Final = "reachy_mini.apps"
 
-# The application environment's interpreter, used only when the daemon's own
-# unit does not say which one it runs. See `reachyctl.daemon`, which prefers the
-# answer it gets from the daemon over this one, because installing into an
-# environment the daemon is not using is the failure REQ-051 exists to catch.
-DEFAULT_PYTHON: Final = "/opt/reachy/venv/bin/python"
+# Where the daemon's own HTTP API answers, as reached FROM the robot: every
+# request is made by an interpreter running there, so this is a loopback address
+# rather than anybody's machine. The released image serves the application
+# control here, which is what makes a stock robot diagnosable without an option.
+# A literal rather than a name, because a robot that cannot resolve `localhost`
+# is a robot this tool would fail on for a reason nobody would guess.
+DEFAULT_DAEMON_API: Final = "http://127.0.0.1:8000"
 
 # Where a transfer lands before it is installed. Under `/var/tmp` rather than
 # `/tmp`: a wheel is large enough that a `tmpfs` on a device with a gigabyte of
@@ -216,8 +218,17 @@ class RobotLayout:
             `ping` reports.
         daemon_control: The module the daemon's application control is reached
             through. See `DEFAULT_DAEMON_CONTROL`.
-        python: The application environment's interpreter, used only as a
-            fallback — see `DEFAULT_PYTHON`.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+            The application control is asked here first and through
+            `daemon_control` second — see `reachyctl.daemon._api` for why a
+            robot has one interface or the other and this tool asks for both.
+        python: The interpreter that owns the daemon's package environment,
+            when an operator has named one, and `None` otherwise. This is the
+            one field with no default, and deliberately: a default here would be
+            a path this tool assumed, and `reachyctl.daemon` resolves the
+            interpreter from the robot precisely so that nothing assumes one.
+            Supplied, it is the answer and it is tried first; absent, the
+            resolution has nothing to fall back to and says so.
         staging: Where a transferred wheel lands before it is installed.
     """
 
@@ -226,7 +237,8 @@ class RobotLayout:
     application: str = DEFAULT_APPLICATION
     daemon_distribution: str = DEFAULT_DAEMON_DISTRIBUTION
     daemon_control: str = DEFAULT_DAEMON_CONTROL
-    python: str = DEFAULT_PYTHON
+    daemon_api: str = DEFAULT_DAEMON_API
+    python: str | None = None
     staging: str = DEFAULT_STAGING
 
     @property

@@ -268,6 +268,14 @@ unless something says out loud which version is there.
 the metadata is what pip records and what the daemon's interpreter will report
 afterwards.
 
+Which interpreter that is, is resolved from the robot rather than assumed — and
+never from the program the daemon's unit starts, which on a stock image is a
+shell launcher. A deploy that stops at its `reach` step saying *could not
+resolve the Python interpreter* is that resolution, not the link: see [When the
+interpreter cannot be
+resolved](./troubleshooting.md#when-the-interpreter-cannot-be-resolved), which
+also gives the `--python` that answers it outright.
+
 Or, reproducibly, through the playbook:
 
 ```

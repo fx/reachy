@@ -85,6 +85,15 @@ with host-key verification on — there is no option that turns it off — so a
 changed host key looks like a connection failure. Point `--known-hosts` at a file
 that has the robot in it.
 
+**One failure here is not about the link at all**, and it names itself: *could
+not resolve the Python interpreter of the environment
+`reachy-mini-daemon.service` runs*. The robot answered; what could not be found
+is the interpreter that owns the environment the daemon's packages are installed
+in. See [When the interpreter cannot be
+resolved](#when-the-interpreter-cannot-be-resolved) below — the same failure
+takes `application.installed` and `application.running` down with it, and one
+`--python` fixes all three.
+
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript is recorded for
 > this check: reaching a real robot's daemon has never been attempted from this
 > repository. What is recorded is what the check reports when no robot is given
@@ -112,6 +121,23 @@ installed, you installed into a different environment.
 `deploy` reads the wheel's own `.dist-info/METADATA` for the distribution name
 rather than parsing its file name, so "what was installed" and "what is running"
 are answers to the same question.
+
+**Which environment that is, is not the daemon's own.** A daemon does not have
+to run its applications where it runs itself, and the released image does not:
+it runs out of one virtual environment and installs applications into a
+**sibling** of it. This check asks the sibling, deriving it the way the vendor's
+own installer does, and falls back to the daemon's environment for an image that
+keeps one for both. Both are resolved from the robot on every question — never
+assumed, and never taken from the program the daemon's unit starts.
+
+Two failures here are about that resolution rather than about the application. A
+complaint naming the environment it looked in — *is not installed in the
+environment the daemon runs applications from, which on this robot is the one
+`/venvs/apps_venv/bin/python` owns* — is a true answer: if the satellite is
+running anyway, it is installed somewhere neither the daemon nor this tool would
+look. A failure saying *could not resolve the Python interpreter* is the
+resolution itself coming up empty; see [When the interpreter cannot be
+resolved](#when-the-interpreter-cannot-be-resolved).
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript. Against the
 > container target the check passes, reporting `the application is installed at
@@ -150,6 +176,33 @@ Read the journal:
 ```
 reachyctl app logs --robot reachy@192.0.2.20
 ```
+
+**There are two application-control interfaces and the robot decides which.**
+The released image serves its control over the daemon's own HTTP API on the
+robot; the container target the provisioning gate runs against implements a
+control module instead. This check asks the API first and the module second, so
+a stock robot needs no flag, and a robot serving neither fails saying so and
+naming both — never by reporting the application as stopped, which would make
+`reachyctl app stop` exit zero over a robot it never reached.
+
+Both interfaces are reached through the interpreter resolved for the daemon's
+environment, so a failure saying *could not resolve the Python interpreter* is
+that resolution and not the application; see [When the interpreter cannot be
+resolved](#when-the-interpreter-cannot-be-resolved).
+
+The daemon's API answers about the application it is **currently** running, and
+it runs one at a time. So *the daemon is running `<something-else>` instead* is
+this check working: the satellite is not running because something displaced it,
+and the name is the one to go and look for. *The daemon is running no
+application* is the ordinary stopped case, and `starting`, `stopping`, `done`
+and `error` are the other states it can report — none of them is running, and
+`starting` in particular is an application that may never finish starting.
+
+*The daemon did not say which application it is running* is none of those, and
+the distinction is worth the sentence: the daemon answered, it reported an
+application, and its answer carried no name. **Nothing has been displaced** —
+go and look at the daemon rather than hunting an application that may not
+exist. The message names the field that was missing.
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript, and no `app logs`
 > transcript at all.
@@ -438,6 +491,85 @@ reachyctl config apply
 ---
 
 ## Failures `doctor` does not have a check for
+
+### When the interpreter cannot be resolved
+
+**What it looks like.** `daemon.reachable`, `application.installed` and
+`application.running` all fail together, each with the same sentence, and
+`reachyctl deploy` fails at its `reach` step with it too:
+
+```
+could not resolve the Python interpreter of the environment reachy-mini-daemon.service runs. The unit reachy-mini-daemon.service starts /venvs/mini_daemon/lib/python3.12/site-packages/reachy_mini/daemon/app/services/wireless/launcher.sh, which was not run: a unit's start program is the daemon's entry point, and only on some images is that also an interpreter. Running it with Python arguments starts a second daemon that competes with the first for its port, its serial device and its camera. Tried /venvs/mini_daemon/bin/python (the environment the unit's start program is installed in). Name the interpreter with --python
+```
+
+**What it means.** Everything `reachyctl` asks of the robot — which
+distributions an environment holds, which version the application is at, whether
+the daemon is running it — is asked *through* an interpreter, and it has to be
+the interpreter that owns the environment being asked about. Installing into a
+path this tool assumed and then verifying against the same assumption would
+agree with itself no matter where the daemon really looks, which is reachyctl
+[REQ-051](../specs/reachyctl/index.md#req-051-deployment-verifies-its-own-result)'s
+whole subject.
+
+The message above is the **daemon's** environment failing to resolve, which is
+the first of the two and the one everything else is derived from. The tool
+resolves it from the robot, in this order:
+
+1. what `--python` names, when an operator named one;
+2. the unit's start program, **only** when its file name is one CPython gives an
+   interpreter — `python`, `python3`, `python3.12`, or one of those carrying
+   a build's ABI flags, such as `python3.13t`;
+3. the `VIRTUAL_ENV` the unit declares;
+4. the environment the start program is installed in, read off a
+   `…/lib/pythonX.Y/site-packages/…` path.
+
+Each candidate is asked `-V` and has to answer with a version line before
+anything else is sent to it. Nothing else is executed, and there is no fallback:
+a path that might not be an interpreter is exactly what this failure exists to
+refuse.
+
+There is deliberately no rule taking the `bin` directory the start program
+merely sits in. A `bin` alone is not an environment — a console script at
+`/usr/local/bin/reachy-mini-daemon` would yield `/usr/local/bin/python`, which
+exists, answers `-V`, and may have nothing to do with the daemon's packages.
+Installing into it and then verifying against it would agree with itself while
+both looked at the wrong place, which is exactly the failure
+[REQ-051](../specs/reachyctl/index.md#req-051-deployment-verifies-its-own-result)
+exists to catch. Such a unit resolves nothing and says so, and `--python`
+answers it in one step.
+
+**The application's environment is resolved second, from the first.** A daemon
+does not have to run its applications where it runs itself: the released image
+runs out of one virtual environment and installs applications into a sibling of
+it, which is what the vendor's own installer does. So `application.installed`
+and the deploy's install step ask `<sibling>/bin/python` first and the daemon's
+own second, and a failure there names *the environment the daemon runs
+applications from* rather than the daemon's.
+
+**What to do.** The message lists every path that was tried and why. Log in to
+the robot and find the interpreter of the environment the daemon's packages are
+installed in — on a stock image, the `bin/python` of the virtual environment the
+unit's start program lives under — then pass it:
+
+```
+reachyctl doctor --robot reachy@192.0.2.20 --python /venvs/mini_daemon/bin/python
+```
+
+**Why the refusal matters.** A `reachyctl` older than this behaviour read the
+unit's start program as an interpreter and ran it with `-c '<python source>'`.
+On ReachyMiniOS v0.2.3 that program is a shell launcher, so the diagnosis
+**started a second daemon**, which then contended with the running one for its
+network port, its serial device and its camera. If a robot has been diagnosed
+with such a version, check for an orphaned daemon process before trusting
+anything else the tool reports about it.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** The failure above is this tool's own
+> string and not a transcript from a robot — nothing in this repository has a
+> Reachy Mini attached. It is held to the code rather than written from memory:
+> `cli/reachyctl/tests/test_reachyctl_interpreter_runbook.py` renders it from
+> the real resolution against the stock image's layout and requires the block
+> above to be it. The `--python` step and the orphaned-process check have not
+> been run against real hardware.
 
 ### The service refuses to start naming a variable
 
