@@ -119,26 +119,33 @@ def test_what_an_operator_named_comes_before_anything_derived() -> None:
     ]
 
 
-def test_the_one_path_an_operator_may_not_name_is_the_unit_s_own_launcher() -> None:
-    """The name gate outranks the order, including over `--python`.
+@pytest.mark.parametrize(
+    "named",
+    [
+        LAUNCHER,
+        "/venvs/mini_daemon/lib/python3.12/site-packages/reachy_mini/daemon/app/"
+        "services/wireless/../wireless/launcher.sh",
+        "/usr/local/bin/py312",
+    ],
+)
+def test_the_gate_outranks_the_operator_and_needs_no_path_comparison(
+    named: str,
+) -> None:
+    """A rule phrased as "not the launcher" would have to compare two paths.
 
-    Every other path is theirs to name. This one is the second daemon arriving
-    by the single route an operator can open by mistake.
+    Two spellings of one file — a `..` in the middle, a symlink, a trailing
+    slash — are not equal as strings, and normalising them properly needs the
+    robot. Phrased as a name instead, the rule needs no comparison: an alias of
+    `launcher.sh` is still called `launcher.sh`. The third case is the price,
+    and it is stated rather than hidden — an interpreter under a name CPython
+    never gives one is refused too, and the failure says to link it.
+
+    Args:
+        named: What `--python` named.
     """
-    found = candidates(configured=LAUNCHER, exec_start=LAUNCHER, environment={})
+    found = candidates(configured=named, exec_start=LAUNCHER, environment={})
 
     assert [candidate.path for candidate in found] == [INTERPRETER]
-
-
-def test_an_operator_may_name_an_interpreter_under_any_other_name() -> None:
-    """The gate is about the unit's start program, not about naming conventions."""
-    found = candidates(
-        configured="/usr/local/bin/py312",
-        exec_start=LAUNCHER,
-        environment={},
-    )
-
-    assert found[0].path == "/usr/local/bin/py312"
 
 
 def test_a_bin_directory_alone_is_not_an_environment_and_is_not_guessed_at() -> None:

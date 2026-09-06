@@ -60,7 +60,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from reachy_checks import ApplicationState, DaemonInfo, InstalledApplication
-from reachyctl.interpreters import candidates
+from reachyctl.interpreters import candidates, names_an_interpreter
 from reachyctl.managed import MalformedRegionError, parse_region
 from reachyctl.robot import CommandOutcome, RobotAccessError
 
@@ -425,7 +425,12 @@ class DaemonClient:
             if await self._identifies_as_an_interpreter(candidate.path):
                 return candidate.path
         raise InterpreterResolutionError(
-            _unresolved(self._layout.daemon_unit, exec_start, considered),
+            _unresolved(
+                self._layout.daemon_unit,
+                exec_start,
+                self._layout.python,
+                considered,
+            ),
         )
 
     async def _identifies_as_an_interpreter(self, path: str) -> bool:
@@ -442,17 +447,22 @@ class DaemonClient:
                 claim an interpreter, unless an operator named it themselves.
 
         Returns:
-            True when everything it said is a version — `Python 3.12.3`, which
-            is exactly what `-V` makes CPython print. A path that is not there,
-            is not executable, or said one word more is not an interpreter, and
-            the next candidate is tried.
+            True when everything it said, on both streams, is a version —
+            `Python 3.12.3`, which is exactly what `-V` makes CPython print. A
+            path that is not there, is not executable, or said one word more is
+            not an interpreter, and the next candidate is tried.
         """
         outcome = await self._run([path, _VERSION_FLAG])
         if not outcome.ok:
             return False
-        # Python 3 writes the version to standard output; older ones wrote it to
-        # standard error, and a robot is not this tool's choice of interpreter.
-        answer = (outcome.stdout or outcome.stderr).strip()
+        # BOTH streams, joined rather than preferred. `-V` makes CPython write
+        # one line to standard output and nothing to standard error, so reading
+        # only the stream that happened to be non-empty would let a program
+        # print the version on one and a launcher's banner on the other and
+        # still pass — which is the whole-answer rule holding on half the
+        # answer. Python 2 wrote the version to standard error; joining covers
+        # that too, without a rule about which stream to believe.
+        answer = f"{outcome.stdout}{outcome.stderr}".strip()
         return _VERSION_ANSWER.fullmatch(answer) is not None
 
     async def installed_versions(self, *distributions: str) -> dict[str, str]:
@@ -908,7 +918,12 @@ def _environment(text: str) -> dict[str, str]:
     return settings
 
 
-def _unresolved(unit: str, exec_start: str, considered: Sequence[Candidate]) -> str:
+def _unresolved(
+    unit: str,
+    exec_start: str,
+    configured: str | None,
+    considered: Sequence[Candidate],
+) -> str:
     """Say why no interpreter could be resolved, and what to do about it.
 
     Args:
@@ -916,6 +931,9 @@ def _unresolved(unit: str, exec_start: str, considered: Sequence[Candidate]) -> 
             service this is about.
         exec_start: The program that unit starts, or an empty string when it
             declares none.
+        configured: What `--python` named, so an operator whose own answer was
+            refused is told that rather than left looking for it in a list it
+            is not in.
         considered: Every candidate that was tried, in the order they were.
 
     Returns:
@@ -930,7 +948,7 @@ def _unresolved(unit: str, exec_start: str, considered: Sequence[Candidate]) -> 
     )
     if not exec_start:
         withheld = f"The unit {unit} declares no start program to derive one from."
-    elif any(candidate.path == exec_start for candidate in considered):
+    elif names_an_interpreter(exec_start):
         withheld = f"The unit {unit} starts {exec_start}."
     else:
         withheld = (
@@ -940,9 +958,19 @@ def _unresolved(unit: str, exec_start: str, considered: Sequence[Candidate]) -> 
             f"arguments starts a second daemon that competes with the first for "
             f"its port, its serial device and its camera."
         )
+    if configured and not names_an_interpreter(configured):
+        refused = (
+            f" The path --python names, {configured}, was not run either: this "
+            f"tool only ever executes a program whose file name is one CPython "
+            f"gives an interpreter, which is what stops a launcher being run at "
+            f"all. Point --python at the interpreter itself, or at a link to it "
+            f"named python."
+        )
+    else:
+        refused = ""
     return (
         f"could not resolve the Python interpreter of the environment {unit} "
-        f"runs. {withheld} {tried} Name the interpreter with --python"
+        f"runs. {withheld}{refused} {tried} Name the interpreter with --python"
     )
 
 

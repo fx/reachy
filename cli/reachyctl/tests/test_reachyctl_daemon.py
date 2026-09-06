@@ -325,8 +325,46 @@ async def test_a_configured_path_that_is_not_an_interpreter_is_refused() -> None
     )
     daemon, _access = daemon_for(
         robot,
-        layout=RobotLayout(python="/usr/bin/there-is-nothing-here"),
+        layout=RobotLayout(python="/usr/bin/python-there-is-nothing-here"),
     )
+
+    assert await daemon.interpreter() == STOCK_INTERPRETER
+
+
+@pytest.mark.asyncio
+async def test_a_configured_path_named_as_no_interpreter_is_says_why_it_was_refused() -> (
+    None
+):
+    """An operator whose own answer was refused must not have to guess at it."""
+    robot = FakeRobot(exec_start=STOCK_LAUNCHER, interpreters={})
+    daemon, _access = daemon_for(robot, layout=RobotLayout(python="/opt/tools/py312"))
+
+    with pytest.raises(InterpreterResolutionError) as raised:
+        await daemon.interpreter()
+
+    assert "/opt/tools/py312, was not run either" in str(raised.value)
+    assert "a link to it named python" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_version_on_one_stream_and_a_banner_on_the_other_is_not_one() -> None:
+    """A program is what it prints on BOTH streams.
+
+    A probe reading only the stream that happened to be non-empty would let a
+    launcher print the version on standard output and announce itself on
+    standard error and still pass, which is the whole-answer rule holding on
+    half the answer.
+    """
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={
+            "/venvs/impostor/bin/python": "3.12.3",
+            STOCK_INTERPRETER: "3.12.3",
+        },
+        noisy_interpreters={"/venvs/impostor/bin/python"},
+        environment={"VIRTUAL_ENV": "/venvs/impostor"},
+    )
+    daemon, _access = daemon_for(robot)
 
     assert await daemon.interpreter() == STOCK_INTERPRETER
 

@@ -114,6 +114,10 @@ class FakeRobot:
             impostor — an empty string, or a version with a banner or a usage
             line after it — which is not an interpreter and must not be treated
             as one.
+        noisy_interpreters: Paths that answer with a bare version on standard
+            output AND a launcher's banner on standard error. A program is what
+            it prints on both streams, so this models the impostor a probe
+            reading only one of them would admit.
         wrapper_runs: Every command sent to the unit's start program while that
             program is not an interpreter. Each one started a second daemon, so
             a test asserting REQ-106 asserts this is empty.
@@ -168,6 +172,7 @@ class FakeRobot:
     interpreters: dict[str, str] = field(
         default_factory=lambda: {DAEMON_INTERPRETER: _INTERPRETER_VERSION},
     )
+    noisy_interpreters: set[str] = field(default_factory=set)
     wrapper_runs: list[list[str]] = field(default_factory=list)
     files: dict[str, str] = field(default_factory=dict)
     packages: dict[str, str] = field(
@@ -422,7 +427,11 @@ class FakeRemoteAccess:
             command=line,
             exit_status=0,
             stdout=f"Python {version}\n",
-            stderr="",
+            stderr=(
+                "reachy-mini launcher: starting\n"
+                if argv[0] in self.robot.noisy_interpreters
+                else ""
+            ),
         )
 
     def _show(self, line: str, argv: list[str]) -> CommandOutcome:
