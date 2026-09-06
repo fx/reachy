@@ -33,6 +33,12 @@ helping the tool guess at it. A unit that genuinely starts an interpreter comes
 next, so a robot that worked before this module existed resolves to exactly the
 path it resolved to then. The derivations follow, and the caller stops at the
 first candidate the robot confirms.
+
+**The name gate outranks the order, including over the operator.** The one path
+`--python` may not name is the unit's own start program, when that program's
+name does not claim an interpreter — running it is the second daemon, arriving
+by the single route an operator can open by mistake. Every other path they might
+name is theirs to name.
 """
 
 from __future__ import annotations
@@ -144,9 +150,10 @@ def candidates(
 
     Returns:
         The candidates, in the order they should be tried, with no path
-        repeated. It is empty when nothing on this robot suggested one, and an
-        empty answer is a real answer: the caller fails with it rather than
-        reaching for a path it invented.
+        repeated and never including the unit's start program unless its name
+        claims an interpreter. It is empty when nothing on this robot suggested
+        one, and an empty answer is a real answer: the caller fails with it
+        rather than reaching for a path it invented.
     """
     directory = PurePosixPath(exec_start).parent
     enclosing = _SITE_PACKAGES.match(exec_start)
@@ -177,8 +184,17 @@ def candidates(
                 "the bin directory the unit's start program is in",
             ),
         )
+    # The unit's start program is a candidate on its NAME and on nothing else,
+    # whichever rule produced it. Only the operator's own answer can reach this,
+    # and it is refused there too: `--python <the launcher>` would run the
+    # launcher, which is the second daemon by the one route an operator can open
+    # by mistake. Everything else they might name is unaffected, because nothing
+    # but the unit's start program starts a daemon.
+    refused = "" if names_an_interpreter(exec_start) else exec_start
     found: dict[str, Candidate] = {}
     for path, source in derived:
+        if path and path == refused:
+            continue
         # First reason wins, so a path derived two ways is named by the
         # strongest thing that suggested it rather than by the last one.
         found.setdefault(path, Candidate(path=path, source=source))

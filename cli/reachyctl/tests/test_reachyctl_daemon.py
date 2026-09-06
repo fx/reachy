@@ -251,6 +251,23 @@ async def test_a_unit_that_is_not_installed_suggests_nothing_and_says_so() -> No
 
 
 @pytest.mark.asyncio
+async def test_naming_the_launcher_with_python_still_does_not_run_it() -> None:
+    """The one route an operator can open by mistake, closed from the inside.
+
+    `--python` is an answer, and the answer it may not give is the unit's own
+    start program. Naming it does not run it: the second daemon is the same
+    second daemon whoever asked for it.
+    """
+    robot = FakeRobot(exec_start=STOCK_LAUNCHER, interpreters={})
+    daemon, _access = daemon_for(robot, layout=RobotLayout(python=STOCK_LAUNCHER))
+
+    with pytest.raises(InterpreterResolutionError):
+        await daemon.interpreter()
+
+    assert robot.wrapper_runs == []
+
+
+@pytest.mark.asyncio
 async def test_a_configured_path_that_is_not_an_interpreter_is_refused() -> None:
     """The override is an answer, and an answer is still checked before it is trusted."""
     robot = FakeRobot(

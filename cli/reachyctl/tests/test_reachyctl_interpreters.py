@@ -119,6 +119,28 @@ def test_what_an_operator_named_comes_before_anything_derived() -> None:
     ]
 
 
+def test_the_one_path_an_operator_may_not_name_is_the_unit_s_own_launcher() -> None:
+    """The name gate outranks the order, including over `--python`.
+
+    Every other path is theirs to name. This one is the second daemon arriving
+    by the single route an operator can open by mistake.
+    """
+    found = candidates(configured=LAUNCHER, exec_start=LAUNCHER, environment={})
+
+    assert [candidate.path for candidate in found] == [INTERPRETER]
+
+
+def test_an_operator_may_name_an_interpreter_under_any_other_name() -> None:
+    """The gate is about the unit's start program, not about naming conventions."""
+    found = candidates(
+        configured="/usr/local/bin/py312",
+        exec_start=LAUNCHER,
+        environment={},
+    )
+
+    assert found[0].path == "/usr/local/bin/py312"
+
+
 def test_a_console_script_offers_the_bin_directory_it_sits_in() -> None:
     """A unit starting an entry point still names the environment holding it."""
     found = candidates(

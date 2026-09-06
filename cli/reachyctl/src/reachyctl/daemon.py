@@ -292,6 +292,10 @@ class DaemonClient:
                 with something this tool cannot read. Returning "not running"
                 for either would make `app stop` report an application it never
                 asked about as already stopped, and exit zero.
+            InterpreterResolutionError: If there is no interpreter to run the
+                control through. Reaching the control means resolving one first,
+                and a robot whose environment cannot be resolved has said
+                nothing about its application either way.
         """
         outcome = await self._control("status", "--json")
         if not outcome.ok:

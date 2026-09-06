@@ -41,10 +41,12 @@ that apply here.
   interpreter, the `VIRTUAL_ENV` the unit declares, the environment the start
   program is installed in — and `reachyctl.daemon` asks each `-V` before any
   Python source goes near it. There is no fallback: an unresolved interpreter is
-  `InterpreterResolutionError` and names `--python`. The rule exists because the
-  stock image's unit starts a shell launcher, and running it with `-c` started a
-  **second daemon** that took the first one's port, serial device and camera —
-  see REQ-105 and REQ-106.
+  `InterpreterResolutionError` and names `--python`. The name gate outranks the
+  order and the operator both: the one path `--python` may not name is the
+  unit's own start program, when that program's name does not claim an
+  interpreter. The rule exists because the stock image's unit starts a shell
+  launcher, and running it with `-c` started a **second daemon** that took the
+  first one's port, serial device and camera — see REQ-105 and REQ-106.
 - **Configuration is validated locally, before anything is contacted.** The
   vocabulary is `reachy_contracts.settings`, shared with provisioning, so a
   value the robot would refuse costs no round trip. A second copy of a
