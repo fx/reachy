@@ -130,7 +130,11 @@ listener and the mDNS record should be torn down synchronously, nor that the
 clear should be refused: an identity can come from an override alone, so refusing
 would make *Reset* impossible there and stopping to get round it starts again
 with the same override. The settings page *claiming* the embargo in that state
-would be a finding; it has a fourth presentation saying so instead.
+would be a finding; it has a fourth presentation saying so instead. The
+groundstation is the opposite case and is not an inconsistency: what a session is
+opened with is read at every replacement, so supplying, clearing or rotating
+either half is adopted at once, and `groundstation_credential` is deliberately
+the one secret in `LIVE_SETTINGS`.
 
 **Specs are written in duvet mode.** RFC 2119 keywords appear **only** inside
 `### REQ-NNN:` sections; their absence from Overview, Background, Design,

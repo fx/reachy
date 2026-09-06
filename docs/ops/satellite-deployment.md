@@ -314,7 +314,7 @@ never by value.
 | `REACHY_SATELLITE_BODY_MOTION_ENABLED` | `false` | Whether predictive gaze coordinates body yaw with its world head target. Provisional, explicit opt-in, and **needs a restart**. |
 | `REACHY_SATELLITE_DETECTION_SOURCE` | `remote` | `remote`, `local`, or `remote_with_local_fallback`. |
 | `REACHY_SATELLITE_GROUNDSTATION_URL` | none | Where the groundstation serves its session endpoint. `ws://` or `wss://`, with no user information, query or fragment, and **at most 255 characters** — see below. Unset means no session is opened, which is *unconfigured* rather than failed. **Applies at once**: it is changeable from the settings page and from Home Assistant without a restart. |
-| `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL` | none | **Secret.** The shared secret presented to open a session. One half without the other opens nothing, so an address with no credential is unconfigured too. |
+| `REACHY_SATELLITE_GROUNDSTATION_CREDENTIAL` | none | **Secret.** The shared secret presented to open a session. One half without the other opens nothing, so an address with no credential is unconfigured too. **Applies at once**: supplying, clearing or rotating it re-opens the session, so it is the one secret that needs no restart. |
 | `REACHY_SATELLITE_FRAME_INTERVAL_SECONDS` | `0.1` | How often a frame goes up to the groundstation. |
 | `REACHY_SATELLITE_STALENESS_SECONDS` | `2.0` | How long a detection stays worth acting on. Past it the head returns to neutral. |
 | `REACHY_SATELLITE_LOCAL_MODEL_PATH` | none | The face-detection weights the robot's own detector loads. Required unless the source is `remote`. |
@@ -451,9 +451,11 @@ there the empty result is the request: the running source is retired, nothing
 replaces it, and the remote detector goes back to *unconfigured*. Both halves
 count — a session needs an address and a credential — so removing either one
 retires the source rather than leaving it answering under a value the operator
-has just taken away. Rotating a credential from one value to another is not this
-and is not a transition: the address is unchanged, the groundstation is still
-configured, and the new secret is used at the next start.
+has just taken away. **Rotating a credential** is the same transition for the
+same reason: the address is unchanged and the groundstation is still configured,
+but a robot that went on authenticating with the secret you had just replaced
+would be the revoked-credential case one step along, so the session is re-opened
+with the new value rather than at the next start.
 
 This is compensation rather than a transaction: a filesystem and a network
 cannot be committed together. What holds after every outcome is that the durable

@@ -43,6 +43,7 @@ from reachy_mini_ha_satellite.config import (
     BOOTSTRAP_SETTINGS,
     COMPATIBILITY_SETTINGS,
     ENV_PREFIX,
+    GROUNDSTATION_CREDENTIAL_SETTING,
     GROUNDSTATION_URL_MAX_LENGTH,
     GROUNDSTATION_URL_SETTING,
     IDENTITY_SETTING,
@@ -559,9 +560,24 @@ class TestWhatTheInterfaceCanChange:
         """A renamed field would otherwise make a live setting quietly dead."""
         assert set(setting_names()) >= LIVE_SETTINGS
 
-    def test_no_secret_is_claimed_to_apply_at_once(self) -> None:
-        """The credential is read when a session is opened, which is at startup."""
-        assert not (LIVE_SETTINGS & SECRET_SETTINGS)
+    def test_the_one_secret_that_applies_at_once_is_the_credential(self) -> None:
+        """It used to be none of them, and the reason given no longer held.
+
+        The recorded reason was that the credential is read when a session is
+        opened, which is at startup. Change 0020 made that stale — the address
+        owner opens a session for every replacement, reading whatever credential
+        is then resolved — and REQ-103 finished the job: supplying, clearing or
+        rotating it now goes through that same transition, so a change to it
+        takes effect without a restart. Leaving it out of this set would have
+        the settings page tell an operator to restart for a value the robot had
+        already adopted, and telling them the opposite would leave a rotated
+        secret unused until the next start.
+
+        The set stays a claim about the code rather than a convenience, so any
+        *other* secret added here is still a finding: a value read once while
+        something is being built does not become live by being listed.
+        """
+        assert {GROUNDSTATION_CREDENTIAL_SETTING} == LIVE_SETTINGS & SECRET_SETTINGS
 
     def test_the_speaker_boost_applies_at_once(self) -> None:
         """Both outputs read it per pushed chunk, so it needs no restart.

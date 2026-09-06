@@ -75,12 +75,12 @@ unsupplied, so `main.build_remote_source` answers `None` and the chain begins
 with no delegate. Supplying either half then reaches `_replace` — the path
 REQ-095 already owns — because what selects that path is
 `_opens_a_different_session` and not the address on its own. **The address on its
-own was the released condition and it is not the right question**: a session
-needs both halves, so a submission supplying or removing the credential changes
-whether one exists while leaving the address exactly as it was. Sent down the
-released branch it would persist an unresolved groundstation and leave the
-running client answering under a revoked secret, with every surface still
-reporting the source as available.
+own was the released condition and it is not the right question**: a session is
+opened with an address *and* a credential, so a submission that supplies, clears
+or rotates the credential changes what the robot would authenticate as while
+leaving the address exactly as it was. Sent down the released branch all three
+left the running client answering under a secret that was no longer the
+configured one, with every surface reporting the source as available.
 
 **In a running application, every write to the overrides file goes through this
 owner's lock, and serializing them is a separate job from owning the address.**
@@ -663,25 +663,30 @@ class GroundstationUrlOwner:
     #:% and run on local detection until both are supplied through a configuration
     #:% surface.
     def _opens_a_different_session(self, resolved: Resolution) -> bool:
-        """Whether a submission changes the groundstation a session is opened at.
+        """Whether a submission changes what a session would be opened with.
 
         **The address alone is not that question, and reading it as though it
-        were is a defect this had.** A session needs an address *and* a
-        credential — `groundstation_is_resolved` is where that is written down —
-        so a submission that supplies the missing half, or removes one, changes
-        whether a session exists at all while leaving the address untouched. Sent
-        down the released branch, clearing the credential would persist an
-        unresolved groundstation and leave the running client answering under a
-        secret the operator had just revoked, with every surface reporting
-        `available`. That is the collapse of *unconfigured* into *connected*,
-        which is the distinction REQ-103 exists to hold.
+        were is a defect this had.** A session is opened with an address *and* a
+        credential — `main.build_remote_source` reads both to construct the
+        client — so a submission changing either one changes what the robot
+        would authenticate as, whatever it leaves the other at.
 
-        **Rotating a credential from one value to another is deliberately not
-        this.** It leaves the groundstation resolved and the address alone, so it
-        stays restart-bound exactly as it was released: the running session
-        authenticated with the preceding secret and is not re-opened. Widening
-        this to any credential change would make a rotation retire and rebuild a
-        live source, which is a behaviour change no requirement here asks for.
+        Sent down the released branch, all three credential submissions were
+        wrong in the same direction. Clearing it persisted an unresolved
+        groundstation and left the running client answering under a secret the
+        operator had just revoked, with every surface reporting `available` —
+        *unconfigured* collapsing into *connected*, which is the distinction
+        REQ-103 exists to hold. Supplying the missing half left a robot whose
+        groundstation was now fully configured with no source built for it.
+        Rotating left the session authenticating with the preceding secret,
+        which is the revoked-credential case again with one extra step.
+
+        So the question is asked of both values and of nothing else. What it is
+        **not** asked of is the settings that decide whether a session exists at
+        all — `face_tracking_enabled` and `detection_source` — which stay
+        restart-bound: a submission changing one of those alone leaves the
+        running source exactly where it is, and one changing it together with
+        the address is the retire-into-nothing case `_replace` refuses.
 
         Args:
             resolved: What the submission resolves to.
@@ -694,8 +699,13 @@ class GroundstationUrlOwner:
         candidate = resolved.settings
         if candidate.groundstation_url != current.groundstation_url:
             return True
-        return groundstation_is_resolved(candidate) != groundstation_is_resolved(
-            current,
+        # Compared, never rendered. `config`'s module docstring enumerates the
+        # places a credential's raw value travels, and this is one of them: two
+        # secrets are equal or they are not, and neither reaches a log line, a
+        # message or a page from here.
+        return (
+            candidate.groundstation_credential.get_secret_value()
+            != current.groundstation_credential.get_secret_value()
         )
 
     async def _restore_if_unavailable(self) -> None:

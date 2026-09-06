@@ -66,9 +66,11 @@ truncated spelling of a credential for a redactor to have failed to recognise:
 surface renders that.
 
 A secret's raw value does still travel, and it is worth saying where rather than
-claiming it never leaves this module. Three paths carry it and none of them is a
+claiming it never leaves this module. Four paths carry it and none of them is a
 rendering: `canonical_string` hands it back unchanged so a submission can be
-*compared* against it, `OverrideStore.save` writes it to a file owner-only, and
+*compared* against it, `OverrideStore.save` writes it to a file owner-only,
+`groundstation_url.GroundstationUrlOwner._opens_a_different_session` compares two
+of them to decide whether a session has to be re-opened, and
 `main.build_remote_source` reveals it once into a `Credential`, which is the
 type that will not print itself — and it is the one reveal site because it is
 also the one place a session client is constructed, at startup and for every
@@ -269,19 +271,29 @@ LIVE_SETTINGS: Final[frozenset[str]] = frozenset(
         "idle_seconds",
         "speaker_boost_percent",
         GROUNDSTATION_URL_SETTING,
+        GROUNDSTATION_CREDENTIAL_SETTING,
     }
 )
 
-# ⚠️ `groundstation_url` is live and is **not** adopted by
-# `SatelliteApplication.apply_live`, which is the one entry in this set that is
-# not. Changing it means building a session client and a perception source and
-# retiring the one running, so it is owned by
+# ⚠️ `groundstation_url` and `groundstation_credential` are live and are **not**
+# adopted by `SatelliteApplication.apply_live`, which is the two entries in this
+# set that are not. Changing either means building a session client and a
+# perception source and retiring the one running, so both are owned by
 # `groundstation_url.GroundstationUrlOwner` — a serialized transition that
 # prepares and starts the replacement before the durable file is written and
-# compensates back to the preceding address if any step fails. It is in this set
-# because what the set means to an operator is "this takes effect without a
-# restart", which is true of it, and `apply_settings_change`'s docstring records
-# the one path a change of it may travel.
+# compensates back to the preceding configuration if any step fails. They are in
+# this set because what the set means to an operator is "this takes effect
+# without a restart", which is true of both, and `apply_settings_change`'s
+# docstring records the one path a change of either may travel.
+#
+# ⚠️ The credential is the one **secret** in this set, and it is here because a
+# session is opened with an address and a credential rather than with an address.
+# A rotation that took effect only at the next start would leave the robot
+# authenticating with the secret an operator had just revoked, which is the same
+# defect as clearing it and being told the source was still available.
+# `GroundstationUrlOwner._opens_a_different_session` is what reads both values,
+# and it is the only place a credential is compared rather than merely tested
+# for emptiness.
 
 # ⚠️ `face_tracking_enabled` is deliberately NOT in that set, and the reason is
 # worth stating because the behaviour layer can adopt it in isolation and looks

@@ -652,10 +652,10 @@ class TestRemotePerceptionIsOptionalAtFirstStart:
     ) -> None:
         """The address was already in the daemon's environment; the credential was not.
 
-        This one changes no address, so it takes the released branch of the
-        transition rather than the replacement — and still has to end with a
-        source, because the reason there was none is exactly the thing the
-        submission supplied.
+        It changes no address, and it reaches the transition anyway: what
+        selects that path is `_opens_a_different_session`, which reads the
+        credential too. It has to end with a source, because the reason there
+        was none is exactly the thing the submission supplied.
 
         Args:
             fs: The in-memory filesystem the durable commit lands in.
@@ -731,18 +731,18 @@ class TestRemotePerceptionIsOptionalAtFirstStart:
         assert owner.effective_url == _GROUNDSTATION
 
     @pytest.mark.asyncio
-    async def test_rotating_a_credential_does_not_retire_anything(
+    async def test_rotating_a_credential_reopens_the_session(
         self,
         fs: object,
     ) -> None:
-        """Restart-bound as it was released, and deliberately still so.
+        """The third credential submission, and the same defect as the other two.
 
-        Rotating leaves the groundstation resolved and the address alone. The
-        running session authenticated with the preceding secret and is not
-        re-opened, which is the behaviour this change found and did not set out
-        to alter — widening the transition to any credential change would retire
-        and rebuild a live source for a value nothing reads until the next
-        start.
+        A rotation that took effect only at the next start would leave the robot
+        authenticating with the secret the operator had just revoked — which is
+        clearing it, one step along. So it goes through the transition too: the
+        preceding source is retired and a new one built with the new value, and
+        `groundstation_credential` is in `LIVE_SETTINGS` so the settings page
+        does not tell an operator to restart for something already adopted.
 
         Args:
             fs: The in-memory filesystem the durable commit lands in.
@@ -754,12 +754,20 @@ class TestRemotePerceptionIsOptionalAtFirstStart:
             f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": _CREDENTIAL,
         }
         owner = _owner(environ)
-        installed = owner._source.delegate
+        retired = owner._source.delegate
 
-        await owner.submit({"groundstation_credential": "another-credential"})
+        resolved = await owner.submit(
+            {"groundstation_credential": "another-credential"},
+        )
 
         assert owner.remote_available
-        assert owner._source.delegate is installed
+        assert owner._source.delegate is not retired
+        assert resolved.settings.groundstation_credential.get_secret_value() == (
+            "another-credential"
+        )
+        # The address is untouched, so the transition rebuilt the session rather
+        # than pointing the robot somewhere else.
+        assert owner.effective_url == _GROUNDSTATION
 
     @pytest.mark.asyncio
     async def test_retiring_into_nothing_for_any_other_reason_is_still_refused(

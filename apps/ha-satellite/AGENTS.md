@@ -298,8 +298,9 @@ deployment can get irreversibly wrong.
   machinery was never constructed keeps holding as services are added. Do not
   reintroduce announcing under a placeholder, and do not stand the announcing
   surface up mid-process: `SatelliteApplication` reports `announcing` from what
-  was *built*, and the settings page's three-way note depends on that being what
-  it says.
+  was *built*, and the settings page's four-way note — the two states where the
+  configured identity and the announced one disagree are the ones only the
+  application can distinguish — depends on that being what it says.
 - **An unresolved groundstation is unconfigured, not failed.**
   `config.groundstation_is_resolved` needs both the address and the credential,
   `main.build_remote_source` builds nothing without them, and `/status` reports
@@ -313,9 +314,11 @@ deployment can get irreversibly wrong.
   — a session needs both halves, so a submission that supplies or removes the
   credential changes whether one exists while leaving the address untouched, and
   sending it down the released branch left the running client answering under a
-  revoked secret with every surface reporting the source as available. Rotating a
-  credential from one value to another is deliberately not a transition and stays
-  restart-bound. The composition the perception chain gets is still what
+  revoked secret with every surface reporting the source as available. Rotating
+  one is the same defect a step along, so it takes the transition too, and
+  `groundstation_credential` is consequently the one secret in
+  `config.LIVE_SETTINGS` — a page telling an operator to restart for a value the
+  robot has already adopted is as wrong as one telling them the opposite. The composition the perception chain gets is still what
   `detection_source` declares, because `ReplaceableRemoteSource` has to stay in
   that chain for the eventual source to be swapped in behind it.
 - **The overrides layer cannot supply a setting the settings page depends on.**
