@@ -170,13 +170,16 @@ Assistant connection, while its announced identity is unresolved.
 - **THEN** no device is registered for this robot, and no entity, history or
   automation target is created that a later identity would have to displace
 
-#### Scenario: The identity is resolved while Home Assistant is watching
+#### Scenario: The identity is resolved and the application started again
 
-- **GIVEN** a running application whose identity has just been set through its
-  settings interface
-- **WHEN** Home Assistant next discovers devices
+- **GIVEN** a running application that has announced nothing, whose identity has
+  just been set through its settings interface
+- **WHEN** the operator stops it from that interface, starts it again from the
+  daemon's own dashboard, and Home Assistant next discovers devices
 - **THEN** exactly one device appears, under exactly the identity that was
-  entered, with the entity identifiers that identity implies
+  entered, with the entity identifiers that identity implies, nothing was
+  registered by any run before that identity existed, and neither a shell
+  session on the robot nor a reinstallation was needed to get there
 
 #### Scenario: An unconfigured application is restarted
 
@@ -327,6 +330,16 @@ version of that, it is the absence of it. An operator who starts the application
 unconfigured has created no Home Assistant device, so there is nothing for the
 eventual correct identity to collide with, split from or orphan.
 
+Adoption is bound to the application's next start, and that is what keeps the
+embargo checkable rather than remembered. The announcing surface is built once,
+from an identity that is already resolved, or it is not built at all, so
+*nothing announced* is a property of what the running process contains rather
+than a rule every later change to the announcing code has to observe. The cost
+is one stop and one start, reached from surfaces a stock robot already exposes —
+the application's own settings interface and the daemon's dashboard. Neither is
+a shell session and neither is a reinstallation, which are the two things this
+contract exists to remove.
+
 The groundstation address and credential follow the same shape for a smaller
 reason: they were never fatal, and a fresh installation should reach the
 settings page with the local detector already running rather than reach it at
@@ -408,3 +421,4 @@ fail independently and the second is the one an operator notices.
 | Date | Change | Document |
 |------|--------|----------|
 | 2026-09-06 | Initial spec created | [0021-stock-robot-installation](../../changes/0021-stock-robot-installation.md) |
+| 2026-09-06 | REQ-102's adoption scenario made restart-bound, and the Design section given the reason | [0021-stock-robot-installation](../../changes/0021-stock-robot-installation.md) |
