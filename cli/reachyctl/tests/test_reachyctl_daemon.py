@@ -45,13 +45,14 @@ from reachyctl_robot import (
     FakeRobot,
     daemon_for,
 )
-from reachyctl_support import reporter_for
+from reachyctl_support import CREDENTIAL, reporter_for
 
 from reachyctl.configure import run_apply
 from reachyctl.daemon import (
     DaemonClient,
     DaemonControlError,
     InterpreterResolutionError,
+    _json_kind,
 )
 from reachyctl.errors import CommandError
 from reachyctl.managed import MalformedRegionError, render_region
@@ -1215,27 +1216,28 @@ async def test_an_empty_body_is_not_a_daemon_running_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("failure", "expected"),
+    ("failure", "kind"),
     [
-        ("7", "7"),
-        ('{"code": 5}', '{"code": 5}'),
-        ('["a", "b"]', '["a", "b"]'),
-        ("true", "true"),
+        ("7", "a number"),
+        ('{"code": 5}', "an object"),
+        ('["a", "b"]', "an array"),
+        ("true", "a boolean"),
     ],
 )
 @pytest.mark.asyncio
-async def test_an_error_that_is_not_a_message_is_shown_rather_than_dropped(
+async def test_an_error_that_is_not_a_message_is_reported_by_type(
     failure: str,
-    expected: str,
+    kind: str,
 ) -> None:
-    """Losing the only evidence of trouble is worse than rendering it awkwardly.
+    """Silently dropping it leaves an operator with nothing to go on.
 
-    It is labelled as not a message, so it cannot be read as one the daemon
-    composed.
+    Its presence and its type are reported, and its content is not — see the
+    test below for why. The type is named in JSON's vocabulary, because what
+    the operator is looking at is an API answer rather than this process.
 
     Args:
         failure: What the daemon put in its `error` field.
-        expected: What the detail has to carry through.
+        kind: What the detail has to call it.
     """
     robot = FakeRobot(
         daemon_api=True,
@@ -1249,8 +1251,35 @@ async def test_an_error_that_is_not_a_message_is_shown_rather_than_dropped(
     state = await daemon.application_state()
 
     assert state.running is False
-    assert "not a message" in state.detail
-    assert expected in state.detail
+    assert kind in state.detail
+    assert "withheld" in state.detail
+    assert "daemon's own log" in state.detail
+
+
+@pytest.mark.asyncio
+async def test_no_part_of_an_unreadable_error_reaches_the_output() -> None:
+    """The reason the content is withheld, asserted rather than described.
+
+    Rendering it would mean re-encoding it, and escaping a quote, a backslash
+    or a newline is exactly what stops a redactor seeded with a raw secret from
+    matching it. This field carries whatever went wrong, which includes
+    whatever was being sent at the time.
+    """
+    robot = FakeRobot(
+        daemon_api=True,
+        api_stdout=(
+            '{"info": {"name": "' + DEFAULT_APPLICATION + '"}, '
+            '"state": "error", "error": {"sent": {"credential": "' + CREDENTIAL + '"}}}'
+        ),
+    )
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert CREDENTIAL not in state.detail
+    assert "credential" not in state.detail
+    assert "sent" not in state.detail
+    assert "an object" in state.detail
 
 
 @pytest.mark.asyncio
@@ -1268,3 +1297,17 @@ async def test_an_error_the_daemon_wrote_is_quoted_verbatim() -> None:
     state = await daemon.application_state()
 
     assert state.detail == "error: it fell over"
+
+
+def test_a_value_json_cannot_produce_still_gets_an_honest_name() -> None:
+    """The one branch a status document cannot reach, and it must not lie either.
+
+    `json.loads` yields exactly seven kinds and the caller has already dealt
+    with two of them, so nothing a daemon sends arrives here. Naming this case
+    "an array" to save a line would be the same defect as every other one on
+    this branch: a sentence true of the values the author had in mind and false
+    of one the code reaches. Called directly, because a robot cannot produce it.
+    """
+    assert _json_kind(object()) == (
+        "neither a message nor anything else this tool can name"
+    )

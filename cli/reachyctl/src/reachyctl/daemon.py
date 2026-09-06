@@ -1198,23 +1198,25 @@ class DaemonClient:
 
 
 def _with_error(detail: str, decoded: Mapping[str, object]) -> str:
-    """Add what the daemon said went wrong, whatever shape it said it in.
+    """Add what the daemon said went wrong, and say so even when it cannot be shown.
 
     A string is the daemon's own message and is quoted verbatim, unchanged, the
     way every other thing a robot wrote is — see `CommandOutcome.complaint`.
 
-    Anything else is a daemon departing from its own model, and it is rendered
-    rather than dropped: losing the only evidence that something is wrong is
-    worse than rendering it awkwardly. It is labelled as not a message so it
-    cannot be read as one the daemon composed.
+    Anything else is a daemon departing from its own model. Its PRESENCE and its
+    TYPE are reported, because silently dropping the only evidence that
+    something is wrong is how an operator is left with nothing to go on. Its
+    CONTENT is withheld, and that is not caution for its own sake: rendering it
+    would mean re-encoding it, and escaping a quote, a backslash or a newline is
+    exactly what stops a redactor seeded with a raw secret from matching it.
+    This field carries whatever went wrong, which includes whatever was being
+    sent at the time, so it is one of the likelier places for a credential to
+    surface — and this is the seam where robot text becomes operator-visible
+    output.
 
-    **Re-encoding it is the one transformation on this path**, and it is worth
-    naming because this repository's rule is that text a robot wrote reaches the
-    redactor unaltered: a value carrying a quote, a backslash or a newline is
-    escaped here, and a secret containing one would then not match a redactor
-    seeded with its raw form. The exposure is bounded — this branch is reached
-    only when the field is already not the string the daemon's own model
-    declares — and the alternative is discarding the evidence entirely.
+    Withholding it costs little: an operator learns something is there and is
+    sent to the daemon's own log, which is where that evidence lives anyway and
+    where it never passed through this tool's redactor.
 
     Args:
         detail: What has been said about the state so far.
@@ -1228,8 +1230,34 @@ def _with_error(detail: str, decoded: Mapping[str, object]) -> str:
         return f"{detail}: {failure}" if failure else detail
     if failure is None:
         return detail
-    rendered = json.dumps(failure, ensure_ascii=False)
-    return f"{detail}: its error field was not a message but {rendered}"
+    return (
+        f"{detail}: its error field was {_json_kind(failure)} rather than a "
+        f"message, and what it held is withheld — it cannot be scrubbed safely. "
+        f"Read the daemon's own log for it"
+    )
+
+
+def _json_kind(value: object) -> str:
+    """Name a JSON value's type the way the document that carried it would.
+
+    Args:
+        value: What was decoded.
+
+    Returns:
+        The type, with its article, so the sentence above reads. JSON's own
+        vocabulary rather than Python's: the operator is looking at an API
+        answer, not at this process.
+    """
+    if isinstance(value, bool):
+        # Before the number check: in Python a bool IS an int.
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, dict):
+        return "an object"
+    if isinstance(value, list):
+        return "an array"
+    return "neither a message nor anything else this tool can name"
 
 
 def _unnamed(field: str, detail: str) -> ApplicationState:
