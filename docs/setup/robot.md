@@ -410,7 +410,7 @@ tool, which is what proves that is enough. **Executed:**
 ```
 wheel-verify: reachyctl 0.1.0
 wheel-verify: doctor reported 9 checks, all skipped
-satellite wheel: reachy_mini_ha_satellite-0.1.0-py3-none-any.whl carries 13 registered assets, their licence texts, and the reachy_mini_apps entry point, whose module reachy_mini_ha_satellite.daemon_app starts and refuses an empty configuration when run the way the daemon runs it
+satellite wheel: reachy_mini_ha_satellite-0.1.0-py3-none-any.whl carries 13 registered assets, their licence texts, and the reachy_mini_apps entry point, whose module reachy_mini_ha_satellite.daemon_app starts and refuses an unusable configuration when run the way the daemon runs it
 ```
 
 The third line is the question specific to the satellite wheel, and it has three
