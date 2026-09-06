@@ -5,15 +5,16 @@ this repository's development environment, which is the recorded reason the
 Space is published by a person rather than by continuous integration. What can
 be tested is every refusal, and that is the part an operator meets: a missing
 token, a Space named something the daemon will not find its own metadata under,
-a source that has drifted from the wheel it names, and a release that does not
-carry that wheel yet.
+a source that has drifted from the wheel it names, a source that is not what is
+committed, and a release that does not carry that wheel yet.
 
-The first three are decided locally. The last one asks the release, which in the
-real script is a `HEAD` request and here is a supplied function — that is what
-the `Opener` protocol exists for, and it is the only reason the script has one.
-The one thing a supplied function cannot see is what happens to the redirect
-GitHub answers a release asset with, so `TestFollowingTheRedirect` asks the
-redirect handler directly.
+All but one are decided locally, and two of those from git's own output, handed
+in as a string so no test runs git. The remaining one asks the release, which in
+the real script is a `HEAD` request and here is a supplied function — that is
+what the `Opener` protocol exists for, and it is the only reason the script has
+one. The one thing a supplied function cannot see is what happens to the
+redirect GitHub answers a release asset with, so `TestFollowingTheRedirect` asks
+the redirect handler directly.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -39,10 +40,12 @@ from publish_app_source import (
     PublishRefusalError,
     check_agrees_with_repository,
     check_release_asset,
+    committed_names,
     entry_point_name,
     read_source,
     resolve_space_id,
     resolve_token,
+    uncommitted_changes,
 )
 from pyfakefs.fake_filesystem import FakeFilesystem
 
@@ -59,6 +62,11 @@ _NAME: Final = "reachy-mini-ha-satellite"
 # scaffolding rather than a contract; the two tests that read the COMMITTED
 # source are the marked ones.
 _FAKE_ROOT: Final = Path("/publish-app-source-tests")
+
+# The committed source's own path, used where a test judges git output about it
+# rather than reading it. `SOURCE_DIRECTORY` is the same path; this spelling is
+# what makes the expected relative names in those tests readable.
+_SOURCE: Final = SOURCE_DIRECTORY
 
 
 def _manifest(directory: Path, requirement: str, version: str = _VERSION) -> Path:
@@ -268,6 +276,65 @@ class TestTheReleaseAsset:
 
         with pytest.raises(PublishRefusalError, match="answered 302"):
             check_release_asset(_WHEEL, opener)
+
+
+class TestPublishingWhatIsCommitted:
+    """The claim the whole route rests on: the Space is reviewable here.
+
+    Both halves are judged from git's own output, handed in as a string, so
+    neither test runs git or touches a repository.
+    """
+
+    def test_a_clean_source_passes(self) -> None:
+        """`git status --porcelain` says nothing when nothing has changed."""
+        uncommitted_changes("", _SOURCE)
+
+    @pytest.mark.parametrize(
+        "status",
+        [" M apps/ha-satellite/app-source/pyproject.toml\n", "A  x\nD  y\n"],
+    )
+    def test_anything_uncommitted_is_refused_with_what_it_was(
+        self,
+        status: str,
+    ) -> None:
+        """A modification, an addition and a deletion are all the same answer."""
+        with pytest.raises(PublishRefusalError, match="uncommitted changes"):
+            uncommitted_changes(status, _SOURCE)
+
+    def test_the_upload_is_restricted_to_what_git_tracks(self) -> None:
+        """`upload_folder` reads no `.gitignore`, so this is what stops a leak."""
+        listed = (
+            "apps/ha-satellite/app-source/pyproject.toml\0"
+            "apps/ha-satellite/app-source/README.md\0"
+            "apps/ha-satellite/app-source/index.html\0"
+        )
+
+        assert committed_names(listed, _SOURCE) == [
+            "README.md",
+            "index.html",
+            "pyproject.toml",
+        ]
+
+    def test_a_source_git_does_not_track_is_refused(self) -> None:
+        """An empty allow-list would publish nothing and report success."""
+        with pytest.raises(PublishRefusalError, match="tracks no file"):
+            committed_names("", _SOURCE)
+
+    @pytest.mark.filesystem
+    def test_the_committed_source_is_the_three_files_the_documents_name(
+        self,
+    ) -> None:
+        """A file added to the directory is a file published to a public Space."""
+        listed = "\0".join(
+            f"apps/ha-satellite/app-source/{name}"
+            for name in sorted(path.name for path in SOURCE_DIRECTORY.iterdir())
+        )
+
+        assert committed_names(listed, SOURCE_DIRECTORY) == [
+            "README.md",
+            "index.html",
+            "pyproject.toml",
+        ]
 
 
 class TestFollowingTheRedirect:

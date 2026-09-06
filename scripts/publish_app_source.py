@@ -7,9 +7,8 @@ the wheel and the release workflow attaches it to a GitHub release;
 is what puts the directory where the daemon can fetch it. Nothing about the
 application is duplicated: the Space is metadata pointing at one artifact.
 
-**Every refusal happens before the Space is created or written to**, and three
-of the four happen before anything at all is contacted. The four, in the order
-they are decided:
+**Every refusal happens before the Space is created or written to**, and all but
+one of them before anything at all is contacted. In the order they are decided:
 
 - **No token.** Publishing needs one; the runbook says how to make it. Decided
   locally.
@@ -21,7 +20,14 @@ they are decided:
 - **A source that does not agree with this checkout.** Publishing a source
   naming a version this repository has not released produces a Space that
   installs nothing, and the operator finds out on the robot. Decided locally,
-  by reading the committed files.
+  by reading the files.
+- **A source that is not what is committed.** The whole claim this route rests
+  on is that what a robot installs is reviewable in this repository, so an
+  uncommitted change to the directory is refused, and the upload is restricted
+  to the files git tracks. `upload_folder` reads no `.gitignore`: without that
+  restriction, a `build/` or an `.egg-info/` left behind by installing the
+  source locally would be published to a public Space. Decided locally, by
+  asking git.
 - **A release that does not carry the wheel the source names.** This one *does*
   reach the network — a `HEAD` request to the release asset, and the redirect
   GitHub answers it with, followed as a `HEAD` so that nothing is ever
@@ -31,8 +37,8 @@ they are decided:
 
 There is no Hugging Face account, token or network in this repository's
 development environment, so the refusals are what can be — and are — covered by
-`scripts/tests/test_publish_app_source.py` without one: the three local ones
-directly, and the fourth through the opener it is handed. What cannot be covered
+`scripts/tests/test_publish_app_source.py` without one: the local ones directly,
+and the release-asset one through the opener it is handed. What cannot be covered
 there is the upload itself, which is why it is the last thing this file does and
 why `--dry-run` stops immediately before it.
 
@@ -45,6 +51,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import subprocess
 import sys
 import tomllib
 import urllib.error
@@ -91,6 +98,11 @@ _RELEASE_ASSET: Final = re.compile(
     r"v(?P<tag_version>[^/\s]+)/"
     r"reachy_mini_ha_satellite-(?P<wheel_version>[^-\s]+)-py3-none-any\.whl\Z",
 )
+
+# How long git is given to answer a question about this checkout. Generous: it
+# is reading an index, and a bound only exists so a wedged command fails rather
+# than hanging a publish.
+_GIT_TIMEOUT_SECONDS: Final = 30
 
 # The one status that means the release carries the wheel. A redirect is not
 # it — `KeepHeadOnRedirect` follows those, as `HEAD` — so anything else arriving
@@ -320,11 +332,75 @@ def check_release_asset(url: str, opener: Opener = _head) -> None:
         raise PublishRefusalError(f"{url} answered {status} rather than 200")
 
 
-def publish(space_id: str, token: str, directory: Path, version: str) -> None:
-    """Create the Space if it is not there and make it this directory.
+def uncommitted_changes(status: str, directory: Path) -> None:
+    """Refuse a source that is not what this checkout has committed.
 
-    Imported here rather than at module level so that every refusal above runs
-    in an environment without `huggingface_hub` — which is every environment
+    `git status --porcelain` over the directory, handed in rather than run here
+    so the judgement is testable. Anything at all in it — a modification, a
+    deletion, a staged-but-uncommitted addition — means the bytes on disk are
+    not the bytes anybody reviewed, and this whole route rests on those being
+    the same thing.
+    """
+    if status.strip():
+        raise PublishRefusalError(
+            f"{directory} has uncommitted changes, and what is published has to "
+            f"be what is committed — that is what makes the Space reviewable "
+            f"here:\n{status.rstrip()}",
+        )
+
+
+def committed_names(listed: str, directory: Path) -> list[str]:
+    """The tracked files under the source, relative to it and sorted.
+
+    `git ls-files -z` output, handed in for the same reason. These become the
+    upload's allow-list, which is the half of "the Space is what is committed"
+    that a clean working tree does not cover: `upload_folder` does not read
+    `.gitignore`, so a `build/` or an `.egg-info/` left behind by somebody
+    installing the source locally would otherwise be published to a public
+    Space along with it.
+    """
+    within = directory.relative_to(_REPOSITORY_ROOT)
+    names = sorted(
+        str(Path(path).relative_to(within)) for path in listed.split("\0") if path
+    )
+    if not names:
+        raise PublishRefusalError(f"git tracks no file under {directory}")
+    return names
+
+
+def _git(*arguments: str) -> str:
+    """Run one read-only git command in this checkout and return its output."""
+    completed = subprocess.run(  # noqa: S603  # a fixed argument vector of this module's own literals and paths it computed itself; no shell, and nothing a caller supplies reaches it
+        ["git", "-C", str(_REPOSITORY_ROOT), *arguments],  # noqa: S607  # `git` is taken from PATH deliberately: this runs inside a checkout, where the git that made it is the right one
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=_GIT_TIMEOUT_SECONDS,
+    )
+    if completed.returncode != 0:
+        raise PublishRefusalError(
+            f"`git {' '.join(arguments)}` failed: {completed.stderr.strip()}",
+        )
+    return completed.stdout
+
+
+def check_source_is_committed(directory: Path) -> list[str]:
+    """Refuse anything but the committed source, and say what that is."""
+    uncommitted_changes(_git("status", "--porcelain", "--", str(directory)), directory)
+    return committed_names(_git("ls-files", "-z", "--", str(directory)), directory)
+
+
+def publish(
+    space_id: str,
+    token: str,
+    directory: Path,
+    version: str,
+    names: list[str],
+) -> None:
+    """Create the Space if it is not there and make it the committed source.
+
+    `huggingface_hub` is imported here rather than at module level so that every
+    refusal above runs in an environment without it — which is every environment
     that has not asked for the `publish` dependency group.
     """
     from huggingface_hub import HfApi
@@ -336,14 +412,17 @@ def publish(space_id: str, token: str, directory: Path, version: str) -> None:
         space_sdk="static",
         exist_ok=True,
     )
-    # `delete_patterns` makes the Space exactly this directory rather than the
-    # union of every publish. A file withdrawn here has to be withdrawn there:
-    # what an operator installs is what is committed, and that is only true if
-    # nothing survives that this checkout does not have.
+    # Two halves of one property. `allow_patterns` is what stops anything the
+    # directory happens to hold — a build tree, an editor's backup, anything
+    # untracked — from reaching a public Space, because `upload_folder` reads no
+    # `.gitignore` and would otherwise send the lot. `delete_patterns` makes the
+    # Space exactly that set rather than the union of every publish, so a file
+    # withdrawn here is withdrawn there.
     api.upload_folder(
         folder_path=str(directory),
         repo_id=space_id,
         repo_type="space",
+        allow_patterns=names,
         delete_patterns="*",
         commit_message=f"Publish the Reachy Mini HA satellite application source {version}",
     )
@@ -370,6 +449,7 @@ def main(argv: list[str]) -> int:
         space_id = resolve_space_id(environ, expected_name)
         source = read_source(SOURCE_DIRECTORY)
         version = check_agrees_with_repository(source, __version__)
+        names = check_source_is_committed(SOURCE_DIRECTORY)
         check_release_asset(source.wheel_url)
     except PublishRefusalError as refusal:
         sys.stderr.write(f"publish-app-source: {refusal}\n")
@@ -378,12 +458,12 @@ def main(argv: list[str]) -> int:
     if arguments.dry_run:
         print(
             f"publish-app-source: {SOURCE_DIRECTORY.name} at {version} would be "
-            f"published to https://huggingface.co/spaces/{space_id}, installing "
-            f"{source.wheel_url}",
+            f"published to https://huggingface.co/spaces/{space_id} as "
+            f"{', '.join(names)}, installing {source.wheel_url}",
         )
         return 0
 
-    publish(space_id, token, SOURCE_DIRECTORY, version)
+    publish(space_id, token, SOURCE_DIRECTORY, version, names)
     print(
         f"publish-app-source: published {version} to "
         f"https://huggingface.co/spaces/{space_id}. Install it on a robot with "

@@ -402,13 +402,13 @@ is committed: both name an account, and this repository is public.
 
 ### What it refuses, and what that looks like
 
-Every refusal happens before the Space is created or written to, and the first
-three of the four — no token, a Space named something else, a source that has
-drifted from the checkout — before anything at all is contacted. The fourth
-asks the release asset with `HEAD`, follows GitHub's redirect for it as a `HEAD`
-as well, and reads no body: a dry run cannot download the wheel it is asking
-about. That is why all four are covered by tests in a workspace with no
-account.
+Every refusal happens before the Space is created or written to, and all but
+one — no token, a Space named something else, a source that has drifted from the
+checkout, a source that is not what is committed — before anything at all is
+contacted. The remaining one asks the release asset with `HEAD`, follows
+GitHub's redirect for it as a `HEAD` as well, and reads no body: a dry run
+cannot download the wheel it is asking about. That is why every one of them is
+covered by tests in a workspace with no account.
 
 Three of them, run here with nothing exported, so each command carries what it
 needs:
@@ -449,9 +449,17 @@ is what a half-applied release bump looks like.
 
 It creates the Space if it is not there — a static Space, which is what a
 Reachy Mini application source is — and then makes its contents **exactly** the
-committed directory, deleting anything on it that this checkout does not have.
-A file withdrawn here is withdrawn there, which is what lets this page say that
-what an operator installs is what is reviewable in this repository.
+files git tracks under that directory, deleting anything on the Space that this
+checkout does not have. A file withdrawn here is withdrawn there, which is what
+lets this page say that what an operator installs is what is reviewable in this
+repository.
+
+Both halves of that are deliberate. The upload is restricted to tracked files
+because the client reads no `.gitignore`, and a `build/` or an `.egg-info/` left
+behind by somebody installing the source locally would otherwise be published to
+a **public** Space along with it. And a directory with any uncommitted change in
+it is refused outright, because bytes nobody has reviewed are exactly what this
+route promises not to ship.
 
 ---
 
