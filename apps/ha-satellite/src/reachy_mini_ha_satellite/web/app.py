@@ -60,6 +60,7 @@ page's job is to say so, not to hold the line.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING, Final, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -97,6 +98,8 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.config import OverrideStore
 
 __all__ = ["SettingsHost", "base_form_values", "create_app"]
+
+_LOGGER: Final = logging.getLogger(__name__)
 
 # What a form submission is allowed to be. A settings page is not an upload
 # endpoint, and a body larger than this is either a mistake or an attempt.
@@ -485,10 +488,7 @@ def create_app(
             # with the operator reading why rather than a traceback. A file that
             # cannot be written is the one worth naming: a change that appears
             # to have been accepted and was not is the worst outcome available.
-            return HTMLResponse(
-                _page(_resolved(), store, application, error=str(error)),
-                status_code=400,
-            )
+            return _refused(error, _resolved(), store, application)
 
         # `None` is a save that changed nothing the file did not already say, so
         # there is no new resolution to record and `changed` below is empty.
@@ -542,10 +542,7 @@ def create_app(
             # value becomes effective, and it has its own source to build.
             resolved = await _write(_discard_everything)
         except ConfigurationError as error:
-            return HTMLResponse(
-                _page(_resolved(), store, application, error=str(error)),
-                status_code=400,
-            )
+            return _refused(error, _resolved(), store, application)
         if resolved is not None:
             current.resolution = resolved
         return _redirect_after(tuple(sorted(discarded)))
@@ -659,6 +656,47 @@ def create_app(
             ),
             Route("/livez", livez),
         ],
+    )
+
+
+def _refused(
+    error: ConfigurationError,
+    resolution: Resolution,
+    store: OverrideStore,
+    application: SettingsHost | None,
+) -> Response:
+    """Render a refused submission, and put its reason where it outlives the tab.
+
+    **Both refusal paths go through here so the reason is logged as well as
+    shown.** A refusal used to exist only in the browser: the page renders it
+    and nothing else records it, so an operator who navigated away took the one
+    piece of evidence with them, and a refusal that did not reproduce could not
+    be told apart from any of the dozen others this path can raise. The journal
+    is the robot's own record and the daemon collects it, so that is where a
+    one-off belongs.
+
+    **Logging the message is safe by construction, not by inspection.** Every
+    `ConfigurationError` this path can produce is built to be reportable:
+    `_check_session_url` refuses an address without quoting it,
+    `load_settings` renders a validation failure from `loc` and `msg` alone
+    precisely so a rejected credential is not printed, and the rest name
+    variables, a path, a length or an OS error. `config`'s module docstring
+    enumerates where a secret's raw value travels and no refusal is on that
+    list.
+
+    Args:
+        error: What the submission was refused with.
+        resolution: The settings in effect, for re-rendering the page.
+        store: Where an override is written, reported on the page.
+        application: The running application, or `None`.
+
+    Returns:
+        The page again, carrying the refusal, with 400.
+    """
+    _LOGGER.warning("settings.refused %s", error)
+    return HTMLResponse(
+        _page(resolution, store, application, error=str(error)),
+        status_code=400,
     )
 
 

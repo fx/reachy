@@ -30,6 +30,7 @@ from reachy_mini_ha_satellite.config import (
     as_configured_string,
     groundstation_is_resolved,
     identity_is_resolved,
+    local_detection_clause,
 )
 
 if TYPE_CHECKING:
@@ -406,7 +407,12 @@ def _groundstation_note(settings: Settings) -> str:
     return (
         '<div class="note">No groundstation is configured, so the remote '
         "detector is <strong>unconfigured</strong> rather than failed: no "
-        "session is opened, nothing is connecting and nothing is being retried. "
+        "session is opened, nothing is connecting and nothing is being retried, "
+        # The one definition of what detects a face meanwhile, shared with the
+        # boot log rather than written again here. A robot with no local
+        # weights has nothing to fall back to, and saying otherwise would
+        # describe somebody else's robot to the operator of this one.
+        f"and {_escape(local_detection_clause(settings))} "
         f"Set both <code>{_escape(GROUNDSTATION_URL_SETTING)}</code> and "
         f"<code>{_escape(GROUNDSTATION_CREDENTIAL_SETTING)}</code> below — one "
         "without the other opens nothing — and a running application adopts "

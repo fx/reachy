@@ -63,6 +63,7 @@ from reachy_mini_ha_satellite.config import (
     identity_is_resolved,
     identity_unresolved_notice,
     load_settings,
+    local_detection_clause,
     log_resolved_configuration,
     overrides_path,
     resolve_submission,
@@ -503,10 +504,40 @@ class TestCoherence:
 
     def test_the_unconfigured_notice_says_unconfigured_not_failed(self) -> None:
         """The distinction the whole of REQ-103's health reporting turns on."""
-        message = groundstation_unresolved_notice()
+        settings = load_settings(
+            {**MINIMAL, f"{ENV_PREFIX}DEVICE_NAME": "r"}, {}
+        ).settings
+        message = groundstation_unresolved_notice(settings)
 
         assert "unconfigured rather than failed" in message
         assert variable_for(GROUNDSTATION_URL_SETTING) in message
+
+    def test_the_notice_says_what_actually_detects_a_face_meanwhile(self) -> None:
+        """Running on local detection is only true where there is a detector.
+
+        The weights are not shipped in this wheel, so a genuinely stock robot
+        has nothing local — and that is exactly the robot this notice is most
+        often read on. Claiming a local half was running there would describe
+        somebody else's robot to the operator of this one.
+        """
+        tracking = {
+            f"{ENV_PREFIX}DEVICE_NAME": "reachy-mini-1",
+            f"{ENV_PREFIX}DETECTION_SOURCE": "remote",
+        }
+        stock = load_settings(tracking, {}).settings
+        with_weights = load_settings(
+            {**tracking, f"{ENV_PREFIX}LOCAL_MODEL_PATH": "/models/face.onnx"},
+            {},
+        ).settings
+        untracked = load_settings(MINIMAL, {}).settings
+
+        assert "nothing local to run instead" in local_detection_clause(stock)
+        assert variable_for("local_model_path") in local_detection_clause(stock)
+        assert "own detector runs instead" in local_detection_clause(with_weights)
+        assert "either way" in local_detection_clause(untracked)
+        # And the notice carries whichever of them applies, rather than a
+        # sentence covering all three at once.
+        assert local_detection_clause(stock) in groundstation_unresolved_notice(stock)
 
     def test_local_detection_without_a_model_is_refused(self) -> None:
         """The weights are not in the wheel, so the path has to be supplied."""

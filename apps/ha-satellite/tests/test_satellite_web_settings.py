@@ -21,7 +21,9 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -61,7 +63,7 @@ from reachy_mini_ha_satellite.web import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     from pyfakefs.fake_filesystem import FakeFilesystem
     from starlette.applications import Starlette
@@ -1012,6 +1014,118 @@ class TestWhenTheChangeCannotBeWritten:
         assert response.status_code == 400
         assert "IDLE_SECONDS" in response.text
         assert _store().load() == {"idle_seconds": "6.0"}
+
+
+class TestARefusalOutlivesTheBrowserTab:
+    """A refusal the operator navigated away from used to leave no evidence.
+
+    The page renders the reason and nothing else recorded it, so a submission
+    that was refused once and then succeeded with the same input could not be
+    told apart from any of the dozen refusals this path can raise. The journal
+    is the robot's own record, so both refusal paths log it too.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_refused_save_is_logged_as_well_as_shown(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The reason survives the tab it was shown in.
+
+        Args:
+            caplog: Where the application's own log is captured.
+        """
+        host = RecordingHost()
+        host.refusal = ConfigurationError("the groundstation would not start")
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app(host)) as client:
+            with caplog.at_level(logging.WARNING):
+                response = await client.post(
+                    "/settings",
+                    content=_form(settings, idle_seconds="9.0"),
+                    headers=_FORM_HEADERS,
+                )
+
+        assert response.status_code == 400
+        assert "settings.refused" in caplog.text
+        assert "the groundstation would not start" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_refused_reset_is_logged_too(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The other path through the same handler, so neither can be forgotten.
+
+        Args:
+            caplog: Where the application's own log is captured.
+        """
+        host = RecordingHost()
+        host.refusal = ConfigurationError("the groundstation would not start")
+
+        async with _client(_app(host)) as client:
+            with caplog.at_level(logging.WARNING):
+                response = await client.post("/reset")
+
+        assert response.status_code == 400
+        assert "settings.refused" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_carrying_a_credential_would_be_a_defect(self) -> None:
+        """The reason logging one is safe by construction rather than by luck.
+
+        Every refusal this path raises is built to be reportable — the address
+        check quotes no address, and a model validation failure is rendered from
+        `loc` and `msg` alone precisely so a rejected credential is not printed.
+        This drives the real refusal for a credential the model rejects and
+        asserts the value is in neither the page nor the log.
+        """
+        host = RecordingHost()
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app(host)) as client:
+            with caplog_at_warning() as records:
+                response = await client.post(
+                    "/settings",
+                    content=_form(
+                        settings,
+                        groundstation_url=f"ws://{'h' * 300}/v1/session",
+                        groundstation_credential=AWKWARD_CREDENTIAL,
+                    ),
+                    headers=_FORM_HEADERS,
+                )
+
+        assert response.status_code == 400
+        logged = "".join(records)
+        for surface in (response.text, logged):
+            assert AWKWARD_CREDENTIAL not in surface
+            assert "ple\\credential" not in surface
+
+
+@contextlib.contextmanager
+def caplog_at_warning() -> Iterator[list[str]]:
+    """Collect this package's warnings without a fixture, for one nested use.
+
+    Yields:
+        The formatted records, appended as they are emitted.
+    """
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    handler = _Collect(level=logging.WARNING)
+    logger = logging.getLogger("reachy_mini_ha_satellite")
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
 
 
 class TestTheFormIsUsableWithoutSeeingIt:

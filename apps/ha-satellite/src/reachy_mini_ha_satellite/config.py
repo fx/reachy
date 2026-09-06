@@ -155,6 +155,7 @@ __all__ = [
     "identity_is_resolved",
     "identity_unresolved_notice",
     "load_settings",
+    "local_detection_clause",
     "log_resolved_configuration",
     "overrides_path",
     "resolve_submission",
@@ -828,8 +829,61 @@ def identity_unresolved_notice() -> str:
     )
 
 
-def groundstation_unresolved_notice() -> str:
+def local_detection_clause(settings: Settings) -> str:
+    """Say what detects a face while no groundstation session is open.
+
+    **One definition, because two surfaces say it and one of them said it
+    wrongly.** REQ-103 has the satellite run on local detection until a
+    groundstation is supplied, and it can only do that where there is a detector
+    to run: the face-detection weights are not shipped in this wheel, so a robot
+    with no `local_model_path` has nothing local and sees nothing until a
+    groundstation arrives. That is the state a genuinely stock robot is in, and
+    prose claiming a local half was running there describes somebody else's
+    robot to the operator of this one.
+
+    The composition is `main.build_perception_source`'s; this reads the same two
+    settings to say which of its outcomes the reader is looking at, and both the
+    boot log and the settings page render this one sentence rather than a copy
+    each.
+
+    Args:
+        settings: The settings in effect.
+
+    Returns:
+        One sentence, as plain text — the settings page escapes it.
+    """
+    if not settings.face_tracking_enabled:
+        return (
+            f"{variable_for('face_tracking_enabled')} is false, so nothing "
+            f"detects a face either way."
+        )
+    if settings.local_model_path.strip():
+        return "the robot's own detector runs instead, until one arrives."
+    return (
+        f"there is nothing local to run instead — the face-detection weights are "
+        f"not shipped in this wheel — so the robot sees no faces at all until a "
+        f"groundstation arrives. Point {variable_for('local_model_path')} at "
+        f"weights on the robot to have it fall back to its own detector."
+    )
+
+
+def groundstation_unresolved_notice(settings: Settings) -> str:
     """Say what an unconfigured groundstation leaves true, rather than failed.
+
+    **What it leaves true depends on the robot, so the notice reads the robot
+    rather than describing every case at once.** REQ-103 says the satellite runs
+    on local detection until a groundstation is supplied, and it can only do that
+    where there is a detector to run: the face-detection weights are not shipped
+    in this wheel, so a robot with no `local_model_path` has nothing local and
+    sees nothing until a groundstation arrives. That is the state a genuinely
+    stock robot is in, and a notice claiming a local half was running there would
+    be describing somebody else's robot to the operator of this one.
+
+    The composition itself is `main.build_perception_source`'s; this reads the
+    same two settings to say which of its outcomes the reader is looking at.
+
+    Args:
+        settings: The settings in effect.
 
     Returns:
         The notice the boot log and the settings page share.
@@ -838,10 +892,9 @@ def groundstation_unresolved_notice() -> str:
         f"{variable_for(GROUNDSTATION_URL_SETTING)} and "
         f"{variable_for(GROUNDSTATION_CREDENTIAL_SETTING)} are not both set, so "
         f"no groundstation session is opened. The remote detector is "
-        f"unconfigured rather than failed: nothing is connecting, nothing is "
-        f"retrying, and a composition with a local half runs on that instead. "
-        f"Supplying both from a configuration surface adopts them without a "
-        f"restart."
+        f"unconfigured rather than failed: nothing is connecting and nothing is "
+        f"retrying, and {local_detection_clause(settings)} Supplying both from a "
+        f"configuration surface adopts them without a restart."
     )
 
 
@@ -1428,7 +1481,7 @@ def log_resolved_configuration(resolution: Resolution) -> None:
     if not groundstation_is_resolved(resolution.settings):
         _LOGGER.info(
             "configuration.groundstation_unresolved %s",
-            groundstation_unresolved_notice(),
+            groundstation_unresolved_notice(resolution.settings),
         )
 
 
