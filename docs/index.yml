@@ -42,6 +42,10 @@ specs:
     path: specs/robot-link/
     description: The wire contract between robot and groundstation — session, capability negotiation, framing, backpressure and reconnection
     status: active
+  - name: stock-robot-installation
+    path: specs/stock-robot-installation/
+    description: Installing and first-time configuring the satellite on an unmodified robot, and degrading gracefully on a released daemon
+    status: active
 
 changes:
   - id: "0001"
@@ -184,3 +188,10 @@ changes:
     spec: home-assistant-configuration-and-camera-feed
     status: complete
     depends_on: ["0015", "0017", "0018", "0019"]
+  - id: "0021"
+    name: stock-robot-installation
+    path: changes/0021-stock-robot-installation.md
+    description: Ungated motion on a released daemon, browser-reachable bootstrap configuration, a daemon interpreter that is asked rather than assumed, and an installable application source
+    spec: stock-robot-installation
+    status: draft
+    depends_on: ["0020"]

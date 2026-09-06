@@ -14,6 +14,7 @@
 | [provisioning](specs/provisioning/) | Idempotent Ansible provisioning from a stock robot image to a configured state | active |
 | [reachyctl](specs/reachyctl/) | The command-line tool for deploying, configuring and diagnosing a robot | active |
 | [robot-link](specs/robot-link/) | The wire contract between robot and groundstation — session, capability negotiation, framing, backpressure and reconnection | active |
+| [stock-robot-installation](specs/stock-robot-installation/) | Installing and first-time configuring the satellite on an unmodified robot, and degrading gracefully on a released daemon | active |
 
 ## Changes
 
@@ -39,3 +40,4 @@
 | 0018 | [satellite-runtime-stability](changes/0018-satellite-runtime-stability.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
 | 0019 | [predictive-gaze-and-coordinated-motion](changes/0019-predictive-gaze-and-coordinated-motion.md) | [gaze-control](specs/gaze-control/) | complete | 0018 |
 | 0020 | [home-assistant-configuration-and-camera-feed](changes/0020-home-assistant-configuration-and-camera-feed.md) | [home-assistant-configuration-and-camera-feed](specs/home-assistant-configuration-and-camera-feed/) | complete | 0015, 0017, 0018, 0019 |
+| 0021 | [stock-robot-installation](changes/0021-stock-robot-installation.md) | [stock-robot-installation](specs/stock-robot-installation/) | draft | 0020 |
