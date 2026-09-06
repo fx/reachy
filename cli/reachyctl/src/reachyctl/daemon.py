@@ -14,12 +14,26 @@ of returning the value it read before the restart, which is precisely the
 outcome that looks identical to success. Every method asks the robot.
 
 **The interpreter is the daemon's, not a path this tool assumed.** Before asking
-what version of the application is installed, this client asks systemd which
-interpreter the daemon actually runs, and asks *that* one. Installing into a
-configured path and then verifying against the same configured path would agree
-with itself no matter which environment the daemon was really using, which is
-the shape of the original failure rather than a check on it. The configured path
-is a fallback for a unit whose `ExecStart` cannot be read, and it says so.
+what version of the application is installed, this client resolves which
+interpreter owns the environment the daemon's packages are installed in, and
+asks *that* one. Installing into a configured path and then verifying against
+the same configured path would agree with itself no matter which environment the
+daemon was really using, which is the shape of the original failure rather than
+a check on it.
+
+**The unit's start program is not that interpreter, and assuming it was started
+a second daemon.** On ReachyMiniOS v0.2.3 the unit starts a shell launcher out
+of the daemon's own virtual environment; an earlier version of this module read
+that path as an interpreter and ran it with `-c '<python source>'`, which
+launched a second daemon that contended with the first for its network port, its
+serial device and its camera. `reachyctl.interpreters` derives the candidates
+instead — from what the operator supplied, from the environment the unit
+declares, and from the environment the start program is installed in — and this
+client confirms one of them before any Python source goes near it. Nothing
+whose file name does not claim to be an interpreter is ever executed at all.
+When nothing resolves, that is `InterpreterResolutionError` and not a fallback:
+a path that might not be an interpreter is exactly what produced the second
+daemon.
 
 **A question that could not be asked is not an answer.** A method here either
 returns what the robot said or raises. None of them returns an empty mapping, an
@@ -46,15 +60,17 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 from reachy_checks import ApplicationState, DaemonInfo, InstalledApplication
+from reachyctl.interpreters import candidates
 from reachyctl.managed import MalformedRegionError, parse_region
 from reachyctl.robot import CommandOutcome, RobotAccessError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
+    from reachyctl.interpreters import Candidate
     from reachyctl.robot import RemoteAccess, RobotLayout
 
-__all__ = ["DaemonClient", "DaemonControlError"]
+__all__ = ["DaemonClient", "DaemonControlError", "InterpreterResolutionError"]
 
 # Asked of the robot's own interpreter, so the answer is what that environment
 # holds rather than what a wheel's file name claims. One round trip answers for
@@ -74,8 +90,16 @@ _METADATA_SCRIPT: Final = (
 
 # systemd renders a command as `{ path=/usr/bin/x ; argv[]=... ; ... }`, one
 # such block per `ExecStart=` the unit declares. The first block's path is the
-# interpreter the daemon runs.
+# program the daemon is STARTED by, which is the daemon's entry point and not
+# necessarily an interpreter — see `reachyctl.interpreters`.
 _EXEC_PATH: Final = re.compile(r"path=(\S+)")
+
+# The flag a candidate is asked to identify itself with, and what an interpreter
+# answers. A flag, deliberately, and never source: the point of the whole
+# resolution is that nothing unproven is handed a program to run, and `-V` asks
+# a question no interpreter can misread and no launcher is given the chance to.
+_VERSION_FLAG: Final = "-V"
+_VERSION_ANSWER: Final = "Python "
 
 # systemd's own spelling for "this unit is running".
 _ACTIVE: Final = "active"
@@ -96,6 +120,21 @@ class DaemonControlError(RobotAccessError):
     robot answered, and what it said is not what this tool knows how to read.
     The most likely cause is a daemon whose control module is spelled
     differently from `RobotLayout.daemon_control`, which is an option away.
+    """
+
+
+class InterpreterResolutionError(RobotAccessError):
+    """No interpreter could be resolved for the daemon's environment.
+
+    Its own type for the same reason `DaemonControlError` is: the robot
+    answered, and what it said does not let this tool operate it. There is
+    deliberately no fallback behind this error. Falling back to a configured
+    path means installing into an environment the daemon may not be using, which
+    is the failure reachyctl REQ-051 exists to catch; falling back to the unit's
+    start program means running a launcher with Python arguments, which is the
+    failure that started a second daemon. The message names every path that was
+    tried and why, and it names `--python`, which is the answer an operator can
+    always give.
     """
 
 
@@ -310,19 +349,7 @@ class DaemonClient:
                 f"{outcome.status_only()}"
             )
             raise RobotAccessError(message)
-        settings: dict[str, str] = {}
-        # systemd prints the whole environment on one line, quoting an
-        # assignment that needs it. Splitting it the way a shell would is the
-        # closest available parse and not an exact one: systemd's own escaping
-        # is its own, and a value carrying something it escapes differently
-        # would come back subtly wrong. It is what there is — `systemctl show`
-        # offers no structured output — and the managed region itself is read
-        # from the file, where the format is this repository's own.
-        for assignment in shlex.split(outcome.stdout.strip()):
-            name, separator, value = assignment.partition("=")
-            if separator:
-                settings[name] = value
-        return settings
+        return _environment(outcome.stdout)
 
     async def announced_identity(self) -> str:
         """Ask what identity the satellite announces to Home Assistant.
@@ -341,22 +368,77 @@ class DaemonClient:
 
     # --- what the operating commands need ------------------------------------
 
+    #:= docs/specs/stock-robot-installation/index.md#req-105-the-daemon-s-start-program-is-not-assumed-to-be-an-interpreter
+    #:% `reachyctl` MUST NOT execute the program named by a robot's daemon service unit
+    #:% as though it were a Python interpreter.
+    #
+    #:= docs/specs/stock-robot-installation/index.md#req-106-diagnosis-and-deployment-start-no-second-daemon
+    #:% `reachyctl` MUST NOT start another instance of the robot's daemon, or take any
+    #:% device, port or lock from the running one, as a side effect of diagnosing or
+    #:% deploying.
     async def interpreter(self) -> str:
-        """Ask systemd which interpreter the daemon runs.
+        """Resolve the interpreter that owns the daemon's package environment.
+
+        One round trip reads the unit's start program and the environment it
+        declares; `reachyctl.interpreters` turns those into candidates, and each
+        is asked to identify itself before it is trusted. The unit's start
+        program is a candidate only when its file name says it is an
+        interpreter, so a shell launcher is never run — see the module
+        documentation for the robot that made this necessary.
 
         Returns:
-            The path in the unit's first `ExecStart`. The configured fallback is
-            used only when the unit declares none — a unit that is not installed
-            reports an empty property — and never to paper over a command that
-            failed. See the module documentation for why asking rather than
-            assuming is the point.
+            The first candidate that answered as an interpreter.
 
         Raises:
+            InterpreterResolutionError: If nothing did. Named and remediable:
+                the message lists what was tried and why, says what was
+                deliberately not run, and names `--python`.
             RobotAccessError: If the unit could not be read at all.
         """
-        properties = await self._show(self._layout.daemon_unit, "ExecStart")
+        properties = await self._show(
+            self._layout.daemon_unit,
+            "ExecStart",
+            "Environment",
+        )
         found = _EXEC_PATH.search(properties.get("ExecStart", ""))
-        return found.group(1) if found is not None else self._layout.python
+        exec_start = found.group(1) if found is not None else ""
+        considered = candidates(
+            configured=self._layout.python,
+            exec_start=exec_start,
+            environment=_environment(properties.get("Environment", "")),
+        )
+        for candidate in considered:
+            if await self._identifies_as_an_interpreter(candidate.path):
+                return candidate.path
+        raise InterpreterResolutionError(
+            _unresolved(self._layout.daemon_unit, exec_start, considered),
+        )
+
+    async def _identifies_as_an_interpreter(self, path: str) -> bool:
+        """Ask a candidate to say what it is.
+
+        `-V` and not source: this is the step that *establishes* the thing
+        everything downstream assumes, so it cannot itself assume it. The answer
+        is read rather than the exit status, because a wrapper an operator named
+        with `--python` can exit zero having done something entirely else, and
+        only the version line makes a program an interpreter.
+
+        Args:
+            path: The candidate. Its file name has already been established to
+                claim an interpreter, unless an operator named it themselves.
+
+        Returns:
+            True when it answered with a version line. A path that is not there,
+            is not executable, or answered with anything else is not an
+            interpreter and the next candidate is tried.
+        """
+        outcome = await self._run([path, _VERSION_FLAG])
+        if not outcome.ok:
+            return False
+        # Python 3 writes the version to standard output; older ones wrote it to
+        # standard error, and a robot is not this tool's choice of interpreter.
+        answer = (outcome.stdout or outcome.stderr).strip()
+        return answer.startswith(_VERSION_ANSWER)
 
     async def installed_versions(self, *distributions: str) -> dict[str, str]:
         """Ask the daemon's environment what versions it holds.
@@ -784,6 +866,69 @@ class DaemonClient:
         if not outcome.ok:
             raise RobotAccessError(f"{complaint}: {outcome.complaint()}")
         return outcome
+
+
+def _environment(text: str) -> dict[str, str]:
+    """Read the environment out of systemd's rendering of it.
+
+    systemd prints the whole environment on one line, quoting an assignment that
+    needs it. Splitting it the way a shell would is the closest available parse
+    and not an exact one: systemd's own escaping is its own, and a value
+    carrying something it escapes differently would come back subtly wrong. It
+    is what there is — `systemctl show` offers no structured output — and the
+    managed region itself is read from the file, where the format is this
+    repository's own.
+
+    Args:
+        text: What systemd printed for the `Environment` property.
+
+    Returns:
+        The settings by name.
+    """
+    settings: dict[str, str] = {}
+    for assignment in shlex.split(text.strip()):
+        name, separator, value = assignment.partition("=")
+        if separator:
+            settings[name] = value
+    return settings
+
+
+def _unresolved(unit: str, exec_start: str, considered: Sequence[Candidate]) -> str:
+    """Say why no interpreter could be resolved, and what to do about it.
+
+    Args:
+        unit: The daemon's unit, so the operator knows which robot and which
+            service this is about.
+        exec_start: The program that unit starts, or an empty string when it
+            declares none.
+        considered: Every candidate that was tried, in the order they were.
+
+    Returns:
+        The message. It names the paths and their reasons rather than only
+        counting them, says out loud what was deliberately *not* run, and ends
+        with the answer an operator can always give.
+    """
+    tried = (
+        "Tried " + "; ".join(candidate.describe() for candidate in considered) + "."
+        if considered
+        else "Nothing on this robot suggested one."
+    )
+    if not exec_start:
+        withheld = f"The unit {unit} declares no start program to derive one from."
+    elif any(candidate.path == exec_start for candidate in considered):
+        withheld = f"The unit {unit} starts {exec_start}."
+    else:
+        withheld = (
+            f"The unit {unit} starts {exec_start}, which was not run: a unit's "
+            f"start program is the daemon's entry point, and only on some "
+            f"images is that also an interpreter. Running it with Python "
+            f"arguments starts a second daemon that competes with the first for "
+            f"its port, its serial device and its camera."
+        )
+    return (
+        f"could not resolve the Python interpreter of the environment {unit} "
+        f"runs. {withheld} {tried} Name the interpreter with --python"
+    )
 
 
 def _substate(properties: Mapping[str, str]) -> str:

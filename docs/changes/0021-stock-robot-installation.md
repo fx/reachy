@@ -395,22 +395,22 @@ waiting on work that does not exist.
   - [x] Run the focused satellite suites and the repository checks required
         above
 
-- [ ] Task 3 — Resolve the daemon's interpreter without starting a second daemon
+- [x] Task 3 — Resolve the daemon's interpreter without starting a second daemon
       (`cli/reachyctl`)
-  - [ ] Resolve the interpreter that owns the daemon's package environment from
+  - [x] Resolve the interpreter that owns the daemon's package environment from
         the environment itself rather than from the unit's start program
-  - [ ] Keep an image whose unit does start an interpreter working, and make the
+  - [x] Keep an image whose unit does start an interpreter working, and make the
         configured override an explicit answer rather than a last resort
-  - [ ] Fail with a named, remediable error when no interpreter can be resolved,
+  - [x] Fail with a named, remediable error when no interpreter can be resolved,
         never falling back to a path that might not be one
-  - [ ] Confirm the three affected checks and the deploy step report what they
+  - [x] Confirm the three affected checks and the deploy step report what they
         found once the boundary is fixed, without each carrying its own
         workaround
-  - [ ] Cover a wrapper-started unit, an interpreter-started unit, an
+  - [x] Cover a wrapper-started unit, an interpreter-started unit, an
         unresolvable environment, an uninstalled unit and the override, proving
         no Python source is ever handed to the unit's program
-  - [ ] Update the troubleshooting entries for the affected checks
-  - [ ] Run the focused CLI suites and the repository checks required above
+  - [x] Update the troubleshooting entries for the affected checks
+  - [x] Run the focused CLI suites and the repository checks required above
 
 - [ ] Task 4 — Publish the installable application source and complete the
       change (**FINAL**, depends on tasks 1, 2 and 3)

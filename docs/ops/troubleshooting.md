@@ -85,6 +85,15 @@ with host-key verification on — there is no option that turns it off — so a
 changed host key looks like a connection failure. Point `--known-hosts` at a file
 that has the robot in it.
 
+**One failure here is not about the link at all**, and it names itself: *could
+not resolve the Python interpreter of the environment
+`reachy-mini-daemon.service` runs*. The robot answered; what could not be found
+is the interpreter that owns the environment the daemon's packages are installed
+in. See [When the interpreter cannot be
+resolved](#when-the-interpreter-cannot-be-resolved) below — the same failure
+takes `application.installed` and `application.running` down with it, and one
+`--python` fixes all three.
+
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript is recorded for
 > this check: reaching a real robot's daemon has never been attempted from this
 > repository. What is recorded is what the check reports when no robot is given
@@ -112,6 +121,12 @@ installed, you installed into a different environment.
 `deploy` reads the wheel's own `.dist-info/METADATA` for the distribution name
 rather than parsing its file name, so "what was installed" and "what is running"
 are answers to the same question.
+
+Which environment that is, is resolved from the robot on every question — never
+assumed, and never taken from the program the daemon's unit starts. A failure
+saying *could not resolve the Python interpreter* is that resolution coming up
+empty rather than anything about the application; see [When the interpreter
+cannot be resolved](#when-the-interpreter-cannot-be-resolved).
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript. Against the
 > container target the check passes, reporting `the application is installed at
@@ -150,6 +165,12 @@ Read the journal:
 ```
 reachyctl app logs --robot reachy@192.0.2.20
 ```
+
+Asking the daemon whether it is running the application means running its
+control module, and that goes through the same resolved interpreter the two
+checks above use. A failure saying *could not resolve the Python interpreter* is
+that resolution and not the application; see [When the interpreter cannot be
+resolved](#when-the-interpreter-cannot-be-resolved).
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript, and no `app logs`
 > transcript at all.
@@ -438,6 +459,63 @@ reachyctl config apply
 ---
 
 ## Failures `doctor` does not have a check for
+
+### When the interpreter cannot be resolved
+
+**What it looks like.** `daemon.reachable`, `application.installed` and
+`application.running` all fail together, each with the same sentence, and
+`reachyctl deploy` fails at its `reach` step with it too:
+
+```
+could not resolve the Python interpreter of the environment reachy-mini-daemon.service runs. The unit reachy-mini-daemon.service starts /venvs/mini_daemon/lib/python3.12/site-packages/reachy_mini/daemon/app/services/wireless/launcher.sh, which was not run: a unit's start program is the daemon's entry point, and only on some images is that also an interpreter. Running it with Python arguments starts a second daemon that competes with the first for its port, its serial device and its camera. Tried /venvs/mini_daemon/bin/python (the environment the unit's start program is installed in). Name the interpreter with --python
+```
+
+**What it means.** Everything `reachyctl` asks about the daemon's environment —
+which distributions it holds, which version the application is at, whether the
+daemon is running it — is asked *through* an interpreter, and it has to be the
+interpreter that owns that environment. Installing into a path this tool assumed
+and then verifying against the same assumption would agree with itself no matter
+where the daemon really looks, which is reachyctl
+[REQ-051](../specs/reachyctl/index.md#req-051-deployment-verifies-its-own-result)'s
+whole subject. So the tool resolves it from the robot, in this order:
+
+1. what `--python` names, when an operator named one;
+2. the unit's start program, **only** when its file name is one CPython gives an
+   interpreter — `python`, `python3`, `python3.12`;
+3. the `VIRTUAL_ENV` the unit declares;
+4. the environment the start program is installed in, read off a
+   `…/lib/pythonX.Y/site-packages/…` path;
+5. the `bin` directory the start program sits in.
+
+Each candidate is asked `-V` and has to answer with a version line before
+anything else is sent to it. Nothing else is executed, and there is no fallback:
+a path that might not be an interpreter is exactly what this failure exists to
+refuse.
+
+**What to do.** The message lists every path that was tried and why. Log in to
+the robot and find the interpreter of the environment the daemon's packages are
+installed in — on a stock image, the `bin/python` of the virtual environment the
+unit's start program lives under — then pass it:
+
+```
+reachyctl doctor --robot reachy@192.0.2.20 --python /venvs/mini_daemon/bin/python
+```
+
+**Why the refusal matters.** A `reachyctl` older than this behaviour read the
+unit's start program as an interpreter and ran it with `-c '<python source>'`.
+On ReachyMiniOS v0.2.3 that program is a shell launcher, so the diagnosis
+**started a second daemon**, which then contended with the running one for its
+network port, its serial device and its camera. If a robot has been diagnosed
+with such a version, check for an orphaned daemon process before trusting
+anything else the tool reports about it.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** The failure above is this tool's own
+> string and not a transcript from a robot — nothing in this repository has a
+> Reachy Mini attached. It is held to the code rather than written from memory:
+> `cli/reachyctl/tests/test_reachyctl_interpreter_runbook.py` renders it from
+> the real resolution against the stock image's layout and requires the block
+> above to be it. The `--python` step and the orphaned-process check have not
+> been run against real hardware.
 
 ### The service refuses to start naming a variable
 

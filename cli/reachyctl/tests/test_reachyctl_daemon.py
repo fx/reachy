@@ -7,14 +7,22 @@ against itself: `ping`, `installed_application`, `application_state`,
 calls, and each is exercised in the state where the check passes and in the
 state where it fails.
 
-Two of these tests are the ones the whole change turns on. One asserts that the
-interpreter is taken from the daemon's own unit rather than from a configured
-path — installing into a path this tool assumed and then verifying against the
-same assumption would agree with itself no matter which environment the daemon
-was really using. The other asserts that nothing is cached: a deploy's
-verification must be able to see a value change under it, and a client that
-remembered the first answer would report the version that was true before the
-restart.
+Two of these tests are the ones change 0008 turned on. One asserts that the
+interpreter is resolved from the robot rather than from a configured path —
+installing into a path this tool assumed and then verifying against the same
+assumption would agree with itself no matter which environment the daemon was
+really using. The other asserts that nothing is cached: a deploy's verification
+must be able to see a value change under it, and a client that remembered the
+first answer would report the version that was true before the restart.
+
+The interpreter tests then say what change 0021 made true. `reachyctl.daemon`
+used to read the unit's start program as an interpreter, and on the stock image
+that program is a shell launcher — running it with Python arguments started a
+second daemon that contended with the first for its port, its serial device and
+its camera. The fake robot models exactly that: anything sent to a start program
+that is not an interpreter lands in `wrapper_runs`, so REQ-106 is asserted
+against the robot's state rather than against the arguments a tool assembled.
+`test_reachyctl_interpreters.py` covers the derivation on its own.
 
 Test module names are globally unique across the workspace — see the root
 `AGENTS.md`.
@@ -29,6 +37,8 @@ import pytest
 from reachyctl_robot import (
     DAEMON_DISTRIBUTION,
     DROP_IN,
+    STOCK_INTERPRETER,
+    STOCK_LAUNCHER,
     FakeRemoteAccess,
     FakeRobot,
     daemon_for,
@@ -36,7 +46,11 @@ from reachyctl_robot import (
 from reachyctl_support import reporter_for
 
 from reachyctl.configure import run_apply
-from reachyctl.daemon import DaemonClient, DaemonControlError
+from reachyctl.daemon import (
+    DaemonClient,
+    DaemonControlError,
+    InterpreterResolutionError,
+)
 from reachyctl.errors import CommandError
 from reachyctl.managed import MalformedRegionError, render_region
 from reachyctl.robot import (
@@ -80,25 +94,175 @@ async def test_a_unit_that_is_not_installed_is_a_different_fault_from_one_that_i
 async def test_the_interpreter_is_the_one_the_daemon_actually_runs() -> None:
     """Asking rather than assuming is what makes verification mean anything.
 
-    The layout carries a different path from the one the unit declares. If this
-    client preferred the configured one, an install and its verification would
-    agree with each other while both looked somewhere the daemon does not.
+    Nothing is configured, so every part of the answer came from the robot. If
+    this client preferred a path of its own, an install and its verification
+    would agree with each other while both looked somewhere the daemon does not.
     """
-    robot = FakeRobot(exec_start="/opt/other/venv/bin/python")
-    daemon, _access = daemon_for(robot, layout=RobotLayout(python="/usr/bin/python3"))
+    robot = FakeRobot(
+        exec_start="/opt/other/venv/bin/python",
+        interpreters={"/opt/other/venv/bin/python": "3.12.3"},
+    )
+    daemon, _access = daemon_for(robot)
 
     assert await daemon.interpreter() == "/opt/other/venv/bin/python"
 
 
 @pytest.mark.asyncio
-async def test_the_configured_interpreter_is_used_only_when_the_unit_cannot_be_read() -> (
+async def test_a_unit_that_starts_a_wrapper_resolves_the_environment_around_it() -> (
     None
 ):
-    """A fallback that is never reached is a fallback nobody can trust."""
-    robot = FakeRobot(exec_start="")
+    """The stock image, and the reason this resolution exists.
+
+    ReachyMiniOS v0.2.3 starts a shell launcher out of the daemon's own virtual
+    environment. Reading that path as an interpreter and handing it Python
+    source ran the launcher, which started a second daemon.
+    """
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: "3.12.3"},
+    )
+    daemon, _access = daemon_for(robot)
+
+    assert await daemon.interpreter() == STOCK_INTERPRETER
+    assert robot.wrapper_runs == []
+
+
+@pytest.mark.asyncio
+async def test_no_python_source_ever_reaches_the_unit_s_start_program() -> None:
+    """REQ-106, asserted against the robot rather than against an argument list.
+
+    Every question this client asks of the daemon's environment goes through
+    the interpreter it resolved, and the fake starts a second daemon the moment
+    anything runs the launcher. An empty `wrapper_runs` is that daemon never
+    having been started.
+    """
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: "3.12.3"},
+        packages={DAEMON_DISTRIBUTION: "4.5.6", DEFAULT_APPLICATION: "2.0"},
+    )
+    daemon, access = daemon_for(robot)
+
+    await daemon.ping()
+    await daemon.installed_application()
+    await daemon.application_state()
+
+    assert robot.wrapper_runs == []
+    assert not any(command[0] == STOCK_LAUNCHER for command in access.commands)
+
+
+@pytest.mark.asyncio
+async def test_the_environment_the_unit_declares_answers_before_anything_is_derived() -> (
+    None
+):
+    """A unit that says which environment it means is a unit that has answered."""
+    robot = FakeRobot(
+        exec_start="/usr/lib/reachy/launch",
+        environment={"VIRTUAL_ENV": "/venvs/declared/"},
+        interpreters={"/venvs/declared/bin/python": "3.12.3"},
+    )
+    daemon, _access = daemon_for(robot)
+
+    assert await daemon.interpreter() == "/venvs/declared/bin/python"
+
+
+@pytest.mark.asyncio
+async def test_a_console_script_resolves_the_bin_directory_it_sits_in() -> None:
+    """A unit starting an entry point still names the environment holding it."""
+    robot = FakeRobot(
+        exec_start="/venvs/mini_daemon/bin/reachy-mini-daemon",
+        interpreters={STOCK_INTERPRETER: "3.12.3"},
+    )
+    daemon, _access = daemon_for(robot)
+
+    assert await daemon.interpreter() == STOCK_INTERPRETER
+    assert robot.wrapper_runs == []
+
+
+@pytest.mark.asyncio
+async def test_the_configured_interpreter_is_the_answer_rather_than_a_last_resort() -> (
+    None
+):
+    """An operator who knows which interpreter it is should not have to be right twice.
+
+    The unit declares one and the robot has both. What `--python` names is what
+    is used, because it is an answer to the question rather than help with a
+    guess.
+    """
+    robot = FakeRobot(
+        exec_start="/opt/other/venv/bin/python",
+        interpreters={
+            "/opt/other/venv/bin/python": "3.12.3",
+            "/usr/bin/python3": "3.12.3",
+        },
+    )
     daemon, _access = daemon_for(robot, layout=RobotLayout(python="/usr/bin/python3"))
 
     assert await daemon.interpreter() == "/usr/bin/python3"
+
+
+@pytest.mark.asyncio
+async def test_an_environment_with_no_interpreter_in_it_is_named_not_guessed_at() -> (
+    None
+):
+    """A path that might not be an interpreter is what started the second daemon."""
+    robot = FakeRobot(exec_start=STOCK_LAUNCHER, interpreters={})
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(InterpreterResolutionError) as raised:
+        await daemon.interpreter()
+
+    assert STOCK_INTERPRETER in str(raised.value)
+    assert "--python" in str(raised.value)
+    assert "not run" in str(raised.value)
+    assert robot.wrapper_runs == []
+
+
+@pytest.mark.asyncio
+async def test_a_declared_interpreter_that_is_not_there_is_reported_as_tried() -> None:
+    """The unit's start program was a candidate on its name and still had to answer.
+
+    Nothing was withheld here — the message says so rather than accusing the
+    unit of starting something it was not allowed to run, which would send an
+    operator looking for a wrapper that does not exist.
+    """
+    robot = FakeRobot(exec_start="/opt/gone/bin/python", interpreters={})
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(InterpreterResolutionError) as raised:
+        await daemon.interpreter()
+
+    assert "starts /opt/gone/bin/python." in str(raised.value)
+    assert "not run" not in str(raised.value)
+    assert "the interpreter the unit's ExecStart names" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_unit_that_is_not_installed_suggests_nothing_and_says_so() -> None:
+    """An empty `ExecStart` is what systemd reports for a unit that is not there."""
+    robot = FakeRobot(exec_start="", interpreters={})
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(InterpreterResolutionError) as raised:
+        await daemon.interpreter()
+
+    assert "declares no start program" in str(raised.value)
+    assert "Nothing on this robot suggested one" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_a_configured_path_that_is_not_an_interpreter_is_refused() -> None:
+    """The override is an answer, and an answer is still checked before it is trusted."""
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: "3.12.3"},
+    )
+    daemon, _access = daemon_for(
+        robot,
+        layout=RobotLayout(python="/usr/bin/there-is-nothing-here"),
+    )
+
+    assert await daemon.interpreter() == STOCK_INTERPRETER
 
 
 @pytest.mark.asyncio
@@ -327,7 +491,10 @@ async def test_a_write_that_could_not_make_its_directory_says_so() -> None:
 @pytest.mark.asyncio
 async def test_installing_a_wheel_uses_the_interpreter_the_daemon_runs() -> None:
     """Which is the whole difference between installing and installing somewhere useful."""
-    robot = FakeRobot(exec_start="/opt/other/venv/bin/python")
+    robot = FakeRobot(
+        exec_start="/opt/other/venv/bin/python",
+        interpreters={"/opt/other/venv/bin/python": "3.12.3"},
+    )
     daemon, access = daemon_for(robot)
     await daemon.stage(b"not really a wheel", "thing.whl")
 

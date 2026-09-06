@@ -23,6 +23,14 @@ version alone, which is exactly the deploy that looks identical to success at
 every step. REQ-051's scenario is that case, and it cannot be written against a
 fake that has no notion of where an install went.
 
+**Running the unit's start program starts a second daemon.** `interpreters` says
+which paths on this robot are really interpreters, and anything else the unit
+starts is a launcher: sending it a command records the run in `wrapper_runs` and
+answers the way the real one did on ReachyMiniOS v0.2.3 — a second daemon that
+found the port already bound and died. A test proves REQ-106 by asserting that
+list is empty, which is an assertion about the robot rather than about the
+arguments a tool happened to build.
+
 Every command is recorded in `commands`, so a test can assert not only what
 happened but what was *not* sent — which is how preview mode is proved to change
 nothing.
@@ -51,8 +59,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DAEMON_DISTRIBUTION",
+    "DAEMON_INTERPRETER",
     "DROP_IN",
     "ROBOT",
+    "STOCK_INTERPRETER",
+    "STOCK_LAUNCHER",
     "FakeRemoteAccess",
     "FakeRobot",
     "applied_settings",
@@ -71,6 +82,21 @@ DROP_IN: Final = (
 
 _SUDO: Final = ("sudo", "-n")
 
+# The interpreter a default robot's daemon environment is built around, and the
+# version it answers `-V` with.
+DAEMON_INTERPRETER: Final = "/opt/reachy/venv/bin/python"
+_INTERPRETER_VERSION: Final = "3.12.3"
+
+# What the stock image's unit actually starts: a shell launcher living inside the
+# daemon's own environment, three directories below its `site-packages`. Not a
+# path from anybody's robot — it is the layout the released image ships, quoted
+# here so the resolution can be tested against the shape that broke it.
+STOCK_LAUNCHER: Final = (
+    "/venvs/mini_daemon/lib/python3.12/site-packages/reachy_mini/daemon/app/"
+    "services/wireless/launcher.sh"
+)
+STOCK_INTERPRETER: Final = "/venvs/mini_daemon/bin/python"
+
 
 @dataclass
 class FakeRobot:
@@ -79,8 +105,15 @@ class FakeRobot:
     Attributes:
         active: Whether the daemon's unit is running.
         load_state: What systemd says about the unit being installed at all.
-        exec_start: The interpreter in the unit's `ExecStart`, or empty when the
-            unit cannot be read.
+        exec_start: The program in the unit's `ExecStart`, or empty when the
+            unit declares none. It is the daemon's entry point, which on some
+            images is an interpreter and on the stock one is a launcher.
+        interpreters: Every path on this robot that really is a Python
+            interpreter, and the version it answers with. Anything else asked
+            for its version says there is no such file.
+        wrapper_runs: Every command sent to the unit's start program while that
+            program is not an interpreter. Each one started a second daemon, so
+            a test asserting REQ-106 asserts this is empty.
         files: The robot's filesystem, as far as this tool writes to it.
         packages: What is installed in the environment the daemon runs.
         environment: What the daemon is actually running with.
@@ -128,7 +161,11 @@ class FakeRobot:
 
     active: bool = True
     load_state: str = "loaded"
-    exec_start: str = "/opt/reachy/venv/bin/python"
+    exec_start: str = DAEMON_INTERPRETER
+    interpreters: dict[str, str] = field(
+        default_factory=lambda: {DAEMON_INTERPRETER: _INTERPRETER_VERSION},
+    )
+    wrapper_runs: list[list[str]] = field(default_factory=list)
     files: dict[str, str] = field(default_factory=dict)
     packages: dict[str, str] = field(
         default_factory=lambda: {DAEMON_DISTRIBUTION: "4.5.6"},
@@ -281,6 +318,15 @@ class FakeRemoteAccess:
             if tuple(command[: len(_SUDO)]) == _SUDO
             else list(command)
         )
+        if self._is_launcher(argv):
+            return self._launch(line, argv)
+        if _is_version(argv):
+            # Answered before `failing` is consulted, because the two model
+            # different things. `interpreters` is what this robot HAS; `failing`
+            # is a program refusing the work it was asked to do, and being asked
+            # what you are is not work. A test that wants a path which is not an
+            # interpreter says so by leaving it out of `interpreters`.
+            return self._version(line, argv)
         if argv and argv[0] in self.robot.failing:
             return CommandOutcome(
                 command=line,
@@ -307,6 +353,73 @@ class FakeRemoteAccess:
             exit_status=127,
             stdout="",
             stderr=f"this robot does not know the command {argv[0] if argv else ''}",
+        )
+
+    def _is_launcher(self, argv: list[str]) -> bool:
+        """Say whether this command runs the unit's start program.
+
+        Args:
+            argv: The command.
+
+        Returns:
+            True when the program being run is what the unit starts and that
+            program is not one of this robot's interpreters — which is the whole
+            of the stock image's problem.
+        """
+        return bool(
+            argv
+            and self.robot.exec_start
+            and argv[0] == self.robot.exec_start
+            and argv[0] not in self.robot.interpreters,
+        )
+
+    def _launch(self, line: str, argv: list[str]) -> CommandOutcome:
+        """Run the unit's start program, which starts a second daemon.
+
+        Args:
+            line: The rendered command.
+            argv: Its arguments.
+
+        Returns:
+            What the real one did on ReachyMiniOS v0.2.3: the launcher ignored
+            everything it was passed, started a daemon, found the first one
+            already holding the port and the serial device, and died.
+        """
+        self.robot.wrapper_runs.append(argv)
+        return CommandOutcome(
+            command=line,
+            exit_status=1,
+            stdout="",
+            stderr=(
+                "ERROR: [Errno 98] error while attempting to bind on address "
+                "('0.0.0.0', 8000): address already in use"
+            ),
+        )
+
+    def _version(self, line: str, argv: list[str]) -> CommandOutcome:
+        """Answer a candidate interpreter asked to identify itself.
+
+        Args:
+            line: The rendered command.
+            argv: Its arguments.
+
+        Returns:
+            A version line when this robot really has an interpreter there, and
+            what a shell says about a path that is not there when it does not.
+        """
+        version = self.robot.interpreters.get(argv[0])
+        if version is None:
+            return CommandOutcome(
+                command=line,
+                exit_status=127,
+                stdout="",
+                stderr=f"{argv[0]}: No such file or directory",
+            )
+        return CommandOutcome(
+            command=line,
+            exit_status=0,
+            stdout=f"Python {version}\n",
+            stderr="",
         )
 
     def _show(self, line: str, argv: list[str]) -> CommandOutcome:
@@ -604,6 +717,19 @@ class FakeRemoteAccess:
             ),
             stderr="",
         )
+
+
+def _is_version(argv: list[str]) -> bool:
+    """Say whether this asks a candidate interpreter to identify itself.
+
+    Args:
+        argv: The command.
+
+    Returns:
+        True when it is `<path> -V` and nothing else. A flag and no source,
+        which is the point of it.
+    """
+    return argv[1:] == ["-V"]
 
 
 def _is_show(argv: list[str]) -> bool:

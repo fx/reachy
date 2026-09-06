@@ -35,6 +35,16 @@ that apply here.
   issues no mutating command at all. The test for one asserts the robot's
   after-state, never that a plan was printed: a command that printed a perfect
   plan and then applied it anyway would pass the second test.
+- **The daemon's start program is not an interpreter, and nothing here may
+  treat it as one.** `reachyctl.interpreters` derives candidates — what
+  `--python` named, a start program whose *file name* is one CPython gives an
+  interpreter, the `VIRTUAL_ENV` the unit declares, the environment the start
+  program is installed in — and `reachyctl.daemon` asks each `-V` before any
+  Python source goes near it. There is no fallback: an unresolved interpreter is
+  `InterpreterResolutionError` and names `--python`. The rule exists because the
+  stock image's unit starts a shell launcher, and running it with `-c` started a
+  **second daemon** that took the first one's port, serial device and camera —
+  see REQ-105 and REQ-106.
 - **Configuration is validated locally, before anything is contacted.** The
   vocabulary is `reachy_contracts.settings`, shared with provisioning, so a
   value the robot would refuse costs no round trip. A second copy of a
