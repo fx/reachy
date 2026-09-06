@@ -43,6 +43,7 @@ from publish_app_source import (
     committed_names,
     entry_point_name,
     read_source,
+    repository_from_remote,
     resolve_space_id,
     resolve_token,
     uncommitted_changes,
@@ -55,6 +56,11 @@ _WHEEL: Final = (
     "reachy_mini_ha_satellite-1.2.3-py3-none-any.whl"
 )
 _NAME: Final = "reachy-mini-ha-satellite"
+
+# The repository `_WHEEL` above is a release asset of. Every check that judges
+# the wheel is told which repository this checkout publishes from, because a
+# version is not an identity.
+_REPOSITORY: Final = "owner/repository"
 
 # Where the scaffolded sources below live. It is an in-memory filesystem, so any
 # absolute path works and none of this reaches a disk — which is why these are
@@ -194,7 +200,9 @@ class TestTheCommittedSource:
         fs.create_dir(_FAKE_ROOT)
         source_directory = _manifest(_FAKE_ROOT / "source", requirement)
         with pytest.raises(PublishRefusalError, match=expected):
-            check_agrees_with_repository(read_source(source_directory), _VERSION)
+            check_agrees_with_repository(
+                read_source(source_directory), _VERSION, _REPOSITORY
+            )
 
     def test_a_source_at_another_version_is_refused(self) -> None:
         """Release automation moves both; a drifted source installs the wrong one."""
@@ -202,7 +210,7 @@ class TestTheCommittedSource:
         with pytest.raises(
             PublishRefusalError, match=re.escape("declares version '1.2.2'")
         ):
-            check_agrees_with_repository(source, _VERSION)
+            check_agrees_with_repository(source, _VERSION, _REPOSITORY)
 
     def test_a_url_naming_another_version_is_refused(self) -> None:
         """The half-updated case: the project moved and the URL did not."""
@@ -211,20 +219,71 @@ class TestTheCommittedSource:
             check_agrees_with_repository(
                 AppSource(version=_VERSION, wheel_url=stale),
                 _VERSION,
+                _REPOSITORY,
             )
 
     def test_agreement_returns_the_one_version(self) -> None:
         """Three declarations, one answer, so a caller reports one value."""
         source = AppSource(version=_VERSION, wheel_url=_WHEEL)
 
-        assert check_agrees_with_repository(source, _VERSION) == _VERSION
+        assert check_agrees_with_repository(source, _VERSION, _REPOSITORY) == _VERSION
 
     @pytest.mark.filesystem
     def test_the_committed_source_agrees_with_this_checkout(self) -> None:
-        """The one that fails when somebody edits the source and not the version."""
+        """The one that fails when somebody edits the source and not the version.
+
+        The repository half is taken from the source's own URL on purpose. What
+        it has to equal is the checkout's `origin` remote, which is a property
+        of the machine rather than of the tree, so comparing them belongs in
+        `TestTheReleaseOrigin` and at publish time. This test is about the
+        version.
+        """
         from reachy_contracts import __version__
 
-        assert check_agrees_with_repository(read_source(SOURCE_DIRECTORY), __version__)
+        source = read_source(SOURCE_DIRECTORY)
+        published_from = source.wheel_url.removeprefix("https://github.com/").split(
+            "/releases/",
+        )[0]
+
+        assert check_agrees_with_repository(source, __version__, published_from)
+
+
+class TestTheReleaseOrigin:
+    """A version is not an identity, so the wheel's repository is checked too."""
+
+    @pytest.mark.parametrize(
+        "remote",
+        [
+            "git@github.com:owner/repository.git",
+            "git@github.com:owner/repository",
+            "https://github.com/owner/repository.git",
+            "https://github.com/owner/repository/",
+            "ssh://git@github.com/owner/repository.git",
+            "  https://github.com/owner/repository\n",
+        ],
+    )
+    def test_every_spelling_of_the_remote_yields_the_repository(
+        self,
+        remote: str,
+    ) -> None:
+        """Derived from the checkout rather than written down in two places."""
+        assert repository_from_remote(remote) == _REPOSITORY
+
+    @pytest.mark.parametrize(
+        "remote",
+        ["", "git@gitlab.com:owner/repository.git", "/srv/git/repository.git"],
+    )
+    def test_a_remote_it_cannot_read_is_refused(self, remote: str) -> None:
+        """Better than guessing at a repository the wheel then has to match."""
+        with pytest.raises(PublishRefusalError, match="not a GitHub repository"):
+            repository_from_remote(remote)
+
+    def test_a_wheel_from_another_repository_is_refused(self) -> None:
+        """The one this exists for: somebody else's release under the same tag."""
+        source = AppSource(version=_VERSION, wheel_url=_WHEEL)
+
+        with pytest.raises(PublishRefusalError, match="somebody else's code"):
+            check_agrees_with_repository(source, _VERSION, "someone/elsewhere")
 
 
 class TestTheReleaseAsset:

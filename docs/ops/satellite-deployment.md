@@ -403,12 +403,19 @@ is committed: both name an account, and this repository is public.
 ### What it refuses, and what that looks like
 
 Every refusal happens before the Space is created or written to, and all but
-one — no token, a Space named something else, a source that has drifted from the
-checkout, a source that is not what is committed — before anything at all is
-contacted. The remaining one asks the release asset with `HEAD`, follows
-GitHub's redirect for it as a `HEAD` as well, and reads no body: a dry run
-cannot download the wheel it is asking about. That is why every one of them is
-covered by tests in a workspace with no account.
+one before anything at all is contacted: no token; a Space named something the
+daemon will not find its own metadata under; a source whose version has drifted
+from this checkout, which is what a half-applied release bump looks like; a
+modified, deleted or untracked file under the source, because what is published
+has to be what somebody reviewed; and a wheel from a repository other than the
+one this checkout releases from, because a version is not an identity and
+another repository's release under the same tag would install somebody else's
+code on every robot that took the Space.
+
+The remaining one asks the release asset with `HEAD`, follows GitHub's redirect
+for it as a `HEAD` as well, and reads no body: a dry run cannot download the
+wheel it is asking about. That is why every one of them is covered by tests in a
+workspace with no account.
 
 Three of them, run here with nothing exported, so each command carries what it
 needs:
@@ -436,9 +443,6 @@ state of this repository**: no release has been published yet, so the wheel the
 committed source names does not exist and publishing is correctly refused until
 one does.
 
-It also refuses a source whose version has drifted from this checkout's, which
-is what a half-applied release bump looks like.
-
 > **⏳ PENDING HARDWARE VERIFICATION.** A successful publish has never been run,
 > and strictly what is missing is an account rather than hardware: no output for
 > the command's success path is recorded, and nothing below the refusals above
@@ -454,12 +458,13 @@ checkout does not have. A file withdrawn here is withdrawn there, which is what
 lets this page say that what an operator installs is what is reviewable in this
 repository.
 
-Both halves of that are deliberate. The upload is restricted to tracked files
-because the client reads no `.gitignore`, and a `build/` or an `.egg-info/` left
-behind by somebody installing the source locally would otherwise be published to
-a **public** Space along with it. And a directory with any uncommitted change in
-it is refused outright, because bytes nobody has reviewed are exactly what this
-route promises not to ship.
+Both halves of that are deliberate. A modified, deleted or untracked file under
+the directory is refused outright, because bytes nobody has reviewed are exactly
+what this route promises not to ship. An **ignored** file is not refused — a
+`build/` or an `.egg-info/` is what installing the source locally leaves behind,
+which is a thing this page asks a maintainer to do — and what keeps it off the
+Space is the allow-list rather than a refusal: the client reads no `.gitignore`,
+so without one it would publish the lot.
 
 ---
 

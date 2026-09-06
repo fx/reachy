@@ -22,12 +22,20 @@ one of them before anything at all is contacted. In the order they are decided:
   installs nothing, and the operator finds out on the robot. Decided locally,
   by reading the files.
 - **A source that is not what is committed.** The whole claim this route rests
-  on is that what a robot installs is reviewable in this repository, so an
-  uncommitted change to the directory is refused, and the upload is restricted
-  to the files git tracks. `upload_folder` reads no `.gitignore`: without that
-  restriction, a `build/` or an `.egg-info/` left behind by installing the
-  source locally would be published to a public Space. Decided locally, by
-  asking git.
+  on is that what a robot installs is reviewable in this repository, so a
+  modified, deleted, staged or untracked file under the directory is refused.
+  An *ignored* one is not — a `build/` or an `.egg-info/` left behind by
+  installing the source locally is exactly what the deployment reference tells
+  a maintainer to produce, and refusing over something that provably cannot
+  reach the Space would be noise. What keeps it off the Space is the other
+  half: the upload is an allow-list of the files git tracks, because
+  `upload_folder` reads no `.gitignore` and would otherwise send the lot.
+  Decided locally, by asking git.
+- **A wheel from another repository.** The URL is required to name the releases
+  of the repository this checkout publishes from, read from its `origin`
+  remote. A version is not an identity: another repository's release under the
+  same tag passes every other check here and installs somebody else's code on
+  every robot that takes the Space.
 - **A release that does not carry the wheel the source names.** This one *does*
   reach the network — a `HEAD` request to the release asset, and the redirect
   GitHub answers it with, followed as a `HEAD` so that nothing is ever
@@ -94,9 +102,17 @@ _SPACE_ID: Final = re.compile(r"\A(?P<owner>[^/\s]+)/(?P<name>[^/\s]+)\Z")
 # a branch archive, a file on somebody's machine — is a source that installs
 # something this repository did not release.
 _RELEASE_ASSET: Final = re.compile(
-    r"\Ahttps://github\.com/[^/\s]+/[^/\s]+/releases/download/"
+    r"\Ahttps://github\.com/(?P<repository>[^/\s]+/[^/\s]+)/releases/download/"
     r"v(?P<tag_version>[^/\s]+)/"
     r"reachy_mini_ha_satellite-(?P<wheel_version>[^-\s]+)-py3-none-any\.whl\Z",
+)
+
+# A git remote, in the two spellings a checkout of a GitHub repository has. The
+# `owner/name` it yields is what the released wheel has to come from — see
+# `check_agrees_with_repository`.
+_REMOTE: Final = re.compile(
+    r"\A(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/)"
+    r"(?P<repository>[^/\s]+/[^/\s]+?)(?:\.git)?/?\Z",
 )
 
 # How long git is given to answer a question about this checkout. Generous: it
@@ -229,7 +245,11 @@ def read_source(directory: Path) -> AppSource:
     return AppSource(version=version, wheel_url=match["url"])
 
 
-def check_agrees_with_repository(source: AppSource, version: str) -> str:
+def check_agrees_with_repository(
+    source: AppSource,
+    version: str,
+    repository: str,
+) -> str:
     """Refuse a source that names anything but this checkout's released wheel.
 
     Returns the version everything agreed on, so a caller reports one value
@@ -256,6 +276,14 @@ def check_agrees_with_repository(source: AppSource, version: str) -> str:
             f"the application source names the release tag v{asset['tag_version']} "
             f"and the wheel {asset['wheel_version']}, and this repository is at "
             f"{version}. All three move together",
+        )
+    if asset["repository"] != repository:
+        raise PublishRefusalError(
+            f"the application source installs a wheel from "
+            f"{asset['repository']}, and this checkout releases from "
+            f"{repository}. A version is not an identity: another repository's "
+            f"release under the same tag would install somebody else's code on "
+            f"every robot that took this Space",
         )
     return version
 
@@ -332,14 +360,40 @@ def check_release_asset(url: str, opener: Opener = _head) -> None:
         raise PublishRefusalError(f"{url} answered {status} rather than 200")
 
 
+def repository_from_remote(remote_url: str) -> str:
+    """The `owner/name` a git remote URL points at, in either spelling.
+
+    What the published source installs has to come from the releases of the
+    repository it is published from. Deriving that from the checkout rather than
+    hard-coding it means a fork publishes its own wheel and this stays one rule
+    rather than a literal in two files.
+    """
+    match = _REMOTE.fullmatch(remote_url.strip())
+    if match is None:
+        raise PublishRefusalError(
+            f"the `origin` remote is {remote_url.strip()!r}, which is not a "
+            f"GitHub repository this can read an owner and a name out of. The "
+            f"released wheel has to come from the repository this publishes "
+            f"from, and that is what says which one it is",
+        )
+    return match["repository"]
+
+
 def uncommitted_changes(status: str, directory: Path) -> None:
     """Refuse a source that is not what this checkout has committed.
 
     `git status --porcelain` over the directory, handed in rather than run here
-    so the judgement is testable. Anything at all in it — a modification, a
-    deletion, a staged-but-uncommitted addition — means the bytes on disk are
-    not the bytes anybody reviewed, and this whole route rests on those being
-    the same thing.
+    so the judgement is testable. Anything in it — a modification, a deletion, a
+    staged-but-uncommitted addition, an untracked file — means the bytes on disk
+    are not the bytes anybody reviewed, and this whole route rests on those
+    being the same thing.
+
+    What that command does NOT report is an ignored file, and that is deliberate
+    rather than overlooked: a `build/` or an `.egg-info/` is what installing the
+    source locally leaves behind, which the deployment reference asks a
+    maintainer to do, and it cannot reach the Space because the upload is an
+    allow-list of tracked files. Refusing over it would be a refusal about
+    something harmless.
     """
     if status.strip():
         raise PublishRefusalError(
@@ -354,10 +408,10 @@ def committed_names(listed: str, directory: Path) -> list[str]:
 
     `git ls-files -z` output, handed in for the same reason. These become the
     upload's allow-list, which is the half of "the Space is what is committed"
-    that a clean working tree does not cover: `upload_folder` does not read
-    `.gitignore`, so a `build/` or an `.egg-info/` left behind by somebody
-    installing the source locally would otherwise be published to a public
-    Space along with it.
+    that `uncommitted_changes` does not cover: it says nothing about an ignored
+    file, and `upload_folder` does not read `.gitignore`, so a `build/` or an
+    `.egg-info/` left behind by somebody installing the source locally would
+    otherwise be published to a public Space along with it.
     """
     within = directory.relative_to(_REPOSITORY_ROOT)
     names = sorted(
@@ -448,7 +502,8 @@ def main(argv: list[str]) -> int:
         token = resolve_token(environ)
         space_id = resolve_space_id(environ, expected_name)
         source = read_source(SOURCE_DIRECTORY)
-        version = check_agrees_with_repository(source, __version__)
+        repository = repository_from_remote(_git("remote", "get-url", "origin"))
+        version = check_agrees_with_repository(source, __version__, repository)
         names = check_source_is_committed(SOURCE_DIRECTORY)
         check_release_asset(source.wheel_url)
     except PublishRefusalError as refusal:
