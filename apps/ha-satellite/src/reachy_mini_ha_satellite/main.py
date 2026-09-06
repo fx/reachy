@@ -110,6 +110,7 @@ from reachy_mini_ha_satellite.config import (
     state_directory,
     variable_for,
 )
+from reachy_mini_ha_satellite.daemon_link import DaemonLink, attempt_daemon_call
 from reachy_mini_ha_satellite.esphome.models import (
     Preferences,
     ServerState,
@@ -641,6 +642,7 @@ class SatelliteApplication:
         behaviour: SatelliteBehaviour,
         motor_groups: MotorGroupCoordinator | None = None,
         motion_gating: MotionGating | None = None,
+        daemon_link: DaemonLink | None = None,
         announced_identity: str | None = None,
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
@@ -661,6 +663,16 @@ class SatelliteApplication:
                 daemon — a test building an application directly — and then
                 derived from whether a coordinator was supplied, which is the
                 same decision with the less specific reason.
+            daemon_link: The process's record of whether the daemon is taking
+                commands, reported on `/status` and on the settings page.
+                **The composition root passes the same object it gave the
+                motion adapter**, and it has to: the record is written by
+                whatever commands the daemon and read here, so a second
+                instance would report a link nothing observes while the robot
+                stands still. Omitted only where nobody commands a daemon — a
+                test building an application directly — and then a fresh record
+                nothing writes to, which reads `up` because nothing has been
+                refused.
             announced_identity: The identity an announcing surface was built
                 for, or `None` when none was built. **What was announced, not
                 what the settings say**, and the two can differ in both
@@ -701,6 +713,7 @@ class SatelliteApplication:
             message = "the reported motion gating must match the coordinator supplied"
             raise ValueError(message)
         self._motion_gating = motion_gating
+        self._daemon_link = daemon_link if daemon_link is not None else DaemonLink()
         self._announced_identity = announced_identity
         self._services = tuple(services)
         self._clock = clock
@@ -871,6 +884,13 @@ class SatelliteApplication:
         is the one whose operator most needs to be told why. It sits beside the
         bounded motor diagnostics on the same surface either way.
 
+        `daemon_link` is the answer to a question none of the others can reach:
+        every key above describes what this application decided, and a robot
+        whose SDK websocket has died is one where all of those are still true
+        and nothing moves. It is reported here rather than inferred from
+        `controller.fault`, because a fault says a command was refused and this
+        says by whom.
+
         **A stock robot on its first boot reports both halves at once**, which
         is the state neither of the two changes that added these keys could see
         on its own: nothing announced because nothing is configured, and motion
@@ -903,6 +923,7 @@ class SatelliteApplication:
                 "safe_hold": controller.safe_hold,
             },
             "motion_gating": self._motion_gating.status(),
+            "daemon_link": self._daemon_link.status(),
         }
         if self._motor_groups is not None:
             status["motors"] = self._motor_groups.status()
@@ -1008,7 +1029,17 @@ class SatelliteApplication:
         )
         input_fault = ControllerFault.NONE
         input_evidence: tuple[object, ...] | None = None
-        if measurement is not None and measurement.head_fault is MotionFault.POSE:
+        # `LINK` joins `POSE` here and only here. The controller's fault
+        # categories are about what it can compute, and a head measurement that
+        # did not arrive is a head measurement that did not arrive whichever
+        # way it failed — so the safety channel is the same one. *Why* it did
+        # not arrive is not collapsed with it: the measurement still carries
+        # `MotionFault.LINK` and `/status` reports the link itself, which is
+        # where an operator reads the difference.
+        if measurement is not None and measurement.head_fault in {
+            MotionFault.POSE,
+            MotionFault.LINK,
+        }:
             input_fault = ControllerFault.POSE
         elif (
             prepared.directive.face is not None
@@ -2406,6 +2437,7 @@ async def build_application(
     handle: RobotHandle,
     *,
     identity: NetworkIdentity | None = None,
+    link: DaemonLink | None = None,
 ) -> SatelliteApplication:
     """Wire the ports to the adapters and assemble everything that runs.
 
@@ -2446,12 +2478,19 @@ async def build_application(
         handle: What the daemon hands a running application.
         identity: What to announce on the network. Discovered from the machine
             when not supplied.
+        link: The process's record of whether the daemon is taking commands.
+            `run` supplies the one the controlled wake already reported on, so
+            an application assembled behind a dead link starts saying so rather
+            than starting clean and discovering it at the first tick. One
+            object reaches both the motion adapter that writes it and the
+            application that reports it.
 
     Returns:
         The application, ready to be run.
     """
     settings = resolution.settings
     state_dir = state_directory(settings)
+    daemon_link = link if link is not None else DaemonLink()
 
     #:= docs/specs/stock-robot-installation/index.md#req-102-nothing-is-announced-while-the-identity-is-unresolved
     #:% The satellite MUST NOT announce itself to Home Assistant, or serve a Home
@@ -2512,6 +2551,7 @@ async def build_application(
         handle,
         controller_config=controller_config,
         coordinator=motor_groups,
+        link=daemon_link,
         tick_seconds=settings.behaviour_tick_seconds,
     )
     # One reference the composed chain keeps for the life of the application,
@@ -2581,6 +2621,7 @@ async def build_application(
         behaviour=behaviour,
         motor_groups=motor_groups,
         motion_gating=gating,
+        daemon_link=daemon_link,
         # The identity, not the fact — every surface that reports on the
         # announcement needs to say *which* one, because a later save can leave
         # the configuration naming a different one while this process goes on
@@ -2767,6 +2808,7 @@ async def _assemble(
     resolution: Resolution,
     handle: RobotHandle,
     stop: asyncio.Event,
+    link: DaemonLink,
 ) -> SatelliteApplication | None:
     """Assemble the application, abandoning it if a stop arrives first.
 
@@ -2782,11 +2824,14 @@ async def _assemble(
         resolution: The settings in effect and where they came from.
         handle: What the daemon hands a running application.
         stop: Set by the daemon's termination signal.
+        link: The record the controlled wake already reported on.
 
     Returns:
         The assembled application, or None if the stop won.
     """
-    assembling = asyncio.ensure_future(build_application(resolution, handle))
+    assembling = asyncio.ensure_future(
+        build_application(resolution, handle, link=link),
+    )
     stopping = asyncio.ensure_future(stop.wait())
     try:
         await asyncio.wait(
@@ -2808,6 +2853,37 @@ async def _assemble(
     return None
 
 
+async def _wake_step(link: DaemonLink, what: str, call: Callable[[], None]) -> None:
+    """Make one controlled-wake daemon call, surviving a link that is down.
+
+    The wake sequence is the application's first contact with the daemon, and
+    on the robot this defect was found on it was also where every restart died.
+    Both calls send: `enable_motors` is one SDK command and `wake_up` is a
+    sequence of them that moves the antennas, and on a websocket the daemon
+    never noticed had gone both raise `ConnectionError` — so the process exited
+    before it had served anything, over and over. Nothing restarts it:
+    `reachy-mini-ha-app.service` is `Type=oneshot`, so the robot stayed silent
+    until a person restarted the daemon's own service.
+
+    A wake that did not happen is cosmetic; an application that did not start is
+    not. So a link fault here is recorded and stepped over, leaving a running,
+    diagnosable application whose settings page and `/status` say what is wrong.
+    Anything else still propagates: a daemon that answered and refused is a
+    daemon this application has no working picture of.
+
+    Args:
+        link: The process's record of whether the daemon is taking commands.
+        what: The step's name, for the log line.
+        call: The blocking daemon call to make.
+    """
+    if await in_thread(lambda: attempt_daemon_call(link, call)):
+        return
+    _LOGGER.warning(
+        "satellite.wake %s not carried; the daemon link is down. Starting anyway",
+        what,
+    )
+
+
 async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     """Read the configuration, build everything, and run until asked to stop.
 
@@ -2825,6 +2901,12 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     SDK call already running on a worker thread is allowed to finish; Python
     cannot safely cancel it in the middle.
 
+    **A daemon that is not answering is not one of those boundaries.** The one
+    `DaemonLink` this process has is created here, before the first command, so
+    that the two wake calls report on the same record the motion adapter and
+    `/status` go on to use — and so that a link already down at startup produces
+    a running application saying so rather than an exit nothing restarts.
+
     Raises:
         ConfigurationError: If the environment is not usable. Raised rather
             than reported, because the caller is what decides whether this is a
@@ -2837,18 +2919,19 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     if stop.is_set():
         _LOGGER.info("satellite.start skipped; stop already requested")
         return
+    link = DaemonLink()
     _LOGGER.info("satellite.wake enabling_motors")
-    await in_thread(handle.enable_motors)
+    await _wake_step(link, "enable_motors", handle.enable_motors)
     if stop.is_set():
         _LOGGER.info("satellite.wake skipped; stop requested after motor enable")
         return
     _LOGGER.info("satellite.wake starting")
-    await in_thread(handle.wake_up)
+    await _wake_step(link, "wake_up", handle.wake_up)
     _LOGGER.info("satellite.wake complete")
     if stop.is_set():
         _LOGGER.info("satellite.start skipped; stop requested during controlled wake")
         return
-    application = await _assemble(resolution, handle, stop)
+    application = await _assemble(resolution, handle, stop, link)
     if application is None:
         _LOGGER.info("satellite.start skipped; stop requested during composition")
         return

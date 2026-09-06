@@ -1314,8 +1314,30 @@ class FakeMedia:
         return self.channels
 
 
+#: What the SDK's websocket client raises from every command it is asked to send
+#: once its liveness poll has gone false, word for word. Bound here so a test
+#: that drives a dead link is driving the real spelling rather than a plausible
+#: one.
+LOST_LINK_MESSAGE: Final = "Lost connection with the server."
+
+
 class FakeRobot:
-    """The daemon handle with scripted measured and calibrated motion feedback."""
+    """The daemon handle with scripted measured and calibrated motion feedback.
+
+    `link_down` models the one failure mode this fake could not express before:
+    `reachy_mini.io.ws_client.WSClient` raises `ConnectionError` from every
+    *command* it is asked to send while its liveness poll is false, and answers
+    every *read* out of the cache its receive loop already filled. So the four
+    methods below that send raise while it is set, and the three that read go
+    on returning their scripted values — which is what makes a robot with a dead
+    link look, from inside the application, like one that is perfectly well and
+    simply never moves.
+
+    It is a plain attribute rather than a script so that a test can put the link
+    back: setting it to `False` mid-run is exactly what a daemon resuming its
+    publication does, and the application is expected to recover from it with no
+    further prompting.
+    """
 
     def __init__(
         self,
@@ -1330,6 +1352,7 @@ class FakeRobot:
         torque_confirmation_support: TorqueConfirmationSupport = (
             TorqueConfirmationSupport.AVAILABLE
         ),
+        link_down: bool = False,
         events: list[str] | None = None,
     ) -> None:
         """Wrap media and load deterministic feedback scripts.
@@ -1346,6 +1369,10 @@ class FakeRobot:
                 which is what the composition root's one probe reads. The
                 default is a daemon with the whole surface, so a test that says
                 nothing about it gets the confirmed path.
+            link_down: Whether the daemon's websocket refuses commands. Every
+                sending method raises `ConnectionError` while it is true, and
+                every reading one answers as normal. Mutable afterwards, which
+                is how a test brings the link back.
             events: Optional shared lifecycle event record.
         """
         self._media = media if media is not None else FakeMedia()
@@ -1358,6 +1385,8 @@ class FakeRobot:
         self.motor_enables_confirmed = list(motor_enables_confirmed)
         self.motor_disables_confirmed = list(motor_disables_confirmed)
         self.torque_support = torque_confirmation_support
+        self.link_down = link_down
+        self.refused_commands = 0
         self.torque_probes = 0
         self.events = events if events is not None else []
         self.heads: list[PoseMatrix] = []
@@ -1372,26 +1401,41 @@ class FakeRobot:
         self.motor_requests: list[tuple[str, tuple[str, ...]]] = []
         self.wake_ups = 0
 
+    def _refuse_while_down(self) -> None:
+        """Raise what the SDK raises, from a method that would have sent."""
+        if not self.link_down:
+            return
+        self.refused_commands += 1
+        raise ConnectionError(LOST_LINK_MESSAGE)
+
     def enable_motors(self, ids: list[str] | None = None) -> None:
         """Record that startup enabled the requested motors."""
         del ids
+        self._refuse_while_down()
         self.motor_enables += 1
         self.events.append("motors.enable")
 
     def enable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
         """Return a scripted complete physical enable confirmation."""
+        self._refuse_while_down()
         self.motor_requests.append(("enable", tuple(ids)))
         self.events.append("motors.enable.confirmed")
         return self._motor_confirmation(self.motor_enables_confirmed, ids, True)
 
     def disable_motors_confirmed(self, ids: list[str]) -> MotorConfirmation:
         """Return a scripted complete physical disable confirmation."""
+        self._refuse_while_down()
         self.motor_requests.append(("disable", tuple(ids)))
         self.events.append("motors.disable.confirmed")
         return self._motor_confirmation(self.motor_disables_confirmed, ids, False)
 
     def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
-        """Return a scripted independent complete physical torque read."""
+        """Return a scripted independent complete physical torque read.
+
+        A *request* to the daemon rather than a cached value, unlike the pose
+        and joint reads below, so it is refused with the commands.
+        """
+        self._refuse_while_down()
         self.motor_requests.append(("read", tuple(ids)))
         self.events.append("motors.read")
         return self._motor_confirmation(self.motor_reads, ids, True)
@@ -1425,6 +1469,7 @@ class FakeRobot:
 
     def wake_up(self) -> None:
         """Record the SDK-controlled wake sequence."""
+        self._refuse_while_down()
         self.wake_ups += 1
         self.events.append("robot.wake")
 
@@ -1440,6 +1485,7 @@ class FakeRobot:
         body_yaw: float | None = None,
     ) -> None:
         """Record one grouped SDK command without implying linearizability."""
+        self._refuse_while_down()
         copied_head = None if head is None else np.array(head, copy=True)
         copied_antennas = None if antennas is None else list(antennas)
         self.targets.append((copied_head, copied_antennas, body_yaw))
@@ -1498,6 +1544,7 @@ class FakeRobot:
 
     def set_automatic_body_yaw(self, enabled: bool) -> None:
         """Record daemon automatic-body-yaw ownership changes."""
+        self._refuse_while_down()
         self.automatic_body_yaw.append(enabled)
         self.events.append(f"motion.auto_yaw.{str(enabled).lower()}")
 

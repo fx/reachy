@@ -4,6 +4,15 @@ Image calibration remains the daemon's responsibility. This adapter retains a
 bounded measured world-pose history, asks the daemon to solve each new image
 observation without moving, removes query-time ego rotation at capture time, and
 returns an absolute world-gaze anchor to the pure behavior layer.
+
+**Every daemon command in this file goes through `_command`, and a daemon that
+refuses one does not raise out of this adapter.** A lost SDK websocket is
+`MotionFault.LINK` — recorded on the shared `DaemonLink` and returned to the
+caller — rather than an exception ending the behaviour loop and, with it, the
+process; see `daemon_link` for why the two conditions stay apart and why exiting
+is the failure that matters. Nothing here retries on its own: the loop above
+commands again on the next tick, and the first command the daemon takes marks
+the link up.
 """
 
 from __future__ import annotations
@@ -21,6 +30,11 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     BodyMeasurement,
     ControllerConfig,
     HeadMeasurement,
+)
+from reachy_mini_ha_satellite.daemon_link import (
+    DAEMON_LINK_ERRORS,
+    DaemonLink,
+    attempt_daemon_call,
 )
 from reachy_mini_ha_satellite.motion_validation import SampleFault, validate_gaze_sample
 from reachy_mini_ha_satellite.motor_control import (
@@ -372,11 +386,31 @@ class ReachyMotion:
         *,
         controller_config: ControllerConfig | None = None,
         coordinator: MotorGroupCoordinator | None = None,
+        link: DaemonLink | None = None,
         body_enabled: bool = False,
         staleness_seconds: float = _DEFAULT_STALENESS_SECONDS,
         tick_seconds: float = _DEFAULT_TICK_SECONDS,
     ) -> None:
-        """Take the daemon handle and one shared validated controller envelope."""
+        """Take the daemon handle, one controller envelope and the process link.
+
+        Args:
+            handle: What the daemon hands a running application.
+            controller_config: The one validated envelope this adapter shares
+                with the behaviour layer.
+            coordinator: The confirmed-torque gate, or `None` on the ungated
+                path.
+            link: The process's record of whether the daemon is answering. The
+                composition root passes the instance the controlled wake
+                already reported on, so a link that was down before this
+                adapter existed is still what `/status` shows. A fresh one is
+                built only for a test that constructs the adapter directly.
+            body_enabled: Whether body motion is in force, when no controller
+                envelope is supplied.
+            staleness_seconds: The measured-pose retention window, when no
+                controller envelope is supplied.
+            tick_seconds: The behaviour cadence this adapter sizes its history
+                for.
+        """
         if controller_config is None:
             controller_config = ControllerConfig(
                 body_enabled=body_enabled,
@@ -397,6 +431,12 @@ class ReachyMotion:
         self._handle = handle
         self._config = controller_config
         self._coordinator = coordinator
+        self._link = link if link is not None else DaemonLink()
+        # Set when a daemon-ownership write was refused by a dead link rather
+        # than performed. The daemon is still running its own body yaw, so the
+        # write has to be made again once the link is back — see
+        # `_assert_body_policy`.
+        self._body_policy_pending = False
         self._history = TimedPoseHistory(
             maximum_age=staleness_seconds,
             maximum_samples=history_samples,
@@ -439,7 +479,22 @@ class ReachyMotion:
         return coordinator is not None and coordinator.terminal_requested
 
     def acquire(self, now: float) -> MotionMeasurement:
-        """Disable competing body yaw and invalidate every older lifecycle snapshot."""
+        """Disable competing body yaw and invalidate every older lifecycle snapshot.
+
+        A link that is down at startup does **not** stop acquisition. The write
+        it swallows asks the daemon to stop moving the body on its own, and a
+        daemon that is not taking commands is not taking the application's
+        motion commands either — so there is nothing to contend with yet, and
+        refusing to acquire here would trade a robot that starts and recovers
+        for one that exits, which is the failure this whole path exists to
+        prevent. The write is remembered as outstanding and made again by
+        `_assert_body_policy`, which every `observe` calls — so it lands on the
+        first tick after the link returns rather than waiting for a face.
+
+        Every other failure still rolls the acquisition back and propagates: a
+        daemon that answered and refused is a daemon whose ownership this
+        adapter does not have.
+        """
         with self._state_lock:
             if self._released:
                 return self._measurement()
@@ -453,13 +508,54 @@ class ReachyMotion:
         if needs_daemon_quiesce:
             try:
                 self._handle.set_automatic_body_yaw(False)
+            except DAEMON_LINK_ERRORS:
+                self._link.record_failure()
+                with self._state_lock:
+                    self._body_policy_pending = True
             except Exception:
                 with self._state_lock:
                     if self._generation == generation:
                         self._acquired = False
                         self._generation += 1
                 raise
+            else:
+                self._link.record_success()
         return self.observe(now) if not self._terminal() else self._measurement()
+
+    def _assert_body_policy(self) -> None:
+        """Re-make the ownership write, which is also this adapter's link probe.
+
+        Two jobs and one call, because they are the same call. **The repair:**
+        a `set_automatic_body_yaw(False)` a dead link swallowed has to be made
+        again, or the daemon goes on moving the body under a head this adapter
+        owns. **The probe:** nothing else discovers that the link is back. The
+        SDK reconnects nothing, and every other daemon call this adapter makes
+        is either a cached read that cannot fail or a motion command the
+        behaviour layer only issues when it wants the robot to move — so a
+        robot alone in a room would go on reporting an outage that ended hours
+        ago, and would never re-make the write above.
+
+        Suitable as a probe precisely because it is the repair: it is
+        idempotent, it is the state this adapter already holds while acquired,
+        and a successful one changes nothing about the robot.
+
+        Only while acquired, and that is the whole of the condition. Unacquired,
+        this adapter owns no daemon policy and has nothing it could say that
+        would not change the robot's behaviour to ask a question — so there is
+        no probe in that mode and the link is reported as the last command
+        observed it.
+        """
+        with self._state_lock:
+            if self._released or not self._acquired:
+                return
+            if not self._body_policy_pending and not self._link.down:
+                return
+        if attempt_daemon_call(
+            self._link,
+            lambda: self._handle.set_automatic_body_yaw(False),
+        ):
+            with self._state_lock:
+                self._body_policy_pending = False
 
     def _measurement(self) -> MotionMeasurement:
         """Return only currently valid typed measurements, retaining cache privately."""
@@ -484,13 +580,21 @@ class ReachyMotion:
         )
 
     def observe(self, now: float) -> MotionMeasurement:
-        """Sample independent measured head direction and optional body yaw."""
+        """Sample measured head direction and body yaw, and mind the daemon link.
+
+        The sampling is unchanged. What is new is the call below it: this is
+        the adapter's one per-tick contact with the daemon while gaze is on, so
+        it is where an outstanding ownership write is re-made and where a link
+        that has come back is noticed at all — see `_assert_body_policy`, which
+        does nothing on a healthy acquired robot.
+        """
         if self._released:
             self._head_fault = MotionFault.RELEASED
             self._body_fault = (
                 MotionFault.RELEASED if self._config.body_enabled else MotionFault.NONE
             )
             return self._measurement()
+        self._assert_body_policy()
         try:
             pose = self._handle.get_current_head_pose()
             rotation = _pose_rotation(pose, measured=True)
@@ -498,6 +602,15 @@ class ReachyMotion:
             world_yaw, world_elevation = _direction_angles(rotation)
             self._last_head_measurement = (world_yaw, world_elevation, now)
             self._head_fault = MotionFault.NONE
+        # Defence rather than an observed path, and worth the three lines
+        # because the cost of being wrong is the process. The released SDK
+        # answers both reads below out of the cache its receive loop fills, so
+        # neither raises when the socket dies — it returns the last value it
+        # saw. A build that made them ask would otherwise end the behaviour
+        # loop here, which is precisely the failure this file now excludes.
+        except DAEMON_LINK_ERRORS:
+            self._link.record_failure()
+            self._head_fault = MotionFault.LINK
         except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
             self._head_fault = MotionFault.POSE
         if self._config.body_enabled:
@@ -508,6 +621,9 @@ class ReachyMotion:
                     raise ValueError("body measurement must be finite")
                 self._last_body_measurement = (measured, now)
                 self._body_fault = MotionFault.NONE
+            except DAEMON_LINK_ERRORS:
+                self._link.record_failure()
+                self._body_fault = MotionFault.LINK
             except (IndexError, RuntimeError, TypeError, ValueError):
                 self._body_fault = MotionFault.POSE
         return self._measurement()
@@ -651,6 +767,18 @@ class ReachyMotion:
                 world_yaw=yaw,
                 world_elevation=elevation,
             )
+        # Not cached, unlike every other rejection here. A cached decision is
+        # final for that face identity, and a link that is down says nothing
+        # about the identity — pinning a rejection to it would outlive the
+        # outage and refuse a face the robot could see perfectly well once the
+        # daemon came back. The same defence as `observe`: the released SDK's
+        # non-moving image query reads cached pose and sends nothing.
+        except DAEMON_LINK_ERRORS:
+            self._link.record_failure()
+            return GazeCalibration(
+                CalibrationStatus.REJECTED,
+                fault=MotionFault.LINK,
+            )
         except (IndexError, RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
             return self._cache_result(identity, CalibrationStatus.REJECTED)
         result = GazeCalibration(CalibrationStatus.ACCEPTED, target)
@@ -699,7 +827,7 @@ class ReachyMotion:
             required = [MotorGroup.HEAD]
             if self._config.body_enabled:
                 required.append(MotorGroup.BODY)
-                sent = self._command(
+                fault = self._command(
                     required,
                     lambda: self._handle.set_target(
                         head=pose,
@@ -707,12 +835,22 @@ class ReachyMotion:
                     ),
                 )
             else:
-                sent = self._command(
+                fault = self._command(
                     required,
                     lambda: self._handle.set_target(head=pose),
                 )
-            if not sent:
-                raise RuntimeError("a required motor command gate is closed")
+            # Returned rather than raised, and returned as the fault `_command`
+            # decided rather than as `COMMAND`. A closed gate is this
+            # application refusing its own sample; a dead link is the daemon
+            # refusing to hear it. Collapsing them here would put a robot that
+            # cannot be commanded at all and a robot protecting one unconfirmed
+            # motor group behind the same word on the same surface.
+            if fault is not MotionFault.NONE:
+                return MotionCommandResult(
+                    MotionCommandStatus.REJECTED,
+                    fault,
+                    call,
+                )
         except (RuntimeError, TypeError, ValueError, np.linalg.LinAlgError):
             return MotionCommandResult(
                 MotionCommandStatus.REJECTED,
@@ -722,7 +860,13 @@ class ReachyMotion:
         return MotionCommandResult(MotionCommandStatus.ACCEPTED, call=call)
 
     def move_head(self, pose: HeadPose) -> None:
-        """Command a pipeline head pose while the adapter remains live and gated."""
+        """Command a pipeline head pose while the adapter remains live and gated.
+
+        The port returns nothing, so a refused command is reported on the link
+        rather than to the caller. That is what `_command` is for: this used to
+        be a bare call whose `ConnectionError` travelled up through the voice
+        pipeline's event delivery and ended the process.
+        """
         if self._released:
             return
         self._command(
@@ -731,7 +875,11 @@ class ReachyMotion:
         )
 
     def move_antennas(self, pose: AntennaPose) -> None:
-        """Command independent antenna angles right then left while gated."""
+        """Command independent antenna angles right then left while gated.
+
+        Reports a dead link the same way `move_head` does, and for the same
+        reason: this is the call that was in the traceback.
+        """
         if self._released:
             return
         self._command(
@@ -743,15 +891,53 @@ class ReachyMotion:
         self,
         groups: list[MotorGroup] | tuple[MotorGroup, ...],
         action: Callable[[], None],
-    ) -> bool:
-        """Run one adapter producer through the shared serialized gate."""
+    ) -> MotionFault:
+        """Run one adapter producer through the shared serialized gate.
+
+        The single place a daemon command leaves this adapter, on both gating
+        modes, and therefore the single place a lost link is observed. The link
+        fault is caught **inside** the coordinator's reservation rather than
+        allowed out of it. `MotorGroupCoordinator.command` releases the
+        reservation in a `finally` and lets the exception through, so a
+        `ConnectionError` escaping it would leave the coordinator's own state
+        perfectly consistent and end the behaviour loop anyway — the gate is not
+        what needed protecting here, the process was. Everything that is not a
+        link fault propagates exactly as before.
+
+        Args:
+            groups: The motor groups the action commands.
+            action: The daemon call to make.
+
+        Returns:
+            `NONE` when the daemon took the command, `LINK` when the link
+            refused it, and `COMMAND` when this application's own gate did —
+            either because a group is not confirmed or because release has
+            begun.
+        """
         if self._released:
-            return False
+            return MotionFault.COMMAND
+        attempted = False
+        carried = False
+
+        def attempt() -> None:
+            nonlocal attempted, carried
+            attempted = True
+            carried = attempt_daemon_call(self._link, action)
+
         coordinator = self._coordinator
         if coordinator is None:
-            action()
-            return True
-        return coordinator.command(groups, action)
+            attempt()
+            reserved = True
+        else:
+            reserved = coordinator.command(groups, attempt)
+        if not attempted:
+            return MotionFault.COMMAND
+        if not carried:
+            return MotionFault.LINK
+        # The coordinator answers False here when terminal release landed while
+        # the command was in flight. The daemon took it, so the link is up; the
+        # command is still not one this adapter may report as accepted.
+        return MotionFault.NONE if reserved else MotionFault.COMMAND
 
     def motor_lifecycle(
         self,
@@ -909,7 +1095,16 @@ class ReachyMotion:
         if acquired and (
             coordinator is None or coordinator.safe_to_restore_body_policy()
         ):
-            self._handle.set_automatic_body_yaw(True)
+            # Recorded rather than raised, for the same reason the command path
+            # does it: a daemon that is not answering cannot be handed its
+            # policy back, and there is nothing a shutdown can do about that.
+            # `main`'s shutdown guard would log the traceback and carry on
+            # anyway; reporting it as the link keeps the last thing `/status`
+            # said about the robot true.
+            attempt_daemon_call(
+                self._link,
+                lambda: self._handle.set_automatic_body_yaw(True),
+            )
 
     def _cache_result(
         self,

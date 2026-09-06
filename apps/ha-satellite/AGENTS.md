@@ -182,6 +182,27 @@ deployment can get irreversibly wrong.
   mode and its bounded reason are `status()["motion_gating"]`, which is on
   `/status` and the settings page for every process, including the stock robot
   that has no `motors` key to put them under.
+- **A lost daemon link is its own condition, and it never ends the process.**
+  The SDK's websocket can stop carrying commands while the daemon itself is
+  running and everything else in this application is healthy; `WSClient` then
+  raises `ConnectionError` from every command it is asked to send. That is
+  `daemon_link.DAEMON_LINK_ERRORS`, one `DaemonLink` per process created in
+  `main.run` before the controlled wake, and `MotionFault.LINK` at the motion
+  boundary. **Do not widen an `except` tuple to swallow `ConnectionError`**: a
+  command the gate refused and a command the daemon never heard are different
+  answers, and the second one means nothing is moving and nothing later will.
+  Every daemon command in `adapters/motion_reachy.py` goes through `_command`,
+  which is the only place the fault is observed on either gating mode and which
+  catches it *inside* the coordinator's reservation so the gate is left
+  consistent. `reachy-mini-ha-app.service` is `Type=oneshot`, so an application
+  that exits stays exited and the robot is silent until a person intervenes —
+  which is why the wake sequence steps over a refusal rather than dying on one,
+  and why acquisition does too. Nothing here reconnects, because the SDK
+  connects once and never again: recovery is the next command the daemon takes.
+  On an acquired adapter that command is `_assert_body_policy`, which is the
+  outstanding ownership write and the only liveness probe there is — without it
+  a robot alone in a room commands nothing and never notices. `/status` carries
+  `daemon_link` and the settings page leads with a hazard note while it is down.
 - **Controller fault and lifecycle are independent.** Stable fault categories
   derive `safe_hold`; they are never encoded as tracking modes. One validated
   `ControllerConfig` instance is shared by behavior and the production motion

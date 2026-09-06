@@ -1187,6 +1187,26 @@ Set `REACHY_SATELLITE_DEVICE_NAME` — and `REACHY_SATELLITE_MAC_ADDRESS` — ba
 what the previous installation announced, restart, and remove the device Home
 Assistant created in the meantime.
 
+**It stopped moving, and the settings page says the daemon link is down.** Read
+that note first: it means the SDK websocket between the application and the
+daemon stopped carrying commands, so nothing the application asks for is
+reaching the motors. Everything else about the robot can be perfectly well at
+the same time — the daemon process still running, the camera still producing
+frames, the settings page still served — which is why the page says it in as
+many words rather than leaving it to be inferred. `/status` carries the same
+thing as `daemon_link`: a `state` of `up` or `down`, how many separate `outages`
+there have been, and how many individual calls were `refused_calls` across all
+of them.
+
+**The application does not need restarting, and must not be reinstalled.** It
+stays up and keeps trying, and it starts commanding again by itself the moment
+the daemon answers — the SDK reconnects nothing, but its liveness poll recovers
+on its own once the daemon resumes publishing, and the state returns to `up`
+without anybody doing anything. If it does not come back, restart the daemon's
+own service on the robot; a repeatedly rising `outages` count against a robot
+that keeps recovering is a daemon worth looking at rather than an application
+worth changing.
+
 **It tracks a face but never moves.** `/status` says which of the two motion
 paths it is on. `motion_gating` reporting `{"mode": "confirmed", "reason":
 "daemon_confirmation_available"}` beside `controller.fault: "command"` and
