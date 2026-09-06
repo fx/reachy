@@ -46,6 +46,12 @@ INTERPRETER: Final = "/venvs/mini_daemon/bin/python"
         "/usr/bin/python3.13t",
         "/usr/bin/python3.12d",
         "/usr/bin/python3.13td",
+        # Accepted on shape alone. There is no CPython 0 and no 3.100 yet, and
+        # encoding today's version numbers into a gate that has to outlive them
+        # would be the narrower mistake — the program still has to exist, be
+        # executable, and answer `-V` with a version.
+        "/usr/bin/python0",
+        "/usr/bin/python3.100",
     ],
 )
 def test_a_name_cpython_gives_an_interpreter_is_one(path: str) -> None:
@@ -73,6 +79,13 @@ def test_a_name_cpython_gives_an_interpreter_is_one(path: str) -> None:
         "/usr/local/bin/python.sh",
         "/opt/reachy/venv/bin/python3.12.1",
         "/usr/bin/python3.13x",
+        # A run of digits with no separator. CPython never omits the dot, and
+        # this is the shape a wrapper picks precisely because it looks close
+        # enough to the real thing.
+        "/usr/bin/python312",
+        "/usr/bin/python27",
+        "/usr/bin/python03",
+        "/usr/bin/python3123",
         "",
     ],
 )
@@ -80,7 +93,10 @@ def test_anything_else_is_not_run_however_much_it_looks_like_one(path: str) -> N
     """The gate is deliberately narrow, and this is the list it has to refuse.
 
     A real interpreter under an unusual name costs an operator one `--python`.
-    A wrapper admitted by a loose pattern costs them a second daemon.
+    A wrapper admitted by a loose pattern costs them a second daemon. The
+    separator-less spellings are the ones worth pinning: `python312` is not a
+    name CPython uses, and a pattern that took it would be admitting the shape
+    a wrapper reaches for because it looks close enough.
 
     Args:
         path: A path whose file name does not claim to be an interpreter.

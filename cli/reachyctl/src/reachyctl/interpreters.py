@@ -90,21 +90,36 @@ __all__ = [
     "names_an_interpreter",
 ]
 
-# The name `python`, optionally a version of at most a major and a minor part,
-# optionally the ABI flags a build appends to it: `python`, `python3`,
+# The name `python`, optionally a SINGLE-DIGIT major version, optionally a dot
+# and a minor, optionally the ABI flags a build appends: `python`, `python3`,
 # `python3.12`, and the `t` and `d` spellings a free-threaded or a debug build
 # installs — `python3.13t`, `python3.12d`, `python3.13td`. Those last are real
 # CPython executables, so refusing them would refuse a real interpreter, and a
 # false refusal is a failure too.
 #
-# Anchored at both ends, so nothing else widens it: `python-config`,
-# `pythonize`, a launcher some image called `python-daemon.sh`, and
-# `python3.12.1` — CPython ships no patch-versioned executable — are all
-# outside. This is a gate on what may be EXECUTED at all, so where it is
-# uncertain it stays narrow: a real interpreter under a name CPython never
-# gives one costs an operator a link named `python`, and a wrapper admitted
-# under a loose pattern costs them a second daemon.
-_INTERPRETER_NAME: Final = re.compile(r"\Apython(?:\d+(?:\.\d+)?t?d?)?\Z")
+# Each bound below is a decision rather than an accident, because this is a
+# gate on what may be EXECUTED at all:
+#
+#   * The major is one digit and the minor needs its dot, so `python312`,
+#     `python27`, `python03` and `python3123` are refused. CPython never omits
+#     the separator, and a run of digits with no dot is the shape a wrapper
+#     picks precisely because it looks close enough.
+#   * The minor is unbounded, so a distant `python3.100` is not refused. What
+#     the gate is checking is the separator, not how far Python has got.
+#   * `python0` is accepted, on shape alone. There is no CPython 0, but
+#     encoding today's major versions into a gate that has to outlive them
+#     would be the narrower mistake, and the cost is nil: the program still has
+#     to exist, be executable, and answer `-V` with a version.
+#   * `python3.12.1` is refused — CPython ships no patch-versioned executable —
+#     as are `python-config`, `pythonize` and a launcher some image called
+#     `python-daemon.sh`. The pattern is anchored at both ends so no suffix can
+#     widen it.
+#
+# Where it is uncertain the gate stays narrow, because the two errors do not
+# cost the same: a real interpreter under a name CPython never gives one costs
+# an operator a link named `python`, and a wrapper admitted under a loose
+# pattern costs them a second daemon.
+_INTERPRETER_NAME: Final = re.compile(r"\Apython(?:\d(?:\.\d+)?t?d?)?\Z")
 
 # `<prefix>/lib/python3.12/site-packages/<package>/...`, which is where an
 # installed distribution's own files live. The prefix is the environment's root,
