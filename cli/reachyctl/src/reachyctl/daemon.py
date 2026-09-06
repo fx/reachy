@@ -99,15 +99,17 @@ _EXEC_PATH: Final = re.compile(r"path=(\S+)")
 # resolution is that nothing unproven is handed a program to run, and `-V` asks
 # a question no interpreter can misread and no launcher is given the chance to.
 #
-# The answer has to be the WHOLE of what came back, matched as a real version.
-# This step is the one that ESTABLISHES what everything after it assumes, so it
-# has to be something a program cannot pass by accident, and each weaker form
-# leaves a gap the next one has to close: the exit status alone admits anything
-# that exits zero, the word alone admits a banner, and a version-shaped PREFIX
-# admits `Python 3.12.3 — wrapper usage: ...`. Anchoring both ends ends that
-# sequence rather than tightening it again, and it costs nothing: `-V` makes
-# CPython print exactly this and nothing else. Anything that prints more is
-# something else, and admitting it would hand `-c '<python source>'` to it.
+# The answer has to be the WHOLE of what came back, on ONE stream, matched as a
+# real version. This step is the one that ESTABLISHES what everything after it
+# assumes, so it has to be something a program cannot pass by accident, and each
+# weaker form leaves a gap the next one has to close: the exit status alone
+# admits anything that exits zero, the word alone admits a banner, a
+# version-shaped PREFIX admits `Python 3.12.3 - wrapper usage: ...`, whichever
+# stream happens to be non-empty admits a program that prints the version on one
+# and announces itself on the other, and a CONCATENATION of the two admits a
+# version split across them. Stating the property exactly — `-V` makes CPython
+# write one bare version to one stream and nothing at all to the other — ends
+# that sequence rather than tightening it again.
 _VERSION_FLAG: Final = "-V"
 _VERSION_ANSWER: Final = re.compile(r"Python \d+(?:\.\d+)*")
 
@@ -447,23 +449,28 @@ class DaemonClient:
                 claim an interpreter, unless an operator named it themselves.
 
         Returns:
-            True when everything it said, on both streams, is a version —
-            `Python 3.12.3`, which is exactly what `-V` makes CPython print. A
-            path that is not there, is not executable, or said one word more is
-            not an interpreter, and the next candidate is tried.
+            True when it spoke on exactly one stream and everything it said
+            there is a version — `Python 3.12.3`, which is exactly what `-V`
+            makes CPython print. A path that is not there, is not executable,
+            said one word more, or said something on both streams is not an
+            interpreter, and the next candidate is tried.
         """
         outcome = await self._run([path, _VERSION_FLAG])
         if not outcome.ok:
             return False
-        # BOTH streams, joined rather than preferred. `-V` makes CPython write
-        # one line to standard output and nothing to standard error, so reading
-        # only the stream that happened to be non-empty would let a program
-        # print the version on one and a launcher's banner on the other and
-        # still pass — which is the whole-answer rule holding on half the
-        # answer. Python 2 wrote the version to standard error; joining covers
-        # that too, without a rule about which stream to believe.
-        answer = f"{outcome.stdout}{outcome.stderr}".strip()
-        return _VERSION_ANSWER.fullmatch(answer) is not None
+        # ONE stream says the whole version and the other says nothing. Which
+        # one is not fixed here — Python 3 writes to standard output and Python
+        # 2 wrote to standard error, and a robot is not this tool's choice of
+        # interpreter — but that there is exactly one is. Preferring whichever
+        # stream is non-empty would admit a program that prints the version on
+        # one and a launcher's banner on the other; concatenating them would
+        # admit a version split across the two. Neither is what `-V` does.
+        spoken = [
+            stream
+            for stream in (outcome.stdout.strip(), outcome.stderr.strip())
+            if stream
+        ]
+        return len(spoken) == 1 and _VERSION_ANSWER.fullmatch(spoken[0]) is not None
 
     async def installed_versions(self, *distributions: str) -> dict[str, str]:
         """Ask the daemon's environment what versions it holds.

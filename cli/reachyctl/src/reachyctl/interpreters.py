@@ -56,6 +56,20 @@ rule needs no comparison at all: an alias of `launcher.sh` is still called
 `launcher.sh`, and it is refused for the same reason the original is. What it
 costs is an operator whose interpreter is at a name CPython never gives one, who
 must point `--python` at a link named `python` instead; the failure says so.
+
+**Where the gate stops, and why it stops there.** A name gate cannot see through
+a rename. An operator who puts a link called `python` in front of their daemon's
+launcher, and then passes that link to `--python`, gets the launcher run — and
+nothing short of running something can tell the two apart, because *proving a
+program is an interpreter means executing it*. What this module can do, and
+does, is bound the consequence: the only thing ever executed on an unproven path
+is `-V`, which is a flag and not source, and everything that follows waits on
+that answer. Chasing the remaining case would mean resolving symlinks on the
+robot, which brings back the path comparison this design removed, needs another
+round trip, and still would not catch a launcher *copied* rather than linked. It
+is a recorded limit of a non-adversarial threat model — the failure this exists
+to stop is a stock image's ordinary layout, not an operator disguising their own
+daemon as an interpreter.
 """
 
 from __future__ import annotations

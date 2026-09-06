@@ -346,22 +346,36 @@ async def test_a_configured_path_named_as_no_interpreter_is_says_why_it_was_refu
     assert "a link to it named python" in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("version", "also"),
+    [
+        ("3.12.3", "reachy-mini launcher: starting\n"),
+        ("3.", "12.3"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_a_version_on_one_stream_and_a_banner_on_the_other_is_not_one() -> None:
-    """A program is what it prints on BOTH streams.
+async def test_a_program_that_speaks_on_both_streams_is_not_an_interpreter(
+    version: str,
+    also: str,
+) -> None:
+    """`-V` puts a bare version on one stream and nothing at all on the other.
 
-    A probe reading only the stream that happened to be non-empty would let a
-    launcher print the version on standard output and announce itself on
-    standard error and still pass, which is the whole-answer rule holding on
-    half the answer.
+    Preferring whichever stream is non-empty would admit a launcher that prints
+    the version and then announces itself; concatenating the two would admit a
+    version split across them. Neither is what an interpreter does, and either
+    would be handed `-c '<python source>'` next.
+
+    Args:
+        version: What the impostor writes after the word on standard output.
+        also: What it writes to standard error.
     """
     robot = FakeRobot(
         exec_start=STOCK_LAUNCHER,
         interpreters={
-            "/venvs/impostor/bin/python": "3.12.3",
+            "/venvs/impostor/bin/python": version,
             STOCK_INTERPRETER: "3.12.3",
         },
-        noisy_interpreters={"/venvs/impostor/bin/python"},
+        noisy_interpreters={"/venvs/impostor/bin/python": also},
         environment={"VIRTUAL_ENV": "/venvs/impostor"},
     )
     daemon, _access = daemon_for(robot)
