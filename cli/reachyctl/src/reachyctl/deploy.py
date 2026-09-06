@@ -256,7 +256,10 @@ async def run_deploy(
     staged = await daemon.stage(wheel.content, wheel.file_name)
     steps.done(_TRANSFER, f"the wheel is at {staged}")
 
-    steps.begin(_INSTALL, "installing into the environment the daemon runs")
+    steps.begin(
+        _INSTALL,
+        "installing into the environment the daemon runs applications from",
+    )
     try:
         installed = await daemon.install_wheel(staged)
     finally:

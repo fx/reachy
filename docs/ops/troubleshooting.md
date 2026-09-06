@@ -496,14 +496,18 @@ reachyctl config apply
 could not resolve the Python interpreter of the environment reachy-mini-daemon.service runs. The unit reachy-mini-daemon.service starts /venvs/mini_daemon/lib/python3.12/site-packages/reachy_mini/daemon/app/services/wireless/launcher.sh, which was not run: a unit's start program is the daemon's entry point, and only on some images is that also an interpreter. Running it with Python arguments starts a second daemon that competes with the first for its port, its serial device and its camera. Tried /venvs/mini_daemon/bin/python (the environment the unit's start program is installed in). Name the interpreter with --python
 ```
 
-**What it means.** Everything `reachyctl` asks about the daemon's environment —
-which distributions it holds, which version the application is at, whether the
-daemon is running it — is asked *through* an interpreter, and it has to be the
-interpreter that owns that environment. Installing into a path this tool assumed
-and then verifying against the same assumption would agree with itself no matter
-where the daemon really looks, which is reachyctl
+**What it means.** Everything `reachyctl` asks of the robot — which
+distributions an environment holds, which version the application is at, whether
+the daemon is running it — is asked *through* an interpreter, and it has to be
+the interpreter that owns the environment being asked about. Installing into a
+path this tool assumed and then verifying against the same assumption would
+agree with itself no matter where the daemon really looks, which is reachyctl
 [REQ-051](../specs/reachyctl/index.md#req-051-deployment-verifies-its-own-result)'s
-whole subject. So the tool resolves it from the robot, in this order:
+whole subject.
+
+The message above is the **daemon's** environment failing to resolve, which is
+the first of the two and the one everything else is derived from. The tool
+resolves it from the robot, in this order:
 
 1. what `--python` names, when an operator named one;
 2. the unit's start program, **only** when its file name is one CPython gives an
@@ -526,6 +530,14 @@ both looked at the wrong place, which is exactly the failure
 [REQ-051](../specs/reachyctl/index.md#req-051-deployment-verifies-its-own-result)
 exists to catch. Such a unit resolves nothing and says so, and `--python`
 answers it in one step.
+
+**The application's environment is resolved second, from the first.** A daemon
+does not have to run its applications where it runs itself: the released image
+runs out of one virtual environment and installs applications into a sibling of
+it, which is what the vendor's own installer does. So `application.installed`
+and the deploy's install step ask `<sibling>/bin/python` first and the daemon's
+own second, and a failure there names *the environment the daemon runs
+applications from* rather than the daemon's.
 
 **What to do.** The message lists every path that was tried and why. Log in to
 the robot and find the interpreter of the environment the daemon's packages are
