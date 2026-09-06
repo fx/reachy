@@ -1,10 +1,11 @@
 """Named deterministic acceptance matrix for stock-robot REQ-099 and REQ-100.
 
-Three daemons and one process-lifetime decision. The first offers no correlated
-grouped-torque confirmation, which every released `reachy-mini` is, and gets the
-ungated command path with no motor switch. The second offers it and is gated
-exactly as change 0020 left it. The third offers it and answers badly, and is
-the reason the degradation cannot be a per-call fallback: it stays gated.
+Four daemons and one process-lifetime decision. One offers no correlated
+grouped-torque confirmation at all — which every released `reachy-mini` is — and
+gets the ungated command path with no motor switch. One offers the whole surface
+and is gated exactly as change 0020 left it. One offers it and answers badly, and
+one offers only part of it; both of those stay gated, which is why the
+degradation cannot be a per-call fallback.
 
 The measured symptom this fixes is here as an assertion rather than as prose. On
 a stock robot the confirmed path reported `controller.fault == "command"` with
@@ -22,7 +23,7 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, cast
+from typing import Final, cast
 
 import pytest
 from satellite_support import (
@@ -34,6 +35,7 @@ from satellite_support import (
 )
 
 from reachy_mini_ha_satellite.adapters.motion_reachy import ReachyMotion
+from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
 from reachy_mini_ha_satellite.behaviour import SatelliteBehaviour
 from reachy_mini_ha_satellite.config import ENV_PREFIX, load_settings
 from reachy_mini_ha_satellite.main import (
@@ -61,9 +63,6 @@ from reachy_mini_ha_satellite.ports import (
     MotionFault,
 )
 
-if TYPE_CHECKING:
-    from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
-
 # The RFC 5737 documentation range. This repository is public.
 _GROUNDSTATION: Final = "ws://192.0.2.10:8080/v1/session"
 
@@ -86,8 +85,6 @@ def _identity() -> NetworkIdentity:
     Returns:
         The identity.
     """
-    from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
-
     return NetworkIdentity(
         interface="eth0",
         ip_address="192.0.2.20",

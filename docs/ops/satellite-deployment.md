@@ -502,7 +502,7 @@ credential and useless for learning one. A separate control unsets it.
 |---|---|
 | `/` | The settings form and the resolved configuration |
 | `/config` | The resolved configuration as JSON, secrets redacted, with which settings are secret, which apply at once, which bootstrap values are read-only and which compatibility inputs are ignored |
-| `/status` | What the robot is doing: pipeline and gaze state plus controller mode, fault and derived safe hold |
+| `/status` | What the robot is doing: pipeline and gaze state, controller mode, fault and derived safe hold, and the motion-gating mode in force with the bounded reason for it |
 | `/diagnostics/controller` | `GET` — bounded scalar controller events with no image, credential or installation identity |
 | `/diagnostics/controller/reset` | `POST` — same-origin diagnostics-only reset; it does not move the robot or change controller state |
 | `/stop` | `POST` — stops the application so a restart-required change can take effect |
@@ -778,6 +778,16 @@ the port it advertised.
 Set `REACHY_SATELLITE_DEVICE_NAME` — and `REACHY_SATELLITE_MAC_ADDRESS` — back to
 what the previous installation announced, restart, and remove the device Home
 Assistant created in the meantime.
+
+**It tracks a face but never moves.** `/status` says which of the two motion
+paths it is on. `motion_gating` reporting `{"mode": "confirmed", "reason":
+"daemon_confirmation_available"}` beside `controller.fault: "command"` and
+`safe_hold: true` is a robot whose daemon *can* confirm torque and whose groups
+were not confirmed — read `motors` for the group that failed, and
+`/diagnostics/controller` for what it did. `{"mode": "ungated", "reason":
+"daemon_confirmation_absent"}` is a stock robot, which commands motion directly
+and announces no motor switch; if that robot is still not moving, the cause is
+somewhere other than the gate.
 
 **It starts but never tracks a face.** `/status` says why. `unknown` means
 nothing has ever produced a detection: the groundstation session is not up, or

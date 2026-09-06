@@ -167,6 +167,12 @@ class _ConfirmedRobotHandle:
         stock robot, which is the wrong answer and the one that leaves the robot
         standing still.
 
+        **It asks exactly what `_confirmed` asks**, of exactly the same object:
+        `callable(getattr(...))` over the same three names. So a daemon this
+        reports as `ABSENT` is one every confirmation call would have found
+        missing, and the probe cannot license an ungated process over a daemon
+        whose confirmations would have run.
+
         Returns:
             `AVAILABLE` when the daemon has all three methods, `ABSENT` when it
             has none, and `PARTIAL` in between.
