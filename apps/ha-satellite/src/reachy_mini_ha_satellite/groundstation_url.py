@@ -72,12 +72,15 @@ a restart.
 **Arriving at the first groundstation is this same transition and not another
 one.** REQ-103 lets the application start with the address or the credential
 unsupplied, so `main.build_remote_source` answers `None` and the chain begins
-with no delegate. Supplying an address then changes it, which is `_replace` — the
-path REQ-095 already owns — and supplying a credential beside an address already
-in the environment changes no address, which is `_restore_if_unavailable`
-building the source the preceding resolution could not. Neither is a second write
-path, and that is deliberate: a first resolution that bypassed this owner would
-be one whose durable value could outrun what the robot adopted.
+with no delegate. Supplying either half then reaches `_replace` — the path
+REQ-095 already owns — because what selects that path is
+`_opens_a_different_session` and not the address on its own. **The address on its
+own was the released condition and it is not the right question**: a session
+needs both halves, so a submission supplying or removing the credential changes
+whether one exists while leaving the address exactly as it was. Sent down the
+released branch it would persist an unresolved groundstation and leave the
+running client answering under a revoked secret, with every surface still
+reporting the source as available.
 
 **In a running application, every write to the overrides file goes through this
 owner's lock, and serializing them is a separate job from owning the address.**
@@ -634,7 +637,7 @@ class GroundstationUrlOwner:
         # additionally runs the check in `reserve_submission`, without a loop,
         # because that one cannot await.
         resolved = resolve_submission(self._environ, wanted)
-        if resolved.settings.groundstation_url == self.effective_url:
+        if not self._opens_a_different_session(resolved):
             # Nothing to retire or start, so the released order is the right
             # one and this is the one definition of it.
             applied = apply_settings_change(
@@ -652,20 +655,44 @@ class GroundstationUrlOwner:
     #:% The satellite MUST start with an unresolved groundstation address or credential
     #:% and run on local detection until both are supplied through a configuration
     #:% surface.
+    def _opens_a_different_session(self, resolved: Resolution) -> bool:
+        """Whether a submission changes the groundstation a session is opened at.
+
+        **The address alone is not that question, and reading it as though it
+        were is a defect this had.** A session needs an address *and* a
+        credential — `groundstation_is_resolved` is where that is written down —
+        so a submission that supplies the missing half, or removes one, changes
+        whether a session exists at all while leaving the address untouched. Sent
+        down the released branch, clearing the credential would persist an
+        unresolved groundstation and leave the running client answering under a
+        secret the operator had just revoked, with every surface reporting
+        `available`. That is the collapse of *unconfigured* into *connected*,
+        which is the distinction REQ-103 exists to hold.
+
+        **Rotating a credential from one value to another is deliberately not
+        this.** It leaves the groundstation resolved and the address alone, so it
+        stays restart-bound exactly as it was released: the running session
+        authenticated with the preceding secret and is not re-opened. Widening
+        this to any credential change would make a rotation retire and rebuild a
+        live source, which is a behaviour change no requirement here asks for.
+
+        Args:
+            resolved: What the submission resolves to.
+
+        Returns:
+            True when the transition — prepare, retire, start, commit — is the
+            right order for this submission.
+        """
+        current = self._resolution.settings
+        candidate = resolved.settings
+        if candidate.groundstation_url != current.groundstation_url:
+            return True
+        return groundstation_is_resolved(candidate) != groundstation_is_resolved(
+            current,
+        )
+
     async def _restore_if_unavailable(self) -> None:
         """Begin one fresh restoration for a submission that changed no address.
-
-        **It is also how the first groundstation arrives when only the
-        credential was missing.** REQ-103 starts the application with an
-        unresolved groundstation, and an address already in the daemon's
-        environment with no credential beside it is exactly that state: the
-        factory answered `None`, so there is no delegate. Supplying the
-        credential changes no address, so `_apply` takes its released branch and
-        arrives here — where `remote_available` is False and the resolution now
-        in effect is the one carrying the credential, so the attempt builds the
-        source the preceding one could not. Nothing had to be written for this
-        case; it falls out of the resolution being replaced before the attempt
-        reads it, and the test suite pins that ordering.
 
         Resubmitting the address already in effect is what an operator does once
         a groundstation they were told is unreachable comes back, and short of a

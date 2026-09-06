@@ -31,6 +31,7 @@ Test module names are globally unique across the workspace — see the root
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -368,6 +369,35 @@ class TestNothingIsAnnouncedWhileTheIdentityIsUnresolved:
             )
             assert _services(application) == {VolumeService, WebService}
 
+    @pytest.mark.asyncio
+    async def test_the_dead_end_that_remains_is_named_in_the_boot_log(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A page that is not served cannot be where the operator sets the value.
+
+        `web_enabled` is environment-only, so a robot with it switched off and
+        no identity has no configuration surface at all — the one arrangement
+        REQ-101 cannot rescue, because the setting that disabled the rescue is
+        itself outside the layer the rescue writes. Pointing at the settings
+        interface there would be a sentence this repository calls a defect.
+
+        Args:
+            caplog: Where the boot log is captured.
+        """
+        environ = {**STOCK, f"{ENV_PREFIX}WEB_ENABLED": "false"}
+
+        with caplog.at_level(logging.WARNING):
+            application = await build_application(
+                load_settings(environ, {}),
+                FakeRobot(),
+                identity=_identity(),
+            )
+
+        assert _services(application) == {VolumeService}
+        assert "the daemon's environment" in caplog.text
+        assert "Set it on the settings interface" not in caplog.text
+
     @pytest.mark.filesystem
     @pytest.mark.asyncio
     async def test_a_resolved_identity_announces_exactly_it(self) -> None:
@@ -626,6 +656,75 @@ class TestRemotePerceptionIsOptionalAtFirstStart:
         assert before
         assert not owner.remote_available
         assert owner.effective_url == ""
+
+    @pytest.mark.asyncio
+    async def test_clearing_the_credential_retires_the_source_too(
+        self,
+        fs: object,
+    ) -> None:
+        """Both halves count, so removing either one is an un-configuration.
+
+        The released transition selected itself on the address alone, and that
+        is not the question a session turns on. Clearing the credential leaves
+        the address exactly as it was, so the address test sends it down the
+        branch that persists and adopts — which would store an unresolved
+        groundstation while the running client went on answering under the
+        secret the operator had just revoked, with every surface reporting the
+        source as available. That is *unconfigured* collapsing into
+        *connected*, which is the distinction REQ-103 exists to hold.
+
+        Args:
+            fs: The in-memory filesystem the durable commit lands in.
+        """
+        del fs
+        environ = {
+            **STOCK,
+            f"{ENV_PREFIX}GROUNDSTATION_URL": _GROUNDSTATION,
+            f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": _CREDENTIAL,
+        }
+        owner = _owner(environ)
+        before = owner.remote_available
+
+        resolved = await owner.submit({"groundstation_credential": ""})
+
+        assert before
+        assert not owner.remote_available
+        assert not groundstation_is_resolved(resolved.settings)
+        # The address is untouched: what was removed is the credential, and a
+        # transition that also cleared the address would be doing more than the
+        # submission asked for.
+        assert owner.effective_url == _GROUNDSTATION
+
+    @pytest.mark.asyncio
+    async def test_rotating_a_credential_does_not_retire_anything(
+        self,
+        fs: object,
+    ) -> None:
+        """Restart-bound as it was released, and deliberately still so.
+
+        Rotating leaves the groundstation resolved and the address alone. The
+        running session authenticated with the preceding secret and is not
+        re-opened, which is the behaviour this change found and did not set out
+        to alter — widening the transition to any credential change would retire
+        and rebuild a live source for a value nothing reads until the next
+        start.
+
+        Args:
+            fs: The in-memory filesystem the durable commit lands in.
+        """
+        del fs
+        environ = {
+            **STOCK,
+            f"{ENV_PREFIX}GROUNDSTATION_URL": _GROUNDSTATION,
+            f"{ENV_PREFIX}GROUNDSTATION_CREDENTIAL": _CREDENTIAL,
+        }
+        owner = _owner(environ)
+        installed = owner._source.delegate
+
+        await owner.submit({"groundstation_credential": "another-credential"})
+
+        assert owner.remote_available
+        assert owner._source.delegate is installed
 
     @pytest.mark.asyncio
     async def test_retiring_into_nothing_for_any_other_reason_is_still_refused(

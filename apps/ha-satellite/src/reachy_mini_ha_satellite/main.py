@@ -2672,11 +2672,27 @@ async def build_application(
         # One line, not the whole notice: `log_resolved_configuration` has
         # already emitted that, a few lines earlier in the same boot log, and a
         # second copy would train a reader to skip both.
+        #
+        # The remedy differs, and pointing at a page that is not being served
+        # would be the kind of sentence this repository calls a defect. With
+        # `web_enabled` false there is no configuration surface on the robot at
+        # all, so the only way out is the daemon's environment — which is the
+        # one arrangement REQ-101 cannot rescue, because the setting that
+        # disabled the rescue is itself environment-only.
         _LOGGER.warning(
             "satellite.unannounced no ESPHome listener, no mDNS record and no "
-            "entities were built, because %s is unresolved. Set it on the "
-            "settings interface and start the application again.",
+            "entities were built, because %s is unresolved. %s",
             variable_for(IDENTITY_SETTING),
+            (
+                "Set it on the settings interface and start the application again."
+                if settings.web_enabled
+                else (
+                    f"The settings interface is switched off by "
+                    f"{variable_for('web_enabled')}, so there is no surface on "
+                    f"this robot to set it from: set it in the daemon's "
+                    f"environment, or switch the interface back on."
+                )
+            ),
         )
     if settings.web_enabled:
         services.append(

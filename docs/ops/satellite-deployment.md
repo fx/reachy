@@ -436,14 +436,24 @@ accepted. Every other setting still saves. Set
 `REACHY_SATELLITE_GROUNDSTATION_URL` in the drop-in instead, or change it from
 the running satellite.
 
-**A submission that would leave no groundstation source at all is refused.**
-Whether a session exists is decided by `REACHY_SATELLITE_FACE_TRACKING_ENABLED`
-and `REACHY_SATELLITE_DETECTION_SOURCE`, both of which take effect at the next
-start. Changing one of them on its own is stored and badged "needs a restart",
-and the running source is untouched. Changing one of them **together with the
-address** would retire the running source into nothing, so it is refused with a
-message saying to submit them without the address. Nothing is written and the
-running source keeps answering.
+**A submission that would leave no groundstation source at all is refused,
+unless unconfiguring the groundstation is what it asked for.** Whether a session
+exists is decided by `REACHY_SATELLITE_FACE_TRACKING_ENABLED` and
+`REACHY_SATELLITE_DETECTION_SOURCE`, both of which take effect at the next start.
+Changing one of them on its own is stored and badged "needs a restart", and the
+running source is untouched. Changing one of them **together with the address**
+would retire the running source into nothing without having been asked to, so it
+is refused with a message saying to submit them without the address. Nothing is
+written and the running source keeps answering.
+
+**Clearing the address, or clearing the credential, is the exception**, because
+there the empty result is the request: the running source is retired, nothing
+replaces it, and the remote detector goes back to *unconfigured*. Both halves
+count — a session needs an address and a credential — so removing either one
+retires the source rather than leaving it answering under a value the operator
+has just taken away. Rotating a credential from one value to another is not this
+and is not a transition: the address is unchanged, the groundstation is still
+configured, and the new secret is used at the next start.
 
 This is compensation rather than a transaction: a filesystem and a network
 cannot be committed together. What holds after every outcome is that the durable
