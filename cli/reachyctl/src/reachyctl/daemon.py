@@ -440,13 +440,17 @@ class DaemonClient:
 
         `-V` and not source: this is the step that *establishes* the thing
         everything downstream assumes, so it cannot itself assume it. The answer
-        is read rather than the exit status, because a wrapper an operator named
-        with `--python` can exit zero having done something entirely else, and
-        only the version line makes a program an interpreter.
+        is read rather than the exit status, because a program can exit zero
+        having done something else entirely, and only the version makes it an
+        interpreter.
 
         Args:
-            path: The candidate. Its file name has already been established to
-                claim an interpreter, unless an operator named it themselves.
+            path: The candidate. `reachyctl.interpreters.candidates` has already
+                established that its file name is one CPython gives an
+                interpreter — every candidate, an operator's `--python`
+                included — so this is never the first thing to look at the name.
+                What that gate cannot see is a rename, which is why this step
+                exists and why what it runs is a flag rather than source.
 
         Returns:
             True when it spoke on exactly one stream and everything it said
