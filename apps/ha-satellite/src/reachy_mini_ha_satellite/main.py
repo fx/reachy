@@ -2424,10 +2424,14 @@ async def build_application(
     """
     settings = resolution.settings
     state_dir = state_directory(settings)
-    announced = identity or discover_network_identity(
-        interface=settings.network_interface,
-        mac_address=settings.mac_address,
-    )
+
+    #:= docs/specs/stock-robot-installation/index.md#req-102-nothing-is-announced-while-the-identity-is-unresolved
+    #:% The satellite MUST NOT announce itself to Home Assistant, or serve a Home
+    #:% Assistant connection, while its announced identity is unresolved.
+    #
+    # Decided here, before anything is built, because two things below are
+    # conditional on it and one of them can fail. See the branch itself.
+    announcing = identity_is_resolved(settings)
 
     audio = ReachyAudio(
         handle.media,
@@ -2541,11 +2545,6 @@ async def build_application(
             await motor_groups.aclose()
             raise
 
-    #:= docs/specs/stock-robot-installation/index.md#req-102-nothing-is-announced-while-the-identity-is-unresolved
-    #:% The satellite MUST NOT announce itself to Home Assistant, or serve a Home
-    #:% Assistant connection, while its announced identity is unresolved.
-    announcing = identity_is_resolved(settings)
-
     application = SatelliteApplication(
         settings=settings,
         audio=audio,
@@ -2593,6 +2592,20 @@ async def build_application(
 
     services: list[Service] = [VolumeService(settings.daemon_api_url)]
     if announcing:
+        # **Discovered here rather than at the top, and that placement is
+        # load-bearing.** `discover_network_identity` refuses a machine with no
+        # default route, no IPv4 address or no hardware address, and its own
+        # docstring gives the reason: a satellite announcing at no address would
+        # be a device Home Assistant found and could not reach. Every word of
+        # that is about announcing. Run unconditionally it would refuse to
+        # assemble an application that announces nothing — on a robot that has
+        # not been given an identity, has not been put on a network yet, and
+        # whose settings interface REQ-101 says must come up so somebody can do
+        # both. Nothing outside this branch reads it.
+        announced = identity or discover_network_identity(
+            interface=settings.network_interface,
+            mac_address=settings.mac_address,
+        )
         state = build_server_state(
             settings,
             identity=announced,

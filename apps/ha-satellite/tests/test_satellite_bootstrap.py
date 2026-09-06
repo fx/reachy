@@ -45,7 +45,7 @@ from satellite_support import (
     FakeRobot,
 )
 
-from reachy_mini_ha_satellite.adapters.network import NetworkIdentity
+from reachy_mini_ha_satellite.adapters.network import NetworkError, NetworkIdentity
 from reachy_mini_ha_satellite.adapters.perception_source import FallbackPerception
 from reachy_mini_ha_satellite.behaviour import SatelliteBehaviour
 from reachy_mini_ha_satellite.config import (
@@ -370,6 +370,39 @@ class TestNothingIsAnnouncedWhileTheIdentityIsUnresolved:
                 identity=_identity(),
             )
             assert _services(application) == {VolumeService, WebService}
+
+    @pytest.mark.asyncio
+    async def test_a_robot_with_no_network_yet_still_serves_its_settings_page(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The order these are built in decides whether REQ-101 holds at all.
+
+        `discover_network_identity` refuses a machine with no default route, no
+        IPv4 address or no hardware address, and every word of its reason is
+        about announcing: a satellite advertising at no address would be a
+        device Home Assistant found and could not reach. Run before the branch
+        that decides whether anything announces, it would refuse to assemble an
+        application that announces nothing — on a robot that has been given no
+        identity, has not been put on a network yet, and whose settings
+        interface is the surface an operator would fix both from.
+
+        Args:
+            monkeypatch: Used to make network discovery fail as it does on a
+                machine with no default route.
+        """
+        import reachy_mini_ha_satellite.main as satellite_main
+
+        def _no_network(**_kwargs: object) -> NetworkIdentity:
+            message = "no default network interface was found"
+            raise NetworkError(message)
+
+        monkeypatch.setattr(satellite_main, "discover_network_identity", _no_network)
+
+        application = await build_application(load_settings(STOCK, {}), FakeRobot())
+
+        assert _services(application) == {VolumeService, WebService}
+        assert application.status()["announcing"] is False
 
     @pytest.mark.asyncio
     async def test_the_dead_end_that_remains_is_named_in_the_boot_log(

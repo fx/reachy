@@ -292,8 +292,11 @@ deployment can get irreversibly wrong.
   and "not acceptable" are different answers.
   **The embargo that makes that safe is structural and lives in one place.**
   `main.build_application` builds no `ServerState` when the identity is
-  unresolved, so there is no entity, no pipeline tap, no ESPHome listener and no
-  mDNS record to have been suppressed — REQ-102 is an absence of machinery
+  unresolved, and discovers no network identity either — `discover_network_identity`
+  refuses a machine with no default route, and running it before that branch
+  would refuse to assemble an application that announces nothing, on exactly the
+  robot REQ-101 exists for. So there is no entity, no pipeline tap, no ESPHome
+  listener and no mDNS record to have been suppressed — REQ-102 is an absence of machinery
   rather than a guard at each announcing call site, and a test that asserts the
   machinery was never constructed keeps holding as services are added. Do not
   reintroduce announcing under a placeholder, and do not stand the announcing
