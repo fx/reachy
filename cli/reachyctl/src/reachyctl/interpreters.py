@@ -82,7 +82,12 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["Candidate", "candidates", "names_an_interpreter"]
+__all__ = [
+    "Candidate",
+    "application_candidates",
+    "candidates",
+    "names_an_interpreter",
+]
 
 # What CPython installs its own executables as: `python`, `python3`,
 # `python3.12`. Anchored at both ends, so `python-config`, `pythonize` and a
@@ -112,6 +117,14 @@ _INTERPRETER: Final = "python"
 
 # The directory an environment keeps its executables in.
 _BIN: Final = "bin"
+
+# What the vendor's own installer calls the environment it puts applications in.
+# It is a SIBLING of the daemon's own environment, not a child of it, and the
+# name is upstream's: `reachy_mini/apps/sources/local_common_venv.py` derives it
+# as `parent_of(the daemon's venv) / "apps_venv"`. A public identifier of a
+# third-party dependency, which the repository's rule on tracked identifiers
+# allows, and the only vendor-specific string in this module.
+_APPLICATION_ENVIRONMENT: Final = "apps_venv"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -219,5 +232,52 @@ def candidates(
             continue
         # First reason wins, so a path derived two ways is named by the
         # strongest thing that suggested it rather than by the last one.
+        found.setdefault(path, Candidate(path=path, source=source))
+    return tuple(found.values())
+
+
+def application_candidates(daemon: str) -> tuple[Candidate, ...]:
+    """Work out which interpreter owns the environment applications are in.
+
+    **A daemon does not have to run its applications in its own environment,
+    and the released one does not.** ReachyMiniOS installs the daemon into one
+    virtual environment and applications into a SIBLING of it, so asking the
+    daemon's own interpreter what version of the application is installed gets
+    the true answer to the wrong question: the application is not there, and
+    reporting that as "not installed" is a false negative about a robot that is
+    running it. Upstream's own installer derives the answer the same way this
+    does — `parent_of(the daemon's venv) / "apps_venv"` — and it also has a mode
+    where the two are one environment, which is the second rule below.
+
+    Args:
+        daemon: The interpreter that owns the daemon's own environment, already
+            resolved and already confirmed to be one.
+
+    Returns:
+        The candidates, best answer first: the sibling environment the vendor's
+        installer uses, and then the daemon's own, which is where an image that
+        keeps one environment for both puts them. Never empty — the daemon's own
+        interpreter is always the last answer — so an application reported as
+        absent has been looked for everywhere it could be.
+    """
+    executable = PurePosixPath(daemon)
+    derived: list[tuple[str, str]] = []
+    if executable.parent.name == _BIN:
+        sibling = executable.parent.parent.parent / _APPLICATION_ENVIRONMENT
+        derived.append(
+            (
+                f"{sibling}/{_BIN}/{_INTERPRETER}",
+                "the environment the daemon installs applications into",
+            ),
+        )
+    derived.append((daemon, "the daemon's own environment"))
+    found: dict[str, Candidate] = {}
+    for path, source in derived:
+        # The same gate, for the same reason: nothing whose name is not one
+        # CPython gives an interpreter is ever executed. Both rules produce one
+        # by construction, and the gate stays so that cannot quietly stop being
+        # true if a rule is added.
+        if not names_an_interpreter(path):
+            continue
         found.setdefault(path, Candidate(path=path, source=source))
     return tuple(found.values())

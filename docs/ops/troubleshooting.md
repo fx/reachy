@@ -122,11 +122,22 @@ installed, you installed into a different environment.
 rather than parsing its file name, so "what was installed" and "what is running"
 are answers to the same question.
 
-Which environment that is, is resolved from the robot on every question — never
-assumed, and never taken from the program the daemon's unit starts. A failure
-saying *could not resolve the Python interpreter* is that resolution coming up
-empty rather than anything about the application; see [When the interpreter
-cannot be resolved](#when-the-interpreter-cannot-be-resolved).
+**Which environment that is, is not the daemon's own.** A daemon does not have
+to run its applications where it runs itself, and the released image does not:
+it runs out of one virtual environment and installs applications into a
+**sibling** of it. This check asks the sibling, deriving it the way the vendor's
+own installer does, and falls back to the daemon's environment for an image that
+keeps one for both. Both are resolved from the robot on every question — never
+assumed, and never taken from the program the daemon's unit starts.
+
+Two failures here are about that resolution rather than about the application. A
+complaint naming the environment it looked in — *is not installed in the
+environment the daemon runs applications from, which on this robot is the one
+`/venvs/apps_venv/bin/python` owns* — is a true answer: if the satellite is
+running anyway, it is installed somewhere neither the daemon nor this tool would
+look. A failure saying *could not resolve the Python interpreter* is the
+resolution itself coming up empty; see [When the interpreter cannot be
+resolved](#when-the-interpreter-cannot-be-resolved).
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript. Against the
 > container target the check passes, reporting `the application is installed at
@@ -166,11 +177,26 @@ Read the journal:
 reachyctl app logs --robot reachy@192.0.2.20
 ```
 
-Asking the daemon whether it is running the application means running its
-control module, and that goes through the same resolved interpreter the two
-checks above use. A failure saying *could not resolve the Python interpreter* is
+**There are two application-control interfaces and the robot decides which.**
+The released image serves its control over the daemon's own HTTP API on the
+robot; the container target the provisioning gate runs against implements a
+control module instead. This check asks the API first and the module second, so
+a stock robot needs no flag, and a robot serving neither fails saying so and
+naming both — never by reporting the application as stopped, which would make
+`reachyctl app stop` exit zero over a robot it never reached.
+
+Both interfaces are reached through the interpreter resolved for the daemon's
+environment, so a failure saying *could not resolve the Python interpreter* is
 that resolution and not the application; see [When the interpreter cannot be
 resolved](#when-the-interpreter-cannot-be-resolved).
+
+The daemon's API answers about the application it is **currently** running, and
+it runs one at a time. So *the daemon is running `<something-else>` instead* is
+this check working: the satellite is not running because something displaced it.
+*The daemon is running no application* is the ordinary stopped case, and
+`starting`, `stopping`, `done` and `error` are the other states it can report —
+none of them is running, and `starting` in particular is an application that may
+never finish starting.
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No failing transcript, and no `app logs`
 > transcript at all.

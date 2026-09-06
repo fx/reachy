@@ -21,7 +21,11 @@ from typing import Final
 
 import pytest
 
-from reachyctl.interpreters import candidates, names_an_interpreter
+from reachyctl.interpreters import (
+    application_candidates,
+    candidates,
+    names_an_interpreter,
+)
 
 # The stock image's unit: a shell launcher, three directories below the
 # `site-packages` of the environment the daemon's own code is installed in.
@@ -194,4 +198,50 @@ def test_every_candidate_says_what_suggested_it() -> None:
     assert [candidate.describe() for candidate in found] == [
         "/venvs/declared/bin/python (the VIRTUAL_ENV the unit declares)",
         f"{INTERPRETER} (the environment the unit's start program is installed in)",
+    ]
+
+
+def test_the_application_environment_is_a_sibling_of_the_daemon_s() -> None:
+    """The released image, and the false negative this removes.
+
+    Asking the daemon's own interpreter what version of the application is
+    installed gets the true answer to the wrong question — the application is
+    not there — and reporting that as "not installed" tells an operator to
+    install something their robot is already running.
+    """
+    found = application_candidates(INTERPRETER)
+
+    assert [candidate.path for candidate in found] == [
+        "/venvs/apps_venv/bin/python",
+        INTERPRETER,
+    ]
+    assert found[0].source == "the environment the daemon installs applications into"
+
+
+def test_the_daemon_s_own_environment_is_always_the_last_answer() -> None:
+    """An image keeping one environment for both resolves exactly as it did before."""
+    found = application_candidates("/opt/reachy/venv/bin/python")
+
+    assert found[-1].path == "/opt/reachy/venv/bin/python"
+    assert found[-1].source == "the daemon's own environment"
+
+
+def test_an_interpreter_outside_a_bin_directory_derives_no_sibling() -> None:
+    """There is no environment to be a sibling of, so nothing is invented."""
+    found = application_candidates("/usr/local/python3.12")
+
+    assert [candidate.path for candidate in found] == ["/usr/local/python3.12"]
+
+
+def test_the_gate_still_holds_when_the_daemon_s_own_path_is_not_one() -> None:
+    """The caller passes a proven interpreter, and the gate does not take that on trust.
+
+    Every path this function offers is executed with `-V` by its caller, so the
+    same rule applies here as everywhere else: a name CPython never gives an
+    interpreter is not offered, whoever produced it.
+    """
+    found = application_candidates("/venvs/mini_daemon/bin/launcher.sh")
+
+    assert "/venvs/mini_daemon/bin/launcher.sh" not in [
+        candidate.path for candidate in found
     ]

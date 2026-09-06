@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_APPLICATION",
+    "DEFAULT_DAEMON_API",
     "DEFAULT_DAEMON_CONTROL",
     "DEFAULT_DAEMON_DISTRIBUTION",
     "DEFAULT_SSH_PORT",
@@ -113,6 +114,14 @@ DEFAULT_DAEMON_DISTRIBUTION: Final = "reachy-mini"
 # differently is a `--daemon-control` away, and confirming it is the first thing
 # the deferred hardware session does.
 DEFAULT_DAEMON_CONTROL: Final = "reachy_mini.apps"
+
+# Where the daemon's own HTTP API answers, as reached FROM the robot: every
+# request is made by an interpreter running there, so this is a loopback address
+# rather than anybody's machine. The released image serves the application
+# control here, which is what makes a stock robot diagnosable without an option.
+# A literal rather than a name, because a robot that cannot resolve `localhost`
+# is a robot this tool would fail on for a reason nobody would guess.
+DEFAULT_DAEMON_API: Final = "http://127.0.0.1:8000"
 
 # Where a transfer lands before it is installed. Under `/var/tmp` rather than
 # `/tmp`: a wheel is large enough that a `tmpfs` on a device with a gigabyte of
@@ -209,6 +218,10 @@ class RobotLayout:
             `ping` reports.
         daemon_control: The module the daemon's application control is reached
             through. See `DEFAULT_DAEMON_CONTROL`.
+        daemon_api: Where the daemon's own HTTP API answers, from the robot.
+            The application control is asked here first and through
+            `daemon_control` second — see `reachyctl.daemon._api` for why a
+            robot has one interface or the other and this tool asks for both.
         python: The interpreter that owns the daemon's package environment,
             when an operator has named one, and `None` otherwise. This is the
             one field with no default, and deliberately: a default here would be
@@ -224,6 +237,7 @@ class RobotLayout:
     application: str = DEFAULT_APPLICATION
     daemon_distribution: str = DEFAULT_DAEMON_DISTRIBUTION
     daemon_control: str = DEFAULT_DAEMON_CONTROL
+    daemon_api: str = DEFAULT_DAEMON_API
     python: str | None = None
     staging: str = DEFAULT_STAGING
 

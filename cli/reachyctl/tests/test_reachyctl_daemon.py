@@ -36,7 +36,9 @@ from pathlib import PurePosixPath
 import pytest
 from reachyctl_robot import (
     DAEMON_DISTRIBUTION,
+    DAEMON_INTERPRETER,
     DROP_IN,
+    STOCK_APPLICATIONS,
     STOCK_INTERPRETER,
     STOCK_LAUNCHER,
     FakeRemoteAccess,
@@ -438,10 +440,10 @@ async def test_an_environment_that_cannot_be_asked_is_a_fault_not_an_empty_answe
     nothing, would make every deploy against an unreachable interpreter report a
     version mismatch that never happened.
     """
-    daemon, _access = daemon_for(FakeRobot(failing={"/opt/reachy/venv/bin/python"}))
+    daemon, _access = daemon_for(FakeRobot(failing={DAEMON_INTERPRETER}))
 
     with pytest.raises(RobotAccessError, match="what it has installed"):
-        await daemon.installed_versions("anything")
+        await daemon.installed_versions(DAEMON_INTERPRETER, "anything")
 
 
 @pytest.mark.asyncio
@@ -458,11 +460,13 @@ async def test_an_empty_environment_is_an_answer_and_an_unreadable_one_is_not() 
     unreadable, _two = daemon_for(FakeRobot(metadata_stdout="not json at all"))
     wrong_shape, _three = daemon_for(FakeRobot(metadata_stdout="[1, 2, 3]"))
 
-    assert await installed.installed_versions("absent") == {"absent": ""}
+    assert await installed.installed_versions(DAEMON_INTERPRETER, "absent") == {
+        "absent": ""
+    }
     with pytest.raises(RobotAccessError, match="not JSON"):
-        await unreadable.installed_versions("absent")
+        await unreadable.installed_versions(DAEMON_INTERPRETER, "absent")
     with pytest.raises(RobotAccessError, match="rather than an object"):
-        await wrong_shape.installed_versions("absent")
+        await wrong_shape.installed_versions(DAEMON_INTERPRETER, "absent")
 
 
 @pytest.mark.asyncio
@@ -544,9 +548,9 @@ async def test_a_control_that_could_not_be_run_is_a_fault_not_a_stopped_applicat
     The command would find the application already stopped, do nothing, and
     exit zero, having learned nothing about it at all.
     """
-    daemon, _access = daemon_for(FakeRobot(failing={"/opt/reachy/venv/bin/python"}))
+    daemon, _access = daemon_for(FakeRobot(failing={DAEMON_INTERPRETER}))
 
-    with pytest.raises(DaemonControlError, match="could not be run"):
+    with pytest.raises(DaemonControlError, match="could not be asked"):
         await daemon.application_state()
 
 
@@ -855,3 +859,262 @@ async def test_a_blanked_drop_in_is_never_silently_overwritten() -> None:
         await run_apply(daemon, {"A_SETTING": "1"}, reporter, preview=False)
 
     assert robot.files[DROP_IN] == ""
+
+
+@pytest.mark.asyncio
+async def test_an_application_in_the_sibling_environment_is_not_reported_absent() -> (
+    None
+):
+    """The false negative hardware found, and the only thing worse than the error.
+
+    The satellite is installed and running on a stock robot; asking the
+    daemon's own environment says it is not there. An operator acting on that
+    installs something they already have.
+    """
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: "3.12.3", STOCK_APPLICATIONS: "3.12.3"},
+        packages={DAEMON_DISTRIBUTION: "1.9.0"},
+        environments={STOCK_APPLICATIONS: {DEFAULT_APPLICATION: "2.0"}},
+    )
+    daemon, _access = daemon_for(robot)
+
+    installed = await daemon.installed_application()
+    reported = await daemon.ping()
+
+    assert installed.installed is True
+    assert installed.version == "2.0"
+    # The daemon's own version still comes from the daemon's own environment.
+    assert reported.version == "1.9.0"
+    assert robot.wrapper_runs == []
+
+
+@pytest.mark.asyncio
+async def test_an_application_in_neither_environment_says_where_it_looked() -> None:
+    """Absent is only a useful answer beside a statement of where it was sought."""
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: "3.12.3", STOCK_APPLICATIONS: "3.12.3"},
+        environments={STOCK_APPLICATIONS: {}},
+    )
+    daemon, _access = daemon_for(robot)
+
+    installed = await daemon.installed_application()
+
+    assert installed.installed is False
+    assert STOCK_APPLICATIONS in installed.complaint
+
+
+@pytest.mark.asyncio
+async def test_a_single_environment_image_reads_and_installs_where_it_always_did() -> (
+    None
+):
+    """No sibling to find, so the daemon's own environment is the answer."""
+    robot = FakeRobot(packages={DEFAULT_APPLICATION: "2.0"})
+    daemon, access = daemon_for(robot)
+    await daemon.stage(b"not really a wheel", "thing.whl")
+
+    installed = await daemon.installed_application()
+    await daemon.install_wheel(PurePosixPath(DEFAULT_STAGING) / "thing.whl")
+
+    assert installed.version == "2.0"
+    installs = [command for command in access.commands if "pip" in command]
+    assert installs[0][:3] == ["sudo", "-n", DAEMON_INTERPRETER]
+
+
+@pytest.mark.asyncio
+async def test_a_wheel_is_installed_where_the_version_is_read_back_from() -> None:
+    """Installing into one environment and verifying another is REQ-051's failure."""
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: "3.12.3", STOCK_APPLICATIONS: "3.12.3"},
+        environments={STOCK_APPLICATIONS: {}},
+    )
+    daemon, access = daemon_for(robot)
+    await daemon.stage(b"not really a wheel", "thing.whl")
+
+    await daemon.install_wheel(PurePosixPath(DEFAULT_STAGING) / "thing.whl")
+
+    installs = [command for command in access.commands if "pip" in command]
+    assert installs[0][:3] == ["sudo", "-n", STOCK_APPLICATIONS]
+
+
+@pytest.mark.asyncio
+async def test_the_daemon_s_own_api_answers_the_application_state() -> None:
+    """The interface a stock robot actually serves, and no flag to reach it."""
+    robot = FakeRobot(daemon_api=True, app_running=True)
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is True
+    assert state.detail == "running"
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_running_nothing_is_not_a_daemon_running_this() -> None:
+    """The endpoint answers about the current application, and there may be none."""
+    robot = FakeRobot(daemon_api=True, app_running=False)
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is False
+    assert "running no application" in state.detail
+
+
+@pytest.mark.asyncio
+async def test_a_daemon_running_something_else_says_which() -> None:
+    """An operator whose satellite was displaced needs to be told that."""
+    robot = FakeRobot(daemon_api=True, app_running=True, current_app="another-app")
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is False
+    assert "another-app" in state.detail
+
+
+@pytest.mark.asyncio
+async def test_an_application_that_is_still_starting_is_not_running_yet() -> None:
+    """`starting` is one of five states and only one of them is up."""
+    robot = FakeRobot(daemon_api=True, app_running=True, app_state="starting")
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is False
+    assert state.detail == "starting"
+
+
+@pytest.mark.asyncio
+async def test_an_image_with_no_api_is_asked_through_the_control_module() -> None:
+    """The container target the provisioning gate runs against is that image."""
+    robot = FakeRobot(daemon_api=False, app_running=True, app_detail="active")
+    daemon, access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is True
+    assert any("-m" in command for command in access.commands)
+
+
+@pytest.mark.asyncio
+async def test_an_api_that_answered_and_refused_is_not_retried_elsewhere() -> None:
+    """Replacing its reason with another interface's would debug the wrong thing."""
+    robot = FakeRobot(daemon_api=True, control_succeeds=False)
+    daemon, access = daemon_for(robot)
+
+    outcome = await daemon.start_application()
+
+    assert outcome.ok is False
+    assert "400" in outcome.stderr
+    assert not any("-m" in command for command in access.commands)
+
+
+@pytest.mark.asyncio
+async def test_starting_and_stopping_go_through_whichever_interface_answers() -> None:
+    """One seam, two implementations, and the robot decides which."""
+    served = FakeRobot(daemon_api=True)
+    module = FakeRobot(daemon_api=False)
+    over_api, _one = daemon_for(served)
+    over_module, _two = daemon_for(module)
+
+    await over_api.start_application()
+    await over_module.start_application()
+
+    # Asserted as a pair rather than one at a time: a narrowing type checker
+    # reads the second half of this test as unreachable otherwise.
+    assert (served.app_running, module.app_running) == (True, True)
+
+    await over_api.stop_application()
+    await over_module.stop_application()
+
+    assert (served.app_running, module.app_running) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_a_robot_serving_neither_control_interface_names_both() -> None:
+    """The released image has no control module, and an image may have no API.
+
+    Told only about the module, an operator would go looking for a module. The
+    reason the API was not there is the other half of the answer.
+    """
+    robot = FakeRobot(daemon_api=False, control_runs=False)
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(DaemonControlError) as raised:
+        await daemon.application_state()
+
+    assert "could not be reached" in str(raised.value)
+    assert "control module could not be run" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        ("not json at all", "not JSON"),
+        ("[1, 2, 3]", "rather than an object"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_api_answering_with_something_unreadable_is_a_fault(
+    answer: str,
+    expected: str,
+) -> None:
+    """Reporting "not running" for it would be a guess dressed as a reading.
+
+    Args:
+        answer: What the API wrote instead of a status document.
+        expected: What the complaint has to say about it.
+    """
+    robot = FakeRobot(daemon_api=True, api_stdout=answer)
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(DaemonControlError, match=expected):
+        await daemon.application_state()
+
+
+@pytest.mark.asyncio
+async def test_an_api_answering_with_an_error_status_is_a_fault() -> None:
+    """It has an API and it refused; that reason is the one worth reporting."""
+    robot = FakeRobot(daemon_api=True, api_refuses=True)
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(DaemonControlError, match="refused the request"):
+        await daemon.application_state()
+
+
+@pytest.mark.asyncio
+async def test_a_status_document_missing_its_parts_is_read_for_what_it_has() -> None:
+    """A daemon that named no state and no application has still answered."""
+    robot = FakeRobot(daemon_api=True, api_stdout='{"state": null, "error": "boom"}')
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is False
+    assert "did not name" in state.detail
+    assert "boom" in state.detail
+
+
+@pytest.mark.asyncio
+async def test_an_environment_that_changed_under_the_client_is_named() -> None:
+    """Nothing here is memoised, so an answer can stop being true mid-question.
+
+    The daemon's interpreter answers the first question and is gone by the
+    second. The application environment then resolves to nothing, and the
+    client says so rather than reaching for a path it invented.
+    """
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: "3.12.3"},
+        version_answers=1,
+    )
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(InterpreterResolutionError) as raised:
+        await daemon.application_interpreter()
+
+    assert "runs applications from" in str(raised.value)
+    assert "--python" in str(raised.value)

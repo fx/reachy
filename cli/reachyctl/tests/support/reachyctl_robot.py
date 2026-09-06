@@ -23,6 +23,16 @@ version alone, which is exactly the deploy that looks identical to success at
 every step. REQ-051's scenario is that case, and it cannot be written against a
 fake that has no notion of where an install went.
 
+**A robot has two environments and one of the two control interfaces.** The
+daemon runs out of one virtual environment and, on the released image, installs
+applications into a sibling of it — so `app_packages` is what the application
+environment holds and `packages` is what the daemon's own does, and a robot that
+keeps a single environment for both simply leaves `app_packages` unset. The
+released image serves its application control over an HTTP API on the robot;
+the container target the provisioning gate runs against implements the control
+module instead. `daemon_api` says which of the two this robot has, so both
+routes are exercised without either being the only one that is ever tested.
+
 **Running the unit's start program starts a second daemon.** `interpreters` says
 which paths on this robot are really interpreters, and anything else the unit
 starts is a launcher: sending it a command records the run in `wrapper_runs` and
@@ -46,6 +56,7 @@ from typing import TYPE_CHECKING, Final
 from reachyctl.daemon import DaemonClient
 from reachyctl.managed import parse_region
 from reachyctl.robot import (
+    DEFAULT_APPLICATION,
     CommandOutcome,
     RobotAccessError,
     RobotLayout,
@@ -97,6 +108,11 @@ STOCK_LAUNCHER: Final = (
 )
 STOCK_INTERPRETER: Final = "/venvs/mini_daemon/bin/python"
 
+# And the environment that image installs applications into: a SIBLING of the
+# daemon's own, which is what makes asking the daemon's interpreter what version
+# of the application is installed the wrong question on a real robot.
+STOCK_APPLICATIONS: Final = "/venvs/apps_venv/bin/python"
+
 
 @dataclass
 class FakeRobot:
@@ -124,6 +140,31 @@ class FakeRobot:
             a test asserting REQ-106 asserts this is empty.
         files: The robot's filesystem, as far as this tool writes to it.
         packages: What is installed in the environment the daemon runs.
+        environments: What each named interpreter's environment holds, for a
+            robot with more than one. An interpreter not in here answers from
+            `packages`, which is what an image keeping a single environment for
+            the daemon and its applications does — and what the container
+            target the provisioning gate uses is.
+        daemon_api: Whether this robot serves the daemon's own HTTP API. False
+            models an image that does not, on which the control module is the
+            only interface, and is the default because that is the shape every
+            test written before the API existed assumes.
+        api_stdout: What the daemon's API writes for a status request, when it
+            is not to write the status document this tool reads.
+        api_refuses: Whether the API answers every request with an error
+            status. A daemon that answered and refused is not a daemon with no
+            API, and the two must not be treated alike.
+        version_answers: How many times an interpreter answers `-V` before this
+            robot reports it gone. `None` is always, which is every ordinary
+            robot; a number models an environment that changes under the client
+            between one question and the next, which is the case this module
+            refuses to memoise against.
+        current_app: Which application the daemon's API reports as the current
+            one. Not always the one being asked about: a robot running
+            something else is a robot this application is not running on.
+        app_state: What the API calls the current application's state, when it
+            is not to be derived from `app_running`. `starting` and `error` are
+            the interesting ones, because neither is running.
         environment: What the daemon is actually running with.
         app_running: Whether the application is running.
         app_detail: What the daemon says about it.
@@ -142,6 +183,10 @@ class FakeRobot:
             is what makes a crash loop and a complaining control two different
             robots.
         stop_succeeds: The same, for stopping it.
+        control_runs: Whether the control module is there at all. False is the
+            released image: `reachy_mini.apps` has no `__main__`, so a robot
+            with no HTTP API and no module has neither interface, which is the
+            case whose failure has to name both.
         control_stdout: What the daemon's application control writes for a
             `status`, when it is not to write the JSON this tool reads. The
             empty default means the ordinary answer.
@@ -179,6 +224,13 @@ class FakeRobot:
     packages: dict[str, str] = field(
         default_factory=lambda: {DAEMON_DISTRIBUTION: "4.5.6"},
     )
+    environments: dict[str, dict[str, str]] = field(default_factory=dict)
+    daemon_api: bool = False
+    api_stdout: str = ""
+    api_refuses: bool = False
+    version_answers: int | None = None
+    current_app: str = DEFAULT_APPLICATION
+    app_state: str = ""
     environment: dict[str, str] = field(default_factory=dict)
     app_running: bool = False
     app_detail: str = "inactive"
@@ -188,6 +240,7 @@ class FakeRobot:
     restart_succeeds: bool = True
     start_succeeds: bool = True
     stop_succeeds: bool = True
+    control_runs: bool = True
     control_stdout: str = ""
     metadata_stdout: str = ""
     journal_interrupts: bool = False
@@ -344,6 +397,7 @@ class FakeRemoteAccess:
                 stderr=f"{argv[0]}: this robot was told to refuse that",
             )
         for matches, handle in (
+            (_is_api, self._api),
             (_is_show, self._show),
             (_is_systemctl_verb, self._systemctl),
             (_is_cat, self._cat),
@@ -417,6 +471,10 @@ class FakeRemoteAccess:
             what a shell says about a path that is not there when it does not.
         """
         version = self.robot.interpreters.get(argv[0])
+        if self.robot.version_answers is not None:
+            if self.robot.version_answers <= 0:
+                version = None
+            self.robot.version_answers -= 1
         if version is None:
             return CommandOutcome(
                 command=line,
@@ -429,6 +487,110 @@ class FakeRemoteAccess:
             exit_status=0,
             stdout=f"Python {version}\n",
             stderr=self.robot.noisy_interpreters.get(argv[0], ""),
+        )
+
+    def _api(self, line: str, argv: list[str]) -> CommandOutcome:
+        """Answer a request to the daemon's own HTTP API.
+
+        The exit statuses are the contract, not the bodies: 7 says this robot
+        serves no such API and the client should try the other interface, 3
+        says the API answered and refused, and 0 says it answered.
+
+        Args:
+            line: The rendered command.
+            argv: Its arguments, ending in the method and the URL.
+
+        Returns:
+            What the request did.
+        """
+        method, url = argv[-2], argv[-1]
+        if not self.robot.daemon_api:
+            return CommandOutcome(
+                command=line,
+                exit_status=7,
+                stdout="",
+                stderr="[Errno 111] Connection refused",
+            )
+        if self.robot.api_refuses:
+            return CommandOutcome(
+                command=line,
+                exit_status=3,
+                stdout="",
+                stderr="503 Service Unavailable",
+            )
+        path = url.partition("://")[2].partition("/")[2]
+        if method == "GET" and path.endswith("current-app-status"):
+            return CommandOutcome(
+                command=line,
+                exit_status=0,
+                stdout=self.robot.api_stdout or self._app_status(),
+                stderr="",
+            )
+        if method == "POST" and "/start-app/" in path:
+            self.robot.current_app = path.rpartition("/start-app/")[2]
+            self.robot.app_running = self.robot.start_succeeds
+            self.robot.app_detail = (
+                "active" if self.robot.start_succeeds else "exited 1 on startup"
+            )
+            return self._api_verb(line)
+        if method == "POST" and path.endswith("stop-current-app"):
+            self.robot.app_running = not self.robot.stop_succeeds
+            self.robot.app_detail = (
+                "stopped by an operator"
+                if self.robot.stop_succeeds
+                else "still running after a stop"
+            )
+            return self._api_verb(line)
+        return CommandOutcome(
+            command=line,
+            exit_status=3,
+            stdout="",
+            stderr="404 Not Found",
+        )
+
+    def _api_verb(self, line: str) -> CommandOutcome:
+        """Answer a request that asked the daemon to do something.
+
+        Args:
+            line: The rendered command.
+
+        Returns:
+            What it did. A daemon that refused answers with an error STATUS,
+            which is not the same as having no API at all.
+        """
+        if not self.robot.control_succeeds:
+            return CommandOutcome(
+                command=line,
+                exit_status=3,
+                stdout="",
+                stderr="400 Bad Request",
+            )
+        return CommandOutcome(
+            command=line,
+            exit_status=0,
+            stdout=self._app_status(),
+            stderr="",
+        )
+
+    def _app_status(self) -> str:
+        """Render what the daemon's API says about the current application.
+
+        Returns:
+            The status document, or `null` when the daemon is running nothing
+            — which is what the real endpoint answers and is a different fact
+            from an application that is installed and stopped.
+        """
+        if not self.robot.app_running and not self.robot.app_state:
+            return "null"
+        state = self.robot.app_state or (
+            "running" if self.robot.app_running else "done"
+        )
+        return json.dumps(
+            {
+                "info": {"name": self.robot.current_app, "source_kind": "installed"},
+                "state": state,
+                "error": None,
+            },
         )
 
     def _show(self, line: str, argv: list[str]) -> CommandOutcome:
@@ -665,7 +827,8 @@ class FakeRemoteAccess:
             One entry per distribution asked about.
         """
         names = argv[3:]
-        found = {name: self.robot.packages.get(name, "") for name in names}
+        installed = self.robot.environments.get(argv[0], self.robot.packages)
+        found = {name: installed.get(name, "") for name in names}
         return CommandOutcome(
             command=line,
             exit_status=0,
@@ -683,6 +846,13 @@ class FakeRemoteAccess:
         Returns:
             What it did.
         """
+        if not self.robot.control_runs:
+            return CommandOutcome(
+                command=line,
+                exit_status=1,
+                stdout="",
+                stderr=f"{argv[0]}: No module named {argv[2]}.__main__",
+            )
         verb = argv[3]
         if verb == "start":
             self.robot.app_running = self.robot.start_succeeds
@@ -739,6 +909,20 @@ def _is_version(argv: list[str]) -> bool:
         which is the point of it.
     """
     return argv[1:] == ["-V"]
+
+
+def _is_api(argv: list[str]) -> bool:
+    """Say whether this is a request to the daemon's own HTTP API.
+
+    Args:
+        argv: The command.
+
+    Returns:
+        True when it is the client's request script, run through an
+        interpreter. Told apart from the metadata query by what the source
+        imports, which is what the two are actually distinguished by.
+    """
+    return len(argv) > 2 and argv[1] == "-c" and "urllib" in argv[2]
 
 
 def _is_show(argv: list[str]) -> bool:
