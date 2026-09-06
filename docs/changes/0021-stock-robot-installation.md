@@ -42,14 +42,23 @@ move.
 
 **The evidence is measured, not inferred.** A real Reachy Mini running
 ReachyMiniOS v0.2.3 with the released `reachy-mini` 1.9.0 was driven with a
-hand-installed satellite build. It tracked faces and streamed frames for the
-whole session and **never moved once**. Every motor group's command gate stayed
-shut because the daemon offers no correlated grouped-torque read-back, the
-controller reported a command fault, and safe hold stayed engaged. The absent
-switches were correct — that is what
+hand-installed satellite build. It tracked faces and streamed over 780 frames
+and **never moved once**. All three motor groups reported the same thing —
+acknowledgement absent, read-back unavailable, gate closed — the controller
+reported a command fault and safe hold stayed engaged for the whole session. The
+absent switches were correct: that is what
 [0020](./0020-home-assistant-configuration-and-camera-feed.md) says happens
-without the capability, and what `README.md` records — but the frozen robot was
-not, and nothing in that change's completion notes claims it should be.
+without the capability, and what `README.md` records. The frozen robot was not,
+and nothing in that change's completion notes claims it should be.
+
+**The application's diagnosis of itself was already right.** The daemon boundary
+detects the absent methods and produces an *unavailable* confirmation rather
+than a failed one, which is exactly the honest distinction. The defect is
+downstream of it: unavailable carries the same not-confirmed verdict a real
+failure carries, so the gate never opens and every motion command is rejected
+forever. Nothing here needs to detect anything the code does not already detect;
+what is missing is a consumer that acts on the difference. A daemon with no
+correlated-torque surface has nothing to gate, and gating it anyway is the bug.
 
 The same session produced the other two failures. A first-time configuration
 cannot be reached, because the announced identity has no default and its absence
@@ -108,10 +117,11 @@ perception, installation through the daemon's own path, and the two `reachyctl`
 properties. Their scenarios are this change's acceptance criteria and are not
 restated here. What implementing them requires of this change:
 
-- The first task MUST separate "this daemon cannot confirm torque" from "this
-  group's confirmation failed" at the daemon boundary, and select the mode once
-  per process rather than per command, so a broken confirmation cannot open the
-  gate that an absent capability opens.
+- The first task MUST act on the absent-versus-failed distinction the daemon
+  boundary already draws, rather than adding a second detection of it, and MUST
+  decide the mode once at composition rather than per group or per command, so
+  that a confirmation which ran and failed can never open the gate an absent
+  capability opens.
 - The first task MUST NOT weaken the serialization, quiescing, reseeding or
   terminal-release guarantees that
   [0020](./0020-home-assistant-configuration-and-camera-feed.md) delivered for
@@ -147,25 +157,43 @@ restated here. What implementing them requires of this change:
 
 #### Task 1 — graceful motor degradation
 
-The daemon boundary in `apps/ha-satellite` currently catches the absence of the
-confirmation methods and returns an `unavailable` confirmation, which every
-caller reads as a failed confirmation. Split that into a capability probe
-performed once where the boundary is constructed, and the per-request result it
-already returns. The probe's outcome selects the coordinator's mode for the
-process's lifetime.
+The daemon boundary in `apps/ha-satellite` already reports the absence of the
+confirmation methods as `MotorConfirmation.unavailable()`, distinct from the
+result a confirmation that ran and failed produces. That part is correct and
+stays. The problem is that `unavailable` carries `confirmed=False`, so every
+consumer treats "this daemon cannot confirm anything" exactly like "this group
+could not be confirmed": no gate opens, `ReachyMotion._command` returns False for
+every command, and `command_gaze` raises on a closed gate.
 
-The confirmed mode is the existing one and is not touched. The ungated mode
-keeps the coordinator — its per-group serialization is what stops two producers
-commanding the same hardware and is unrelated to torque — and holds the gate
-open, so `ReachyMotion` commands succeed and `command_gaze` no longer raises.
-Registration of the three switches stays exactly where it is: an unconfirmed
-group gets none, which is
+The recommended shape is to decide at composition rather than to teach each
+consumer the difference. `main.py` builds `MotorGroupCoordinator`
+unconditionally; probe the handle instead and build **no coordinator at all**
+when the correlated-torque surface is absent. `ReachyMotion._command` already has
+the `coordinator is None` branch that performs the action and returns True,
+which is exactly the ungated path the application had before 0020, so the
+degraded mode is an existing code path rather than a new one.
+
+**The probe cannot be a `hasattr` against `_ConfirmedRobotHandle`,** which
+always defines all three methods; it has to answer for the object that wrapper
+wraps. Whatever it exposes belongs on the `RobotHandle` protocol in
+`adapters/daemon.py`, with the fakes updated to match, so the two modes are
+reachable from tests without hardware.
+
+The confirmed mode is untouched, and registration of the three switches stays
+exactly where it is: an unconfirmed group gets none, which is
 [REQ-093](../specs/home-assistant-configuration-and-camera-feed/index.md#req-093-home-assistant-configuration-reports-effective-state)'s
-contract and not this change's to restate or relax.
+contract and not this change's to restate or relax. With no coordinator there is
+no group to register, and the result is the same absence.
 
-The mode goes into the bounded, identifier-free motor diagnostics that change
-already publishes, as one static field beside the per-group records, and into
-the health surface the settings interface reads.
+The mode in force goes into `/status` and the health surface the settings page
+reads, beside the bounded identifier-free motor diagnostics 0020 already
+publishes, so an operator sees the degradation rather than inferring it from
+motion that silently works.
+
+This shape is a recommendation and not a mandate. If the code argues for
+something else — a coordinator that is constructed but ungated, say, because
+some producer depends on its serialization — take the other route and say why in
+the pull request.
 
 #### Task 2 — browser-reachable bootstrap configuration
 
@@ -223,16 +251,18 @@ and flips this document's Status.
 
 ### Decisions
 
-- **Decision:** Detect the daemon's confirmation capability once and degrade to
-  ungated motion, rather than treating an absent capability as a failed
-  confirmation.
-  - **Why:** The two are different facts and only one of them is a reason to
-    stop moving. Collapsing them made a robot that cannot confirm torque a robot
-    that cannot move, which is a strictly worse outcome than the ungated motion
-    every build before the confirmed path shipped already performed.
+- **Decision:** Act on the absent-capability result the daemon boundary already
+  produces by choosing the mode once at composition, rather than by teaching
+  each consumer to read it.
+  - **Why:** The distinction between an unavailable capability and a failed
+    confirmation exists and is correct; only the consequence is missing. A
+    process-lifetime decision has one place to be wrong and one place to be
+    tested, whereas a per-call check would have to be repeated at every gate and
+    would leave the two modes interleaved in one code path.
   - **Alternatives considered:** Keeping the refusal and requiring the forked
     daemon on every robot; a configuration flag to disable the gate; treating
-    any confirmation failure, including a real one, as licence to open the gate.
+    any confirmation failure, including a real one, as licence to open the gate;
+    reading the unavailable result at each gate site.
 - **Decision:** Keep the motor switches absent in the ungated mode.
   - **Why:** A switch whose state nothing can confirm is the optimistic state
     0020 refused to ship, and the operator's decision there has not changed.
@@ -297,10 +327,12 @@ and flips this document's Status.
   has been standing still since the confirmed path shipped will start moving
   when this lands. That is the intent, and the staged verification below brings
   it up one group at a time with an abort path rather than all at once.
-- **The confirmed path must stay exactly as it is.** The degradation is
-  selected by a capability probe, so a bug in the probe is a bug that silently
-  disables the safety contract on a robot that has it. The acceptance matrix
-  drives both modes and the capability-present-but-failing case explicitly.
+- **The confirmed path must stay exactly as it is.** One probe at composition
+  decides which mode a whole process runs in, so a probe that answers wrongly —
+  the obvious way being to interrogate the wrapper instead of the handle it
+  wraps — silently disables the safety contract on a robot that has it. The
+  acceptance matrix drives both modes and the capability-present-but-failing
+  case explicitly.
 - **A second daemon may already have been started on a robot under diagnosis.**
   An operator who has run the current `deploy` or `doctor` against a stock robot
   may have an orphaned process or a wedged device. The runbook says how to check
@@ -318,18 +350,20 @@ waiting on work that does not exist.
 
 - [ ] Task 1 — Degrade to ungated motion on a daemon without torque
       confirmation (`apps/ha-satellite`)
-  - [ ] Probe the daemon's grouped-torque confirmation capability once where the
-        daemon boundary is constructed, and distinguish its absence from a
-        confirmation that ran and failed
-  - [ ] Select the coordinator's mode from that probe for the process's
-        lifetime, keeping per-group serialization in both modes and holding the
-        command gate open only in the ungated one
+  - [ ] Expose the wrapped handle's correlated-torque surface on the
+        `RobotHandle` protocol in `adapters/daemon.py` and update the fakes, so
+        the probe answers for the object `_ConfirmedRobotHandle` wraps rather
+        than for the wrapper, which always defines all three methods
+  - [ ] Probe it once at composition in `main.py` and build no coordinator when
+        the surface is absent, taking the existing ungated command path rather
+        than adding a second one; deviate from this shape only with a reason
+        stated in the pull request
   - [ ] Leave the confirmed path's gating, quiescing, reseeding, ownership and
         terminal-release behaviour unchanged, and leave switch registration
         governed by the unconfirmed-group contract it already has
-  - [ ] Report the mode in force and the reason for it on the bounded
-        identifier-free motor diagnostics and the health surface, with no
-        credential or installation identifier
+  - [ ] Report the mode in force and the reason for it in `/status` and on the
+        settings page's health surface, beside the bounded identifier-free motor
+        diagnostics, with no credential or installation identifier
   - [ ] Cover both modes, a present-but-failing capability, a partially
         answering capability, motion under the ungated mode, the absence of
         switches under it, and shutdown and safe-hold behaviour in both, with

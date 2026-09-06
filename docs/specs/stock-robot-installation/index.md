@@ -32,11 +32,16 @@ daemon to correlate each grouped torque request with an acknowledgement and a
 physical read-back, which is the confirmation
 [REQ-093](../home-assistant-configuration-and-camera-feed/index.md#req-093-home-assistant-configuration-reports-effective-state)
 requires before it will announce a motor switch. No released daemon offers it.
-The absent capability presents as a failed confirmation, every group's command
-gate stays shut, and the satellite tracks a face and streams frames while never
-moving at all. The missing switches are the correct outcome; the frozen robot is
-not. Absent and failed are different facts about a daemon, and only one of them
-is a reason to stop moving.
+
+The application already notices that honestly: a daemon with no such surface
+produces a confirmation marked *unavailable*, which is a different value from
+the one a confirmation that ran and failed produces. The distinction is drawn
+and it is correct. What is missing is the consequence — an unavailable
+confirmation is still not a confirmation, so every group's command gate stays
+shut, every motion command is rejected, and the satellite tracks a face and
+streams frames while never moving at all. The missing switches are the correct
+outcome; the frozen robot is not. A daemon that cannot report torque has nothing
+to gate, and gating it anyway is what stops the robot.
 
 **There is no first-time configuration path.** The announced Home Assistant
 identity has no default, deliberately, because a derived default is silently
@@ -75,8 +80,8 @@ health as broken, and the thing it was diagnosing was itself.
 ### REQ-099: Motion survives a daemon without torque confirmation
 
 The satellite MUST command motion on a robot whose daemon offers no correlated
-grouped-torque confirmation capability at all, operating the affected motor
-groups ungated rather than refusing every motion command.
+grouped-torque confirmation capability, treating that absence as nothing to gate
+rather than as a motor group whose torque state could not be confirmed.
 
 #### Scenario: A stock robot tracks a face
 
@@ -274,27 +279,31 @@ deploying.
 
 ## Design
 
-### Two facts about a daemon, not one
+### Acting on a distinction that is already drawn
 
-The application's daemon boundary answers two separate questions: whether the
-robot's daemon offers grouped-torque confirmation at all, and what a particular
-confirmation attempt returned. Today the first collapses into the second — an
-absent method is caught and reported as a failed confirmation — and every
-downstream decision then reads "this group could not be confirmed" when the
-truth is "this daemon cannot confirm anything".
+The application's daemon boundary answers two separate questions and already
+answers them separately: whether the robot's daemon offers grouped-torque
+confirmation at all, and what a particular confirmation attempt returned. An
+absent surface produces an *unavailable* result rather than a failed one, so the
+fact REQ-099 turns on is present in the process and correct.
 
-Separating them is the whole of REQ-099. Capability detection happens once,
-where the boundary is built, and its result selects between two modes for the
-process's lifetime. The confirmed mode is the one that exists today and nothing
-about it changes. The ungated mode issues the same motion commands with the gate
-held open, keeps the coordinator's serialization so two producers still cannot
-command a group at once, and registers no motor switch — which is what the
-unconfirmed-group half of REQ-093 already requires and is not restated here.
+What no consumer does is act on it. Unavailable and failed both mean "not
+confirmed", and "not confirmed" closes the gate, so a daemon that was never
+capable of confirming anything is treated exactly like a group whose
+confirmation went wrong. REQ-099 is that consequence and nothing more: where the
+capability is absent there is no torque state to protect and no gate worth
+holding, so the satellite commands motion.
 
-A capability that is present and answers badly is a failed confirmation, not an
-absent capability. That is the third scenario, and it is the one that keeps the
-degradation from becoming a way to switch the safety contract off by breaking
-something.
+The decision belongs at composition, once per process, rather than per group or
+per command. Two modes follow from it. The confirmed mode is the one that exists
+today and nothing about it changes. The ungated mode is the command path the
+application had before confirmation existed at all — motion issued directly,
+with no gate and no motor switch, which is what the unconfirmed-group half of
+REQ-093 already requires and is not restated here.
+
+A capability that is present and answers badly stays a failed confirmation. That
+is the third scenario, and it is what keeps the degradation from becoming a way
+to switch the safety contract off by breaking something.
 
 ### Saying which mode is in force
 
