@@ -19,7 +19,8 @@ in it, and it is decided without a robot.
 
 **A path becomes a candidate only when something other than hope says it is an
 interpreter.** The unit's start program qualifies on its *name* — `python`,
-`python3`, `python3.12` — and never on the bare fact that the unit starts it,
+`python3` or `python3.12`, and nothing else — and never on the bare fact that
+the unit starts it,
 because that is precisely the assumption that produced the second daemon.
 Everything else is derived from something that identifies an *environment*: the
 `VIRTUAL_ENV` the unit declares, or the `bin` beside the
@@ -89,13 +90,17 @@ __all__ = [
     "names_an_interpreter",
 ]
 
-# What CPython installs its own executables as: `python`, `python3`,
-# `python3.12`. Anchored at both ends, so `python-config`, `pythonize` and a
-# launcher some image called `python-daemon.sh` are all outside it. This is a
-# gate on what may be EXECUTED at all, so it is deliberately narrow: a real
-# interpreter under an unusual name costs an operator one `--python`, and a
-# wrapper admitted under a loose pattern costs them a second daemon.
-_INTERPRETER_NAME: Final = re.compile(r"\Apython\d*(?:\.\d+)*\Z")
+# The name `python`, optionally followed by a version number of at most a major
+# and a minor part, and nothing else at all. That is exactly the set CPython
+# installs its own executables under — `python`, `python3`, `python3.12` — and
+# the pattern is anchored at both ends so a suffix cannot widen it:
+# `python-config`, `pythonize`, `python3.12.1` and a launcher some image called
+# `python-daemon.sh` are all outside it. This is a gate on what may be EXECUTED
+# at all, so it is deliberately narrow, and it is narrow in the direction that
+# is safe: a real interpreter under a name CPython never gives one costs an
+# operator a link named `python`, and a wrapper admitted under a loose pattern
+# costs them a second daemon.
+_INTERPRETER_NAME: Final = re.compile(r"\Apython(?:\d+(?:\.\d+)?)?\Z")
 
 # `<prefix>/lib/python3.12/site-packages/<package>/...`, which is where an
 # installed distribution's own files live. The prefix is the environment's root,

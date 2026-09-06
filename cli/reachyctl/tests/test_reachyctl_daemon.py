@@ -239,7 +239,13 @@ async def test_an_environment_with_no_interpreter_in_it_is_named_not_guessed_at(
 
 @pytest.mark.parametrize(
     "answer",
-    ["", "3.12.3 — wrapper usage: --help for options", "3.12.3\nstarting daemon"],
+    [
+        "",
+        "3",
+        "3.12",
+        "3.12.3 — wrapper usage: --help for options",
+        "3.12.3\nstarting daemon",
+    ],
 )
 @pytest.mark.asyncio
 async def test_a_program_that_says_one_word_more_than_a_version_is_not_one(
@@ -247,9 +253,11 @@ async def test_a_program_that_says_one_word_more_than_a_version_is_not_one(
 ) -> None:
     """The probe establishes what everything after it assumes, so it cannot be lax.
 
-    `-V` makes CPython print a version and nothing else, so anything that
-    prints more is something else — a banner, a wrapper's usage line, a
-    launcher announcing what it is about to start. Admitting one would hand it
+    `-V` makes CPython print a complete version and nothing else, so anything
+    that prints more is something else — a banner, a wrapper's usage line, a
+    launcher announcing what it is about to start — and anything that prints
+    LESS is something else too. `Python 3` is eight characters a wrapper can
+    emit by accident, and admitting it would hand that wrapper
     `-c '<python source>'` next. The next candidate is tried instead, which
     here is the environment the launcher is installed in.
 
@@ -334,7 +342,7 @@ async def test_a_configured_path_that_is_not_an_interpreter_is_refused() -> None
 
 
 @pytest.mark.asyncio
-async def test_a_configured_path_named_as_no_interpreter_is_says_why_it_was_refused() -> (
+async def test_a_configured_path_no_interpreter_is_named_says_why_it_was_refused() -> (
     None
 ):
     """An operator whose own answer was refused must not have to guess at it."""
@@ -1118,3 +1126,25 @@ async def test_an_environment_that_changed_under_the_client_is_named() -> None:
 
     assert "runs applications from" in str(raised.value)
     assert "--python" in str(raised.value)
+
+
+@pytest.mark.parametrize("version", ["3.12.3", "3.13.0rc1"])
+@pytest.mark.asyncio
+async def test_a_complete_version_is_accepted_including_a_pre_release(
+    version: str,
+) -> None:
+    """The pattern is the shape `-V` produces, and a pre-release is one of them.
+
+    Narrower than what CPython prints would refuse a real interpreter, which
+    costs an operator a `--python` for no safety at all.
+
+    Args:
+        version: What the interpreter answers with.
+    """
+    robot = FakeRobot(
+        exec_start=STOCK_LAUNCHER,
+        interpreters={STOCK_INTERPRETER: version},
+    )
+    daemon, _access = daemon_for(robot)
+
+    assert await daemon.interpreter() == STOCK_INTERPRETER

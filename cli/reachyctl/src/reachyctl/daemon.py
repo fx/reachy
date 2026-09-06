@@ -21,8 +21,8 @@ the same configured path would agree with itself no matter which environment the
 daemon was really using, which is the shape of the original failure rather than
 a check on it.
 
-**The unit's start program is not that interpreter, and assuming it was started
-a second daemon.** On ReachyMiniOS v0.2.3 the unit starts a shell launcher out
+**The unit's start program is not that interpreter, and assuming it was one
+started a second daemon.** On ReachyMiniOS v0.2.3 the unit starts a shell launcher out
 of the daemon's own virtual environment; an earlier version of this module read
 that path as an interpreter and ran it with `-c '<python source>'`, which
 launched a second daemon that contended with the first for its network port, its
@@ -164,19 +164,25 @@ _EXEC_PATH: Final = re.compile(r"path=(\S+)")
 # resolution is that nothing unproven is handed a program to run, and `-V` asks
 # a question no interpreter can misread and no launcher is given the chance to.
 #
-# The answer has to be the WHOLE of what came back, on ONE stream, matched as a
-# real version. This step is the one that ESTABLISHES what everything after it
-# assumes, so it has to be something a program cannot pass by accident, and each
-# weaker form leaves a gap the next one has to close: the exit status alone
+# The answer has to be the WHOLE of what came back, on ONE stream, and a
+# COMPLETE version. This step is the one that ESTABLISHES what everything after
+# it assumes, so it has to be something a program cannot pass by accident, and
+# each weaker form leaves a gap the next one has to close: the exit status alone
 # admits anything that exits zero, the word alone admits a banner, a
 # version-shaped PREFIX admits `Python 3.12.3 - wrapper usage: ...`, whichever
 # stream happens to be non-empty admits a program that prints the version on one
-# and announces itself on the other, and a CONCATENATION of the two admits a
-# version split across them. Stating the property exactly — `-V` makes CPython
-# write one bare version to one stream and nothing at all to the other — ends
-# that sequence rather than tightening it again.
+# and announces itself on the other, a CONCATENATION of the two admits a version
+# split across them, and an OPTIONAL minor and patch admit the eight characters
+# `Python 3`, which any wrapper can print by accident.
+#
+# So the pattern is the shape `-V` actually produces and nothing else: major,
+# minor and patch, and the release-level suffix CPython appends to a
+# pre-release — `Python 3.12.3`, `Python 3.13.0rc1`. Anything an interpreter
+# would not print is refused, and refusal is safe: the next candidate is tried,
+# and a robot where none answers gets a named error rather than a program handed
+# Python source on the strength of two characters.
 _VERSION_FLAG: Final = "-V"
-_VERSION_ANSWER: Final = re.compile(r"Python \d+(?:\.\d+)*")
+_VERSION_ANSWER: Final = re.compile(r"Python \d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?")
 
 # systemd's own spelling for "this unit is running".
 _ACTIVE: Final = "active"

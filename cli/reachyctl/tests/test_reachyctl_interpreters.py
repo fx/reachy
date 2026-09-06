@@ -42,11 +42,15 @@ INTERPRETER: Final = "/venvs/mini_daemon/bin/python"
         "/usr/bin/python",
         "/usr/bin/python3",
         "/venvs/mini_daemon/bin/python3.12",
-        "/opt/reachy/venv/bin/python3.12.1",
+        "/opt/reachy/venv/bin/python2.7",
     ],
 )
 def test_a_name_cpython_gives_an_interpreter_is_one(path: str) -> None:
-    """These are the names an interpreter is installed under.
+    """These are the names CPython installs its own executables under.
+
+    `python`, `python3` and a major.minor pair, and that is the whole set — a
+    patch-versioned executable is not something CPython ships, so it belongs in
+    the refused list below rather than here.
 
     Args:
         path: A path whose file name claims to be one.
@@ -62,6 +66,7 @@ def test_a_name_cpython_gives_an_interpreter_is_one(path: str) -> None:
         "/venvs/mini_daemon/bin/pythonish",
         "/venvs/mini_daemon/bin/reachy-mini-daemon",
         "/usr/local/bin/python.sh",
+        "/opt/reachy/venv/bin/python3.12.1",
         "",
     ],
 )
