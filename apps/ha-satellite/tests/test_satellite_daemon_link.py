@@ -66,9 +66,11 @@ from reachy_mini_ha_satellite.config import (
     load_settings,
 )
 from reachy_mini_ha_satellite.daemon_link import (
+    COUNTER_LIMIT,
     DaemonLink,
     DaemonLinkState,
     attempt_daemon_call,
+    report_daemon_call,
 )
 from reachy_mini_ha_satellite.main import (
     SatelliteApplication,
@@ -78,6 +80,7 @@ from reachy_mini_ha_satellite.main import (
 from reachy_mini_ha_satellite.motor_control import (
     MotionGatingMode,
     MotorGroup,
+    MotorGroupCoordinator,
     TorqueConfirmationSupport,
 )
 from reachy_mini_ha_satellite.ports import (
@@ -296,6 +299,25 @@ class TestTheLinkRecordKeepsTheTwoConditionsApart:
         assert report["state"] in {state.value for state in DaemonLinkState}
         assert all(isinstance(report[key], int) for key in ("outages", "refused_calls"))
 
+    def test_both_counts_saturate_rather_than_growing_with_uptime(self) -> None:
+        """A robot commanding at twenty hertz must not grow the `/status` payload.
+
+        Driven past the limit rather than to it, because what is pinned is that
+        the number *stops* — a counter tested only at its cap passes just as
+        well while still rising underneath.
+        """
+        link = DaemonLink()
+
+        for _refusal in range(COUNTER_LIMIT + 5):
+            link.record_failure()
+            link.record_success()
+
+        assert link.status() == {
+            "state": "up",
+            "outages": COUNTER_LIMIT,
+            "refused_calls": COUNTER_LIMIT,
+        }
+
 
 class TestOnlyALinkFaultIsSwallowed:
     """Widening the catch to everything is the mistake this replaces."""
@@ -329,6 +351,29 @@ class TestOnlyALinkFaultIsSwallowed:
 
         with pytest.raises(ValueError, match="4x4"):
             attempt_daemon_call(link, _reject)
+        assert not link.down
+
+    def test_the_reporting_helper_records_and_then_re_raises(self) -> None:
+        """For a caller whose own failure path has to run — a lifecycle phase.
+
+        The record is the point: without it the coordinator turns the refusal
+        into `MotorConfirmation.failed()` and `/status` goes on saying the
+        daemon is answering while it refuses everything.
+        """
+        link = DaemonLink()
+
+        def _refuse() -> None:
+            raise ConnectionError(LOST_LINK_MESSAGE)
+
+        with pytest.raises(ConnectionError):
+            report_daemon_call(link, _refuse)
+        assert link.down
+
+    def test_the_reporting_helper_returns_what_the_call_returned(self) -> None:
+        """It stands in for the call rather than wrapping its result."""
+        link = DaemonLink()
+
+        assert report_daemon_call(link, lambda: 7) == 7
         assert not link.down
 
 
@@ -564,6 +609,25 @@ class TestAcquisitionAndReleaseSurviveIt:
             motion.acquire(0.0)
         assert not link.down
 
+    def test_a_released_adapter_probes_nothing(self) -> None:
+        """The probe sits inside `observe`, and release short-circuits it.
+
+        REQ-050 says a released port stops commanding movement, and a liveness
+        write is a command: a tick still in flight when the daemon asks for
+        shutdown must not reach the robot with one.
+        """
+        robot = FakeRobot(link_down=True)
+        link = DaemonLink()
+        motion = _acquired(robot, link)
+        motion.release()
+        robot.link_down = False
+        before = len(robot.automatic_body_yaw)
+
+        measurement = motion.observe(1.0)
+
+        assert measurement.head_fault is MotionFault.RELEASED
+        assert len(robot.automatic_body_yaw) == before
+
     def test_releasing_over_a_dead_link_does_not_raise(self) -> None:
         """Shutdown hands the policy back, and cannot when nothing is listening."""
         robot = FakeRobot()
@@ -662,6 +726,50 @@ class TestTheGatedPathSurvivesALostLink:
         result = motion.command_gaze(_sample())
 
         assert result.status is MotionCommandStatus.ACCEPTED
+
+    @pytest.mark.asyncio
+    async def test_a_refused_torque_read_is_a_failed_group_and_a_down_link(
+        self,
+    ) -> None:
+        """The gated path's own daemon calls, which the motion adapter never sees.
+
+        `MotorGroupCoordinator._set`/`_read` turn every exception into
+        `MotorConfirmation.failed()`, and that must keep happening — a gate
+        opened over torque nobody confirmed is the safety contract gone. What
+        would otherwise be lost is *why*: the group closes, the application
+        lives, and nothing anywhere says the daemon refused to answer.
+        """
+        robot = FakeRobot(link_down=True)
+        link = DaemonLink()
+        coordinator = MotorGroupCoordinator(robot, clock=ManualClock(), link=link)
+        try:
+            registered = await coordinator.initialize()
+
+            assert registered == ()
+            assert not any(coordinator.gate_open(group) for group in MotorGroup)
+            assert link.down
+        finally:
+            await asyncio.wait_for(
+                coordinator.aclose(),
+                timeout=_DRAIN_TIMEOUT_SECONDS,
+            )
+
+    @pytest.mark.asyncio
+    async def test_a_confirming_daemon_reports_the_link_as_up(self) -> None:
+        """The same calls are what mark it back up on the gated path."""
+        robot = FakeRobot()
+        link = DaemonLink()
+        link.record_failure()
+        coordinator = MotorGroupCoordinator(robot, clock=ManualClock(), link=link)
+        try:
+            await coordinator.initialize()
+
+            assert link.state is DaemonLinkState.UP
+        finally:
+            await asyncio.wait_for(
+                coordinator.aclose(),
+                timeout=_DRAIN_TIMEOUT_SECONDS,
+            )
 
     @pytest.mark.asyncio
     async def test_a_closed_gate_is_still_reported_as_the_command(self) -> None:
@@ -872,8 +980,13 @@ class TestTheSurfacesReportIt:
         )
 
         assert "The link to the robot daemon is <strong>down</strong>" in page
-        assert "The application is still running" in page
+        assert "<strong>The application is still running</strong>" in page
         assert "restart the daemon" in page
+        # The qualification is the part an operator acts on: without it the page
+        # promises a state that refreshes by itself, and on a robot with face
+        # tracking off it does not until something moves the robot.
+        assert "with face tracking on it re-checks every tick" in page
+        assert "can stay showing an outage that has already ended" in page
 
     def test_the_page_says_nothing_while_the_daemon_answers(self) -> None:
         """A standing warning is a warning an operator stops reading."""

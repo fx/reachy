@@ -451,13 +451,16 @@ def _daemon_link_note(status: Mapping[str, object]) -> str:
         return ""
     return (
         '<div class="note hazard">The link to the robot daemon is '
-        "<strong>down</strong>. Commands this application sends are not "
-        "reaching the motors, so the robot will not move and will not wake, "
-        "however this page is configured. <strong>The application is still "
-        "running</strong> and keeps trying: it starts commanding again by "
-        "itself the moment the daemon answers, and there is nothing to do here."
-        " If it does not come back, restart the daemon's own service on the "
-        "robot — the application does not need reinstalling or restarting.</div>"
+        "<strong>down</strong>: the last command this application sent was "
+        "refused, so nothing it asks for is reaching the motors and the robot "
+        "will not move, however this page is configured. <strong>The "
+        "application is still running</strong> and needs no restart — it "
+        "commands the daemon again on its own and this goes back to "
+        "<code>up</code> as soon as one lands. How soon depends on what the "
+        "robot is doing: with face tracking on it re-checks every tick, and "
+        "with tracking off it finds out at the next thing that moves the robot, "
+        "so this can stay showing an outage that has already ended. If it does "
+        "not come back, restart the daemon's own service on the robot.</div>"
     )
 
 

@@ -37,16 +37,30 @@ application to do but keep trying. A socket that is actually closed never
 recovers, and the robot needs its daemon restarted.
 
 Those two look identical from here, which is why nothing in this module tries to
-tell them apart. The application keeps commanding, the first command the daemon
-carries marks the link up again, and the surface says which of the two states is
-in force so that an operator can decide whether to restart the daemon.
+tell them apart. The first command the daemon carries marks the link up again,
+and the surface says which of the two states is in force so that an operator can
+decide whether to restart the daemon.
+
+**How soon that happens depends on what the robot is doing, and the surfaces say
+so rather than promising otherwise.** With gaze acquired — face tracking on —
+the motion adapter re-asserts its daemon ownership on every behaviour tick while
+the link is down, so recovery is noticed within a tick. With gaze off there is
+nothing this application may send that would not change the robot's behaviour to
+ask a question, so nothing probes: the state is what the last command observed,
+and it returns to `up` at the next thing that moves the robot — a voice-pipeline
+antenna or head move. Neither case needs a person, and neither case is the
+application giving up.
 
 ## What is reported
 
 `DaemonLink.status()` is three bounded values — a state, a count of outages and
-a count of refused calls. No address, no credential, no identifier, nothing that
-grows with how long the robot has been running, which is the same bound the
-controller diagnostics are held to.
+a count of refused calls. No address, no credential, no identifier. The two
+counts saturate at `COUNTER_LIMIT` rather than rising for the life of the
+process, because a robot commanding at twenty hertz against a dead daemon would
+otherwise grow the `/status` payload for as long as the outage lasts, and this
+repository's diagnostics carry nothing that grows with uptime. A count sitting at
+the limit reads "at least this many", which is the only thing an operator does
+with it.
 """
 
 from __future__ import annotations
@@ -60,13 +74,20 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 __all__ = [
+    "COUNTER_LIMIT",
     "DAEMON_LINK_ERRORS",
     "DaemonLink",
     "DaemonLinkState",
     "attempt_daemon_call",
+    "report_daemon_call",
 ]
 
 _LOGGER: Final = logging.getLogger(__name__)
+
+#: Where the two reported counts stop. Four digits is more than an operator
+#: reads and small enough that the payload cannot grow with uptime; a count at
+#: the limit means "at least this many", which is all either is used for.
+COUNTER_LIMIT: Final = 9999
 
 # What "the daemon did not take this command" is spelled as at the SDK boundary.
 #
@@ -159,11 +180,11 @@ class DaemonLink:
             the daemon's own journal.
         """
         with self._lock:
-            self._refused_calls += 1
+            self._refused_calls = min(self._refused_calls + 1, COUNTER_LIMIT)
             lost = self._state is DaemonLinkState.UP
             self._state = DaemonLinkState.DOWN
             if lost:
-                self._outages += 1
+                self._outages = min(self._outages + 1, COUNTER_LIMIT)
         if lost:
             _LOGGER.error(
                 "satellite.daemon_link lost; the application stays up and keeps "
@@ -176,9 +197,10 @@ class DaemonLink:
 
         Returns:
             The state, how many separate outages there have been, and how many
-            individual calls were refused across all of them. Three bounded
-            values naming nothing installed: no address, no credential, no
-            identity.
+            individual calls were refused across all of them — the two counts
+            saturating at `COUNTER_LIMIT`, so this payload has a fixed maximum
+            size however long the robot runs. Three bounded values naming
+            nothing installed: no address, no credential, no identity.
         """
         with self._lock:
             return {
@@ -191,11 +213,10 @@ class DaemonLink:
 def attempt_daemon_call(link: DaemonLink, call: Callable[[], None]) -> bool:
     """Make one daemon call, reporting the link rather than raising when it is down.
 
-    The one place the `except` clause is written, so that "which exceptions mean
-    the link" is answered once for the wake sequence, the motion adapter's
-    command path and its daemon-ownership writes alike. Anything that is not a
-    link fault propagates untouched: a bad pose is still a bad pose and the
-    caller still has to deal with it.
+    For a caller whose contract is that it does not die: the behaviour loop, the
+    controlled wake, and the shutdown that hands the daemon its policy back.
+    Anything that is not a link fault propagates untouched — a bad pose is still
+    a bad pose and the caller still has to deal with it.
 
     Args:
         link: What to record the outcome on.
@@ -211,3 +232,40 @@ def attempt_daemon_call(link: DaemonLink, call: Callable[[], None]) -> bool:
         return False
     link.record_success()
     return True
+
+
+def report_daemon_call[ResultT](
+    link: DaemonLink,
+    call: Callable[[], ResultT],
+) -> ResultT:
+    """Make one daemon call, recording the link and letting every failure through.
+
+    The other half of the pair, for a caller that **already has a containing
+    failure path and needs it to run**: a motor-group lifecycle phase whose
+    refusal closes that group's gate, and the coordinator's own confirmed-torque
+    calls, which turn any exception into `MotorConfirmation.failed()`. Swallowing
+    a link fault there would open a gate over torque nobody confirmed, so this
+    records and re-raises rather than deciding for the caller.
+
+    Both helpers exist because the two contracts are genuinely different, and
+    having one would mean the difference living at each call site. What they
+    share is `DAEMON_LINK_ERRORS`: "which exceptions mean the link" is answered
+    in exactly one place.
+
+    Args:
+        link: What to record the outcome on.
+        call: The daemon call to make.
+
+    Returns:
+        Whatever the call returned.
+
+    Raises:
+        BaseException: Whatever the call raised, link faults included.
+    """
+    try:
+        result = call()
+    except DAEMON_LINK_ERRORS:
+        link.record_failure()
+        raise
+    link.record_success()
+    return result

@@ -35,6 +35,7 @@ from reachy_mini_ha_satellite.daemon_link import (
     DAEMON_LINK_ERRORS,
     DaemonLink,
     attempt_daemon_call,
+    report_daemon_call,
 )
 from reachy_mini_ha_satellite.motion_validation import SampleFault, validate_gaze_sample
 from reachy_mini_ha_satellite.motor_control import (
@@ -952,13 +953,22 @@ class ReachyMotion:
         return _ReachyMotionLifecycle(self, group, clock, finalize)
 
     def _sample_reseed(self, group: MotorGroup, now: float) -> _MotionReseedSample:
-        """Read and validate hardware without mutating loop-owned adapter state."""
+        """Read and validate hardware without mutating loop-owned adapter state.
+
+        Both reads report on the link and neither swallows anything:
+        a reseed that did not happen must still fail its lifecycle phase, which
+        is what closes the group's gate rather than opening it over measured
+        state nobody has.
+        """
         pose: np.ndarray | None = None
         head: HeadMeasurement | None = None
         body: BodyMeasurement | None = None
         antennas: AntennaPose | None = None
         if group in {MotorGroup.HEAD, MotorGroup.BODY}:
-            measured_pose = self._handle.get_current_head_pose()
+            measured_pose = report_daemon_call(
+                self._link,
+                self._handle.get_current_head_pose,
+            )
             pose = project_measured_pose(measured_pose)
             pose.setflags(write=False)
             world_yaw, world_elevation = _direction_angles(pose[:3, :3])
@@ -966,12 +976,18 @@ class ReachyMotion:
         if group is MotorGroup.BODY or (
             group is MotorGroup.HEAD and self._config.body_enabled
         ):
-            head_joints, _antenna_joints = self._handle.get_current_joint_positions()
+            head_joints, _antenna_joints = report_daemon_call(
+                self._link,
+                self._handle.get_current_joint_positions,
+            )
             if len(head_joints) != 7 or not math.isfinite(float(head_joints[0])):
                 raise ValueError("body reseed requires one complete finite joint read")
             body = BodyMeasurement(float(head_joints[0]), now)
         if group is MotorGroup.ANTENNAS:
-            _head_joints, antenna_joints = self._handle.get_current_joint_positions()
+            _head_joints, antenna_joints = report_daemon_call(
+                self._link,
+                self._handle.get_current_joint_positions,
+            )
             if len(antenna_joints) != 2 or not all(
                 math.isfinite(float(value)) for value in antenna_joints
             ):
@@ -1048,7 +1064,10 @@ class ReachyMotion:
                 return False
         restored = False
         try:
-            self._handle.set_automatic_body_yaw(automatic_yaw)
+            report_daemon_call(
+                self._link,
+                lambda: self._handle.set_automatic_body_yaw(automatic_yaw),
+            )
             with self._state_lock:
                 restored = (
                     not self._release_requested()
@@ -1059,8 +1078,17 @@ class ReachyMotion:
             # a call that raised included: the daemon may have adopted the write
             # before it failed, and this is the last thread that knows the write
             # was attempted at all.
+            #
+            # `attempt_daemon_call` here and `report_daemon_call` above, which is
+            # not an inconsistency. The write above has a caller that acts on its
+            # failure; this one is in a `finally` reached because something
+            # already went wrong, and a link fault raised out of it would replace
+            # that reason with this one. It is recorded and stepped over instead.
             if not restored and automatic_yaw:
-                self._handle.set_automatic_body_yaw(False)
+                attempt_daemon_call(
+                    self._link,
+                    lambda: self._handle.set_automatic_body_yaw(False),
+                )
         return restored
 
     def _commit_restore(
@@ -1160,7 +1188,13 @@ class _ReachyMotionLifecycle(MotorGroupLifecycle):
         if self._group is not MotorGroup.BODY:
             return None
         snapshot = self._motion._begin_lifecycle()
-        self._motion._handle.set_automatic_body_yaw(False)
+        # Recorded and re-raised: the coordinator closes this group on a failed
+        # prepare, and that has to keep happening — quiescing the daemon's own
+        # body producer is the precondition for owning the body at all.
+        report_daemon_call(
+            self._motion._link,
+            lambda: self._motion._handle.set_automatic_body_yaw(False),
+        )
         return snapshot
 
     def prepare_loop(self, prepared: object) -> None:

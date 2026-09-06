@@ -2540,7 +2540,9 @@ async def build_application(
     # group with its gate shut.
     gating = MotionGating.decide(handle.torque_confirmation_support())
     motor_groups = (
-        MotorGroupCoordinator(handle, clock=time.monotonic) if gating.gated else None
+        MotorGroupCoordinator(handle, clock=time.monotonic, link=daemon_link)
+        if gating.gated
+        else None
     )
     _LOGGER.info(
         "satellite.motion gating=%s reason=%s",

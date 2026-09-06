@@ -191,18 +191,33 @@ deployment can get irreversibly wrong.
   boundary. **Do not widen an `except` tuple to swallow `ConnectionError`**: a
   command the gate refused and a command the daemon never heard are different
   answers, and the second one means nothing is moving and nothing later will.
-  Every daemon command in `adapters/motion_reachy.py` goes through `_command`,
-  which is the only place the fault is observed on either gating mode and which
-  catches it *inside* the coordinator's reservation so the gate is left
-  consistent. `reachy-mini-ha-app.service` is `Type=oneshot`, so an application
-  that exits stays exited and the robot is silent until a person intervenes —
-  which is why the wake sequence steps over a refusal rather than dying on one,
-  and why acquisition does too. Nothing here reconnects, because the SDK
-  connects once and never again: recovery is the next command the daemon takes.
-  On an acquired adapter that command is `_assert_body_policy`, which is the
-  outstanding ownership write and the only liveness probe there is — without it
-  a robot alone in a room commands nothing and never notices. `/status` carries
-  `daemon_link` and the settings page leads with a hazard note while it is down.
+  **Every call that reaches the daemon's websocket reports on the link**, and
+  there are exactly two ways to do it. `attempt_daemon_call` records and steps
+  over, for a caller whose contract is that it does not die — the controlled
+  wake, `ReachyMotion._command` (which is the one place a motion command leaves
+  the adapter on either gating mode, and which catches the fault *inside* the
+  coordinator's reservation), and shutdown's policy restore.
+  `report_daemon_call` records and re-raises, for a caller that already has a
+  containing failure path which must still run — every motor-group lifecycle
+  phase, and `MotorGroupCoordinator._set`/`_read`, whose `failed()` keeps a gate
+  shut over torque nobody confirmed. Adding a daemon call that goes through
+  neither is the gap this rule exists to close: the application survives it and
+  `/status` says `up` while the robot stands still.
+  `reachy-mini-ha-app.service` is `Type=oneshot`, so an application that exits
+  stays exited and the robot is silent until a person intervenes — which is why
+  the wake sequence steps over a refusal rather than dying on one, and why
+  acquisition does too. Nothing here reconnects, because the SDK connects once
+  and never again: recovery is the next command the daemon takes. With gaze
+  acquired that is `_assert_body_policy`, the outstanding ownership write
+  doubling as the only liveness probe available, so recovery is noticed within a
+  tick; with gaze off nothing may be sent to ask a question and the state is
+  what the last command observed, returning to `up` at the next voice-pipeline
+  move. **Say that difference wherever the recovery is described** — the module
+  docstring, the settings page and the runbook all do, because "it recovers by
+  itself" without it is advice an operator would act on wrongly. `/status`
+  carries `daemon_link`, whose two counts saturate at
+  `daemon_link.COUNTER_LIMIT` so the payload cannot grow with uptime, and the
+  settings page leads with a hazard note while the link is down.
 - **Controller fault and lifecycle are independent.** Stable fault categories
   derive `safe_hold`; they are never encoded as tracking modes. One validated
   `ControllerConfig` instance is shared by behavior and the production motion

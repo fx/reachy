@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
+from reachy_mini_ha_satellite.daemon_link import DaemonLink, report_daemon_call
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
@@ -399,10 +401,24 @@ class MotorGroupCoordinator:
         handle: RobotHandle,
         *,
         clock: Callable[[], float],
+        link: DaemonLink | None = None,
     ) -> None:
-        """Start all groups closed until initial physical confirmation."""
+        """Start all groups closed until initial physical confirmation.
+
+        Args:
+            handle: What the daemon hands a running application.
+            clock: The monotonic source confirmation ages are measured against.
+            link: The process's record of whether the daemon is answering. The
+                composition root passes the one the motion adapter and
+                `/status` share; this coordinator's own confirmed-torque calls
+                report on it, because on a daemon that offers the surface they
+                are the only daemon calls the gated path makes that the motion
+                adapter never sees. A fresh one is built only for a test
+                constructing a coordinator directly.
+        """
         self._handle = handle
         self._clock = clock
+        self._link = link if link is not None else DaemonLink()
         self._lock = threading.RLock()
         self._commands_drained = threading.Condition(self._lock)
         self._operation_mutex = threading.Lock()
@@ -1153,16 +1169,33 @@ class MotorGroupCoordinator:
             return {"groups": groups, "events": events}
 
     def _set(self, group: MotorGroup, requested: bool) -> MotorConfirmation:
+        """Write one group's torque, recording the link and confirming nothing on error.
+
+        `report_daemon_call` rather than `attempt_daemon_call`: the `except`
+        below is load-bearing and must still run. A confirmation this coordinator
+        did not get is `failed`, whether the daemon refused it or never heard it,
+        because the alternative is a gate opened over torque nobody confirmed.
+        What the link record adds is the *reason*, which `/status` reports and
+        `MotorConfirmation` deliberately has no room for.
+        """
         try:
-            if requested:
-                return self._handle.enable_motors_confirmed(list(MOTOR_GROUPS[group]))
-            return self._handle.disable_motors_confirmed(list(MOTOR_GROUPS[group]))
+            return report_daemon_call(self._link, lambda: self._write(group, requested))
         except Exception:
             return MotorConfirmation.failed()
 
+    def _write(self, group: MotorGroup, requested: bool) -> MotorConfirmation:
+        """Make the one SDK torque write, with nothing caught around it."""
+        if requested:
+            return self._handle.enable_motors_confirmed(list(MOTOR_GROUPS[group]))
+        return self._handle.disable_motors_confirmed(list(MOTOR_GROUPS[group]))
+
     def _read(self, group: MotorGroup) -> MotorConfirmation:
+        """Read one group's physical torque, on the same terms as `_set`."""
         try:
-            return self._handle.read_motor_torque(list(MOTOR_GROUPS[group]))
+            return report_daemon_call(
+                self._link,
+                lambda: self._handle.read_motor_torque(list(MOTOR_GROUPS[group])),
+            )
         except Exception:
             return MotorConfirmation.failed()
 
