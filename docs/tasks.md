@@ -20,17 +20,32 @@ Catch-all task list for work not tracked in a specific [change document](changes
         (provisioning REQ-060, so far proved only against the container target)
       - `reachyctl provision --remove`
       - `reachyctl deploy --preview`, `reachyctl deploy`, and the version the
-        robot reports afterwards
+        robot reports afterwards. **Unblocked** — the interpreter resolution
+        [#36](https://github.com/fx/reachy/pull/36) landed is what used to make
+        `deploy` fail at its `reach` step — and still not run end to end
       - `reachyctl config get`, `diff`, `apply --preview`, `apply`, `set`
       - `reachyctl app start`, `stop`, `logs`
-      - `reachyctl doctor --robot …`, with every check passing rather than
-        skipped
-      - Confirm the daemon's application control really is
-        `python -m reachy_mini.apps` — change 0009 records it as the one
-        provisional interface, and `--daemon-control` is what a robot that
-        spells it differently costs
+      - `reachyctl doctor --robot …` **with `--intent` supplied**, so that the
+        last two checks run rather than skip. The `--robot` half is done: against
+        a Reachy Mini running ReachyMiniOS v0.2.3 it reported nine checks, 7
+        passed, 0 failed and 2 skipped, and the two skips were
+        `configuration.effective` and `home-assistant.identity`, which correctly
+        need a declaration. A run in which a check *fails* has not been recorded
+        either — see [the robot runbook, step 7](setup/robot.md#7-verify-the-whole-chain)
 
       **The satellite on the robot**
+      - **Publish the application source, and install it on a stock robot
+        through the daemon's own path** — the whole of
+        [Path C](setup/robot.md#path-c-install-from-the-robots-own-dashboard) and
+        [Route A](ops/satellite-deployment.md#route-a-install-from-the-robots-own-surfaces),
+        which is
+        [REQ-104](specs/stock-robot-installation/index.md#req-104-the-application-installs-through-the-daemon-s-own-path)'s
+        scenario. Two steps and neither is hardware: the Space does not exist
+        yet, because publishing it needs a Hugging Face account this repository
+        deliberately holds no token for, and no release carries the wheel the
+        source names yet — `just publish-app-source --dry-run` refuses on exactly
+        that today. Then the install, the upgrade, and what the daemon's
+        Uninstall leaves behind
       - It starts, appears in the daemon's application list, and the dashboard
         links to its settings page (ha-satellite REQ-049)
       - `/config`, `/status` and the settings page answer
@@ -155,7 +170,9 @@ Catch-all task list for work not tracked in a specific [change document](changes
       the ninth spec with its final safety and deterministic acceptance evidence
       present and
       [0020](changes/0020-home-assistant-configuration-and-camera-feed.md) the
-      tenth with its annotations, so all ten specs and all 98 requirements are
+      tenth with its annotations;
+      [0021](changes/0021-stock-robot-installation.md) registered the eleventh
+      with its final task, so all eleven specs and all 106 requirements are
       traced and the exclusion no longer applies. A repository setting rather
       than a file, which is why it is a task here.
 
@@ -186,7 +203,85 @@ Catch-all task list for work not tracked in a specific [change document](changes
       corrected in passing. Search for `not yet implemented` as well as
       `implemented yet` when this is picked up.
 
+      **A ninth spec would have joined them and did not.**
+      [stock-robot-installation](specs/stock-robot-installation/) said "proposed
+      and not yet implemented" too, and
+      [0021](changes/0021-stock-robot-installation.md) corrected it — that change
+      document explicitly authorised the sentence and a changelog row, and
+      nothing else under that directory. That is the narrow exception rather than
+      a precedent: the eight above are still their own `/spec-writer` proposal.
+
+- [ ] **`provisioning/ansible` has the `ExecStart` defect
+      [#36](https://github.com/fx/reachy/pull/36) fixed in `reachyctl`, and its
+      gate cannot see it.** The verification role reaches Python through a filter
+      plugin that parses `path=` out of the daemon unit's `ExecStart` and treats
+      it as an interpreter, and the roles default `reachy_python` to the same
+      assumption. That is
+      [REQ-105](specs/stock-robot-installation/index.md#req-105-the-daemon-s-start-program-is-not-assumed-to-be-an-interpreter)
+      failing in the other consumer: on ReachyMiniOS v0.2.3 the unit's start
+      program is a shell launcher, and running it with Python arguments starts a
+      second daemon.
+
+      **The idempotency gate is green either way**, because
+      [`provisioning/ci/`](../provisioning/ci/README.md)'s container target ships
+      a unit whose `ExecStart` really is an interpreter. So the gate proves the
+      roles converge against a target that does not have the defect, and a real
+      stock robot does. Needs its own change: the resolution `reachyctl`
+      now performs belongs behind one boundary both consumers use, and the
+      container target should model the launcher-started unit so the gate can
+      see the difference.
+
+- [ ] **Two `cli/reachyctl` provision tests pass for the wrong reason.**
+      `test_provision_runs_the_playbook_it_was_asked_for` and
+      `test_provision_names_the_removal_path_so_it_is_discoverable` monkeypatch
+      `shutil.which` and `Path.is_dir` **after** those were captured as default
+      argument values, so the patches are inert and the test exercises the real
+      machine instead of the fake. They pass wherever `ansible-playbook` happens
+      to be on `PATH` — GitHub's runners — and fail on every local worktree,
+      including a clean `main`. A test whose verdict depends on the machine is
+      not a gate; the fix is to make the two lookups injectable rather than
+      captured at import.
+
+- [ ] **The benchmark tolerances are marginal across the suite.** On unrelated
+      commits, `pipeline.capability.face` measured +121% and `session.round_trip`
+      +127% against a 100% tolerance, both on changes that cannot have affected
+      them and both passing on a re-run. **Widening the one tolerance that fired
+      is the wrong fix** and recording that is the point of this item: two
+      independent measurements at more than twice the baseline say the harness's
+      variance is the problem, not the threshold. What is needed is a look at
+      the whole tolerance set against the distribution the runners actually
+      produce — repeated runs, and a tolerance argued from that data the way
+      [benchmarks REQ-071](specs/benchmarks/index.md#requirements) asks — rather
+      than a per-benchmark adjustment made each time one fires.
+
+- [ ] **`REACHY_SATELLITE_WEB_ENABLED=false` leaves a robot with no
+      configuration surface at all, and the setting that did it is
+      environment-only.** With the settings page off and no identity configured,
+      there is nowhere to set the identity from: the page is the first-time
+      configuration surface
+      ([REQ-101](specs/stock-robot-installation/index.md#req-101-an-unresolved-identity-starts-the-application-rather-than-stopping-it)),
+      and the one setting that can remove it cannot be changed from it — by
+      design, because a page that had written `false` would be the page you could
+      no longer open to undo it. The boot log names the setting, which is the only
+      thing standing between an operator and a silent dead end. It deserves a
+      decision — refuse the combination at startup, keep serving a
+      configuration-only page, or state it as intended — rather than staying a
+      gap nobody wrote down. Ownership is the
+      [ha-satellite](specs/ha-satellite/) and
+      [stock-robot-installation](specs/stock-robot-installation/) contracts, so
+      it is a `/spec-writer` proposal.
+
 ## Completed
+
+- [x] **Settle what the daemon's application control actually is.** Change 0009
+      recorded `python -m reachy_mini.apps` as the one provisional interface and
+      `--daemon-control` as the escape hatch for a robot that spelled it
+      differently. Hardware settled it **negatively**: `reachy_mini.apps` has no
+      `__main__` in any released daemon, so that interface has never worked
+      anywhere. [#36](https://github.com/fx/reachy/pull/36) makes the daemon's
+      own HTTP API the first route and keeps the module as the second, because
+      the Ansible verification role and the idempotency gate's container target
+      both implement the module form.
 
 - [x] Record a baseline profile for the `github-ubuntu-latest` runner class in
       `bench/baseline.json`, so the timing half of the benchmark gate judges

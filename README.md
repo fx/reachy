@@ -32,6 +32,15 @@ wake-word model has none left for inference.
    **Read its identity warning before you install or upgrade anything**; it is
    the one step in this repository that cannot be undone
 
+**On a stock robot, with no shell on it:** the satellite is published as an
+application source the robot's own daemon installs, so installing it is a
+request to the robot's dashboard and naming it is a form on the application's own
+settings page — [Path C](docs/setup/robot.md#path-c-install-from-the-robots-own-dashboard),
+and [the deployment reference](docs/ops/satellite-deployment.md#route-a-install-from-the-robots-own-surfaces)
+in full. Nothing is copied onto the robot and no file its image ships is edited.
+The wheel on GitHub Releases stays the artifact of record; the source names it
+by version rather than carrying a second copy of the code.
+
 **Running one:**
 
 - [Updating a running installation](docs/ops/deploy.md)
@@ -74,7 +83,7 @@ which `reachy-mini` the robot runs — they do not touch motors.
 - [`AGENTS.md`](AGENTS.md) — the map of the repository and the invariants that
   hold across it. Read this before changing anything
 - [`REVIEW.md`](REVIEW.md) — the review conventions every change is judged against
-- [`docs/index.md`](docs/index.md) — ten specs and the change documents that
+- [`docs/index.md`](docs/index.md) — eleven specs and the change documents that
   sequence the work. The specs are the authority; a change document sequences, it
   does not redefine
 - [`docs/contracts/`](docs/contracts/) — generated schemas and interface

@@ -40,4 +40,4 @@
 | 0018 | [satellite-runtime-stability](changes/0018-satellite-runtime-stability.md) | [ha-satellite](specs/ha-satellite/) | complete | 0013 |
 | 0019 | [predictive-gaze-and-coordinated-motion](changes/0019-predictive-gaze-and-coordinated-motion.md) | [gaze-control](specs/gaze-control/) | complete | 0018 |
 | 0020 | [home-assistant-configuration-and-camera-feed](changes/0020-home-assistant-configuration-and-camera-feed.md) | [home-assistant-configuration-and-camera-feed](specs/home-assistant-configuration-and-camera-feed/) | complete | 0015, 0017, 0018, 0019 |
-| 0021 | [stock-robot-installation](changes/0021-stock-robot-installation.md) | [stock-robot-installation](specs/stock-robot-installation/) | draft | 0020 |
+| 0021 | [stock-robot-installation](changes/0021-stock-robot-installation.md) | [stock-robot-installation](specs/stock-robot-installation/) | complete | 0020 |

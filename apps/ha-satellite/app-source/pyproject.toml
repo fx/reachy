@@ -1,0 +1,65 @@
+# The published application source: the directory the Reachy Mini daemon
+# downloads and installs when an operator installs this satellite from the
+# robot's own surfaces. Published as a Hugging Face Space by
+# `just publish-app-source`; see the README beside this file for what an
+# operator reads, and `docs/ops/satellite-deployment.md` for the whole route.
+#
+# It carries NO code. The daemon's installer runs, in effect,
+#
+#     uv pip install --python <the robot's apps venv>/bin/python <this directory>
+#
+# so this project's whole job is to name the released wheel as a requirement.
+# Installing it installs that wheel, the wheel declares the
+# `reachy_mini_apps` entry point — ha-satellite REQ-041 — and the daemon
+# discovers the application through that entry point exactly as it does for a
+# wheel installed by hand. One artifact, reached a second way, which is
+# stock-robot-installation REQ-104's whole mechanism.
+#
+# Three things about the shape below are deliberate.
+#
+# **The requirement is a direct URL to a GitHub release asset, not an index
+# lookup.** Nothing here is published to a Python package index — that is a
+# non-goal of the contract this implements — and the repository is public, so
+# the asset is fetchable from a robot with no credential of any kind.
+#
+# **The `local-detection` extra is deliberately not requested.** It would pull
+# an ONNX runtime onto the robot for a detector that additionally needs weights
+# this wheel does not ship. Remote detection is the default and the settings
+# page is where an operator turns the local one on, with a model path.
+#
+# **The version appears three times and each one is on a line of its own.**
+# That is not formatting: release-please's generic updater is line-based and
+# replaces at most ONE version per line, and its version pattern treats what
+# follows a `-` as a pre-release tag — so a wheel named `…-1.4.0-py3-none-any`
+# on one line would be rewritten to `…-1.5.0-none-any`, silently, on the release
+# pull request. Splitting the requirement over a TOML multi-line string leaves
+# one clean version per line.
+# `apps/ha-satellite/tests/test_satellite_app_source.py`
+# replays that updater against this file and fails if the layout stops working.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reachy-mini-ha-satellite-app-source"
+description = "Installs the Reachy Mini Home Assistant voice satellite"
+readme = "README.md"
+requires-python = ">=3.12"
+keywords = ["reachy-mini-app"]
+# x-release-please-start-version
+version = "0.2.0"
+dependencies = [
+    """\
+reachy-mini-ha-satellite @ \
+https://github.com/fx/reachy/releases/download/v0.2.0/\
+reachy_mini_ha_satellite-0.2.0\
+-py3-none-any.whl\
+""",
+]
+# x-release-please-end
+
+# Metadata only: there is no package here to find, and saying so is what stops
+# the build backend guessing at one.
+[tool.setuptools]
+packages = []

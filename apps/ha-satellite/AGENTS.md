@@ -29,8 +29,8 @@ wire remains Boolean: later failures retain the last-confirmed value and surface
 bounded diagnostics rather than inventing a third state. Body motion remains
 restart-bound, false by default and a provisional opt-in because the rollout did
 not settle calibration or its shipping default. All three specs are registered in
-`.duvet/config.toml`; repository traceability covers all ten specs and all 98
-requirements, with nothing left unregistered.
+`.duvet/config.toml`; repository traceability covers all eleven specs and all
+106 requirements, with nothing left unregistered.
 
 Read the root [`AGENTS.md`](../../AGENTS.md) first — it holds the invariants
 that apply here.
@@ -54,8 +54,22 @@ that apply here.
 | `src/reachy_mini_ha_satellite/web/` | The settings interface REQ-049 requires |
 | `src/reachy_mini_ha_satellite/main.py` | The composition root: ports to adapters, the loop, and the four services |
 | `src/reachy_mini_ha_satellite/daemon_app.py` | The `reachy_mini_apps` entry point, and the ONLY module that imports the SDK |
+| `app-source/` | The published application source: two files and no code, naming the released wheel, which is what the robot's own daemon installs |
 | `tests/support/satellite_support.py` | The fake for every port, plus the fakes the adapters' own tests need |
 | `tests/` | The carried upstream tests, with their own `LICENSE` and `NOTICE`, plus this repository's own |
+
+**`app-source/` is published, not built.** It is not a workspace member — the
+root `pyproject.toml` excludes it — and nothing here installs it: the robot's
+daemon downloads it from a Hugging Face Space and runs `uv pip install` over the
+directory, which installs the wheel it names. `just publish-app-source` is what
+puts it there, `scripts/publish_app_source.py` is what refuses to publish
+something inconsistent, and
+`tests/test_satellite_app_source.py` holds the committed bytes to the wheel this
+member builds — including replaying release-please's generic updater over them,
+because the version appears four times and the updater rewrites at most one per
+line. Three things follow for anyone editing it: the version is never edited by
+hand, the requirement stays one release asset, and a file added to the directory
+is a file published to a public Space.
 
 Deployment is documented in
 [`docs/ops/satellite-deployment.md`](../../docs/ops/satellite-deployment.md),

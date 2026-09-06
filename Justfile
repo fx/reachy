@@ -810,6 +810,41 @@ wheel-verify out_dir="dist":
     fi
     {{ uv }} python scripts/verify_satellite_wheel.py "${satellite[0]}"
 
+# The publish path's own environment. `huggingface-hub` is a dependency group of
+# its own and deliberately outside `default-groups`, for the reason Ansible is:
+# a lint, a type check and a test run have no use for a Hugging Face client, and
+# the one command that does asks for it by name. The same `uv.lock` resolves it.
+publish := "uv run --locked --all-packages --group publish"
+
+# Publish the committed application source as a Hugging Face Space.
+#
+#     REACHY_APP_SPACE_ID=<owner>/reachy-mini-ha-satellite HF_TOKEN=… \
+#         just publish-app-source --dry-run
+#
+# `apps/ha-satellite/app-source/` is what the robot's daemon downloads and
+# installs when an operator installs this satellite from the robot's own
+# surfaces — no shell on the robot, no file copied onto it, no shipped file
+# edited. It names one released wheel; this makes it fetchable.
+#
+# The target Space and the token are environment variables rather than committed
+# defaults because they name somebody's account and this repository is public.
+# Every refusal — no token, a Space whose name the daemon will not find its own
+# metadata under, a source that has drifted from this checkout, a release that
+# does not carry the wheel yet — happens before anything is contacted, which is
+# what makes them testable here without an account. `--dry-run` runs all of it
+# and stops before creating or writing to the Space.
+#
+# Publishing follows a release rather than preceding it: the source names a
+# release asset, and a Space published first points at a wheel that is not
+# there. The runbook is `docs/ops/satellite-deployment.md`.
+#
+#:= docs/specs/stock-robot-installation/index.md#req-104-the-application-installs-through-the-daemon-s-own-path
+#:% The satellite MUST be installable onto an unmodified robot through the daemon's
+#:% own application-installation path, without copying files onto the robot, opening
+#:% a shell on it, or editing any file its image ships.
+publish-app-source *args:
+    {{ publish }} python scripts/publish_app_source.py {{ args }}
+
 # Redraw the committed perception fixture images.
 #
 # They are drawn rather than photographed, so their provenance is the script and

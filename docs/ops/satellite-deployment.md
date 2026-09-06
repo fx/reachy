@@ -5,9 +5,26 @@ Releases. Installing it into the robot's shared application environment is the
 whole of registering it: the wheel declares a `reachy_mini_apps` entry point, and
 the Reachy Mini daemon enumerates that group when it starts.
 
-There is deliberately no Hugging Face Space. The daemon can install applications
-from one, but it discovers them through a standard Python entry point either way
-— see the [architecture spec](../specs/architecture/index.md#versioning-and-distribution).
+**There are two ways to get it there, and they end in the same place.** The
+daemon has an application-installation path of its own — it downloads a
+published application source and installs it into the robot's shared
+application environment — so on a robot you have no shell on, and want no shell
+on, that path is the whole installation. The other way is to fetch the wheel and
+install it yourself, which needs a shell and is what an operator iterating on
+the application wants. Either way the daemon finds the application through the
+same entry point, so this is one artifact reached two ways rather than two
+packaging stories: [Installing](#installing).
+
+> **An earlier version of this page said there was deliberately no published
+> application source, and there now is.** That decision made a shell a
+> prerequisite for installing at all, which is the thing
+> [stock-robot-installation REQ-104](../specs/stock-robot-installation/index.md#req-104-the-application-installs-through-the-daemon-s-own-path)
+> reverses. Two design notes still record the old decision — the
+> [architecture](../specs/architecture/index.md#versioning-and-distribution) and
+> [HA Satellite](../specs/ha-satellite/index.md#packaging-and-deployment) specs
+> both say a wheel is sufficient and no source is published. They are wrong and
+> they are not this document's to correct: a spec edit is its own proposal, and
+> reconciling those two notes is one somebody still has to make.
 
 Discovering an application and starting one are different mechanisms, and the
 second is not what the entry point's spelling suggests:
@@ -108,6 +125,185 @@ device rather than replacing it.
 
 ## Installing
 
+Two routes, one outcome.
+
+| | Route A — the robot's own surfaces | Route B — a wheel |
+|---|---|---|
+| Needs a shell on the robot | No | Yes |
+| Needs the application source published | Yes | No |
+| Where the commands run | Your machine, over the robot's HTTP API | On the robot |
+| Use it for | A stock robot, and any robot you would rather not open a shell on | Iterating on the application, and any build that is not a release |
+
+Route B is the older one and is unchanged. Route A is what makes a stock robot
+installable at all, and it is the one to read first.
+
+---
+
+## Route A: install from the robot's own surfaces
+
+> **⏳ PENDING HARDWARE VERIFICATION.** No transcript is recorded for any step in
+> this route. The requests, their bodies and the daemon's behaviour are read out
+> of the released daemon's own source — `reachy-mini` 1.9.0, which is what
+> ReachyMiniOS v0.2.3 runs — and **not** from having run them against a robot.
+> Nothing in this repository has a Reachy Mini attached, and the Space itself
+> has not been published, so this route has never been executed end to end.
+> [`docs/tasks.md`](../tasks.md) carries it.
+
+Nothing here opens a shell on the robot, copies a file onto it, or changes a
+file its image ships. Every request goes to the daemon's own HTTP API, which
+answers on port **8000**, and every one of them can equally be made from the
+daemon's dashboard where the dashboard offers it.
+
+### A1. Know the Space
+
+The application source is published as a Hugging Face Space named
+`<owner>/reachy-mini-ha-satellite`. It is a directory of two files and no code:
+it names one released wheel, and installing it installs that wheel. It is
+committed at [`apps/ha-satellite/app-source/`](../../apps/ha-satellite/app-source/)
+and published from there, so what a robot installs is reviewable here —
+[Publishing the application source](#publishing-the-application-source) is how it
+gets there.
+
+**The Space's name is not cosmetic.** The daemon stores an installed
+application's metadata under the Space's repository name and reads it back under
+the application's entry-point name, so a Space called anything other than
+`reachy-mini-ha-satellite` installs and then cannot find what it recorded about
+itself. `just publish-app-source` refuses to publish to any other name.
+
+You do not need to be in the manufacturer's curated application list. The
+dashboard's *browse* list is limited to that list, but the install endpoints
+below take any Space id.
+
+### A2. Give the robot a token, if the Space is private
+
+A **public** Space needs no token and no account: skip this step.
+
+A **private** Space is installed through an endpoint that requires a token
+stored on the robot first, and answers `401 No HuggingFace token found` without
+one. The dashboard has a Hugging Face login that stores it; the same thing over
+the API is:
+
+```
+curl --request POST http://<robot>:8000/api/hf-auth/save-token \
+  --header 'content-type: application/json' \
+  --data '{"token": "<a Hugging Face token with read access>"}'
+```
+
+The token is stored on the robot. Treat it the way you would treat any other
+credential the robot holds — see the trust model under
+[the settings page](#-it-is-unauthenticated-and-so-is-the-rest-of-the-robot).
+
+### A3. Ask the daemon to install it
+
+For a **public** Space:
+
+```
+curl --request POST http://<robot>:8000/api/apps/install \
+  --header 'content-type: application/json' \
+  --data '{
+    "name": "reachy-mini-ha-satellite",
+    "source_kind": "hf_space",
+    "url": "https://huggingface.co/spaces/<owner>/reachy-mini-ha-satellite"
+  }'
+```
+
+For a **private** one, with the token from A2 already stored:
+
+```
+curl --request POST http://<robot>:8000/api/apps/install-private-space \
+  --header 'content-type: application/json' \
+  --data '{"space_id": "<owner>/reachy-mini-ha-satellite"}'
+```
+
+Both answer with a job identifier — `{"job_id": "..."}` — and do the work in the
+background.
+
+**What the daemon then does**, because it is worth knowing before reading an
+install log: it downloads the Space, checks the directory has a `pyproject.toml`
+or a `setup.py` in its root, and runs `uv pip install` over the directory
+(falling back to `pip` when `uv` is absent) against the interpreter of the
+robot's **shared application environment** — a sibling of the daemon's own, which
+it creates and pre-populates with `reachy-mini` the first time an application is
+installed. Nothing is installed into the daemon's own environment, and no file
+the image ships is touched.
+
+### A4. Watch the job
+
+```
+curl http://<robot>:8000/api/apps/job-status/<job_id>
+```
+
+The install downloads a wheel and resolves its dependencies from a package
+index, so on a robot's connection it is minutes rather than seconds.
+
+### A5. Start it
+
+From the dashboard's application list, or:
+
+```
+curl --request POST http://<robot>:8000/api/apps/start-app/reachy-mini-ha-satellite
+```
+
+The application is listed under its entry-point name, which is the name above,
+whatever the Space was called.
+
+**The daemon does not report why an application stopped**, and that is the single
+most misleading thing about this route as well as the other one — see
+[How the daemon starts it](#how-the-daemon-starts-it) before concluding anything
+from `state: done`.
+
+### A6. Name the robot, in a browser
+
+The application starts **with no identity and announces nothing**. Open its
+settings page at `http://<robot>:8088/`; it heads itself *This robot is not
+configured yet* and says so in as many words.
+
+Set `REACHY_SATELLITE_DEVICE_NAME` there — read
+[the warning at the top of this page](#-before-you-install-pin-the-announced-identity)
+first, because this is the one value that cannot be changed later without cost —
+then press **Stop** on that page and start the application again from the
+dashboard. The identity is read while the announcement is being built, so it
+takes effect at the next start. No shell, and no reinstall.
+
+### A7. Point it at a groundstation, if you have one
+
+On the same page, set the groundstation address and its credential. Both are
+needed; either one missing means no session is opened, which the page reports as
+*unconfigured* rather than failed. Supplying them is adopted **without a
+restart** — see
+[Replacing the groundstation while the satellite runs](#replacing-the-groundstation-while-the-satellite-runs),
+which is the same transition.
+
+Without one, the robot runs on its own detector where
+`REACHY_SATELLITE_LOCAL_MODEL_PATH` names weights, and sees nothing until a
+groundstation arrives where it does not. Both states are on the page.
+
+### Upgrading an installation made this way
+
+Publish the newer source, then install it again exactly as in A3 — the source
+names the wheel by version, so a newer source is a newer wheel. The daemon's own
+update path (its dashboard's update control, `POST /api/apps/update/<app_name>`)
+reinstalls the Space in place and is the shorter route where it works.
+
+The announced identity and everything else the settings page wrote live in the
+robot's state directory, outside the installation, so they survive either.
+
+### ⚠️ What the daemon's Uninstall leaves behind
+
+Removing the application from the dashboard uninstalls the distribution named by
+the entry point — `reachy-mini-ha-satellite`, the wheel — which is what makes the
+application disappear from the list, because the entry point goes with it. The
+metadata-only distribution the Space installs alongside it,
+`reachy-mini-ha-satellite-app-source`, is not named by any entry point and stays
+in the shared application environment. It carries no code and no configuration
+and does nothing; installing again replaces it. It is recorded here because
+"uninstalled" and "no trace left" are not the same sentence, and the difference
+is the kind of thing that costs somebody an hour later.
+
+---
+
+## Route B: install a wheel
+
 Every command below runs on the robot. The addresses are from the RFC 5737
 documentation ranges; substitute your own.
 
@@ -171,6 +367,80 @@ sudo systemctl restart reachy-mini-daemon
 
 The application appears in the daemon's list of installed applications. Nothing
 else registers it.
+
+---
+
+## Publishing the application source
+
+This is a maintainer's step, not an operator's, and it happens once per release
+rather than once per robot. Route A above installs whatever it finds published;
+this is what puts it there.
+
+**It is not done by continuous integration**, and that is deliberate rather than
+pending: publishing needs a Hugging Face account, and this repository holds no
+token for one. The account and the one-time authentication are a person's.
+
+### Release first, then publish
+
+The source names a **release asset** — the wheel, by version, under its tag — so
+a Space published before the release it names points at a file that is not
+there, and the robot finds out several minutes into an install. `just wheels`
+and the release workflow produce the wheel; publish after the release carrying
+it exists.
+
+```
+export HF_TOKEN=<a Hugging Face token with write access>
+export REACHY_APP_SPACE_ID=<owner>/reachy-mini-ha-satellite
+just publish-app-source --dry-run
+just publish-app-source
+```
+
+`--dry-run` runs every check, including asking the release for the wheel, and
+stops before creating or writing to the Space. Neither the token nor the target
+is committed: both name an account, and this repository is public.
+
+### What it refuses, and what that looks like
+
+Every refusal happens before anything is contacted, which is why they are
+covered by tests in a workspace with no account. Three of them, run here:
+
+```
+$ just publish-app-source --dry-run
+publish-app-source: no Hugging Face token: set HF_TOKEN or HUGGING_FACE_HUB_TOKEN to a token with write access to the Space. Nothing is contacted without one
+```
+
+```
+$ REACHY_APP_SPACE_ID=<owner>/ha-satellite just publish-app-source --dry-run
+publish-app-source: REACHY_APP_SPACE_ID names the Space 'ha-satellite', and it has to be 'reachy-mini-ha-satellite': the daemon saves an installed application's metadata under the Space's name and reads it back under the entry-point name, so any other name installs and then cannot find what it recorded
+```
+
+```
+$ just publish-app-source --dry-run
+publish-app-source: https://github.com/<owner>/<repository>/releases/download/v<version>/reachy_mini_ha_satellite-<version>-py3-none-any.whl answered 404: the release this source names does not carry that wheel yet. Publish the Space after the release, not before
+```
+
+Those are transcripts, with the owner, the repository and the version replaced
+by their placeholders and the `just` invocation line cut. **The third one is the
+current state of this repository**: no release has been published yet, so the
+wheel the committed source names does not exist and publishing is correctly
+refused until one does.
+
+It also refuses a source whose version has drifted from this checkout's, which
+is what a half-applied release bump looks like.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** A successful publish has never been run,
+> and strictly what is missing is an account rather than hardware: no output for
+> the command's success path is recorded, and nothing below the refusals above
+> is a transcript. The Space itself does not exist yet, which is why every step
+> of Route A is marked the same way.
+
+### What a publish does
+
+It creates the Space if it is not there — a static Space, which is what a
+Reachy Mini application source is — and then makes its contents **exactly** the
+committed directory, deleting anything on it that this checkout does not have.
+A file withdrawn here is withdrawn there, which is what lets this page say that
+what an operator installs is what is reviewable in this repository.
 
 ---
 

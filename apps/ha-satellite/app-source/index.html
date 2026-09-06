@@ -1,0 +1,42 @@
+<!doctype html>
+<!--
+  The page a static Hugging Face Space serves. It exists so an operator who
+  opens the Space before installing sees what this is rather than a build
+  error, and it deliberately names no version: the version lives in
+  `pyproject.toml` and in the README's card, and a third copy is a third thing
+  to keep in step. Nothing is loaded from anywhere — no script, no stylesheet,
+  no font — so the page is the whole of what it does.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Reachy Mini HA Satellite</title>
+    <style>
+      body {
+        margin: 0 auto;
+        max-width: 34rem;
+        padding: 3rem 1.5rem;
+        font-family: system-ui, sans-serif;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Reachy Mini HA Satellite</h1>
+    <p>
+      A Home Assistant voice satellite for the Reachy Mini. Install it from the
+      robot's own dashboard; it needs no shell on the robot and changes no file
+      the robot's image ships.
+    </p>
+    <p>
+      Nothing is announced to Home Assistant until the robot has been given a
+      name on the application's own settings page, which is served on port 8088
+      once the application is running.
+    </p>
+    <p>
+      The source, the documentation and the released wheel this Space installs
+      are at <a href="https://github.com/fx/reachy">github.com/fx/reachy</a>.
+    </p>
+  </body>
+</html>

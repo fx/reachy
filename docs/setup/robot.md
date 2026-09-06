@@ -22,16 +22,21 @@ after the fact worth the name.
 
 ## ⏳ How much of this page has been executed
 
-Nothing in this repository has a Reachy Mini attached, so the steps that talk to
-a robot **have not been run against one**. They are marked, individually, like
-this:
+Nothing in this repository has a Reachy Mini attached, so with one exception the
+steps that talk to a robot **have not been run against one**. They are marked,
+individually, like this:
 
 > **⏳ PENDING HARDWARE VERIFICATION.** No expected output is recorded for this
 > step, because the command has never been run against a robot. Nothing below is
 > a transcript.
 
-What *has* been executed, and is transcribed verbatim, is every step that runs
-off the robot: the playbook against the container target described in
+**The exception is [step 7](#7-verify-the-whole-chain)**, `reachyctl doctor
+--robot`, which has been run against a real Reachy Mini. Its outcome is recorded
+there as counts and readings rather than as a transcript, because every line of
+the transcript carries something belonging to that one installation.
+
+What *else* has been executed, and is transcribed verbatim, is every step that
+runs off the robot: the playbook against the container target described in
 [`provisioning/ci/README.md`](../../provisioning/ci/README.md), the wheel builds,
 and every `doctor` and `probe` run that does not need `--robot`. The container
 target runs real systemd, a real daemon unit, a real application environment and
@@ -85,16 +90,23 @@ and `"confirmed"` on one carrying the branch above.
 
 ---
 
-## Two paths, and when each is right
+## Three paths, and when each is right
 
-| | `reachyctl provision` | `reachyctl deploy` |
-|---|---|---|
-| What it is | The Ansible playbook: four roles, a declaration, a verification | One wheel, built and installed, then checked |
-| Use it for | First setup, and any change you want reproducible | Iterating on the application |
-| Idempotent | Yes, and a gate enforces it | The install is; it always restarts and re-verifies |
-| Needs | An inventory and a declaration | `--robot` and a wheel or a member to build |
+| | `reachyctl provision` | `reachyctl deploy` | The robot's own dashboard |
+|---|---|---|---|
+| What it is | The Ansible playbook: four roles, a declaration, a verification | One wheel, built and installed, then checked | The daemon's own application install, from a published source |
+| Use it for | First setup, and any change you want reproducible | Iterating on the application | A robot you want no shell on at all |
+| Needs a shell on the robot | Yes, over SSH | Yes, over SSH | **No** |
+| Idempotent | Yes, and a gate enforces it | The install is; it always restarts and re-verifies | Installing again replaces what is there |
+| Needs | An inventory and a declaration | `--robot` and a wheel or a member to build | The published application source, and a browser |
 
-Do the first setup with `provision`. Reach for `deploy` when you are changing
+**If you have never opened a shell on this robot and would rather not, [Path C](#path-c-install-from-the-robots-own-dashboard)
+is the whole of it** — install from the dashboard, name the robot on the
+application's own settings page, and stop there. Nothing on this page is
+required before it and nothing after it is required for a working satellite.
+
+Otherwise: do the first setup with `provision`, because it is the one that makes
+the robot's configuration reproducible. Reach for `deploy` when you are changing
 the application and want the wheel on the robot in one step.
 
 ---
@@ -505,6 +517,77 @@ returning as soon as the command was accepted.
 
 ---
 
+## Path C: install from the robot's own dashboard
+
+The route that needs no shell on the robot, no file copied onto it, and no
+change to any file its image ships. Everything below is either a click on a page
+the robot already serves or a request to the daemon's own HTTP API from your
+machine.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** This route has never been executed end to
+> end: the application source it installs has not been published yet, and
+> nothing in this repository has a Reachy Mini attached. What the daemon does
+> with a published source is read out of the released daemon's own code —
+> `reachy-mini` 1.9.0, which is what ReachyMiniOS v0.2.3 runs — rather than
+> observed. Nothing below is a transcript.
+
+**What you need:** the robot on the network, a browser, and the Space the
+application source is published to — `<owner>/reachy-mini-ha-satellite`. If
+nobody has published it yet, that is a maintainer's one-time step and it is in
+[the deployment reference](../ops/satellite-deployment.md#publishing-the-application-source).
+
+**What you do not need:** an account on the robot, `ssh`, this repository, or
+`reachyctl`.
+
+### C1. Install it
+
+The daemon's dashboard installs applications from its curated list, and this one
+is not in that list — which does not matter, because the install endpoints take
+any Space. From your own machine:
+
+```
+curl --request POST http://<robot>:8000/api/apps/install \
+  --header 'content-type: application/json' \
+  --data '{
+    "name": "reachy-mini-ha-satellite",
+    "source_kind": "hf_space",
+    "url": "https://huggingface.co/spaces/<owner>/reachy-mini-ha-satellite"
+  }'
+```
+
+A **private** Space takes a stored Hugging Face token and a different endpoint;
+both are in
+[Route A of the deployment reference](../ops/satellite-deployment.md#route-a-install-from-the-robots-own-surfaces),
+which is this path in full, with what the daemon does at each step and how to
+watch the install job.
+
+### C2. Start it, and name the robot
+
+Start the application from the dashboard's list, then open its settings page at
+`http://<robot>:8088/`. It will say the robot is **not configured yet**, because
+nothing is announced to Home Assistant until you name it — read
+[the identity warning](home-assistant.md#-the-one-thing-that-cannot-be-undone-the-announced-identity)
+before choosing, then set `REACHY_SATELLITE_DEVICE_NAME`, press **Stop**, and
+start it again from the dashboard.
+
+That is a working satellite. The groundstation address and credential go on the
+same page and are adopted without a restart; with neither, the robot runs on its
+own detector where one is configured and says so where it is not.
+
+### What Path C does not give you
+
+- **No reproducible configuration.** Everything set on the settings page lives in
+  the robot's state directory and survives a reinstall of the application, but
+  not a re-image. Path A is what makes it declarative.
+- **No `reachyctl` on this robot.** `doctor --robot`, `deploy` and `config` all
+  reach the robot over SSH; they are diagnosis and management, not
+  prerequisites, and the satellite is fully configurable without them.
+- **Nothing changes about the motor switches.** They depend on the daemon's
+  `reachy-mini`, not on how the application got there — see the warning at the
+  top of this page.
+
+---
+
 ## 7. Verify the whole chain
 
 This is the point of the exercise: one command that says which link is broken,
@@ -518,8 +601,23 @@ reachyctl doctor \
   --intent declaration.json
 ```
 
-> **⏳ PENDING HARDWARE VERIFICATION.** No expected output is recorded for a run
-> with `--robot` against a robot. Nothing below is a transcript.
+**Executed against a Reachy Mini running ReachyMiniOS v0.2.3 with `reachy-mini`
+1.9.0**, with `--robot` and without `--intent`: nine checks, **7 passed, 0
+failed, 2 skipped**. `daemon.reachable` reported that the robot's daemon
+answered and is running 1.9.0; `application.installed`, the application present
+at version 0.2.0; `application.running`, that it is running; and the
+groundstation round trip, 1.2 ms. The two skips were `configuration.effective`
+and `home-assistant.identity`, which need an `--intent` declaration and are
+correctly skipped rather than failed without one.
+
+The transcript itself is not reproduced. Every line of it carries the robot's
+account name, its address or a path with an account in it, and the counts and
+the four readings above are the whole of what it says that is not specific to
+one installation — see the runbook convention in the root `AGENTS.md`.
+
+> **⏳ PENDING HARDWARE VERIFICATION** for the rest of it: a run with `--intent`
+> supplied, in which the two skipped checks also run, has not been recorded, and
+> neither has a run in which a check fails.
 
 What *is* recorded is the same command without `--robot`, which is the shape you
 should expect the groundstation half to take — see

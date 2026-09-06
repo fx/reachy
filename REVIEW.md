@@ -17,18 +17,19 @@ emits `<br>` and no `<pre>` — because CommonMark forbids an indented code bloc
 from interrupting a paragraph. Do not report it, and do not suggest joining the
 lines.
 
-**`.duvet/snapshot.txt` records annotations, not coverage.** All ten specs and
-all 98 requirements are registered in `.duvet/config.toml`, so
+**`.duvet/snapshot.txt` records annotations, not coverage.** All eleven specs
+and all 106 requirements are registered in `.duvet/config.toml`, so
 `duvet report --ci` and `duvet query -c implementation` check the complete
-requirement set, and no proposal is left unregistered — change 0020 implemented
-REQ-093–098 and registered the Home Assistant configuration and camera-feed spec
-in the same pull request. The distinction still matters: duvet also loads any
+requirement set, and no proposal is left unregistered — change 0021 implemented
+REQ-099–106 and registered the stock-robot-installation spec with its final
+task, exactly as change 0020 did for the Home Assistant configuration and
+camera-feed spec before it. The distinction still matters: duvet also loads any
 specification an annotation points at before registration, which is why an older
 snapshot could contain more requirement text than the gate covered. That
 historical mismatch ended when 0015 registered architecture and 0019 registered
 gaze-control with its final safety, diagnostics and deterministic acceptance
 evidence in place. Regeneration is byte-identical for the registered corpus, and
-a green run is evidence about all ten specs. See `.duvet/config.toml` for each
+a green run is evidence about all eleven specs. See `.duvet/config.toml` for each
 registration rationale and for why annotations are written `#:=`/`#:%` rather
 than duvet's documented `#=`/`#%`.
 

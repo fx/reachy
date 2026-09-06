@@ -571,6 +571,71 @@ anything else the tool reports about it.
 > above to be it. The `--python` step and the orphaned-process check have not
 > been run against real hardware.
 
+### A second daemon left behind by an earlier diagnosis
+
+**What it looks like.** The robot behaves as though something else has its
+hardware: the daemon logs a port already in use, the camera or the serial device
+cannot be opened, motion stops responding, or `doctor` reports faults that move
+around between runs. It follows a `deploy` or a `doctor` run made with a
+`reachyctl` from before the interpreter resolution above, which executed the
+unit's start program and so started a whole second daemon.
+
+**How to tell.** Count the daemon's start programs. One is correct:
+
+```
+ps -eo pid,ppid,etimes,args | grep '[l]auncher.sh'
+```
+
+**Executed, on a Reachy Mini running ReachyMiniOS v0.2.3 with `reachy-mini`
+1.9.0:** across three separate `reachyctl doctor` runs against the robot, the
+count of matching processes was **1** each time, before and after — which is
+[REQ-106](../specs/stock-robot-installation/index.md#req-106-diagnosis-and-deployment-start-no-second-daemon)'s
+scenario holding on real hardware. The transcript itself is not reproduced here:
+its lines carry the robot's account name and its filesystem paths, and the count
+is the whole of what it says. Two or more lines is the failure this section is
+about.
+
+**How to recover.** The orphan is not a systemd service — it was started by
+`reachyctl` as a child of an SSH session, and that session is gone — so
+restarting the unit restarts the real daemon and leaves the orphan exactly where
+it is. It has to be ended by process identifier, and by identifier only:
+
+1. Read the list above and identify the extra process. The genuine one is the
+   older of the two (`etimes` is its age in seconds) and its parent is systemd
+   (`ppid` 1, or the identifier of the unit's own process).
+2. Confirm before ending anything:
+   ```
+   ps -p <pid> -o pid,ppid,lstart,args
+   ```
+3. End that one process:
+   ```
+   kill <pid>
+   ```
+
+**Never `pkill -f launcher.sh` or anything else that matches by pattern**: the
+pattern matches the daemon the robot needs as well as the orphan, and taking
+both down on a robot you are diagnosing over the network is a longer evening
+than the one you are having.
+
+If a device stays busy after the orphan is gone — the camera, or
+`/dev/ttyAMA3` — the kernel is still holding it for a process that has not
+finished exiting. Give it a few seconds, then restart the daemon's unit; if it
+is still busy, power-cycle the robot, which is faster than diagnosing a stuck
+device driver.
+
+**The cause is fixed.** A current `reachyctl` never runs the unit's start
+program: every interpreter candidate has to be named like an interpreter *and*
+answer `-V` with a version before anything is sent to it, and when nothing
+resolves it says so rather than falling back. This section is here for robots
+diagnosed with an older one, and for recognising the symptom quickly if it ever
+appears again.
+
+> **⏳ PENDING HARDWARE VERIFICATION.** The recovery steps have not been run: no
+> robot here has had a second daemon on it since the fix, and reproducing one
+> deliberately would mean running a tool this repository no longer ships. The
+> detection count above *was* executed, and is the only part of this section
+> that is evidence rather than instruction.
+
 ### The service refuses to start naming a variable
 
 **Executed:**
