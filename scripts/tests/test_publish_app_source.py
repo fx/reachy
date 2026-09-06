@@ -251,14 +251,19 @@ class TestTheCommittedSource:
 class TestTheReleaseOrigin:
     """A version is not an identity, so the wheel's repository is checked too."""
 
+    # The SSH spelling of a git remote puts a user and a host either side of an
+    # `@`, so the leak scanner reads it as an e-mail address. Every value below
+    # is the documentation placeholder `owner/repository`, and the user half is
+    # git's own fixed account name rather than anybody's, so each such line
+    # carries the inline marker where a reviewer reads it.
     @pytest.mark.parametrize(
         "remote",
         [
-            "git@github.com:owner/repository.git",
-            "git@github.com:owner/repository",
+            "git@github.com:owner/repository.git",  # leak-scan:allow
+            "git@github.com:owner/repository",  # leak-scan:allow
             "https://github.com/owner/repository.git",
             "https://github.com/owner/repository/",
-            "ssh://git@github.com/owner/repository.git",
+            "ssh://git@github.com/owner/repository.git",  # leak-scan:allow
             "  https://github.com/owner/repository\n",
         ],
     )
@@ -271,7 +276,11 @@ class TestTheReleaseOrigin:
 
     @pytest.mark.parametrize(
         "remote",
-        ["", "git@gitlab.com:owner/repository.git", "/srv/git/repository.git"],
+        [
+            "",
+            "git@gitlab.com:owner/repository.git",  # leak-scan:allow  # as above
+            "/srv/git/repository.git",
+        ],
     )
     def test_a_remote_it_cannot_read_is_refused(self, remote: str) -> None:
         """Better than guessing at a repository the wheel then has to match."""
