@@ -55,7 +55,7 @@ from reachy_mini_ha_satellite.groundstation_url import (
 )
 from reachy_mini_ha_satellite.web import (
     CLEAR_PREFIX,
-    UNCONFIGURED_HEADING,
+    CLEARED_IDENTITY_HEADING,
     create_app,
     form_value,
 )
@@ -993,7 +993,10 @@ class TestWhenTheChangeCannotBeWritten:
 
         assert response.status_code == 303
         assert _store().load() == {}
-        assert UNCONFIGURED_HEADING in page
+        # This host is announcing, so the page says the identity was *cleared*
+        # rather than claiming an embargo the running process is not under —
+        # `test_satellite_bootstrap.py` owns that distinction.
+        assert CLEARED_IDENTITY_HEADING in page
 
     @pytest.mark.asyncio
     async def test_resetting_into_an_unusable_environment_is_still_refused(

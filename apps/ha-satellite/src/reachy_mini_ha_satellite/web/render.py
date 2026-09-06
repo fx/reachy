@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.config import Resolution, SettingReport
 
 __all__ = [
+    "CLEARED_IDENTITY_HEADING",
     "CLEAR_PREFIX",
     "UNCONFIGURED_HEADING",
     "field_choices",
@@ -50,6 +51,12 @@ __all__ = [
 #: it with an empty string would leave an operator on a page that looks broken
 #: at exactly the moment they most need it to look deliberate.
 UNCONFIGURED_HEADING: Final = "This robot is not configured yet"
+
+#: And what it calls one whose identity has been cleared while it is still
+#: announcing under the one it started with. A separate heading rather than the
+#: one above, because "not configured yet" is false of a robot Home Assistant is
+#: connected to — see `_identity_note` for the state and why it is reachable.
+CLEARED_IDENTITY_HEADING: Final = "The announced identity has been cleared"
 
 #: How a form asks for a secret to be unset rather than left alone. An empty
 #: password field means "leave it as it is", because that is what a browser
@@ -215,17 +222,29 @@ def _field(report: SettingReport, settings: Settings) -> str:
     )
 
 
-def _lede(settings: Settings, *, resolved_identity: bool) -> str:
+def _lede(
+    settings: Settings,
+    *,
+    resolved_identity: bool,
+    announcing: bool | None,
+) -> str:
     """Say what this robot announces itself as, or that it announces nothing.
 
     Args:
         settings: The settings in effect.
         resolved_identity: Whether an identity has been supplied.
+        announcing: Whether an announcing surface was built, or `None` when
+            nothing is running behind this page.
 
     Returns:
         The first sentence of the page.
     """
     if not resolved_identity:
+        if announcing:
+            return (
+                "The announced identity has been cleared, and this application "
+                "is still announcing under the one it started with."
+            )
         return (
             "Nothing is announced to Home Assistant: this robot has no "
             "announced identity yet."
@@ -241,17 +260,39 @@ def _lede(settings: Settings, *, resolved_identity: bool) -> str:
 def _identity_note(*, resolved_identity: bool, announcing: bool | None) -> str:
     """Render the standing note about the announced identity.
 
-    Three states rather than one, and they are three because the identity is
-    restart-bound. A robot with no identity is being told what the embargo is
-    and how to leave it; a robot with an identity supplied to a process that
-    started without one is being told the embargo is still in force and why; a
-    robot that is announcing is being told the thing it has always been told,
-    which is not to change the value.
+    Four states rather than one, and they are four because the identity is
+    **restart-bound**: what a process announces is fixed when it is built, so
+    the configured identity and the announced one are two facts and either can
+    move without the other.
+
+    | Configured | Announcing | What the operator is told |
+    |---|---|---|
+    | unresolved | no | the embargo, and how to leave it |
+    | unresolved | **yes** | the identity was *cleared* and this process is still announcing under the one it started with |
+    | resolved | no | an identity is set and this process started without one |
+    | resolved | yes | the standing hazard: do not change it |
+
+    **The second row is the one worth reading, because getting it wrong is a
+    lie in the direction that matters.** Clearing `device_name` on a robot that
+    is announcing resolves — an unresolved identity is a state now — so it is
+    persisted and badged "needs a restart" like any other restart-bound change,
+    and the process goes on announcing under the identity it was built with. A
+    page that showed the embargo there would tell an operator no device was
+    registered while Home Assistant was still connected to one.
+
+    It is not refused, and that is deliberate rather than an omission: the
+    identity can come from an override alone, so refusing would make *Reset*
+    impossible on such a robot — and stopping it to get round that starts it
+    again with the same override, which is a dead end of exactly the kind this
+    change exists to remove. REQ-102 still holds, because "its announced
+    identity" is what a process announces and that is resolved for as long as it
+    announces anything; the cleared value takes effect at the next start, and
+    that start builds no announcing surface at all.
 
     `announcing` is `None` for a page with no application behind it — the
     rendering-only composition the composition root never produces. There is
-    nothing running to be announcing or not, so the middle state is not one that
-    page can be in and it renders the standing hazard instead.
+    nothing running to be announcing or not, so neither middle row is one that
+    page can be in, and it renders the first or the last.
 
     Args:
         resolved_identity: Whether an identity has been supplied.
@@ -261,6 +302,18 @@ def _identity_note(*, resolved_identity: bool, announcing: bool | None) -> str:
     Returns:
         One note.
     """
+    if not resolved_identity and announcing:
+        return (
+            '<div class="note hazard"><strong>The announced identity has been '
+            "cleared, and this application is still announcing under the one it "
+            "started with.</strong> What a satellite announces is fixed when it "
+            "starts, so clearing the value takes effect at the next start — and "
+            "that start will announce nothing at all, leaving the Home Assistant "
+            "device this robot registered with no satellite behind it. If that "
+            "was not what you meant, set <code>"
+            f"{_escape(IDENTITY_SETTING)}</code> back below before stopping the "
+            "application.</div>"
+        )
     if not resolved_identity:
         return (
             '<div class="note hazard"><strong>Nothing is announced to Home '
@@ -381,11 +434,14 @@ def render_settings_page(
     resolved_identity = identity_is_resolved(settings)
     # A robot with no announced identity has no name to head the page with —
     # not even the display name, since heading it with one would imply a
-    # configured robot. The title is the heading on its own in that state,
+    # configured robot. The title is the heading on its own in those states,
     # because "This robot is not configured yet settings" is nobody's tab.
-    heading = (
-        settings.announced_friendly_name if resolved_identity else UNCONFIGURED_HEADING
-    )
+    if resolved_identity:
+        heading = settings.announced_friendly_name
+    elif announcing:
+        heading = CLEARED_IDENTITY_HEADING
+    else:
+        heading = UNCONFIGURED_HEADING
     title = f"{heading} settings" if resolved_identity else heading
     notes: list[str] = []
     if error is not None:
@@ -440,8 +496,9 @@ def render_settings_page(
         f"<title>{_escape(title)}</title>"
         f"<style>{_STYLE}</style></head><body>"
         f"<h1>{_escape(heading)}</h1>"
-        f'<p class="lede">{_lede(settings, resolved_identity=resolved_identity)} '
-        f"{state}</p>"
+        f'<p class="lede">'
+        f"{_lede(settings, resolved_identity=resolved_identity, announcing=announcing)}"
+        f" {state}</p>"
         f"{_identity_note(resolved_identity=resolved_identity, announcing=announcing)}"
         f"{_groundstation_note(settings)}"
         f"{''.join(notes)}{ignored}{unread}"

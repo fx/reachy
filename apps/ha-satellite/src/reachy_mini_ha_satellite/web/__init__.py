@@ -18,6 +18,7 @@ from reachy_mini_ha_satellite.web.app import (
 )
 from reachy_mini_ha_satellite.web.render import (
     CLEAR_PREFIX,
+    CLEARED_IDENTITY_HEADING,
     UNCONFIGURED_HEADING,
     field_choices,
     form_value,
@@ -25,6 +26,7 @@ from reachy_mini_ha_satellite.web.render import (
 )
 
 __all__ = [
+    "CLEARED_IDENTITY_HEADING",
     "CLEAR_PREFIX",
     "UNCONFIGURED_HEADING",
     "SettingsHost",

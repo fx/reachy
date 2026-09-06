@@ -50,6 +50,7 @@ from reachy_mini_ha_satellite.adapters.perception_source import FallbackPercepti
 from reachy_mini_ha_satellite.behaviour import SatelliteBehaviour
 from reachy_mini_ha_satellite.config import (
     ENV_PREFIX,
+    IDENTITY_SETTING,
     OVERRIDES_FILENAME,
     ConfigurationError,
     OverrideStore,
@@ -75,6 +76,7 @@ from reachy_mini_ha_satellite.main import (
     build_remote_source,
 )
 from reachy_mini_ha_satellite.web import (
+    CLEARED_IDENTITY_HEADING,
     UNCONFIGURED_HEADING,
     create_app,
     render_settings_page,
@@ -493,6 +495,39 @@ class TestNothingIsAnnouncedWhileTheIdentityIsUnresolved:
 
         assert "still announcing" in page
         assert UNCONFIGURED_HEADING not in page
+
+    def test_clearing_a_live_identity_does_not_claim_an_embargo_it_has_not_got(
+        self,
+    ) -> None:
+        """The fourth state, and the one where getting it wrong lies outward.
+
+        An unresolved identity is a state now, so clearing `device_name` on a
+        robot that is announcing resolves, is persisted, and is badged "needs a
+        restart" like any other restart-bound change — while the process goes on
+        announcing under the identity it was built with. A page that showed the
+        embargo there would tell an operator no device was registered while Home
+        Assistant was still connected to one.
+
+        It is not refused, and that is deliberate: the identity can come from an
+        override alone, so refusing would make *Reset* impossible on such a
+        robot, and stopping it to get round that starts it again with the same
+        override — a dead end of exactly the kind this change exists to remove.
+        """
+        cleared = load_settings(NAMED, {IDENTITY_SETTING: ""})
+
+        page = render_settings_page(
+            cleared,
+            configuration_report(cleared),
+            status={},
+            overrides_path=str(_STATE_DIR / OVERRIDES_FILENAME),
+            announcing=True,
+        )
+
+        assert not identity_is_resolved(cleared.settings)
+        assert "Nothing is announced to Home Assistant until" not in page
+        assert UNCONFIGURED_HEADING not in page
+        assert CLEARED_IDENTITY_HEADING in page
+        assert "still announcing under the one it started with" in page
 
     @pytest.mark.asyncio
     async def test_an_identity_resolved_after_this_process_started_is_not_announced(
