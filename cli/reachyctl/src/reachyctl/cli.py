@@ -388,7 +388,6 @@ def _layout(
         daemon_unit: The unit carrying the environment.
         daemon_control: The daemon's application-control module.
         daemon_api: Where the daemon's own HTTP API answers, from the robot.
-        daemon_api: Where the daemon's own HTTP API answers, from the robot.
         python: The interpreter an operator named, or `None` to resolve one
             from the robot.
 
