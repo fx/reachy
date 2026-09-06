@@ -174,12 +174,19 @@ _OUTSTANDING_MESSAGE: Final = (
 )
 
 # What a transition says when the submission would leave the robot with no
-# groundstation source at all while one is running. The settings that decide
-# whether a session exists take effect at the next start, so a save that changes
-# one of them *and* the address would retire the running source into nothing —
-# and the page would report success over a satellite that had stopped seeing.
-# The message names no setting: which ones they are is the factory's business,
-# and a list here is one that goes stale silently.
+# groundstation source at all while one is running **and did not ask for that**.
+# The settings that decide whether a session exists take effect at the next
+# start, so a save that changes one of them *and* the address would retire the
+# running source into nothing — and the page would report success over a
+# satellite that had stopped seeing. The message names no setting: which ones
+# they are is the factory's business, and a list here is one that goes stale
+# silently.
+#
+# A submission that unconfigures the groundstation — clearing the address or the
+# credential — reaches no source at all for a reason it stated, so it retires
+# rather than being refused and never produces this message. `_replace` is where
+# the two are told apart, by asking `groundstation_is_resolved` of the submitted
+# configuration.
 _RETIRES_INTO_NOTHING_MESSAGE: Final = (
     "the submitted configuration opens no groundstation session while one is "
     "running, so the address was not changed. The settings that decide whether "
