@@ -280,10 +280,72 @@ deployment can get irreversibly wrong.
   "was this written against the old behaviour?" — a claim that something is
   redundant, immediate, or a duplicate is the kind that rots silently, and the
   kind whose rotting deletes code.
-- **The announced Home Assistant identity has no default.** `device_name` is
-  required and the application refuses to start without it. Home Assistant keys
-  a device on what it announces, so a derived default would be correct on a
-  fresh install and silently destructive on an upgrade. Do not add one.
+- **Nothing derives the announced Home Assistant identity, and an unresolved one
+  is a state rather than a refusal.** Home Assistant keys a device on what it
+  announces, so a default derived from the package name, the host name or the
+  hardware address would be correct on a fresh install and silently destructive
+  on an upgrade. **Do not add one.** The field's default is the empty string and
+  that is the unresolved state rather than a name — read it as the absence of an
+  answer, so that no plausible-looking identity is ever manufactured for an
+  operator to announce by accident. What changed with stock-robot installation
+  REQ-101 is where the refusal lands: `device_name` defaults to the empty string,
+  `config.identity_is_resolved` is the one question anything asks about it, and
+  the application starts, serves its settings interface and serves `/status`
+  without one. An identity the model *rejects* is still fatal — "not supplied"
+  and "not acceptable" are different answers.
+  **The embargo that makes that safe is structural and lives in one place.**
+  `main.build_application` builds no `ServerState` when the identity is
+  unresolved, and discovers no network identity either — `discover_network_identity`
+  refuses a machine with no default route, and running it before that branch
+  would refuse to assemble an application that announces nothing, on exactly the
+  robot REQ-101 exists for. So there is no entity, no pipeline tap, no ESPHome
+  listener and no mDNS record to have been suppressed — REQ-102 is an absence of machinery
+  rather than a guard at each announcing call site, and a test that asserts the
+  machinery was never constructed keeps holding as services are added. Do not
+  reintroduce announcing under a placeholder, and do not stand the announcing
+  surface up mid-process: `SatelliteApplication` reports `announcing` from what
+  was *built*, and it carries the **identity** rather than a boolean because the
+  configured value and the announced one can disagree in either direction: one
+  supplied to a process that started without it is configured and not announced,
+  and one changed on a running robot leaves Home Assistant keyed on the
+  preceding one. `/status` reports both (`announcing`, `announced_as`), and the
+  settings page's five-way identity note and its "Announced to Home Assistant
+  as" sentence are rendered from what was announced, never from the settings.
+  **This decision and the motion-gating one are independent, and a robot out of
+  its box is in both states at once**: no identity, so nothing announced, and a
+  released daemon with nothing to correlate, so motion ungated. Deriving either
+  from the other would be wrong on exactly that robot — a stock daemon says
+  nothing about whether anybody has named the robot, and a fork that can confirm
+  torque says nothing about whether it is safe to announce one.
+  `test_satellite_bootstrap.py` pins the intersection, which is the state
+  neither change could see on its own.
+- **An unresolved groundstation is unconfigured, not failed.**
+  `config.groundstation_is_resolved` needs both the address and the credential,
+  `main.build_remote_source` builds nothing without them, and `/status` reports
+  `unconfigured` — the same distinction `reachy_checks` draws between a skipped
+  check and a failed one. The first groundstation an operator supplies is adopted
+  by `groundstation_url.GroundstationUrlOwner`, the transition REQ-095 already
+  owns, and not by a second path: **supplying or removing either half reaches
+  `_replace`**, because what selects that path is
+  `GroundstationUrlOwner._opens_a_different_session` and not the address on its
+  own. The address alone was the released condition and it is the wrong question
+  — a session needs both halves, so a submission that supplies or removes the
+  credential changes whether one exists while leaving the address untouched, and
+  sending it down the released branch left the running client answering under a
+  revoked secret with every surface reporting the source as available. Rotating
+  one is the same defect a step along, so it takes the transition too, and
+  `groundstation_credential` is consequently the one secret in
+  `config.LIVE_SETTINGS` — a page telling an operator to restart for a value the
+  robot has already adopted is as wrong as one telling them the opposite.
+  **Until a groundstation exists the robot runs on its own detector**, which is
+  REQ-103 in as many words, so a `remote` selection composes
+  `FallbackPerception` — never `local`, because `ReplaceableRemoteSource` has to
+  stay in that chain for the eventual source to be swapped in behind it, and the
+  fallback is the one composition that both holds it and answers from the robot
+  while it is empty. The substitution is keyed on the groundstation being
+  unresolved and needs `local_model_path`: the weights are not in this wheel, so
+  with none set there is nothing local to run and the honest outcome is no
+  detections and a surface saying `unconfigured`.
 - **The overrides layer cannot supply a setting the settings page depends on.**
   An override sits above the environment, so it can only be undone by writing
   another one — and a page that had written one of these wrongly is the page

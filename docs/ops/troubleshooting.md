@@ -138,11 +138,14 @@ cleanly-exited application `done` and leaves it stopped; nothing relaunches it.
 So this check failing right after somebody pressed **Stop** on the settings page
 is the settings page working, not a fault.
 
-If it exits at startup, the reason is almost always configuration:
-`REACHY_SATELLITE_DEVICE_NAME` is unset, or the detection source needs something
-it was not given — `remote` needs an address *and* a credential, `local` needs a
-path to model weights that are deliberately not shipped in the wheel. Read the
-journal:
+If it exits at startup, the reason is almost always configuration: a variable
+under `REACHY_SATELLITE_` that names no setting, an announced identity the
+contract does not accept, or `local` detection with no path to the model weights
+that are deliberately not shipped in the wheel. **An unset
+`REACHY_SATELLITE_DEVICE_NAME` is not one of them, and neither is an unsupplied
+groundstation** — both are unresolved states the application starts on, and it
+serves its settings page saying so, announcing nothing until an identity is set.
+Read the journal:
 
 ```
 reachyctl app logs --robot reachy@192.0.2.20

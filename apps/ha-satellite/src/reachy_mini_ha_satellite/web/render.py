@@ -20,12 +20,17 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Literal, get_args, get_origin
 
 from reachy_mini_ha_satellite.config import (
+    GROUNDSTATION_CREDENTIAL_SETTING,
     GROUNDSTATION_URL_MAX_LENGTH,
     GROUNDSTATION_URL_SETTING,
+    IDENTITY_SETTING,
     LIVE_SETTINGS,
     SECRET_SETTINGS,
     Settings,
     as_configured_string,
+    groundstation_is_resolved,
+    identity_is_resolved,
+    local_detection_clause,
 )
 
 if TYPE_CHECKING:
@@ -34,11 +39,25 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.config import Resolution, SettingReport
 
 __all__ = [
+    "CLEARED_IDENTITY_HEADING",
     "CLEAR_PREFIX",
+    "UNCONFIGURED_HEADING",
     "field_choices",
     "form_value",
     "render_settings_page",
 ]
+
+#: What the page calls a robot that has not been given an identity yet. A robot
+#: with no announced name has no name to head the page with either, and heading
+#: it with an empty string would leave an operator on a page that looks broken
+#: at exactly the moment they most need it to look deliberate.
+UNCONFIGURED_HEADING: Final = "This robot is not configured yet"
+
+#: And what it calls one whose identity has been cleared while it is still
+#: announcing under the one it started with. A separate heading rather than the
+#: one above, because "not configured yet" is false of a robot Home Assistant is
+#: connected to — see `_identity_note` for the state and why it is reachable.
+CLEARED_IDENTITY_HEADING: Final = "The announced identity has been cleared"
 
 #: How a form asks for a secret to be unset rather than left alone. An empty
 #: password field means "leave it as it is", because that is what a browser
@@ -204,6 +223,203 @@ def _field(report: SettingReport, settings: Settings) -> str:
     )
 
 
+def _lede(
+    settings: Settings,
+    *,
+    resolved_identity: bool,
+    announced_identity: str | None,
+) -> str:
+    """Say what this robot announces itself as, or that it announces nothing.
+
+    **The authoritative sentence on the page, so it states what is announced
+    rather than what is configured.** The two are different facts — the identity
+    is restart-bound — and rendering the configured one here was wrong in the
+    direction that matters: a robot saved with a new `device_name` would be
+    described as announced under it while Home Assistant was still keyed on the
+    preceding one, on the page whose standing hazard is that very key.
+
+    Args:
+        settings: The settings in effect.
+        resolved_identity: Whether an identity has been supplied.
+        announced_identity: What this process announces, or `None` when it
+            announces nothing — including when there is no application behind
+            this page at all.
+
+    Returns:
+        The first sentence of the page.
+    """
+    if announced_identity is None:
+        if resolved_identity:
+            # A page with an application that built no announcing surface, or
+            # with no application at all. `_identity_note` tells the two apart;
+            # neither is announcing, which is all this sentence claims.
+            return "Nothing is announced to Home Assistant yet."
+        return (
+            "Nothing is announced to Home Assistant: this robot has no "
+            "announced identity yet."
+        )
+    announced = (
+        f"Announced to Home Assistant as <code>{_escape(announced_identity)}</code>."
+    )
+    if not resolved_identity:
+        return (
+            f"{announced} The configured identity has been cleared, so the next "
+            f"start announces nothing."
+        )
+    if settings.device_name != announced_identity:
+        return (
+            f"{announced} The configured identity is now <code>"
+            f"{_escape(settings.device_name)}</code>, which takes effect at the "
+            f"next start."
+        )
+    return announced
+
+
+#:= docs/specs/stock-robot-installation/index.md#req-102-nothing-is-announced-while-the-identity-is-unresolved
+#:% The satellite MUST NOT announce itself to Home Assistant, or serve a Home
+#:% Assistant connection, while its announced identity is unresolved.
+def _identity_note(
+    *,
+    resolved_identity: bool,
+    announcing: bool | None,
+    renamed: bool,
+) -> str:
+    """Render the standing note about the announced identity.
+
+    Five states rather than one, and they are five because the identity is
+    **restart-bound**: what a process announces is fixed when it is built, so
+    the configured identity and the announced one are two facts, and either can
+    move without the other in either direction.
+
+    | Configured | Announcing | What the operator is told |
+    |---|---|---|
+    | unresolved | no | the embargo, and how to leave it |
+    | unresolved | **yes** | the identity was *cleared* and this process is still announcing under the one it started with |
+    | resolved | no | an identity is set and this process started without one |
+    | resolved, **changed** | yes | the change has not happened yet, and what it will do when it does |
+    | resolved, unchanged | yes | the standing hazard: do not change it |
+
+    **The second row is the one worth reading, because getting it wrong is a
+    lie in the direction that matters.** Clearing `device_name` on a robot that
+    is announcing resolves — an unresolved identity is a state now — so it is
+    persisted and badged "needs a restart" like any other restart-bound change,
+    and the process goes on announcing under the identity it was built with. A
+    page that showed the embargo there would tell an operator no device was
+    registered while Home Assistant was still connected to one.
+
+    It is not refused, and that is deliberate rather than an omission: the
+    identity can come from an override alone, so refusing would make *Reset*
+    impossible on such a robot — and stopping it to get round that starts it
+    again with the same override, which is a dead end of exactly the kind this
+    change exists to remove. REQ-102 still holds, because "its announced
+    identity" is what a process announces and that is resolved for as long as it
+    announces anything; the cleared value takes effect at the next start, and
+    that start builds no announcing surface at all.
+
+    `announcing` is `None` for a page with no application behind it — the
+    rendering-only composition the composition root never produces. There is
+    nothing running to be announcing or not, so neither middle row is one that
+    page can be in, and it renders the first or the last.
+
+    Args:
+        resolved_identity: Whether an identity has been supplied.
+        announcing: Whether an announcing surface was built, or `None` when
+            nothing is running behind this page.
+        renamed: Whether the configured identity differs from the one this
+            process announces. Only meaningful while announcing.
+
+    Returns:
+        One note.
+    """
+    if not resolved_identity and announcing:
+        return (
+            '<div class="note hazard"><strong>The announced identity has been '
+            "cleared, and this application is still announcing under the one it "
+            "started with.</strong> What a satellite announces is fixed when it "
+            "starts, so clearing the value takes effect at the next start — and "
+            "that start will announce nothing at all, leaving the Home Assistant "
+            "device this robot registered with no satellite behind it. If that "
+            "was not what you meant, set <code>"
+            f"{_escape(IDENTITY_SETTING)}</code> back below before stopping the "
+            "application.</div>"
+        )
+    if not resolved_identity:
+        return (
+            '<div class="note hazard"><strong>Nothing is announced to Home '
+            "Assistant until <code>"
+            f"{_escape(IDENTITY_SETTING)}</code> is set.</strong> No device is "
+            "registered, no entity exists and no Home Assistant connection is "
+            "served, so there is nothing here for a later identity to collide "
+            "with. Set it below and save.<br><br>Choose the name now and never "
+            "change it: Home Assistant keys the device on it, so a later change "
+            "registers a second device, every entity identifier gains a suffix, "
+            "history detaches and automations referencing the old identifiers "
+            "stop matching. Upgrading an existing installation means setting it "
+            "to whatever the previous application announced.<br><br>The "
+            "announcing surface is built when the application starts, so after "
+            "saving press <em>Stop</em> below and start it again from the robot "
+            "dashboard — no shell, and no reinstall.</div>"
+        )
+    if announcing is False:
+        return (
+            '<div class="note hazard"><strong>An identity is set, and this '
+            "application started without one, so it is still announcing "
+            "nothing.</strong> Press <em>Stop</em> below and start it again "
+            "from the robot dashboard — the daemon leaves a cleanly-stopped "
+            "application stopped.</div>"
+        )
+    if renamed:
+        return (
+            '<div class="note hazard"><strong>The announced identity has been '
+            "changed, and Home Assistant is still keyed on the one this "
+            "application started with.</strong> When it next starts it will "
+            "announce the new one, and Home Assistant will register a "
+            "<em>second</em> device: every entity identifier gains a suffix, "
+            "history stays with the old device and automations referencing the "
+            "old identifiers stop matching. Nothing has happened yet — set "
+            f"<code>{_escape(IDENTITY_SETTING)}</code> back below if that was "
+            "not what you meant.</div>"
+        )
+    return (
+        '<div class="note hazard"><strong>Do not change '
+        "<code>device_name</code> on a robot Home Assistant already knows.</strong> "
+        "Home Assistant keys the device on it: a new name registers a new "
+        "device, every entity identifier gains a suffix, history detaches, and "
+        "automations referencing the old identifiers stop matching.</div>"
+    )
+
+
+#:= docs/specs/stock-robot-installation/index.md#req-103-remote-perception-is-optional-at-first-start
+#:% The satellite MUST start with an unresolved groundstation address or credential
+#:% and run on local detection until both are supplied through a configuration
+#:% surface.
+def _groundstation_note(settings: Settings) -> str:
+    """Say that an unsupplied groundstation is unconfigured rather than broken.
+
+    Args:
+        settings: The settings in effect.
+
+    Returns:
+        The note, or nothing at all when a groundstation is configured.
+    """
+    if groundstation_is_resolved(settings):
+        return ""
+    return (
+        '<div class="note">No groundstation is configured, so the remote '
+        "detector is <strong>unconfigured</strong> rather than failed: no "
+        "session is opened, nothing is connecting and nothing is being retried, "
+        # The one definition of what detects a face meanwhile, shared with the
+        # boot log rather than written again here. A robot with no local
+        # weights has nothing to fall back to, and saying otherwise would
+        # describe somebody else's robot to the operator of this one.
+        f"and {_escape(local_detection_clause(settings))} "
+        f"Set both <code>{_escape(GROUNDSTATION_URL_SETTING)}</code> and "
+        f"<code>{_escape(GROUNDSTATION_CREDENTIAL_SETTING)}</code> below — one "
+        "without the other opens nothing — and a running application adopts "
+        "them without a restart.</div>"
+    )
+
+
 def _resolved_table(report: Sequence[SettingReport]) -> str:
     """Render the resolved configuration, defaults included.
 
@@ -225,12 +441,18 @@ def _resolved_table(report: Sequence[SettingReport]) -> str:
     )
 
 
+#:= docs/specs/stock-robot-installation/index.md#req-101-an-unresolved-identity-starts-the-application-rather-than-stopping-it
+#:% The satellite MUST start and serve its settings interface when no announced
+#:% identity has been configured, reporting the identity as unresolved rather than
+#:% refusing to start.
 def render_settings_page(
     resolution: Resolution,
     report: Sequence[SettingReport],
     *,
     status: Mapping[str, object],
     overrides_path: str,
+    announcing: bool | None = None,
+    announced_identity: str | None = None,
     error: str | None = None,
     saved: Sequence[str] = (),
     restart_needed: Sequence[str] = (),
@@ -242,6 +464,17 @@ def render_settings_page(
         report: The same, rendered with secrets redacted.
         status: What the robot is doing right now.
         overrides_path: Where a change written here is kept.
+        announcing: Whether the application behind this page built an announcing
+            surface, or `None` when there is no application behind it. Taken
+            from the application rather than inferred from the settings, because
+            the identity is restart-bound: one supplied a moment ago is resolved
+            configuration and still nothing announced, and that gap is precisely
+            what an operator on this page needs told.
+        announced_identity: *Which* identity it announces, or `None` when it
+            announces none. The gap runs the other way too — an identity changed
+            on a running robot leaves Home Assistant keyed on the preceding one
+            — so the sentence that says what Home Assistant sees is rendered
+            from this rather than from the settings.
         error: What went wrong with the last submission, if anything.
         saved: Which settings the last submission changed.
         restart_needed: Which of those need the application restarted.
@@ -250,6 +483,28 @@ def render_settings_page(
         One self-contained HTML document.
     """
     settings = resolution.settings
+    resolved_identity = identity_is_resolved(settings)
+    # A robot with no announced identity has no name to head the page with —
+    # not even the display name, since heading it with one would imply a
+    # configured robot. The title is the heading on its own in those states,
+    # because "This robot is not configured yet settings" is nobody's tab.
+    renamed = announced_identity is not None and (
+        settings.device_name != announced_identity
+    )
+    if renamed:
+        # A fact rather than a label: the display name is configuration too and
+        # would be as stale as the identity beside it, so while the two disagree
+        # the page is headed by what Home Assistant is actually keyed on. The
+        # friendly name is a display value and its own one-restart staleness is
+        # not worth a second carried string.
+        heading = str(announced_identity)
+    elif resolved_identity:
+        heading = settings.announced_friendly_name
+    elif announcing:
+        heading = CLEARED_IDENTITY_HEADING
+    else:
+        heading = UNCONFIGURED_HEADING
+    title = f"{heading} settings" if resolved_identity else heading
     notes: list[str] = []
     if error is not None:
         notes.append(
@@ -300,16 +555,14 @@ def render_settings_page(
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f"<title>{_escape(settings.announced_friendly_name)} settings</title>"
+        f"<title>{_escape(title)}</title>"
         f"<style>{_STYLE}</style></head><body>"
-        f"<h1>{_escape(settings.announced_friendly_name)}</h1>"
-        f'<p class="lede">Announced to Home Assistant as '
-        f"<code>{_escape(settings.device_name)}</code>. {state}</p>"
-        '<div class="note hazard"><strong>Do not change '
-        "<code>device_name</code> on a robot Home Assistant already knows.</strong> "
-        "Home Assistant keys the device on it: a new name registers a new "
-        "device, every entity identifier gains a suffix, history detaches, and "
-        "automations referencing the old identifiers stop matching.</div>"
+        f"<h1>{_escape(heading)}</h1>"
+        f'<p class="lede">'
+        f"{_lede(settings, resolved_identity=resolved_identity, announced_identity=announced_identity)}"
+        f" {state}</p>"
+        f"{_identity_note(resolved_identity=resolved_identity, announcing=announcing, renamed=renamed)}"
+        f"{_groundstation_note(settings)}"
         f"{''.join(notes)}{ignored}{unread}"
         '<form method="post" action="settings">'
         "<table><thead><tr><th>Setting</th><th>Value</th><th></th></tr></thead>"

@@ -6,9 +6,9 @@ narrow protocol the running application satisfies. The split is what lets "what
 does the page say about a secret?" be answered by calling a function rather than
 by driving a server.
 
-Nothing here imports `main.py`. The interface is handed a `SettingsHost` — three
-methods — which is both what breaks the import cycle and a complete statement of
-what a settings page is allowed to do to a running robot.
+Nothing here imports `main.py`. The interface is handed a `SettingsHost` — a
+handful of methods — which is both what breaks the import cycle and a complete
+statement of what a settings page is allowed to do to a running robot.
 """
 
 from reachy_mini_ha_satellite.web.app import (
@@ -18,13 +18,17 @@ from reachy_mini_ha_satellite.web.app import (
 )
 from reachy_mini_ha_satellite.web.render import (
     CLEAR_PREFIX,
+    CLEARED_IDENTITY_HEADING,
+    UNCONFIGURED_HEADING,
     field_choices,
     form_value,
     render_settings_page,
 )
 
 __all__ = [
+    "CLEARED_IDENTITY_HEADING",
     "CLEAR_PREFIX",
+    "UNCONFIGURED_HEADING",
     "SettingsHost",
     "base_form_values",
     "create_app",

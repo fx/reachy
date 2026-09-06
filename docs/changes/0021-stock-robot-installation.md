@@ -371,28 +371,28 @@ waiting on work that does not exist.
   - [x] Run the focused satellite suites and the repository checks required
         above (PR #35)
 
-- [ ] Task 2 — Start and configure without a shell on the robot
+- [x] Task 2 — Start and configure without a shell on the robot
       (`apps/ha-satellite`)
-  - [ ] Make an unresolved announced identity a representable configuration
+  - [x] Make an unresolved announced identity a representable configuration
         state rather than a validation failure, keeping every other identity
         constraint as it is
-  - [ ] Start the application, its settings interface and its health surface
+  - [x] Start the application, its settings interface and its health surface
         with an unresolved identity, and start no announcing surface
-  - [ ] Present the unconfigured state explicitly in the settings interface,
+  - [x] Present the unconfigured state explicitly in the settings interface,
         naming what is missing and that nothing is announced until it is set
-  - [ ] Adopt an identity supplied through the settings interface without a
+  - [x] Adopt an identity supplied through the settings interface without a
         shell session and without reinstalling, announcing exactly it
-  - [ ] Give an unresolved groundstation address and credential the same
+  - [x] Give an unresolved groundstation address and credential the same
         treatment, routing their first resolution through the existing
         replacement owner rather than a second path, and report the remote
         source as unconfigured rather than failed
-  - [ ] Cover unresolved, invalid and resolved identities, repeated restarts
+  - [x] Cover unresolved, invalid and resolved identities, repeated restarts
         while unresolved, the announcement embargo, adoption, and first-time
         groundstation resolution with local fallback, with fakes and no Home
         Assistant instance
-  - [ ] Update the configuration and settings-interface documentation for the
+  - [x] Update the configuration and settings-interface documentation for the
         new startup states
-  - [ ] Run the focused satellite suites and the repository checks required
+  - [x] Run the focused satellite suites and the repository checks required
         above
 
 - [ ] Task 3 — Resolve the daemon's interpreter without starting a second daemon

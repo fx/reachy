@@ -45,10 +45,22 @@ So the button stops the satellite and the operator starts it again from the
 daemon's own dashboard — which is a web interface, so REQ-049's "without a
 shell" holds either way. Claiming a restart the daemon does not perform would
 leave an operator looking at a robot that had gone quiet.
+
+**This page is also the first-time configuration surface**, which is stock-robot
+installation REQ-101 and is the reason it is served before the announced identity
+exists. On a robot reached only through the surfaces its shipped image exposes,
+this and the daemon's own dashboard are the whole of what an operator has, so a
+refusal to start without an identity made the identity unsuppliable. It now
+renders an explicit unconfigured state instead — see `render._identity_note` and
+`render._groundstation_note` — and saving one is the ordinary restart-bound path
+the *Stop* button already exists for. Nothing is announced in the meantime, which
+is REQ-102 and is enforced in `main.build_application` rather than here: this
+page's job is to say so, not to hold the line.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING, Final, Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -86,6 +98,8 @@ if TYPE_CHECKING:
     from reachy_mini_ha_satellite.config import OverrideStore
 
 __all__ = ["SettingsHost", "base_form_values", "create_app"]
+
+_LOGGER: Final = logging.getLogger(__name__)
 
 # What a form submission is allowed to be. A settings page is not an upload
 # endpoint, and a body larger than this is either a mistake or an attempt.
@@ -194,8 +208,10 @@ def _default_string(name: str) -> str:
         name: Which setting.
 
     Returns:
-        The default as a string, or the empty string for the one setting that
-        has no default and for every secret — whose value is never rendered.
+        The default as a string, and the empty string for every secret — whose
+        value is never rendered. The announced identity's own default *is* the
+        empty string, which is the unresolved state rather than a name, so it
+        needs no special case here.
     """
     if name in SECRET_SETTINGS:
         return ""
@@ -472,10 +488,7 @@ def create_app(
             # with the operator reading why rather than a traceback. A file that
             # cannot be written is the one worth naming: a change that appears
             # to have been accepted and was not is the worst outcome available.
-            return HTMLResponse(
-                _page(_resolved(), store, application, error=str(error)),
-                status_code=400,
-            )
+            return _refused(error, _resolved(), store, application)
 
         # `None` is a save that changed nothing the file did not already say, so
         # there is no new resolution to record and `changed` below is empty.
@@ -496,10 +509,15 @@ def create_app(
             request: The form submission, read only for where it came from.
 
         Returns:
-            A redirect to the page, or the page again with the refusal on it —
-            which is what happens when the environment on its own is not usable,
-            because the announced identity was only ever set from here. Nothing
-            is written in that case: the resolve comes first.
+            A redirect to the page, or the page again with the refusal on it
+            when the environment on its own does not resolve. Nothing is written
+            in that case: the resolve comes first.
+
+            **Discarding an identity that was only ever set from here is not
+            such a case.** It resolves, to the unresolved state — REQ-101 — so
+            the reset succeeds and the page comes back saying nothing is
+            announced. Which is honest: the value is gone, and the process
+            announcing under it is still doing so until it is stopped.
         """
         if not _from_this_page(request):
             return _refuse_cross_site()
@@ -524,10 +542,7 @@ def create_app(
             # value becomes effective, and it has its own source to build.
             resolved = await _write(_discard_everything)
         except ConfigurationError as error:
-            return HTMLResponse(
-                _page(_resolved(), store, application, error=str(error)),
-                status_code=400,
-            )
+            return _refused(error, _resolved(), store, application)
         if resolved is not None:
             current.resolution = resolved
         return _redirect_after(tuple(sorted(discarded)))
@@ -641,6 +656,47 @@ def create_app(
             ),
             Route("/livez", livez),
         ],
+    )
+
+
+def _refused(
+    error: ConfigurationError,
+    resolution: Resolution,
+    store: OverrideStore,
+    application: SettingsHost | None,
+) -> Response:
+    """Render a refused submission, and put its reason where it outlives the tab.
+
+    **Both refusal paths go through here so the reason is logged as well as
+    shown.** A refusal used to exist only in the browser: the page renders it
+    and nothing else records it, so an operator who navigated away took the one
+    piece of evidence with them, and a refusal that did not reproduce could not
+    be told apart from any of the dozen others this path can raise. The journal
+    is the robot's own record and the daemon collects it, so that is where a
+    one-off belongs.
+
+    **Logging the message is safe by construction, not by inspection.** Every
+    `ConfigurationError` this path can produce is built to be reportable:
+    `_check_session_url` refuses an address without quoting it,
+    `load_settings` renders a validation failure from `loc` and `msg` alone
+    precisely so a rejected credential is not printed, and the rest name
+    variables, a path, a length or an OS error. `config`'s module docstring
+    enumerates where a secret's raw value travels and no refusal is on that
+    list.
+
+    Args:
+        error: What the submission was refused with.
+        resolution: The settings in effect, for re-rendering the page.
+        store: Where an override is written, reported on the page.
+        application: The running application, or `None`.
+
+    Returns:
+        The page again, carrying the refusal, with 400.
+    """
+    _LOGGER.warning("settings.refused %s", error)
+    return HTMLResponse(
+        _page(resolution, store, application, error=str(error)),
+        status_code=400,
     )
 
 
@@ -801,11 +857,19 @@ def _page(
     running: dict[str, object] = (
         {"running": False} if application is None else application.status()
     )
+    # `None` rather than False when there is no application, because the page
+    # renders three different things and "nothing is running behind this page"
+    # is not the same state as "something is running and announcing nothing".
+    # See `render._identity_note`.
+    announcing = None if application is None else bool(running.get("announcing"))
+    announced = running.get("announced_as")
     return render_settings_page(
         resolution,
         configuration_report(resolution),
         status=running,
         overrides_path=str(store.path),
+        announcing=announcing,
+        announced_identity=announced if isinstance(announced, str) else None,
         error=error,
         saved=saved,
         restart_needed=restart_needed,

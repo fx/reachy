@@ -32,12 +32,20 @@ old one, but the history that was attached to the old one does not move with it.
 
 ### What decides it
 
-`REACHY_SATELLITE_DEVICE_NAME`. **It has no default and the application refuses
-to start without it**, and that refusal is deliberate: a default derived from
-the package name would be correct on a fresh installation and silently
-destructive on an upgrade — and an upgrade from an application with a different
-package name is exactly the case this repository exists to serve. Being asked
-for the value is how the hazard becomes visible *before* it has happened.
+`REACHY_SATELLITE_DEVICE_NAME`. **Nothing derives it, and nothing is announced
+to Home Assistant until you set it**, and that embargo is deliberate: a default
+derived from the package name would be correct on a fresh installation and
+silently destructive on an upgrade — and an upgrade from an application with a
+different package name is exactly the case this repository exists to serve. Being
+asked for the value is how the hazard becomes visible *before* it has happened.
+
+The application **starts** without it, and serves its settings page so the value
+can be supplied from a browser. What it does not do is build anything that could
+announce: no ESPHome listener, no mDNS record, no entities. Home Assistant
+discovers no device at all, so there is nothing for the eventual correct identity
+to collide with. The value takes effect at the next start —
+[`docs/ops/satellite-deployment.md`](../ops/satellite-deployment.md) has the
+sequence.
 
 Home Assistant keys the device on the **hardware address** as well. A satellite
 moved to new network hardware announces a new device even under the old name, so

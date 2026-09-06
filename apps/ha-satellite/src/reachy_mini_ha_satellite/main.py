@@ -12,12 +12,19 @@ imports `PipelineEvent` in order to translate the vendored protocol's events int
 it. That is the translation sitting on the adapter side deliberately — it is what
 keeps protobuf out of the state machine — and it composes nothing.
 
-What runs here is a loop and four services. The loop asks the behaviour layer
-what the robot should be doing and applies the answer; the services are the
-things that have a lifetime of their own — the ESPHome protocol server, the
-microphone pump that feeds it and the wake-word detection that runs beside it,
-the mDNS advertisement Home Assistant discovers the robot through, and the
-settings interface.
+What runs here is a loop and up to four services. The loop asks the behaviour
+layer what the robot should be doing and applies the answer; the services are the
+things that have a lifetime of their own — the daemon's own output volume, the
+ESPHome protocol server with the microphone pump that feeds it and the wake-word
+detection that runs beside it, the mDNS advertisement Home Assistant discovers
+the robot through, and the settings interface.
+
+**Up to** four, because two of them are the announcing surface and stock-robot
+installation REQ-102 forbids one on a robot whose announced identity nobody has
+supplied yet. `build_application` builds neither in that state, and builds no
+`ServerState` for them to have been built over — see its docstring. The loop, the
+motion path, the perception chain and the settings interface come up regardless,
+which is REQ-101.
 
 **Shutdown is the part worth reading.** ha-satellite REQ-050 asks for movement to
 stop, the media interface to be released, and the process to exit, and it asks
@@ -87,6 +94,7 @@ from reachy_mini_ha_satellite.behaviour.gaze_controller import (
     HeadMeasurement,
 )
 from reachy_mini_ha_satellite.config import (
+    IDENTITY_SETTING,
     OVERRIDES_FILENAME,
     ConfigurationError,
     OverrideMerge,
@@ -94,10 +102,13 @@ from reachy_mini_ha_satellite.config import (
     Resolution,
     Settings,
     as_configured_string,
+    groundstation_is_resolved,
+    identity_is_resolved,
     load_settings,
     log_resolved_configuration,
     overrides_path,
     state_directory,
+    variable_for,
 )
 from reachy_mini_ha_satellite.esphome.models import (
     Preferences,
@@ -608,7 +619,7 @@ def _publish_nothing() -> None:
 #:% On receiving a termination signal the application MUST stop commanding movement,
 #:% release the media interface, and exit.
 class SatelliteApplication:
-    """The running application: three ports, one behaviour layer, four services.
+    """The running application: three ports, one behaviour layer, its services.
 
     Nothing here decides anything. The behaviour layer decides; this ticks it,
     hands its answers to the motion port, and owns the lifetimes.
@@ -630,6 +641,7 @@ class SatelliteApplication:
         behaviour: SatelliteBehaviour,
         motor_groups: MotorGroupCoordinator | None = None,
         motion_gating: MotionGating | None = None,
+        announced_identity: str | None = None,
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -649,6 +661,18 @@ class SatelliteApplication:
                 daemon — a test building an application directly — and then
                 derived from whether a coordinator was supplied, which is the
                 same decision with the less specific reason.
+            announced_identity: The identity an announcing surface was built
+                for, or `None` when none was built. **What was announced, not
+                what the settings say**, and the two can differ in both
+                directions because `device_name` is restart-bound: an identity
+                supplied to a process that started without one is resolved
+                configuration and still nothing announced, and an identity
+                changed on a running robot leaves Home Assistant keyed on the
+                preceding one until the next start. A surface reporting the
+                settings would be wrong about the first in the direction that
+                says a robot is on Home Assistant while REQ-102's embargo holds,
+                and wrong about the second in the direction that says a rename
+                has happened when Home Assistant has not seen it.
             services: The things with lifetimes, started in order and stopped
                 in reverse.
             clock: The monotonic source the behaviour layer is given.
@@ -677,6 +701,7 @@ class SatelliteApplication:
             message = "the reported motion gating must match the coordinator supplied"
             raise ValueError(message)
         self._motion_gating = motion_gating
+        self._announced_identity = announced_identity
         self._services = tuple(services)
         self._clock = clock
         self._sleep = sleep
@@ -824,17 +849,40 @@ class SatelliteApplication:
     #:% The satellite MUST report which motion-gating mode is in force and why, so that
     #:% an operator can tell an ungated stock robot from a confirmed one without
     #:% inferring it from whether the robot moved.
+    #
+    #:= docs/specs/stock-robot-installation/index.md#req-101-an-unresolved-identity-starts-the-application-rather-than-stopping-it
+    #:% The satellite MUST start and serve its settings interface when no announced
+    #:% identity has been configured, reporting the identity as unresolved rather than
+    #:% refusing to start.
     def status(self) -> dict[str, object]:
         """Say what the robot is doing, for the settings interface to report.
+
+        Several of these keys are about configuration rather than behaviour, and
+        they are here because "why is this robot not doing what I expect?" is a
+        question the behaviour report cannot answer. `identity` is what is
+        *configured*; `announcing` and `announced_as` are what was *built*, and
+        they are separate from it for the reason the constructor records — the
+        two can differ in both directions, so one field could not say which.
+        `remote` distinguishes *never supplied* from *broken*, which is this
+        repository's standing rule for a health surface.
 
         `motion_gating` is here rather than under `motors`, because a stock
         robot has no coordinator and therefore no `motors` key — and that robot
         is the one whose operator most needs to be told why. It sits beside the
         bounded motor diagnostics on the same surface either way.
 
+        **A stock robot on its first boot reports both halves at once**, which
+        is the state neither of the two changes that added these keys could see
+        on its own: nothing announced because nothing is configured, and motion
+        ungated because its daemon offers nothing to correlate. The two
+        decisions are independent, and reading either from the other would be
+        wrong on the robot they are both about.
+
         Returns:
             The pipeline state, why the head is where it is, whether the robot
-            has settled into idling, and which motion-gating mode is in force.
+            has settled into idling, whether it announces anything and under
+            what identity, what the remote detector's state is, and which
+            motion-gating mode is in force.
         """
         report = self._behaviour.status(self._clock())
         controller = self._behaviour.controller_state
@@ -843,6 +891,12 @@ class SatelliteApplication:
             "gaze": report.outcome.value,
             "tracking": report.tracking,
             "idle": report.idle,
+            "identity": (
+                "resolved" if identity_is_resolved(self._settings) else "unresolved"
+            ),
+            "announcing": self._announced_identity is not None,
+            "announced_as": self._announced_identity,
+            "remote": self._remote_state(),
             "controller": {
                 "mode": controller.mode.value,
                 "fault": controller.fault.value,
@@ -853,6 +907,40 @@ class SatelliteApplication:
         if self._motor_groups is not None:
             status["motors"] = self._motor_groups.status()
         return status
+
+    #:= docs/specs/stock-robot-installation/index.md#req-103-remote-perception-is-optional-at-first-start
+    #:% The satellite MUST start with an unresolved groundstation address or credential
+    #:% and run on local detection until both are supplied through a configuration
+    #:% surface.
+    def _remote_state(self) -> str:
+        """Say what the groundstation detector is, without collapsing the states.
+
+        Four answers, and the order they are decided in is the point. What is
+        *observed* wins: a source that is installed is available whatever the
+        settings have since become. Then the two ways there is deliberately none
+        — face tracking switched off or the robot's own detector selected, which
+        is `disabled`, and a groundstation nobody has supplied, which is
+        `unconfigured`. Only what is left is `unavailable`, which is the one
+        answer meaning something went wrong.
+
+        Returns:
+            One of `available`, `disabled`, `unconfigured` or `unavailable`.
+        """
+        owner = self._groundstation
+        if owner is not None and owner.remote_available:
+            return "available"
+        # The owner's resolution rather than `self._settings` where there is
+        # one: a groundstation supplied from Home Assistant changes it without
+        # `apply_live` having been called with anything this object retained.
+        settings = self._settings if owner is None else owner.resolution.settings
+        if (
+            not settings.face_tracking_enabled
+            or settings.detection_source is _ROBOT_ONLY
+        ):
+            return "disabled"
+        if not groundstation_is_resolved(settings):
+            return "unconfigured"
+        return "unavailable"
 
     def controller_diagnostics(self) -> tuple[dict[str, object], ...]:
         """Return the behavior layer's bounded private controller evidence."""
@@ -1022,7 +1110,15 @@ class SatelliteApplication:
                 acquired_at = self._clock()
                 self._motion.acquire(acquired_at)
                 self._last_tick_at = acquired_at
-            self._audio.start()
+            if self._announced_identity is not None:
+                # Capture exists to feed two things and both of them are the
+                # announcing surface: the ESPHome session Home Assistant
+                # listens on, and the wake-word detector that starts one.
+                # REQ-102 means neither was built, so starting the daemon's
+                # recording pipeline would take the robot's microphone and
+                # accumulate audio nothing ever reads. `aclose` still stops it,
+                # which is a no-op on a pipeline that never started.
+                self._audio.start()
             await self._perception.start()
             for service in self._services:
                 await service.start()
@@ -2104,11 +2200,20 @@ def build_remote_source(
 
     Returns:
         The source, or `None` when this configuration opens no session at all:
-        face tracking switched off, or the robot's own detector selected.
+        face tracking switched off, the robot's own detector selected, or the
+        groundstation not yet supplied.
     """
     if not settings.face_tracking_enabled:
         return None
     if settings.detection_source is _ROBOT_ONLY:
+        return None
+    if not groundstation_is_resolved(settings):
+        # REQ-103. Nothing is built rather than a client built around an empty
+        # address, so there is no session to fail, nothing to reconnect and
+        # nothing for a health surface to report as broken. The owner's factory
+        # is this same function, so the first groundstation an operator supplies
+        # is adopted by the replacement path REQ-095 already owns rather than by
+        # a second one written for the first time.
         return None
     return RemotePerception(
         media,
@@ -2132,6 +2237,26 @@ def build_perception_source(
 ) -> PerceptionPort | None:
     """Assemble the detector an operator asked for, or none at all.
 
+    **One selection is not always the one that was asked for**, and REQ-103 is
+    why. A robot whose groundstation nobody has supplied yet runs on its own
+    detector until somebody does — so a `remote` selection composes the fallback
+    instead, and the operator's choice reasserts itself as soon as a session
+    exists, because that is exactly what `FallbackPerception` does with a
+    connected source. Nothing about the chain has to be rebuilt for it: the
+    fallback holds the same `ReplaceableRemoteSource` every other composition
+    does, which is what lets the address owner swap a source in behind it — the
+    reason the composition is not simply rewritten to `local` here.
+
+    It needs a detector to fall back *to*, and the weights are not shipped in
+    this wheel. With no `local_model_path` there is nothing local to run, so the
+    `remote` selection is composed as asked and the robot sees nothing until a
+    groundstation arrives. That limit is the asset licensing one this package
+    records at `local_model_path`, not a decision taken here.
+
+    A process that started unconfigured therefore keeps the fallback for its
+    lifetime, which is a superset of `remote`: it answers from the groundstation
+    whenever the session is up, and from the robot when it is not.
+
     Args:
         settings: The settings in effect.
         media: The daemon's media interface, which frames come off.
@@ -2151,8 +2276,16 @@ def build_perception_source(
 
     remote = remote if remote is not None else build_remote_source(settings, media)
 
+    selection = settings.detection_source
+    if (
+        selection is SourceSelection.REMOTE
+        and not groundstation_is_resolved(settings)
+        and settings.local_model_path.strip()
+    ):
+        selection = SourceSelection.REMOTE_WITH_LOCAL_FALLBACK
+
     local = None
-    if settings.detection_source is not SourceSelection.REMOTE:
+    if selection is not SourceSelection.REMOTE:
         model_path = Path(settings.local_model_path).expanduser()
 
         def _detector() -> SdkFaceDetector:
@@ -2175,7 +2308,7 @@ def build_perception_source(
             offload=in_thread,
         )
 
-    return build_perception(settings.detection_source, remote=remote, local=local)
+    return build_perception(selection, remote=remote, local=local)
 
 
 class _NoPerception:
@@ -2290,6 +2423,24 @@ async def build_application(
     have to be handed the entity list to append to, and the ordering a reader
     now finds on consecutive lines would become two halves to reassemble.
 
+    **This is where REQ-102's embargo lives, and it is structural rather than a
+    flag.** With no announced identity nothing announcing is *constructed*: no
+    `ServerState`, no entity, no pipeline tap, no ESPHome listener and no mDNS
+    record. An application that never built any of them cannot mis-key a Home
+    Assistant device however long it runs or however often it is restarted,
+    which is a stronger statement than a guard at each announcing call site and
+    a much easier one to check. Everything else comes up: motion, perception,
+    the health surface and the settings interface REQ-101 asks for — which is
+    the surface the identity is supplied through.
+
+    `device_name` is restart-bound, so supplying one adopts at the next start
+    rather than mid-process. That is the ordinary restart-bound path the page
+    already offers a *Stop* button for, and it is what keeps the embargo
+    provable: the announcing surface is built once, from a resolved identity, or
+    not at all. Standing an ESPHome listener and an mDNS record up mid-run would
+    put the embargo back into the announcing code, where every later change to
+    it has to remember the rule.
+
     Args:
         resolution: The settings in effect and where they came from.
         handle: What the daemon hands a running application.
@@ -2301,10 +2452,14 @@ async def build_application(
     """
     settings = resolution.settings
     state_dir = state_directory(settings)
-    announced = identity or discover_network_identity(
-        interface=settings.network_interface,
-        mac_address=settings.mac_address,
-    )
+
+    #:= docs/specs/stock-robot-installation/index.md#req-102-nothing-is-announced-while-the-identity-is-unresolved
+    #:% The satellite MUST NOT announce itself to Home Assistant, or serve a Home
+    #:% Assistant connection, while its announced identity is unresolved.
+    #
+    # Decided here, before anything is built, because two things below are
+    # conditional on it and one of them can fail. See the branch itself.
+    announcing = identity_is_resolved(settings)
 
     audio = ReachyAudio(
         handle.media,
@@ -2418,13 +2573,6 @@ async def build_application(
             await motor_groups.aclose()
             raise
 
-    state = build_server_state(
-        settings,
-        identity=announced,
-        audio=audio,
-        state_dir=state_dir,
-    )
-
     application = SatelliteApplication(
         settings=settings,
         audio=audio,
@@ -2433,6 +2581,11 @@ async def build_application(
         behaviour=behaviour,
         motor_groups=motor_groups,
         motion_gating=gating,
+        # The identity, not the fact — every surface that reports on the
+        # announcement needs to say *which* one, because a later save can leave
+        # the configuration naming a different one while this process goes on
+        # announcing this.
+        announced_identity=settings.device_name if announcing else None,
     )
 
     # The same file `run` read the overrides out of, and the same by
@@ -2465,77 +2618,132 @@ async def build_application(
     )
     application.attach_groundstation(groundstation)
 
-    # Appended before any connection exists, which is safe because the vendored
-    # protocol layer's three de-duplication branches match its *own* classes by
-    # `isinstance` and never touch these. The keys stay unique because that layer
-    # numbers what it builds from `len(state.entities)`, so ours are 0 and 1 and
-    # the media player shifts up — invisible to Home Assistant, which keys an
-    # entity on `{mac}-{entity_type}-{object_id}` rather than on the key.
-    state.entities.append(
-        SpeakerVolumeNumberEntity(state=state, key=len(state.entities)),
-    )
-    boost = SpeakerBoostNumberEntity(
-        state=state,
-        key=len(state.entities),
-        get_percent=lambda: application.settings.speaker_boost_percent,
-        # The address owner, because it serializes writes to the overrides file
-        # this control also writes — not because the boost is an address. See
-        # `build_boost_setter`.
-        set_percent=build_boost_setter(groundstation),
-    )
-    state.entities.append(boost)
-    # `registered_motor_groups` is empty without a coordinator, so this loop
-    # already announced nothing in the ungated mode; the guard is what says so
-    # to a reader and to the type checker at the same time.
-    if motor_groups is not None:
-        for group in registered_motor_groups:
-            state.entities.append(
-                MotorSwitchEntity(
-                    state=state,
-                    coordinator=motor_groups,
-                    group=group,
-                    key=len(state.entities),
+    services: list[Service] = [VolumeService(settings.daemon_api_url)]
+    if announcing:
+        # **Discovered here rather than at the top, and that placement is
+        # load-bearing.** `discover_network_identity` refuses a machine with no
+        # default route, no IPv4 address or no hardware address, and its own
+        # docstring gives the reason: a satellite announcing at no address would
+        # be a device Home Assistant found and could not reach. Every word of
+        # that is about announcing. Run unconditionally it would refuse to
+        # assemble an application that announces nothing — on a robot that has
+        # not been given an identity, has not been put on a network yet, and
+        # whose settings interface REQ-101 says must come up so somebody can do
+        # both. Nothing outside this branch reads it.
+        announced = identity or discover_network_identity(
+            interface=settings.network_interface,
+            mac_address=settings.mac_address,
+        )
+        state = build_server_state(
+            settings,
+            identity=announced,
+            audio=audio,
+            state_dir=state_dir,
+        )
+        # Appended before any connection exists, which is safe because the
+        # vendored protocol layer's three de-duplication branches match its
+        # *own* classes by `isinstance` and never touch these. The keys stay
+        # unique because that layer numbers what it builds from
+        # `len(state.entities)`, so ours are 0 and 1 and the media player shifts
+        # up — invisible to Home Assistant, which keys an entity on
+        # `{mac}-{entity_type}-{object_id}` rather than on the key.
+        state.entities.append(
+            SpeakerVolumeNumberEntity(state=state, key=len(state.entities)),
+        )
+        boost = SpeakerBoostNumberEntity(
+            state=state,
+            key=len(state.entities),
+            get_percent=lambda: application.settings.speaker_boost_percent,
+            # The address owner, because it serializes writes to the overrides
+            # file this control also writes — not because the boost is an
+            # address. See `build_boost_setter`.
+            set_percent=build_boost_setter(groundstation),
+        )
+        state.entities.append(boost)
+        # `registered_motor_groups` is empty without a coordinator, so this loop
+        # already announced nothing in the ungated mode; the guard is what says
+        # so to a reader and to the type checker at the same time.
+        if motor_groups is not None:
+            for group in registered_motor_groups:
+                state.entities.append(
+                    MotorSwitchEntity(
+                        state=state,
+                        coordinator=motor_groups,
+                        group=group,
+                        key=len(state.entities),
+                    )
                 )
-            )
-    # Announced whatever the detection source is: the address is configuration
-    # an operator changes before selecting a groundstation, not a report of one
-    # that is currently connected.
-    address = GroundstationUrlTextEntity(
-        state=state,
-        owner=groundstation,
-        key=len(state.entities),
-    )
-    state.entities.append(address)
-    groundstation.publish_changes(address.publish)
-    # The other direction, and the reason the boost control needs one where the
-    # volume control does not: the settings page can change this value without
-    # Home Assistant having asked. `apply_live` is what every change of it
-    # passes through, so pushing from there covers both surfaces with one call
-    # site.
-    application.publish_live_changes(boost.publish)
+        # Announced whatever the detection source is: the address is
+        # configuration an operator changes before selecting a groundstation,
+        # not a report of one that is currently connected.
+        address = GroundstationUrlTextEntity(
+            state=state,
+            owner=groundstation,
+            key=len(state.entities),
+        )
+        state.entities.append(address)
+        groundstation.publish_changes(address.publish)
+        # The other direction, and the reason the boost control needs one where
+        # the volume control does not: the settings page can change this value
+        # without Home Assistant having asked. `apply_live` is what every change
+        # of it passes through, so pushing from there covers both surfaces with
+        # one call site.
+        application.publish_live_changes(boost.publish)
 
-    tap = PipelineEventTap(application.deliver)
-    state.peripheral_api = tap
+        tap = PipelineEventTap(application.deliver)
+        state.peripheral_api = tap
 
-    services: list[Service] = [
-        VolumeService(settings.daemon_api_url),
-        EsphomeService(
-            state,
-            audio.capture,
-            tap,
-            host=settings.api_host,
-            port=settings.api_port,
-            # REQ-044. The models loaded above are only announced until
-            # something runs them, and this is the something.
-            detector=WakeWordDetector(state),
-        ),
-    ]
-    if settings.advertise:
         services.append(
-            AdvertisementService(
-                name=settings.device_name,
+            EsphomeService(
+                state,
+                audio.capture,
+                tap,
+                host=settings.api_host,
                 port=settings.api_port,
-                identity=announced,
+                # REQ-044. The models loaded above are only announced until
+                # something runs them, and this is the something.
+                detector=WakeWordDetector(state),
+            ),
+        )
+        if settings.advertise:
+            services.append(
+                AdvertisementService(
+                    name=settings.device_name,
+                    port=settings.api_port,
+                    identity=announced,
+                ),
+            )
+    else:
+        # Not a degraded assembly with the announcement suppressed: nothing that
+        # could announce was built. The wake-word models are not even loaded,
+        # because the thing that would run them serves a Home Assistant
+        # connection and REQ-102 says there is not one to serve. The three
+        # entities and the pipeline tap have no `ServerState` to be appended to,
+        # which is the same absence stated structurally.
+        #
+        # One line, not the whole notice: `log_resolved_configuration` has
+        # already emitted that, a few lines earlier in the same boot log, and a
+        # second copy would train a reader to skip both.
+        #
+        # The remedy differs, and pointing at a page that is not being served
+        # would be the kind of sentence this repository calls a defect. With
+        # `web_enabled` false there is no configuration surface on the robot at
+        # all, so the only way out is the daemon's environment — which is the
+        # one arrangement REQ-101 cannot rescue, because the setting that
+        # disabled the rescue is itself environment-only.
+        _LOGGER.warning(
+            "satellite.unannounced no ESPHome listener, no mDNS record and no "
+            "entities were built, because %s is unresolved. %s",
+            variable_for(IDENTITY_SETTING),
+            (
+                "Set it on the settings interface and start the application again."
+                if settings.web_enabled
+                else (
+                    f"The settings interface is switched off by "
+                    f"{variable_for('web_enabled')}, so there is no surface on "
+                    f"this robot to set it from: set it in the daemon's "
+                    f"environment, or switch the interface back on."
+                )
             ),
         )
     if settings.web_enabled:

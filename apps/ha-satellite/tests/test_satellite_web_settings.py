@@ -21,7 +21,9 @@ Test module names are globally unique across the workspace — see the root
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -53,10 +55,15 @@ from reachy_mini_ha_satellite.groundstation_url import (
     GroundstationUrlOwner,
     ReplaceableRemoteSource,
 )
-from reachy_mini_ha_satellite.web import CLEAR_PREFIX, create_app, form_value
+from reachy_mini_ha_satellite.web import (
+    CLEAR_PREFIX,
+    CLEARED_IDENTITY_HEADING,
+    create_app,
+    form_value,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterator, Mapping
 
     from pyfakefs.fake_filesystem import FakeFilesystem
     from starlette.applications import Starlette
@@ -94,6 +101,11 @@ class RecordingHost:
         # write beginning, or `None` for a write nothing raced.
         self.interleaved: Mapping[str, str] | None = None
         self.stops = 0
+        # Whether an announcing surface was built. True is the configured robot
+        # every test but the bootstrap ones is about; the page reads it to tell
+        # "an identity was just supplied" from "this process announces under
+        # one", which is a distinction only the application can make.
+        self.announcing = True
         self.events: tuple[dict[str, object], ...] = (
             public_controller_diagnostic_event(),
         )
@@ -110,6 +122,9 @@ class RecordingHost:
             "gaze": "unknown",
             "tracking": False,
             "idle": True,
+            "identity": "resolved",
+            "announcing": self.announcing,
+            "remote": "available",
         }
 
     def apply_live(self, settings: Settings) -> None:
@@ -656,10 +671,15 @@ class TestRotatingTheCredential:
         assert host.applied[-1].groundstation_credential.get_secret_value() == ""
 
     @pytest.mark.asyncio
-    async def test_unsetting_one_a_session_needs_is_refused_with_a_reason(
-        self,
-    ) -> None:
-        """Rather than accepted and found later as a robot connecting to nothing."""
+    async def test_unsetting_one_leaves_the_groundstation_unconfigured(self) -> None:
+        """REQ-103. It used to be refused; now the page says what it left behind.
+
+        Removing the credential is how an operator un-configures a
+        groundstation, and refusing it made that impossible without a shell. The
+        submission is accepted, the address is left exactly as it was, and the
+        page comes back saying the remote detector is unconfigured rather than
+        failed — which is the state the robot is now in.
+        """
         host = RecordingHost()
         settings = load_settings(ENVIRONMENT, {}).settings
         fields = {f"{CLEAR_PREFIX}groundstation_credential": "1"}
@@ -670,10 +690,12 @@ class TestRotatingTheCredential:
                 content=_form(settings, **fields),
                 headers=_FORM_HEADERS,
             )
+            page = (await client.get("/")).text
 
-        assert response.status_code == 400
-        assert "GROUNDSTATION_CREDENTIAL" in response.text
-        assert host.applied == []
+        assert response.status_code == 303
+        assert host.applied[-1].groundstation_credential.get_secret_value() == ""
+        assert host.applied[-1].groundstation_url == settings.groundstation_url
+        assert "unconfigured</strong> rather than failed" in page
 
 
 class TestResettingAndRestarting:
@@ -955,17 +977,155 @@ class TestWhenTheChangeCannotBeWritten:
         assert host.applied == []
 
     @pytest.mark.asyncio
-    async def test_resetting_into_an_unusable_environment_is_refused(self) -> None:
-        """A robot configured entirely from this page must not be able to brick itself."""
+    async def test_resetting_away_the_only_identity_leaves_it_unresolved(self) -> None:
+        """REQ-101. It resolves — to the unresolved state — so it is not refused.
+
+        This used to be a refusal, on the grounds that a robot configured
+        entirely from this page must not be able to brick itself. There is
+        nothing left to brick: an environment with no identity starts, serves
+        this page and announces nothing, so the honest outcome is a reset that
+        succeeds and a page that says so.
+        """
         environ = {f"{ENV_PREFIX}FACE_TRACKING_ENABLED": "false"}
         _store().save({"device_name": "reachy-mini-1"})
 
         async with _client(_app(RecordingHost(), environ=environ)) as client:
             response = await client.post("/reset")
+            page = (await client.get("/")).text
+
+        assert response.status_code == 303
+        assert _store().load() == {}
+        # This host is announcing, so the page says the identity was *cleared*
+        # rather than claiming an embargo the running process is not under —
+        # `test_satellite_bootstrap.py` owns that distinction.
+        assert CLEARED_IDENTITY_HEADING in page
+
+    @pytest.mark.asyncio
+    async def test_resetting_into_an_unusable_environment_is_still_refused(
+        self,
+    ) -> None:
+        """Unresolved is not unusable, and a value the model rejects is refused."""
+        environ = {f"{ENV_PREFIX}IDLE_SECONDS": "not-a-number"}
+        _store().save({"idle_seconds": "6.0"})
+
+        async with _client(_app(RecordingHost(), environ=environ)) as client:
+            response = await client.post("/reset")
 
         assert response.status_code == 400
-        assert "DEVICE_NAME" in response.text
-        assert _store().load() == {"device_name": "reachy-mini-1"}
+        assert "IDLE_SECONDS" in response.text
+        assert _store().load() == {"idle_seconds": "6.0"}
+
+
+class TestARefusalOutlivesTheBrowserTab:
+    """A refusal the operator navigated away from used to leave no evidence.
+
+    The page renders the reason and nothing else recorded it, so a submission
+    that was refused once and then succeeded with the same input could not be
+    told apart from any of the dozen refusals this path can raise. The journal
+    is the robot's own record, so both refusal paths log it too.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_refused_save_is_logged_as_well_as_shown(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The reason survives the tab it was shown in.
+
+        Args:
+            caplog: Where the application's own log is captured.
+        """
+        host = RecordingHost()
+        host.refusal = ConfigurationError("the groundstation would not start")
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app(host)) as client:
+            with caplog.at_level(logging.WARNING):
+                response = await client.post(
+                    "/settings",
+                    content=_form(settings, idle_seconds="9.0"),
+                    headers=_FORM_HEADERS,
+                )
+
+        assert response.status_code == 400
+        assert "settings.refused" in caplog.text
+        assert "the groundstation would not start" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_refused_reset_is_logged_too(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The other path through the same handler, so neither can be forgotten.
+
+        Args:
+            caplog: Where the application's own log is captured.
+        """
+        host = RecordingHost()
+        host.refusal = ConfigurationError("the groundstation would not start")
+
+        async with _client(_app(host)) as client:
+            with caplog.at_level(logging.WARNING):
+                response = await client.post("/reset")
+
+        assert response.status_code == 400
+        assert "settings.refused" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_carrying_a_credential_would_be_a_defect(self) -> None:
+        """The reason logging one is safe by construction rather than by luck.
+
+        Every refusal this path raises is built to be reportable — the address
+        check quotes no address, and a model validation failure is rendered from
+        `loc` and `msg` alone precisely so a rejected credential is not printed.
+        This drives the real refusal for a credential the model rejects and
+        asserts the value is in neither the page nor the log.
+        """
+        host = RecordingHost()
+        settings = load_settings(ENVIRONMENT, {}).settings
+
+        async with _client(_app(host)) as client:
+            with caplog_at_warning() as records:
+                response = await client.post(
+                    "/settings",
+                    content=_form(
+                        settings,
+                        groundstation_url=f"ws://{'h' * 300}/v1/session",
+                        groundstation_credential=AWKWARD_CREDENTIAL,
+                    ),
+                    headers=_FORM_HEADERS,
+                )
+
+        assert response.status_code == 400
+        logged = "".join(records)
+        for surface in (response.text, logged):
+            assert AWKWARD_CREDENTIAL not in surface
+            assert "ple\\credential" not in surface
+
+
+@contextlib.contextmanager
+def caplog_at_warning() -> Iterator[list[str]]:
+    """Collect this package's warnings without a fixture, for one nested use.
+
+    Yields:
+        The formatted records, appended as they are emitted.
+    """
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    handler = _Collect(level=logging.WARNING)
+    logger = logging.getLogger("reachy_mini_ha_satellite")
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
 
 
 class TestTheFormIsUsableWithoutSeeingIt:

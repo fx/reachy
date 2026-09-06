@@ -52,10 +52,17 @@ from verify_satellite_wheel import (
     ENTRY_POINT_TARGET,
     EX_CONFIG,
     REQUIRED_TEXTS,
+    UNRECOGNISED_VARIABLE,
     check,
 )
 
 from reachy_mini_ha_satellite.assets.registry import ASSETS
+from reachy_mini_ha_satellite.config import (
+    ENV_PREFIX,
+    Settings,
+    unrecognised_variables,
+    variable_for,
+)
 
 _PACKAGE = "reachy_mini_ha_satellite"
 _METADATA = f"{_PACKAGE}-0.1.0.dist-info"
@@ -526,10 +533,11 @@ class TestTheLaunch:
 
     `check_launch` itself extracts a wheel and starts two subprocesses, which a
     unit test must not do. What it decides on the strength of, though, is two
-    pure functions over a finished process, and those are what is exercised
-    here — with results handed to them directly, so the whole class performs no
-    input or output. `just wheel-verify` runs the subprocess half against the
-    real built wheel, which is where it belongs.
+    pure functions over a finished process and one that builds the environment
+    those processes run in, and those are what is exercised here — with results
+    handed to them directly, so the whole class performs no input or output.
+    `just wheel-verify` runs the subprocess half against the real built wheel,
+    which is where it belongs.
 
     The tests that compare a resolved path take `fs`, and only those. Deciding
     whether two paths name one file goes through `Path.resolve`, which reads
@@ -537,6 +545,42 @@ class TestTheLaunch:
     in-memory one instead, so those tests perform no input either. The rest
     hand the verdict function a finished process and touch no path at all.
     """
+
+    def test_the_launch_is_given_a_configuration_that_must_be_refused(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The evidence the whole launch check rests on, made explicit.
+
+        An *empty* configuration used to be refused, and stock-robot
+        installation REQ-101 deliberately made it start instead — an
+        application that will not start cannot serve the settings page an
+        identity is supplied through. So the launch has to be handed something
+        else the configuration layer must refuse, or the check would be reading
+        a crash somewhere in the robot layer as its signal.
+
+        Args:
+            monkeypatch: Used to put a satellite variable in the environment,
+                so that dropping the inherited ones is observable.
+        """
+        monkeypatch.setenv(variable_for("device_name"), "reachy-mini-1")
+
+        environment = verify_satellite_wheel._launch_environment(
+            stub_root=Path("/stub"),
+            wheel_root=Path("/wheel"),
+            state_dir=Path("/state"),
+        )
+
+        assert variable_for("device_name") not in environment
+        assert environment[UNRECOGNISED_VARIABLE] == "1"
+        assert unrecognised_variables(environment) == (UNRECOGNISED_VARIABLE,)
+
+    def test_the_refusal_it_relies_on_names_no_real_setting(self) -> None:
+        """Otherwise the launch would resolve and reach for a robot handle."""
+        assert UNRECOGNISED_VARIABLE.startswith(ENV_PREFIX)
+        assert UNRECOGNISED_VARIABLE not in {
+            variable_for(name) for name in Settings.model_fields
+        }
 
     def test_exiting_zero_having_done_nothing_is_the_finding(self) -> None:
         """The defect itself: a module the daemon can find and cannot run."""

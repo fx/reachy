@@ -16,17 +16,44 @@ Each reads one variable, neither produces a `Settings`, and both are covered by
 `BOOTSTRAP_SETTINGS` below, which is what keeps the two answers from diverging
 from the resolved one.
 
-Three things are different here, and each has a reason.
+Four things are different here, and each has a reason.
 
-**The announced identity has no default at all.** Home Assistant keys an ESPHome
-device on the identity it announces; change it and Home Assistant does not update
-the existing device, it registers a new one. Every entity acquires a suffixed
-identifier, history detaches, and every automation and dashboard card referencing
-the old identifiers silently stops matching anything. A default derived from the
-package name would be correct on a fresh installation and silently destructive on
-the upgrade from the predecessor — which is the case that actually exists, since
-that application was a different distribution. Refusing to start is what makes
-the hazard visible at configuration time rather than after it has happened.
+**Nothing derives the announced identity, and an unresolved one is a state rather
+than a refusal.** Home Assistant keys an ESPHome device on the identity it
+announces; change it and Home Assistant does not update the existing device, it
+registers a new one. Every entity acquires a suffixed identifier, history
+detaches, and every automation and dashboard card referencing the old identifiers
+silently stops matching anything. A default derived from the package name would be
+correct on a fresh installation and silently destructive on the upgrade from the
+predecessor — which is the case that actually exists, since that application was a
+different distribution, and the host name and the hardware address are no better.
+
+So no plausible-looking name is ever manufactured for an operator to announce by
+accident. **The field's default is the empty string, and that is the unresolved
+state rather than a name**: nothing announces it, `identity_is_resolved` is how a
+caller asks whether an identity was supplied at all, and a robot that has been
+given none is one Home Assistant has never heard of. Read the default as the
+absence of an answer, not as an answer that happens to be blank.
+
+What changed with stock-robot installation REQ-101 is *when* the refusal happens.
+The application used to refuse to start without an identity, which made the
+settings interface — the only surface on a stock robot that could supply one —
+unreachable for exactly as long as the value was missing. The hazard the refusal
+guarded is announcing under a **wrong** identity, and announcing under none is the
+absence of that hazard rather than a weaker form of it. So configuration resolves
+to a state in which the identity is either set or explicitly unresolved, and only
+the announcing surface treats unresolved as fatal, by not being built at all —
+`main.build_application` is where that happens, and REQ-102 is the embargo it
+keeps. An invalid identity is still refused: `max_length` is unchanged, so a value
+the model rejects stops the application with the message that names the variable.
+
+**The groundstation address and credential are unresolved states too.** An empty
+address, or an empty credential, used to be a coherence failure that refused to
+start; under REQ-103 it means no session is opened and
+`groundstation_is_resolved` answers False, which every surface reports as
+*unconfigured* rather than as failed. A non-empty address is still validated, and
+still refused when it is not one a session can be opened on — see
+`_check_session_url`, whose reason is redaction rather than syntax.
 
 **There is a third layer under the environment.** ha-satellite REQ-049 requires
 every operator-facing setting to be changeable from the application's own web
@@ -45,15 +72,18 @@ truncated spelling of a credential for a redactor to have failed to recognise:
 surface renders that.
 
 A secret's raw value does still travel, and it is worth saying where rather than
-claiming it never leaves this module. Three paths carry it and none of them is a
+claiming it never leaves this module. Four paths carry it and none of them is a
 rendering: `canonical_string` hands it back unchanged so a submission can be
-*compared* against it, `OverrideStore.save` writes it to a file owner-only, and
+*compared* against it, `OverrideStore.save` writes it to a file owner-only,
+`groundstation_url.GroundstationUrlOwner._opens_a_different_session` compares two
+of them to decide whether a session has to be re-opened, and
 `main.build_remote_source` reveals it once into a `Credential`, which is the
 type that will not print itself — and it is the one reveal site because it is
 also the one place a session client is constructed, at startup and for every
 later replacement alike. Everywhere else it is read only to be tested for
 emptiness and discarded — `resolved_configuration` choosing between `<set>` and
-`<unset>`, and the coherence check refusing a session with no credential.
+`<unset>`, and `groundstation_is_resolved` deciding whether a session can be
+opened at all.
 `test_satellite_config.py` and `test_satellite_web_settings.py` assert that a
 credential carrying a tab, a newline and a backslash appears in no rendering of
 any surface — raw, escaped, or `repr`'d.
@@ -99,6 +129,7 @@ __all__ = [
     "BOOTSTRAP_SETTINGS",
     "COMPATIBILITY_SETTINGS",
     "ENV_PREFIX",
+    "GROUNDSTATION_CREDENTIAL_SETTING",
     "GROUNDSTATION_URL_MAX_LENGTH",
     "GROUNDSTATION_URL_SETTING",
     "IDENTITY_SETTING",
@@ -119,7 +150,12 @@ __all__ = [
     "configuration_report",
     "declared_but_unread",
     "declared_elsewhere",
+    "groundstation_is_resolved",
+    "groundstation_unresolved_notice",
+    "identity_is_resolved",
+    "identity_unresolved_notice",
     "load_settings",
+    "local_detection_clause",
     "log_resolved_configuration",
     "overrides_path",
     "resolve_submission",
@@ -149,12 +185,17 @@ type OverrideMerge = Callable[[Mapping[str, str]], Mapping[str, str]]
 
 ENV_PREFIX: Final = "REACHY_SATELLITE_"
 
-# The one setting with no default, named here so the message that explains why
-# and the model that declares it cannot drift apart.
+# The one setting whose empty value means *unresolved* rather than a default,
+# named here so the notice that explains why and the model that declares it
+# cannot drift apart.
 IDENTITY_SETTING: Final = "device_name"
 
 # The setting Home Assistant can also write, named for the same reason.
 GROUNDSTATION_URL_SETTING: Final = "groundstation_url"
+
+# The other half of a resolved groundstation. Named beside the address because
+# `groundstation_is_resolved` needs both and neither on its own opens a session.
+GROUNDSTATION_CREDENTIAL_SETTING: Final = "groundstation_credential"
 
 # How long that address may be, on every surface that accepts one: the field
 # below, the settings page's input, the Home Assistant text entity's declared
@@ -237,19 +278,29 @@ LIVE_SETTINGS: Final[frozenset[str]] = frozenset(
         "idle_seconds",
         "speaker_boost_percent",
         GROUNDSTATION_URL_SETTING,
+        GROUNDSTATION_CREDENTIAL_SETTING,
     }
 )
 
-# ⚠️ `groundstation_url` is live and is **not** adopted by
-# `SatelliteApplication.apply_live`, which is the one entry in this set that is
-# not. Changing it means building a session client and a perception source and
-# retiring the one running, so it is owned by
+# ⚠️ `groundstation_url` and `groundstation_credential` are live and are **not**
+# adopted by `SatelliteApplication.apply_live`, which is the two entries in this
+# set that are not. Changing either means building a session client and a
+# perception source and retiring the one running, so both are owned by
 # `groundstation_url.GroundstationUrlOwner` — a serialized transition that
 # prepares and starts the replacement before the durable file is written and
-# compensates back to the preceding address if any step fails. It is in this set
-# because what the set means to an operator is "this takes effect without a
-# restart", which is true of it, and `apply_settings_change`'s docstring records
-# the one path a change of it may travel.
+# compensates back to the preceding configuration if any step fails. They are in
+# this set because what the set means to an operator is "this takes effect
+# without a restart", which is true of both, and `apply_settings_change`'s
+# docstring records the one path a change of either may travel.
+#
+# ⚠️ The credential is the one **secret** in this set, and it is here because a
+# session is opened with an address and a credential rather than with an address.
+# A rotation that took effect only at the next start would leave the robot
+# authenticating with the secret an operator had just revoked, which is the same
+# defect as clearing it and being told the source was still available.
+# `GroundstationUrlOwner._opens_a_different_session` is what reads both values,
+# and it is the only place a credential is compared rather than merely tested
+# for emptiness.
 
 # ⚠️ `face_tracking_enabled` is deliberately NOT in that set, and the reason is
 # worth stating because the behaviour layer can adopt it in isolation and looks
@@ -259,14 +310,6 @@ LIVE_SETTINGS: Final[frozenset[str]] = frozenset(
 # layer owns; both happen in `main.build_application`, once, at startup. A page
 # that said "applies at once" would be telling an operator that tracking is now
 # on while nothing was ever built to do it.
-
-
-# The selection that runs the detector on the robot and opens no session. Bound
-# once rather than spelled at each site, because this repository's leak scanner
-# reads the dotted form as an mDNS hostname suffix — the same reason
-# `adapters/perception_source.py` binds it, and one exempted line is better than
-# several.
-_ROBOT_ONLY: Final = SourceSelection.LOCAL  # leak-scan:allow
 
 
 class ConfigurationError(RuntimeError):
@@ -294,15 +337,17 @@ class SettingSource(StrEnum):
 class Settings(BaseSettings):
     """Everything this application reads from its environment.
 
-    Every field but `device_name` has a default, so the resolved configuration
-    is complete whether or not an operator set anything — which is what makes
-    the boot dump and the settings page worth reading.
+    Every field has a default, so the resolved configuration is complete whether
+    or not an operator set anything — which is what makes the boot dump and the
+    settings page worth reading.
 
     Attributes:
         device_name: The identity announced to Home Assistant, which keys the
-            device on it. **No default, deliberately**: see this module's
-            docstring, and `_identity_is_unset_message` for what an operator is
-            told when it is missing.
+            device on it. **Nothing derives one, deliberately**: the empty
+            default is the *unresolved* state rather than a name, nothing is
+            announced while it holds, and `identity_is_resolved` is the one
+            question a caller asks about it. See this module's docstring, and
+            `identity_unresolved_notice` for what an operator is told.
         friendly_name: The display name Home Assistant shows. Blank means the
             announced identity is used for both. Unlike the identity it is safe
             to change: Home Assistant renames the device rather than replacing
@@ -337,11 +382,16 @@ class Settings(BaseSettings):
             while live body calibration remains provisional.
         detection_source: Which detector answers — see ha-satellite REQ-047.
         groundstation_url: Where the groundstation serves its session endpoint.
-            Required by every selection but `local`. Capped at
+            **Not required.** Empty is the unresolved state, in which no session
+            is opened and every surface reports the remote detector as
+            *unconfigured* — see `groundstation_is_resolved`. Capped at
             `GROUNDSTATION_URL_MAX_LENGTH` because Home Assistant's text entity
             reports it, and changeable while the application runs — see
             `groundstation_url.GroundstationUrlOwner`.
         groundstation_credential: The shared secret presented to open a session.
+            Not required either, and unresolved on the same terms: one half
+            without the other opens nothing, so a configuration holding only one
+            of them is as unconfigured as one holding neither.
         frame_interval_seconds: How long between frames submitted to the
             groundstation.
         staleness_seconds: How long a detection stays worth acting on. Past it
@@ -390,7 +440,16 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    device_name: str = Field(min_length=1, max_length=64)
+    #:= docs/specs/stock-robot-installation/index.md#req-101-an-unresolved-identity-starts-the-application-rather-than-stopping-it
+    #:% The satellite MUST start and serve its settings interface when no announced
+    #:% identity has been configured, reporting the identity as unresolved rather than
+    #:% refusing to start.
+    #
+    # Empty is unresolved, not a name. The bound stays what it was, so a value
+    # the identity contract does not accept is still refused — by the model,
+    # with the message `load_settings` builds — and only *absence* starts the
+    # application.
+    device_name: str = Field(default="", max_length=64)
     friendly_name: str = Field(default="", max_length=64)
     mac_address: str = Field(default="", max_length=32)
     network_interface: str = Field(default="", max_length=32)
@@ -470,7 +529,11 @@ class Settings(BaseSettings):
 
         Returns:
             The configured display name, or the announced identity when none
-            was configured.
+            was configured — and the empty string while the identity itself is
+            unresolved, because there is nothing to announce and nothing that
+            could be shown. Nothing reads this in that state: the announcing
+            surface is not built, and the settings page asks
+            `identity_is_resolved` before it renders a name.
         """
         return self.friendly_name or self.device_name
 
@@ -669,23 +732,85 @@ class Resolution:
     declared_but_unread: tuple[str, ...] = ()
 
 
-def _identity_is_unset_message() -> str:
-    """Explain why the announced identity has to be pinned, not just that it is.
+#:= docs/specs/stock-robot-installation/index.md#req-101-an-unresolved-identity-starts-the-application-rather-than-stopping-it
+#:% The satellite MUST start and serve its settings interface when no announced
+#:% identity has been configured, reporting the identity as unresolved rather than
+#:% refusing to start.
+def identity_is_resolved(settings: Settings) -> bool:
+    """Say whether an announced identity has been supplied at all.
+
+    The one question anything asks about `device_name`, so that "is this robot
+    configured?" has one answer rather than a `strip()` repeated at each caller
+    — and so that the announcing surface and the settings page cannot come to
+    disagree about which state a robot is in.
+
+    Blank counts as unresolved, whitespace included. It is the same test the
+    released application applied before it refused to start, kept rather than
+    tightened: a value of spaces has never been an identity here, and turning it
+    into a *rejected* one would change what an existing environment does.
+
+    Args:
+        settings: The settings in effect.
 
     Returns:
-        The refusal an operator reads, which is the only warning they get
-        before the hazard it describes has already happened.
+        True when there is an identity to announce.
+    """
+    return bool(settings.device_name.strip())
+
+
+#:= docs/specs/stock-robot-installation/index.md#req-103-remote-perception-is-optional-at-first-start
+#:% The satellite MUST start with an unresolved groundstation address or credential
+#:% and run on local detection until both are supplied through a configuration
+#:% surface.
+def groundstation_is_resolved(settings: Settings) -> bool:
+    """Say whether a session could be opened with what is configured.
+
+    **Both halves or neither.** An address with no credential opens nothing —
+    the groundstation refuses a session that presents none — so a configuration
+    holding one of the two is as unresolved as one holding neither, and
+    reporting it any other way would tell an operator the remote source had
+    failed when it had never been asked to do anything.
+
+    Args:
+        settings: The settings in effect.
+
+    Returns:
+        True when both the address and the credential are set.
+    """
+    return bool(
+        settings.groundstation_url.strip()
+        and settings.groundstation_credential.get_secret_value(),
+    )
+
+
+def identity_unresolved_notice() -> str:
+    """Explain what an unresolved identity means and why nothing derives one.
+
+    The words the boot log and the settings page both use, because an operator
+    meeting this state on a fresh robot needs the same explanation wherever they
+    meet it.
+
+    Returns:
+        The notice. It states the embargo first, because that is the fact that
+        makes the state safe, and the hazard second, because that is what makes
+        the value worth choosing carefully.
     """
     variable = variable_for(IDENTITY_SETTING)
     return (
-        f"{variable} is not set, and there is deliberately no default.\n"  # noqa: S608  # prose, not a query: the rule matches on the words "set" and "from" appearing in one f-string
+        f"{variable} is not set, and nothing derives one for you. "  # noqa: S608  # prose, not a query: the rule matches on the words "set" and "from" appearing in one f-string
+        f"Nothing is announced to Home Assistant until it is: no device is "
+        f"registered, no entity exists, and no Home Assistant connection is "
+        f"served. The application runs, and its settings interface is where "
+        f"the value is supplied.\n"
         f"\n"
         f"Home Assistant keys an ESPHome device on the identity it announces. "
         f"If that identity changes, Home Assistant does not update the existing "
         f"device — it registers a new one. Every entity acquires a suffixed "
         f"identifier, history detaches from the old entity, and every "
         f"automation, script and dashboard card referencing the old identifiers "
-        f"silently stops matching anything.\n"
+        f"silently stops matching anything. Announcing under no identity is not "
+        f"a lesser form of that: nothing has been registered, so there is "
+        f"nothing for the eventual correct identity to collide with.\n"
         f"\n"
         f"There is no default derived from the package name, the host name or "
         f"anything else that changes when this software is repackaged, because "
@@ -701,6 +826,75 @@ def _identity_is_unset_message() -> str:
         f"\n"
         f"A new robot: choose a name now and never change it, for example "
         f"{variable}=reachy-mini-1."
+    )
+
+
+def local_detection_clause(settings: Settings) -> str:
+    """Say what detects a face while no groundstation session is open.
+
+    **One definition, because two surfaces say it and one of them said it
+    wrongly.** REQ-103 has the satellite run on local detection until a
+    groundstation is supplied, and it can only do that where there is a detector
+    to run: the face-detection weights are not shipped in this wheel, so a robot
+    with no `local_model_path` has nothing local and sees nothing until a
+    groundstation arrives. That is the state a genuinely stock robot is in, and
+    prose claiming a local half was running there describes somebody else's
+    robot to the operator of this one.
+
+    The composition is `main.build_perception_source`'s; this reads the same two
+    settings to say which of its outcomes the reader is looking at, and both the
+    boot log and the settings page render this one sentence rather than a copy
+    each.
+
+    Args:
+        settings: The settings in effect.
+
+    Returns:
+        One sentence, as plain text — the settings page escapes it.
+    """
+    if not settings.face_tracking_enabled:
+        return (
+            f"{variable_for('face_tracking_enabled')} is false, so nothing "
+            f"detects a face either way."
+        )
+    if settings.local_model_path.strip():
+        return "the robot's own detector runs instead, until one arrives."
+    return (
+        f"there is nothing local to run instead — the face-detection weights are "
+        f"not shipped in this wheel — so the robot sees no faces at all until a "
+        f"groundstation arrives. Point {variable_for('local_model_path')} at "
+        f"weights on the robot to have it fall back to its own detector."
+    )
+
+
+def groundstation_unresolved_notice(settings: Settings) -> str:
+    """Say what an unconfigured groundstation leaves true, rather than failed.
+
+    **What it leaves true depends on the robot, so the notice reads the robot
+    rather than describing every case at once.** REQ-103 says the satellite runs
+    on local detection until a groundstation is supplied, and it can only do that
+    where there is a detector to run: the face-detection weights are not shipped
+    in this wheel, so a robot with no `local_model_path` has nothing local and
+    sees nothing until a groundstation arrives. That is the state a genuinely
+    stock robot is in, and a notice claiming a local half was running there would
+    be describing somebody else's robot to the operator of this one.
+
+    The composition itself is `main.build_perception_source`'s; this reads the
+    same two settings to say which of its outcomes the reader is looking at.
+
+    Args:
+        settings: The settings in effect.
+
+    Returns:
+        The notice the boot log and the settings page share.
+    """
+    return (
+        f"{variable_for(GROUNDSTATION_URL_SETTING)} and "
+        f"{variable_for(GROUNDSTATION_CREDENTIAL_SETTING)} are not both set, so "
+        f"no groundstation session is opened. The remote detector is "
+        f"unconfigured rather than failed: nothing is connecting and nothing is "
+        f"retrying, and {local_detection_clause(settings)} Supplying both from a "
+        f"configuration surface adopts them without a restart."
     )
 
 
@@ -894,10 +1088,18 @@ def load_settings(
         The settings in effect and where each of them came from.
 
     Raises:
-        ConfigurationError: If a prefixed variable is not recognised, if the
-            announced identity is unset, if a released groundstation address is
-            longer than `GROUNDSTATION_URL_MAX_LENGTH`, or if a recognised value
-            does not parse. Every message names the variable.
+        ConfigurationError: If a prefixed variable is not recognised, if a
+            released groundstation address is longer than
+            `GROUNDSTATION_URL_MAX_LENGTH`, or if a recognised value does not
+            parse. Every message names the variable.
+
+            **An unresolved announced identity is not among them**, and neither
+            is an unresolved groundstation. Both are states this returns rather
+            than refusals — REQ-101 and REQ-103 — and `identity_is_resolved` and
+            `groundstation_is_resolved` are what a caller asks about them. An
+            identity the model *rejects* is still refused here, because "no
+            value" and "a value the contract does not accept" are different
+            answers and only the first one is safe to start on.
     """
     source = os.environ if environ is None else environ
     written = {} if overrides is None else overrides
@@ -913,9 +1115,6 @@ def load_settings(
         raise ConfigurationError(message)
 
     values, sources, ignored = _declared_values(source, written)
-
-    if not values.get(IDENTITY_SETTING, "").strip():
-        raise ConfigurationError(_identity_is_unset_message())
 
     # Before the model, so the refusal names the layer and the remedy rather
     # than only the length. See `_check_url_length`.
@@ -1064,6 +1263,10 @@ def apply_settings_change(
     return resolved
 
 
+#:= docs/specs/stock-robot-installation/index.md#req-103-remote-perception-is-optional-at-first-start
+#:% The satellite MUST start with an unresolved groundstation address or credential
+#:% and run on local detection until both are supplied through a configuration
+#:% surface.
 def _check_coherence(settings: Settings) -> None:
     """Refuse a configuration whose parts contradict each other.
 
@@ -1071,41 +1274,33 @@ def _check_coherence(settings: Settings) -> None:
     silently never tracks anything, which is the least debuggable way to be told
     about a mistake.
 
+    **An unsupplied groundstation is no longer one of them.** It used to be: a
+    remote selection with an empty address, or with an empty credential, refused
+    to start. REQ-103 makes both an unresolved state instead, because on a fresh
+    installation the surface that would supply them is the one the refusal
+    prevented from being served. Nothing is silently tracked by a source that
+    does not exist — `main.build_remote_source` builds none, and every surface
+    reports the remote detector as *unconfigured* rather than as failed, which is
+    this repository's standing distinction between "never supplied" and "broken".
+
+    A **non-empty** address is still checked, and the reason is not coherence: it
+    is reported by value on every surface, so one carrying user information has
+    to be refused before the first line of the resolved configuration is emitted.
+    See `_check_session_url`.
+
     Args:
         settings: The parsed settings.
 
     Raises:
-        ConfigurationError: If face tracking is asked for without the source it
-            would need, or — via `_check_session_url`, which this calls once the
-            address is known to be non-empty — if the groundstation address is
-            not one a session can be opened on.
+        ConfigurationError: If a detector on the robot is selected without the
+            weights it would load, or — via `_check_session_url` — if a supplied
+            groundstation address is not one a session can be opened on.
     """
     if not settings.face_tracking_enabled:
         return
 
-    needs_groundstation = settings.detection_source is not _ROBOT_ONLY
-    if needs_groundstation:
-        if not settings.groundstation_url.strip():
-            message = (
-                f"{variable_for('detection_source')}="
-                f"{settings.detection_source.value} needs a groundstation, but "
-                f"{variable_for('groundstation_url')} is empty. Set it, or select "
-                f"{_ROBOT_ONLY.value} to run the detector on the robot, "
-                f"or set {variable_for('face_tracking_enabled')}=false to switch "
-                f"face tracking off."
-            )
-            raise ConfigurationError(message)
+    if settings.groundstation_url.strip():
         _check_session_url(settings.groundstation_url.strip())
-        if not settings.groundstation_credential.get_secret_value():
-            message = (
-                f"{variable_for('detection_source')}="
-                f"{settings.detection_source.value} opens a session with the "
-                f"groundstation, and {variable_for('groundstation_credential')} "
-                f"is empty. A session with no credential is refused by the "
-                f"groundstation, so this is caught here rather than as a robot "
-                f"that connects to nothing."
-            )
-            raise ConfigurationError(message)
 
     needs_local_model = settings.detection_source is not SourceSelection.REMOTE
     if needs_local_model and not settings.local_model_path.strip():
@@ -1272,6 +1467,21 @@ def log_resolved_configuration(resolution: Resolution) -> None:
             "compatibility that predictive gaze ignores. Save ordinary settings "
             "to drop it.",
             name,
+        )
+    # The two unresolved states, said out loud at the one place that says what
+    # the application is running on. An operator reading a boot log has to be
+    # able to tell "nothing is announced because nothing has been configured"
+    # from "the announcement failed", and the difference is not visible in a
+    # dump of settings at their defaults.
+    if not identity_is_resolved(resolution.settings):
+        _LOGGER.warning(
+            "configuration.identity_unresolved %s",
+            identity_unresolved_notice(),
+        )
+    if not groundstation_is_resolved(resolution.settings):
+        _LOGGER.info(
+            "configuration.groundstation_unresolved %s",
+            groundstation_unresolved_notice(resolution.settings),
         )
 
 

@@ -5,9 +5,10 @@ groundstation link declared, the daemon's environment converged, and the whole
 thing asserted rather than assumed.
 
 **Read [the Home Assistant runbook's identity warning](home-assistant.md#-the-one-thing-that-cannot-be-undone-the-announced-identity)
-before you deploy anything.** `REACHY_SATELLITE_DEVICE_NAME` has no default and
-choosing it wrongly on an upgrade detaches every entity's history in Home
-Assistant. There is no repair for that after the fact worth the name.
+before you deploy anything.** Nothing derives `REACHY_SATELLITE_DEVICE_NAME`,
+nothing is announced until you set it, and choosing it wrongly on an upgrade
+detaches every entity's history in Home Assistant. There is no repair for that
+after the fact worth the name.
 
 - **You need:** a robot on the network, an account on it with `sudo`, a
   [running groundstation](groundstation.md), and this repository checked out on
@@ -214,8 +215,10 @@ here.
 | `REACHY_HOME_ASSISTANT_IDENTITY` | The same. The application announces `REACHY_SATELLITE_DEVICE_NAME`. `doctor`'s `home-assistant.identity` check nonetheless reads this one and calls it "the identity the satellite announces" |
 
 **What that means for you today.** A robot provisioned from this declaration
-alone has a satellite that **refuses to start**, because
-`REACHY_SATELLITE_DEVICE_NAME` has no default and nothing has set it. Set the
+alone has a satellite that starts, serves its settings page and **announces
+nothing to Home Assistant**, because `REACHY_SATELLITE_DEVICE_NAME` has no
+default and nothing has set it. Either supply the value from that page — see
+[`docs/ops/satellite-deployment.md`](../ops/satellite-deployment.md) — or set the
 application's own variables in a **second drop-in of your own** beside the
 managed one — the managed region is owned in full and rewritten whole, but
 other drop-ins in the same directory belong to whoever put them there and
@@ -407,7 +410,7 @@ tool, which is what proves that is enough. **Executed:**
 ```
 wheel-verify: reachyctl 0.1.0
 wheel-verify: doctor reported 9 checks, all skipped
-satellite wheel: reachy_mini_ha_satellite-0.1.0-py3-none-any.whl carries 13 registered assets, their licence texts, and the reachy_mini_apps entry point, whose module reachy_mini_ha_satellite.daemon_app starts and refuses an empty configuration when run the way the daemon runs it
+satellite wheel: reachy_mini_ha_satellite-0.1.0-py3-none-any.whl carries 13 registered assets, their licence texts, and the reachy_mini_apps entry point, whose module reachy_mini_ha_satellite.daemon_app starts and refuses an unusable configuration when run the way the daemon runs it
 ```
 
 The third line is the question specific to the satellite wheel, and it has three

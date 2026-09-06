@@ -119,6 +119,23 @@ one — a measurement deciding a question the spec argued for is what a decision
 record is for. Do not report such a row. Any other edit under `docs/specs/` is
 still a finding.
 
+**The satellite's announced identity is fixed at startup, so clearing the setting
+is not a REQ-102 violation.** `device_name` is restart-bound: the announcing
+surface is built once from the identity in effect at startup, or not at all.
+REQ-102 forbids announcing "while its announced identity is unresolved", and what
+a *running* process announces is resolved for as long as it announces anything —
+so clearing the setting is persisted, badged "needs a restart", and takes effect
+at the next start, which builds nothing announcing. Do not report that the
+listener and the mDNS record should be torn down synchronously, nor that the
+clear should be refused: an identity can come from an override alone, so refusing
+would make *Reset* impossible there and stopping to get round it starts again
+with the same override. The settings page *claiming* the embargo in that state
+would be a finding; it has a fourth presentation saying so instead. The
+groundstation is the opposite case and is not an inconsistency: what a session is
+opened with is read at every replacement, so supplying, clearing or rotating
+either half is adopted at once, and `groundstation_credential` is deliberately
+the one secret in `LIVE_SETTINGS`.
+
 **Specs are written in duvet mode.** RFC 2119 keywords appear **only** inside
 `### REQ-NNN:` sections; their absence from Overview, Background, Design,
 Constraints, Open Questions and scenario bodies is required, since a keyword

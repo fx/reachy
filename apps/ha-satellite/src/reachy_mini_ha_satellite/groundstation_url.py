@@ -56,13 +56,31 @@ leaves remote health unavailable with the preceding address durable and local
 detection working, which is the honest state rather than a second client
 alongside a first that may be alive.
 
-**A transition that would leave no source at all is refused.** Whether a session
-exists is decided by settings that take effect at the next start, so a
-submission changing one of them together with the address would close the
-running source, install nothing, commit and report success. The decision is read
-off the factory's own answer — no candidate while one is running — rather than
-off a list of the settings that produce it, which is a list that goes stale
-without anything noticing.
+**A transition that would leave no source at all is refused, unless it is an
+operator unconfiguring the groundstation.** Whether a session exists is decided
+by settings that take effect at the next start, so a submission changing one of
+them together with the address would close the running source, install nothing,
+commit and report success. The decision is read off the factory's own answer — no
+candidate while one is running — rather than off a list of the settings that
+produce it, which is a list that goes stale without anything noticing. Clearing
+the address itself is the one submission for which that outcome is what was
+asked for: stock-robot installation REQ-103 makes an unresolved groundstation a
+state the robot can be in, and a robot that could enter it only at startup would
+be one an operator could point at a wrong groundstation and not un-point without
+a restart.
+
+**Arriving at the first groundstation is this same transition and not another
+one.** REQ-103 lets the application start with the address or the credential
+unsupplied, so `main.build_remote_source` answers `None` and the chain begins
+with no delegate. Supplying either half then reaches `_replace` — the path
+REQ-095 already owns — because what selects that path is
+`_opens_a_different_session` and not the address on its own. **The address on its
+own was the released condition and it is not the right question**: a session is
+opened with an address *and* a credential, so a submission that supplies, clears
+or rotates the credential changes what the robot would authenticate as while
+leaving the address exactly as it was. Sent down the released branch all three
+left the running client answering under a secret that was no longer the
+configured one, with every surface reporting the source as available.
 
 **In a running application, every write to the overrides file goes through this
 owner's lock, and serializing them is a separate job from owning the address.**
@@ -111,6 +129,7 @@ from reachy_mini_ha_satellite.config import (
     ConfigurationError,
     OverrideMerge,
     apply_settings_change,
+    groundstation_is_resolved,
     resolve_submission,
     validate_groundstation_url_length,
 )
@@ -155,12 +174,19 @@ _OUTSTANDING_MESSAGE: Final = (
 )
 
 # What a transition says when the submission would leave the robot with no
-# groundstation source at all while one is running. The settings that decide
-# whether a session exists take effect at the next start, so a save that changes
-# one of them *and* the address would retire the running source into nothing —
-# and the page would report success over a satellite that had stopped seeing.
-# The message names no setting: which ones they are is the factory's business,
-# and a list here is one that goes stale silently.
+# groundstation source at all while one is running **and did not ask for that**.
+# The settings that decide whether a session exists take effect at the next
+# start, so a save that changes one of them *and* the address would retire the
+# running source into nothing — and the page would report success over a
+# satellite that had stopped seeing. The message names no setting: which ones
+# they are is the factory's business, and a list here is one that goes stale
+# silently.
+#
+# A submission that unconfigures the groundstation — clearing the address or the
+# credential — reaches no source at all for a reason it stated, so it retires
+# rather than being refused and never produces this message. `_replace` is where
+# the two are told apart, by asking `groundstation_is_resolved` of the submitted
+# configuration.
 _RETIRES_INTO_NOTHING_MESSAGE: Final = (
     "the submitted configuration opens no groundstation session while one is "
     "running, so the address was not changed. The settings that decide whether "
@@ -618,7 +644,7 @@ class GroundstationUrlOwner:
         # additionally runs the check in `reserve_submission`, without a loop,
         # because that one cannot await.
         resolved = resolve_submission(self._environ, wanted)
-        if resolved.settings.groundstation_url == self.effective_url:
+        if not self._opens_a_different_session(resolved):
             # Nothing to retire or start, so the released order is the right
             # one and this is the one definition of it.
             applied = apply_settings_change(
@@ -631,6 +657,56 @@ class GroundstationUrlOwner:
             await self._restore_if_unavailable()
             return applied
         return await self._replace(wanted, resolved)
+
+    #:= docs/specs/stock-robot-installation/index.md#req-103-remote-perception-is-optional-at-first-start
+    #:% The satellite MUST start with an unresolved groundstation address or credential
+    #:% and run on local detection until both are supplied through a configuration
+    #:% surface.
+    def _opens_a_different_session(self, resolved: Resolution) -> bool:
+        """Whether a submission changes what a session would be opened with.
+
+        **The address alone is not that question, and reading it as though it
+        were is a defect this had.** A session is opened with an address *and* a
+        credential — `main.build_remote_source` reads both to construct the
+        client — so a submission changing either one changes what the robot
+        would authenticate as, whatever it leaves the other at.
+
+        Sent down the released branch, all three credential submissions were
+        wrong in the same direction. Clearing it persisted an unresolved
+        groundstation and left the running client answering under a secret the
+        operator had just revoked, with every surface reporting `available` —
+        *unconfigured* collapsing into *connected*, which is the distinction
+        REQ-103 exists to hold. Supplying the missing half left a robot whose
+        groundstation was now fully configured with no source built for it.
+        Rotating left the session authenticating with the preceding secret,
+        which is the revoked-credential case again with one extra step.
+
+        So the question is asked of both values and of nothing else. What it is
+        **not** asked of is the settings that decide whether a session exists at
+        all — `face_tracking_enabled` and `detection_source` — which stay
+        restart-bound: a submission changing one of those alone leaves the
+        running source exactly where it is, and one changing it together with
+        the address is the retire-into-nothing case `_replace` refuses.
+
+        Args:
+            resolved: What the submission resolves to.
+
+        Returns:
+            True when the transition — prepare, retire, start, commit — is the
+            right order for this submission.
+        """
+        current = self._resolution.settings
+        candidate = resolved.settings
+        if candidate.groundstation_url != current.groundstation_url:
+            return True
+        # Compared, never rendered. `config`'s module docstring enumerates the
+        # places a credential's raw value travels, and this is one of them: two
+        # secrets are equal or they are not, and neither reaches a log line, a
+        # message or a page from here.
+        return (
+            candidate.groundstation_credential.get_secret_value()
+            != current.groundstation_credential.get_secret_value()
+        )
 
     async def _restore_if_unavailable(self) -> None:
         """Begin one fresh restoration for a submission that changed no address.
@@ -724,7 +800,11 @@ class GroundstationUrlOwner:
         # retired, so closing the candidate is the whole compensation.
         await self._abort_if_overtaken(generation, candidate)
 
-        if candidate is None and self._source.delegate is not None:
+        if (
+            candidate is None
+            and self._source.delegate is not None
+            and groundstation_is_resolved(resolved.settings)
+        ):
             # The submitted configuration opens no session while one is running.
             # Retiring into nothing would close the live source, install
             # nothing, commit and report success — a satellite that has stopped
@@ -732,6 +812,15 @@ class GroundstationUrlOwner:
             # from the factory's own answer rather than from a list of the
             # settings that produce it, so it keeps holding when that list
             # grows.
+            #
+            # **Unless the submission is an operator unconfiguring the
+            # groundstation**, which REQ-103 makes a representable state rather
+            # than an accident. Clearing the address is a request to retire into
+            # nothing, said in as many words, and refusing it would leave a
+            # robot that had been pointed at the wrong groundstation unable to
+            # stop pointing at it without a restart. The condition asks the
+            # submitted configuration rather than counting the settings that
+            # changed, so it stays a question about what was asked for.
             raise ConfigurationError(_RETIRES_INTO_NOTHING_MESSAGE)
 
         retired = self._source.detach()
