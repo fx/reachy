@@ -32,8 +32,8 @@ old one, but the history that was attached to the old one does not move with it.
 
 ### What decides it
 
-`REACHY_SATELLITE_DEVICE_NAME`. **It has no default and nothing is announced to
-Home Assistant until it is set**, and that embargo is deliberate: a default
+`REACHY_SATELLITE_DEVICE_NAME`. **Nothing derives it, and nothing is announced
+to Home Assistant until you set it**, and that embargo is deliberate: a default
 derived from the package name would be correct on a fresh installation and
 silently destructive on an upgrade — and an upgrade from an application with a
 different package name is exactly the case this repository exists to serve. Being

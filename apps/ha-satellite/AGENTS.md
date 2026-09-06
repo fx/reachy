@@ -280,11 +280,14 @@ deployment can get irreversibly wrong.
   "was this written against the old behaviour?" — a claim that something is
   redundant, immediate, or a duplicate is the kind that rots silently, and the
   kind whose rotting deletes code.
-- **The announced Home Assistant identity has no default, and an unresolved one
+- **Nothing derives the announced Home Assistant identity, and an unresolved one
   is a state rather than a refusal.** Home Assistant keys a device on what it
   announces, so a default derived from the package name, the host name or the
   hardware address would be correct on a fresh install and silently destructive
-  on an upgrade. **Do not add one.** What changed with stock-robot installation
+  on an upgrade. **Do not add one.** The field's default is the empty string and
+  that is the unresolved state rather than a name — read it as the absence of an
+  answer, so that no plausible-looking identity is ever manufactured for an
+  operator to announce by accident. What changed with stock-robot installation
   REQ-101 is where the refusal lands: `device_name` defaults to the empty string,
   `config.identity_is_resolved` is the one question anything asks about it, and
   the application starts, serves its settings interface and serves `/status`

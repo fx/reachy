@@ -5,8 +5,8 @@ groundstation link declared, the daemon's environment converged, and the whole
 thing asserted rather than assumed.
 
 **Read [the Home Assistant runbook's identity warning](home-assistant.md#-the-one-thing-that-cannot-be-undone-the-announced-identity)
-before you deploy anything.** `REACHY_SATELLITE_DEVICE_NAME` has no default,
-nothing is announced until it is set, and choosing it wrongly on an upgrade
+before you deploy anything.** Nothing derives `REACHY_SATELLITE_DEVICE_NAME`,
+nothing is announced until you set it, and choosing it wrongly on an upgrade
 detaches every entity's history in Home Assistant. There is no repair for that
 after the fact worth the name.
 

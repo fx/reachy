@@ -18,16 +18,22 @@ from the resolved one.
 
 Four things are different here, and each has a reason.
 
-**The announced identity has no default at all, and an unresolved one is a state
-rather than a refusal.** Home Assistant keys an ESPHome device on the identity it
+**Nothing derives the announced identity, and an unresolved one is a state rather
+than a refusal.** Home Assistant keys an ESPHome device on the identity it
 announces; change it and Home Assistant does not update the existing device, it
 registers a new one. Every entity acquires a suffixed identifier, history
 detaches, and every automation and dashboard card referencing the old identifiers
 silently stops matching anything. A default derived from the package name would be
 correct on a fresh installation and silently destructive on the upgrade from the
 predecessor — which is the case that actually exists, since that application was a
-different distribution. So there is still no default, and `identity_is_resolved`
-is how a caller asks whether one was supplied.
+different distribution, and the host name and the hardware address are no better.
+
+So no plausible-looking name is ever manufactured for an operator to announce by
+accident. **The field's default is the empty string, and that is the unresolved
+state rather than a name**: nothing announces it, `identity_is_resolved` is how a
+caller asks whether an identity was supplied at all, and a robot that has been
+given none is one Home Assistant has never heard of. Read the default as the
+absence of an answer, not as an answer that happens to be blank.
 
 What changed with stock-robot installation REQ-101 is *when* the refusal happens.
 The application used to refuse to start without an identity, which made the
@@ -790,7 +796,7 @@ def identity_unresolved_notice() -> str:
     """
     variable = variable_for(IDENTITY_SETTING)
     return (
-        f"{variable} is not set, and there is deliberately no default. "  # noqa: S608  # prose, not a query: the rule matches on the words "set" and "from" appearing in one f-string
+        f"{variable} is not set, and nothing derives one for you. "  # noqa: S608  # prose, not a query: the rule matches on the words "set" and "from" appearing in one f-string
         f"Nothing is announced to Home Assistant until it is: no device is "
         f"registered, no entity exists, and no Home Assistant connection is "
         f"served. The application runs, and its settings interface is where "

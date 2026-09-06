@@ -17,8 +17,8 @@ second is not what the entry point's spelling suggests:
 
 ## ⚠️ Before you install: pin the announced identity
 
-**`REACHY_SATELLITE_DEVICE_NAME` has no default, and nothing is announced to
-Home Assistant until it is set.** That embargo is deliberate and it is the single
+**Nothing derives `REACHY_SATELLITE_DEVICE_NAME`, and nothing is announced to
+Home Assistant until you set it.** That embargo is deliberate and it is the single
 most important thing on this page.
 
 Home Assistant keys an ESPHome device on the identity it announces. If that
