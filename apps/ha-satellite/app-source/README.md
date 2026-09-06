@@ -65,7 +65,10 @@ value.
 Everything — the source, the runbooks, the specifications this is built against,
 and the release the wheel above comes from — is at
 <https://github.com/fx/reachy>. This Space is published from the directory
-`apps/ha-satellite/app-source/` in that repository and is byte-for-byte what is
-committed there, so what you install here is reviewable there.
+`apps/ha-satellite/app-source/` in that repository, and every file it installs
+from is byte-for-byte what is committed there — so what you install here is
+reviewable there. The only file on the Space that does not come from that
+directory is the `.gitattributes` Hugging Face creates with every repository,
+which the robot never downloads.
 
 Issues and pull requests are welcome in that repository rather than here.
