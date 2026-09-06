@@ -5,14 +5,25 @@ bounded measured world-pose history, asks the daemon to solve each new image
 observation without moving, removes query-time ego rotation at capture time, and
 returns an absolute world-gaze anchor to the pure behavior layer.
 
-**Every daemon command in this file goes through `_command`, and a daemon that
-refuses one does not raise out of this adapter.** A lost SDK websocket is
-`MotionFault.LINK` — recorded on the shared `DaemonLink` and returned to the
-caller — rather than an exception ending the behaviour loop and, with it, the
-process; see `daemon_link` for why the two conditions stay apart and why exiting
-is the failure that matters. Nothing here retries on its own: the loop above
-commands again on the next tick, and the first command the daemon takes marks
-the link up.
+**Every call in this file that reaches the daemon reports on the shared
+`DaemonLink`, and which of the two helpers it uses is decided by who is waiting
+for the answer.** A lost SDK websocket is a condition of its own —
+`MotionFault.LINK`, never folded into `COMMAND` — because the two say different
+things about the robot; `daemon_link` records why, and why an application that
+exits over one is the failure that matters.
+
+The **behaviour loop's** calls take `attempt_daemon_call` and never raise out of
+this adapter: `_command`, which every motion command goes through on both gating
+modes, plus `observe`, `calibrate`, `acquire` and `release`. Nothing there
+retries on its own — the loop above commands again on the next tick and the
+first command the daemon takes marks the link up.
+
+A **motor-group lifecycle phase** takes `report_daemon_call` instead, which
+records and re-raises: `_ReachyMotionLifecycle.prepare_worker`, `_sample_reseed`
+and `_restore_policy_worker` all have a coordinator waiting on their outcome
+that closes the group's gate when they fail, and swallowing the fault there
+would open a gate over state nobody has. The one exception is inside
+`_restore_policy_worker`'s `finally`, for the reason recorded at that line.
 """
 
 from __future__ import annotations
@@ -895,9 +906,10 @@ class ReachyMotion:
     ) -> MotionFault:
         """Run one adapter producer through the shared serialized gate.
 
-        The single place a daemon command leaves this adapter, on both gating
-        modes, and therefore the single place a lost link is observed. The link
-        fault is caught **inside** the coordinator's reservation rather than
+        The single place a *motion command* leaves this adapter, on both gating
+        modes — not the only daemon call it makes, and the module docstring has
+        the rest. The link fault is caught **inside** the coordinator's
+        reservation rather than
         allowed out of it. `MotorGroupCoordinator.command` releases the
         reservation in a `finally` and lets the exception through, so a
         `ConnectionError` escaping it would leave the coordinator's own state
