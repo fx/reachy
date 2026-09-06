@@ -86,8 +86,19 @@ documentation with itself. The third is
 of the managed drop-in are written against: `test_reachyctl_managed.py` and
 `test_provisioning_managed_contract.py` each read the block out of it and require
 their own renderer to reproduce it, so the committed bytes are the contract and a
-fake would compare a renderer with itself. Do not report those. A marker on a
-test that merely *used* a real path for convenience still is a finding.
+fake would compare a renderer with itself. Do not report those.
+
+The fourth is **a test that composes the satellite through
+`main.build_application`** — `test_satellite_motion_gating.py`,
+`test_satellite_bootstrap.py`, `test_satellite_daemon_link.py`. That function
+scans the wheel's own wake-word and sound directories and loads what it finds, so
+such a test performs real input whatever it goes on to assert, and the marker is
+the honest declaration of that rather than a licence it was given. Do not report
+one as a mislabelled unit test, and do not ask for the asset edge to be mocked:
+what those tests exercise is the *composed* wiring — the coordinator the real
+composition built and the gates it opened — and a fake asset directory replaces
+that with a fixture asserting itself. A marker on a test that merely *used* a
+real path for convenience still is a finding.
 
 **Some standing rules are review-enforced on purpose.** Tooling decides what a
 tool can: `--disable-socket`, and `ignore-without-code`/`PGH003`/`PGH004` for a
