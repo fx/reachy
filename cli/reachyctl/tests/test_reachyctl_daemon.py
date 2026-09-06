@@ -1197,3 +1197,74 @@ async def test_a_complete_version_is_accepted_including_a_pre_release(
     daemon, _access = daemon_for(robot)
 
     assert await daemon.interpreter() == STOCK_INTERPRETER
+
+
+@pytest.mark.asyncio
+async def test_an_empty_body_is_not_a_daemon_running_nothing() -> None:
+    """Two different robots, and substituting one for the other invented a fact.
+
+    A daemon that answers `null` is running no application. A daemon that
+    answers with no body at all has told us nothing, and reporting that as "no
+    application is running" is a false sentence about a real robot.
+    """
+    robot = FakeRobot(daemon_api=True, api_stdout="")
+    daemon, _access = daemon_for(robot)
+
+    with pytest.raises(DaemonControlError, match="not JSON"):
+        await daemon.application_state()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("7", "7"),
+        ('{"code": 5}', '{"code": 5}'),
+        ('["a", "b"]', '["a", "b"]'),
+        ("true", "true"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_an_error_that_is_not_a_message_is_shown_rather_than_dropped(
+    failure: str,
+    expected: str,
+) -> None:
+    """Losing the only evidence of trouble is worse than rendering it awkwardly.
+
+    It is labelled as not a message, so it cannot be read as one the daemon
+    composed.
+
+    Args:
+        failure: What the daemon put in its `error` field.
+        expected: What the detail has to carry through.
+    """
+    robot = FakeRobot(
+        daemon_api=True,
+        api_stdout=(
+            '{"info": {"name": "' + DEFAULT_APPLICATION + '"}, '
+            '"state": "error", "error": ' + failure + "}"
+        ),
+    )
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.running is False
+    assert "not a message" in state.detail
+    assert expected in state.detail
+
+
+@pytest.mark.asyncio
+async def test_an_error_the_daemon_wrote_is_quoted_verbatim() -> None:
+    """A string is the daemon's own message and reaches the redactor unaltered."""
+    robot = FakeRobot(
+        daemon_api=True,
+        api_stdout=(
+            '{"info": {"name": "' + DEFAULT_APPLICATION + '"}, '
+            '"state": "error", "error": "it fell over"}'
+        ),
+    )
+    daemon, _access = daemon_for(robot)
+
+    state = await daemon.application_state()
+
+    assert state.detail == "error: it fell over"

@@ -123,13 +123,20 @@ _METADATA_SCRIPT: Final = (
 # back to another interface would replace the reason with a second, unrelated
 # one. A daemon that could not be reached at all is an image that does not serve
 # this interface, and that is what the fallback is for.
+#
+# The body is written through UNCHANGED, and an empty one stays empty. An
+# earlier version substituted `null` for it, which made a daemon that answered
+# with nothing indistinguishable from one that answered "no application is
+# running" — a false sentence about a real robot, and one this tool would have
+# gone on to report. An empty body is not JSON and fails as not JSON. Nothing
+# parses the body of a start or a stop, so this costs those nothing.
 _API_SCRIPT: Final = (
     "import sys, urllib.error, urllib.request\n"
     "method, url = sys.argv[1], sys.argv[2]\n"
     "request = urllib.request.Request(url, method=method)\n"
     "try:\n"
     "    with urllib.request.urlopen(request, timeout=10) as answer:\n"
-    "        sys.stdout.write(answer.read().decode('utf-8') or 'null')\n"
+    "        sys.stdout.write(answer.read().decode('utf-8'))\n"
     "except urllib.error.HTTPError as error:\n"
     "    sys.stderr.write(f'{error.code} {error.reason}')\n"
     "    raise SystemExit(3) from None\n"
@@ -482,6 +489,10 @@ class DaemonClient:
             )
             raise DaemonControlError(message) from error
         if decoded is None:
+            # A JSON `null`, which is what this endpoint answers when the daemon
+            # is running nothing. An EMPTY body cannot arrive here — the request
+            # script passes the body through unchanged, so an empty one fails
+            # above as not JSON rather than being read as this.
             return ApplicationState(
                 running=False,
                 detail="the daemon is running no application",
@@ -495,9 +506,7 @@ class DaemonClient:
             raise DaemonControlError(message)
         state = decoded.get("state")
         detail = state if isinstance(state, str) else "in a state it did not name"
-        failure = decoded.get("error")
-        if isinstance(failure, str) and failure:
-            detail = f"{detail}: {failure}"
+        detail = _with_error(detail, decoded)
         info = decoded.get("info")
         if not isinstance(info, dict):
             return _unnamed("info", detail)
@@ -1186,6 +1195,41 @@ class DaemonClient:
         if not outcome.ok:
             raise RobotAccessError(f"{complaint}: {outcome.complaint()}")
         return outcome
+
+
+def _with_error(detail: str, decoded: Mapping[str, object]) -> str:
+    """Add what the daemon said went wrong, whatever shape it said it in.
+
+    A string is the daemon's own message and is quoted verbatim, unchanged, the
+    way every other thing a robot wrote is — see `CommandOutcome.complaint`.
+
+    Anything else is a daemon departing from its own model, and it is rendered
+    rather than dropped: losing the only evidence that something is wrong is
+    worse than rendering it awkwardly. It is labelled as not a message so it
+    cannot be read as one the daemon composed.
+
+    **Re-encoding it is the one transformation on this path**, and it is worth
+    naming because this repository's rule is that text a robot wrote reaches the
+    redactor unaltered: a value carrying a quote, a backslash or a newline is
+    escaped here, and a secret containing one would then not match a redactor
+    seeded with its raw form. The exposure is bounded — this branch is reached
+    only when the field is already not the string the daemon's own model
+    declares — and the alternative is discarding the evidence entirely.
+
+    Args:
+        detail: What has been said about the state so far.
+        decoded: The status document.
+
+    Returns:
+        The detail, with the error appended when there is one.
+    """
+    failure = decoded.get("error")
+    if isinstance(failure, str):
+        return f"{detail}: {failure}" if failure else detail
+    if failure is None:
+        return detail
+    rendered = json.dumps(failure, ensure_ascii=False)
+    return f"{detail}: its error field was not a message but {rendered}"
 
 
 def _unnamed(field: str, detail: str) -> ApplicationState:

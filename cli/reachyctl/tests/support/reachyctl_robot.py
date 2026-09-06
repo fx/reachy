@@ -150,7 +150,10 @@ class FakeRobot:
             only interface, and is the default because that is the shape every
             test written before the API existed assumes.
         api_stdout: What the daemon's API writes for a status request, when it
-            is not to write the status document this tool reads.
+            is not to write the status document this tool reads. `None` is the
+            ordinary document; an EMPTY STRING is a daemon that answered with
+            no body at all, which is a different robot from one that answered
+            `null` and must not be read as the same.
         api_refuses: Whether the API answers every request with an error
             status. A daemon that answered and refused is not a daemon with no
             API, and the two must not be treated alike.
@@ -226,7 +229,7 @@ class FakeRobot:
     )
     environments: dict[str, dict[str, str]] = field(default_factory=dict)
     daemon_api: bool = False
-    api_stdout: str = ""
+    api_stdout: str | None = None
     api_refuses: bool = False
     version_answers: int | None = None
     current_app: str = DEFAULT_APPLICATION
@@ -523,7 +526,11 @@ class FakeRemoteAccess:
             return CommandOutcome(
                 command=line,
                 exit_status=0,
-                stdout=self.robot.api_stdout or self._app_status(),
+                stdout=(
+                    self._app_status()
+                    if self.robot.api_stdout is None
+                    else self.robot.api_stdout
+                ),
                 stderr="",
             )
         if method == "POST" and "/start-app/" in path:
