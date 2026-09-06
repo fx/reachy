@@ -470,8 +470,15 @@ def publish(
     # directory happens to hold — a build tree, an editor's backup, anything
     # untracked — from reaching a public Space, because `upload_folder` reads no
     # `.gitignore` and would otherwise send the lot. `delete_patterns` makes the
-    # Space exactly that set rather than the union of every publish, so a file
-    # withdrawn here is withdrawn there.
+    # Space that set rather than the union of every publish, so a file withdrawn
+    # here is withdrawn there.
+    #
+    # One remote file survives both, and it is the Hub's rather than ours:
+    # `upload_folder` never deletes a `.gitattributes`, whatever the delete
+    # patterns say, and the Hub writes one into every repository it creates. It
+    # reaches no robot — the daemon's downloader ignores `.gitattributes`
+    # explicitly — so what an operator installs is still exactly the tracked
+    # source.
     api.upload_folder(
         folder_path=str(directory),
         repo_id=space_id,

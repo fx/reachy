@@ -843,7 +843,9 @@ publish := "uv run --locked --all-packages --group publish"
 # `.gitignore`, so a build tree left by installing the source locally would
 # otherwise be published to a public Space along with it. That is also why an
 # ignored file is not one of the refusals above — it cannot reach the Space, and
-# a refusal about something harmless is noise.
+# a refusal about something harmless is noise. The one remote file the upload
+# cannot remove is the `.gitattributes` the Hub writes into every repository it
+# creates, which the robot's downloader ignores explicitly.
 #
 # Publishing follows a release rather than preceding it: the source names a
 # release asset, and a Space published first points at a wheel that is not

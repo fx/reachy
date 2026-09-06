@@ -134,7 +134,8 @@ and so needs nothing here.
 `just lint-boundary`, `just lint-behaviour-boundary`,
 `just lint-capability-boundary`, `just check-assets`, `just vendored-drift`,
 `just publish-app-source` — the one command that reaches an account rather than
-a robot, and the one that refuses before it reaches anything — the
+a robot, and the one whose refusals are all decided before the Space is written
+to — the
 wheel trio `just wheels`, `just wheel-size` and `just wheel-verify`, the
 benchmark set `just bench`, `just bench-compare`, `just bench-sizes` and
 `just bench-record`, and the provisioning set `just provision-lint`,

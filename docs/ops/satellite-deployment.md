@@ -452,11 +452,17 @@ one does.
 ### What a publish does
 
 It creates the Space if it is not there — a static Space, which is what a
-Reachy Mini application source is — and then makes its contents **exactly** the
-files git tracks under that directory, deleting anything on the Space that this
+Reachy Mini application source is — and then makes its contents the files git
+tracks under that directory, deleting anything else on the Space that this
 checkout does not have. A file withdrawn here is withdrawn there, which is what
 lets this page say that what an operator installs is what is reviewable in this
 repository.
+
+One remote file survives that, and it is the Hub's own: `upload_folder` never
+deletes a `.gitattributes`, whatever it is told to delete, and the Hub writes
+one into every repository it creates. It reaches no robot — the daemon's
+downloader ignores `.gitattributes` explicitly — so the installed source is
+still exactly what is tracked here.
 
 Both halves of that are deliberate. A modified, deleted or untracked file under
 the directory is refused outright, because bytes nobody has reviewed are exactly
