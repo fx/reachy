@@ -150,6 +150,24 @@ deployment can get irreversibly wrong.
   directives, measured motion and coordinated samples must remain resolvable
   runtime types there; adapters and behavior import them rather than redeclaring
   aliases or leaving protocol annotations behind `TYPE_CHECKING`.
+- **The motion-gating mode is decided once, at composition, and reported.**
+  `main.build_application` asks the handle
+  `torque_confirmation_support()` — a question about the *daemon*, which only
+  `daemon_app._ConfirmedRobotHandle` can answer, because that wrapper defines all
+  three confirmed methods whatever the daemon behind it can do, so a `hasattr`
+  against it answers "yes" on every robot. A daemon offering none of them gets
+  **no `MotorGroupCoordinator` at all** and `ReachyMotion._command`'s existing
+  `coordinator is None` branch, which is the ungated path the application had
+  before confirmation existed; there is no torque state to protect and no switch
+  to announce. A daemon offering **some** of them is gated with the rest, because
+  the degradation exists where there is nothing to gate and a half-implemented
+  daemon is not that. A daemon offering all three is gated exactly as change 0020
+  left it, and a group of its whose confirmation is refused, contradicted or
+  absent stays an unconfirmed group — treating that as an absent capability would
+  make breaking the confirmation a way to switch the safety contract off. The
+  mode and its bounded reason are `status()["motion_gating"]`, which is on
+  `/status` and the settings page for every process, including the stock robot
+  that has no `motors` key to put them under.
 - **Controller fault and lifecycle are independent.** Stable fault categories
   derive `safe_hold`; they are never encoded as tracking modes. One validated
   `ControllerConfig` instance is shared by behavior and the production motion

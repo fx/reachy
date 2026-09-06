@@ -29,6 +29,9 @@ __all__ = [
     "HEAD_MOTOR_IDS",
     "MOTOR_GROUPS",
     "MOTOR_IDENTIFIERS",
+    "MotionGating",
+    "MotionGatingMode",
+    "MotionGatingReason",
     "MotorConfirmation",
     "MotorConfirmationOutcome",
     "MotorEvidence",
@@ -37,6 +40,7 @@ __all__ = [
     "MotorGroupCoordinator",
     "MotorGroupLifecycle",
     "MotorTransition",
+    "TorqueConfirmationSupport",
 ]
 
 HEAD_MOTOR_IDS: Final = tuple(f"stewart_{index}" for index in range(1, 7))
@@ -73,6 +77,104 @@ class MotorConfirmationOutcome(StrEnum):
     PARTIAL = "partial"
     FAILED = "failed"
     UNAVAILABLE = "unavailable"
+
+
+class TorqueConfirmationSupport(StrEnum):
+    """Whether the daemon behind the handle offers the confirmation surface.
+
+    A question about the *daemon*, asked once and answered from the object the
+    SDK boundary wraps. It is not a question about a confirmation: a daemon that
+    offers the surface and answers badly is `AVAILABLE` here and an unconfirmed
+    group everywhere else.
+
+    `PARTIAL` is a daemon offering some of the three methods and not the others.
+    It is treated as offering the capability, which is the conservative reading
+    — see `MotionGating.decide`.
+    """
+
+    AVAILABLE = "available"
+    PARTIAL = "partial"
+    ABSENT = "absent"
+
+
+class MotionGatingMode(StrEnum):
+    """Which of the two command paths a whole process runs on.
+
+    Under `CONFIRMED` every producer passes the coordinator's per-group gate.
+    Under `UNGATED` commands reach the daemon directly and no motor switch is
+    announced, which is what the application did before confirmation existed.
+    """
+
+    CONFIRMED = "confirmed"
+    UNGATED = "ungated"
+
+
+class MotionGatingReason(StrEnum):
+    """Why that mode is in force, bounded and naming nothing installed."""
+
+    CONFIRMATION_AVAILABLE = "daemon_confirmation_available"
+    CONFIRMATION_PARTIAL = "daemon_confirmation_partial"
+    CONFIRMATION_ABSENT = "daemon_confirmation_absent"
+
+
+_GATING_REASONS: Final[Mapping[TorqueConfirmationSupport, MotionGatingReason]] = {
+    TorqueConfirmationSupport.AVAILABLE: MotionGatingReason.CONFIRMATION_AVAILABLE,
+    TorqueConfirmationSupport.PARTIAL: MotionGatingReason.CONFIRMATION_PARTIAL,
+    TorqueConfirmationSupport.ABSENT: MotionGatingReason.CONFIRMATION_ABSENT,
+}
+
+
+#:= docs/specs/stock-robot-installation/index.md#req-100-the-motion-gating-mode-in-force-is-reported
+#:% The satellite MUST report which motion-gating mode is in force and why, so that
+#:% an operator can tell an ungated stock robot from a confirmed one without
+#:% inferring it from whether the robot moved.
+@dataclass(frozen=True, slots=True)
+class MotionGating:
+    """The process-lifetime motion-gating decision and the reason for it."""
+
+    mode: MotionGatingMode
+    reason: MotionGatingReason
+
+    @classmethod
+    def decide(cls, support: TorqueConfirmationSupport) -> MotionGating:
+        """Choose the command path once, from what the daemon offers.
+
+        Only a daemon offering none of the surface is degraded. A partial
+        surface is gated with the rest: the ungated path exists because there is
+        nothing to gate, and a daemon halfway through gaining the capability is
+        not that. It is also the case where a wrong answer is worst — it is a
+        build that may already correlate torque — so the report says `partial`
+        rather than pretending the two are the same.
+
+        Args:
+            support: What the daemon offers, probed at the SDK boundary.
+
+        Returns:
+            The mode in force and the reason to report for it.
+        """
+        return cls(
+            MotionGatingMode.UNGATED
+            if support is TorqueConfirmationSupport.ABSENT
+            else MotionGatingMode.CONFIRMED,
+            _GATING_REASONS[support],
+        )
+
+    @property
+    def gated(self) -> bool:
+        """Whether this process builds a coordinator and gates every producer."""
+        return self.mode is MotionGatingMode.CONFIRMED
+
+    def status(self) -> dict[str, str]:
+        """Return the bounded report of the mode and its reason.
+
+        Two enum values and nothing else: no credential, no address, no
+        identity, and nothing that grows with how long the robot has been
+        running.
+
+        Returns:
+            The mode and the reason, both bounded strings.
+        """
+        return {"mode": self.mode.value, "reason": self.reason.value}
 
 
 class MotorEvidenceError(StrEnum):

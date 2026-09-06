@@ -122,9 +122,11 @@ from reachy_mini_ha_satellite.groundstation_url import (
     ReplaceableRemoteSource,
 )
 from reachy_mini_ha_satellite.motor_control import (
+    MotionGating,
     MotorGroup,
     MotorGroupCoordinator,
     MotorGroupLifecycle,
+    TorqueConfirmationSupport,
 )
 from reachy_mini_ha_satellite.motor_entities import MotorSwitchEntity
 from reachy_mini_ha_satellite.ports import (
@@ -627,6 +629,7 @@ class SatelliteApplication:
         perception: PerceptionPort,
         behaviour: SatelliteBehaviour,
         motor_groups: MotorGroupCoordinator | None = None,
+        motion_gating: MotionGating | None = None,
         services: Sequence[Service] = (),
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -641,6 +644,11 @@ class SatelliteApplication:
             perception: What is in front of the robot.
             behaviour: What to do about it.
             motor_groups: Confirmed torque state and producer gates, when available.
+            motion_gating: Which command path is in force and why, as the
+                composition root decided it. Omitted only where nobody probed a
+                daemon — a test building an application directly — and then
+                derived from whether a coordinator was supplied, which is the
+                same decision with the less specific reason.
             services: The things with lifetimes, started in order and stopped
                 in reverse.
             clock: The monotonic source the behaviour layer is given.
@@ -655,6 +663,20 @@ class SatelliteApplication:
         self._perception = perception
         self._behaviour = behaviour
         self._motor_groups = motor_groups
+        if motion_gating is None:
+            motion_gating = MotionGating.decide(
+                TorqueConfirmationSupport.AVAILABLE
+                if motor_groups is not None
+                else TorqueConfirmationSupport.ABSENT
+            )
+        elif motion_gating.gated is not (motor_groups is not None):
+            # Refused rather than reconciled: the report and the command path
+            # are the same decision, and a status surface that says "confirmed"
+            # over a process with no gate is worse than no status surface at
+            # all.
+            message = "the reported motion gating must match the coordinator supplied"
+            raise ValueError(message)
+        self._motion_gating = motion_gating
         self._services = tuple(services)
         self._clock = clock
         self._sleep = sleep
@@ -793,12 +815,26 @@ class SatelliteApplication:
         """Return the application-owned coordinator for entities and diagnostics."""
         return self._motor_groups
 
+    @property
+    def motion_gating(self) -> MotionGating:
+        """Return which command path this process runs on, and why."""
+        return self._motion_gating
+
+    #:= docs/specs/stock-robot-installation/index.md#req-100-the-motion-gating-mode-in-force-is-reported
+    #:% The satellite MUST report which motion-gating mode is in force and why, so that
+    #:% an operator can tell an ungated stock robot from a confirmed one without
+    #:% inferring it from whether the robot moved.
     def status(self) -> dict[str, object]:
         """Say what the robot is doing, for the settings interface to report.
 
+        `motion_gating` is here rather than under `motors`, because a stock
+        robot has no coordinator and therefore no `motors` key — and that robot
+        is the one whose operator most needs to be told why. It sits beside the
+        bounded motor diagnostics on the same surface either way.
+
         Returns:
-            The pipeline state, why the head is where it is, and whether the
-            robot has settled into idling.
+            The pipeline state, why the head is where it is, whether the robot
+            has settled into idling, and which motion-gating mode is in force.
         """
         report = self._behaviour.status(self._clock())
         controller = self._behaviour.controller_state
@@ -812,6 +848,7 @@ class SatelliteApplication:
                 "fault": controller.fault.value,
                 "safe_hold": controller.safe_hold,
             },
+            "motion_gating": self._motion_gating.status(),
         }
         if self._motor_groups is not None:
             status["motors"] = self._motor_groups.status()
@@ -2239,11 +2276,13 @@ async def build_application(
 ) -> SatelliteApplication:
     """Wire the ports to the adapters and assemble everything that runs.
 
-    Awaited because initial motor confirmation is. That confirmation decides
-    which switches exist, so it has to finish before they are appended and
-    before anything that serves them starts — and it is several blocking daemon
-    calls, which the event loop must be free of while they run or the stop
-    watcher cannot set its event.
+    Awaited because initial motor confirmation is, on a daemon that offers it.
+    That confirmation decides which switches exist, so it has to finish before
+    they are appended and before anything that serves them starts — and it is
+    several blocking daemon calls, which the event loop must be free of while
+    they run or the stop watcher cannot set its event. A daemon with no
+    confirmation surface makes none of those calls, registers no switch, and
+    runs the ungated command path instead.
 
     It stays *here*, rather than becoming an awaited step of its own between
     this and `SatelliteApplication.run`, because registration is the thing it
@@ -2292,7 +2331,28 @@ async def build_application(
         body_enabled=settings.body_motion_enabled,
         require_motion_measurements=True,
     )
-    motor_groups = MotorGroupCoordinator(handle, clock=time.monotonic)
+    #:= docs/specs/stock-robot-installation/index.md#req-099-motion-survives-a-daemon-without-torque-confirmation
+    #:% The satellite MUST command motion on a robot whose daemon offers no correlated
+    #:% grouped-torque confirmation capability, treating that absence as nothing to gate
+    #:% rather than as a motor group whose torque state could not be confirmed.
+    #
+    # One probe, one decision, one process. A daemon offering nothing to
+    # correlate has no torque state for a gate to protect and no switch to
+    # announce, so it gets no coordinator and `ReachyMotion._command` takes its
+    # existing `coordinator is None` branch — the path the application had
+    # before confirmation existed. Everything else is untouched: a daemon that
+    # *does* offer the surface is gated exactly as it was, and a group of its
+    # whose confirmation is refused, contradicted or absent stays an unconfirmed
+    # group with its gate shut.
+    gating = MotionGating.decide(handle.torque_confirmation_support())
+    motor_groups = (
+        MotorGroupCoordinator(handle, clock=time.monotonic) if gating.gated else None
+    )
+    _LOGGER.info(
+        "satellite.motion gating=%s reason=%s",
+        gating.mode.value,
+        gating.reason.value,
+    )
     motion = ReachyMotion(
         handle,
         controller_config=controller_config,
@@ -2341,20 +2401,22 @@ async def build_application(
 
         return motion.motor_lifecycle(group, time.monotonic, _finalize)
 
-    for group in MotorGroup:
-        motor_groups.set_hooks(
-            group,
-            lifecycle=functools.partial(_motor_lifecycle, group),
-        )
-    try:
-        registered_motor_groups = await motor_groups.initialize()
-    except BaseException:
-        # Nothing owns the coordinator until the application below is handed it,
-        # so a cancelled or failed confirmation closes it here. Otherwise its
-        # worker outlives the startup that created it, with no application left
-        # to call `aclose`.
-        await motor_groups.aclose()
-        raise
+    registered_motor_groups: tuple[MotorGroup, ...] = ()
+    if motor_groups is not None:
+        for group in MotorGroup:
+            motor_groups.set_hooks(
+                group,
+                lifecycle=functools.partial(_motor_lifecycle, group),
+            )
+        try:
+            registered_motor_groups = await motor_groups.initialize()
+        except BaseException:
+            # Nothing owns the coordinator until the application below is handed
+            # it, so a cancelled or failed confirmation closes it here.
+            # Otherwise its worker outlives the startup that created it, with no
+            # application left to call `aclose`.
+            await motor_groups.aclose()
+            raise
 
     state = build_server_state(
         settings,
@@ -2370,6 +2432,7 @@ async def build_application(
         perception=perception,
         behaviour=behaviour,
         motor_groups=motor_groups,
+        motion_gating=gating,
     )
 
     # The same file `run` read the overrides out of, and the same by
@@ -2421,15 +2484,19 @@ async def build_application(
         set_percent=build_boost_setter(groundstation),
     )
     state.entities.append(boost)
-    for group in registered_motor_groups:
-        state.entities.append(
-            MotorSwitchEntity(
-                state=state,
-                coordinator=motor_groups,
-                group=group,
-                key=len(state.entities),
+    # `registered_motor_groups` is empty without a coordinator, so this loop
+    # already announced nothing in the ungated mode; the guard is what says so
+    # to a reader and to the type checker at the same time.
+    if motor_groups is not None:
+        for group in registered_motor_groups:
+            state.entities.append(
+                MotorSwitchEntity(
+                    state=state,
+                    coordinator=motor_groups,
+                    group=group,
+                    key=len(state.entities),
+                )
             )
-        )
     # Announced whatever the detection source is: the address is configuration
     # an operator changes before selecting a groundstation, not a report of one
     # that is currently connected.
@@ -2495,13 +2562,13 @@ async def _assemble(
 ) -> SatelliteApplication | None:
     """Assemble the application, abandoning it if a stop arrives first.
 
-    Assembly is where initial motor confirmation happens, and confirmation is
-    what *opens* the gates: a stop the daemon sets while a five-second daemon
-    read is in flight has to reach it, or the robot finishes energising the
-    motors it is being told to shut down. Racing the two is what makes
-    `build_application`'s own cancellation path — which closes the coordinator
-    and registers nothing — the shutdown path as well, rather than a second one
-    written beside it.
+    Assembly is where initial motor confirmation happens on a daemon that offers
+    it, and confirmation is what *opens* the gates: a stop the daemon sets while
+    a five-second daemon read is in flight has to reach it, or the robot
+    finishes energising the motors it is being told to shut down. Racing the two
+    is what makes `build_application`'s own cancellation path — which closes the
+    coordinator and registers nothing — the shutdown path as well, rather than a
+    second one written beside it.
 
     Args:
         resolution: The settings in effect and where they came from.
@@ -2543,12 +2610,12 @@ async def run(handle: RobotHandle, stop: asyncio.Event) -> None:
     A stop requested before motor enable, between motor enable and controlled
     wake, or after controlled wake prevents the next hardware or composition
     boundary. One requested *during* assembly reaches the same place: initial
-    motor confirmation is awaited off this loop, so the daemon's stop watcher
-    can still set this event while it runs, and `_assemble` abandons the
-    assembly when it does — leaving every gate closed, no group registered,
-    motion unacquired and no service started. The blocking SDK call already
-    running on a worker thread is allowed to finish; Python cannot safely cancel
-    it in the middle.
+    motor confirmation, where the daemon offers it, is awaited off this loop, so
+    the daemon's stop watcher can still set this event while it runs, and
+    `_assemble` abandons the assembly when it does — leaving every gate closed,
+    no group registered, motion unacquired and no service started. The blocking
+    SDK call already running on a worker thread is allowed to finish; Python
+    cannot safely cancel it in the middle.
 
     Raises:
         ConfigurationError: If the environment is not usable. Raised rather

@@ -195,6 +195,7 @@ class TestDaemonSurfaceIsNarrow:
             "enable_motors_confirmed",
             "disable_motors_confirmed",
             "read_motor_torque",
+            "torque_confirmation_support",
             "wake_up",
             "media",
             "set_target",

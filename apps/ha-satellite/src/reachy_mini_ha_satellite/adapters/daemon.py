@@ -30,7 +30,10 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 import numpy.typing as npt
 
-from reachy_mini_ha_satellite.motor_control import MotorConfirmation
+from reachy_mini_ha_satellite.motor_control import (
+    MotorConfirmation,
+    TorqueConfirmationSupport,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -222,6 +225,26 @@ class RobotHandle(Protocol):
 
     def read_motor_torque(self, ids: list[str]) -> MotorConfirmation:
         """Read physical torque state independently for exactly these motors."""
+        ...
+
+    def torque_confirmation_support(self) -> TorqueConfirmationSupport:
+        """Say whether the daemon offers the three methods above at all.
+
+        The three above always exist *here*, because the boundary that
+        implements this protocol defines them whatever the daemon behind it can
+        do — a released `reachy-mini` has none of them and gets an `unavailable`
+        confirmation rather than an `AttributeError`. So the question of whether
+        the capability exists cannot be asked of the object satisfying this
+        protocol by looking for its methods, and is asked here instead, where
+        the implementation can answer for the daemon it wraps.
+
+        Answered once at composition and never again: the daemon does not gain
+        or lose the surface while the application runs, and a per-call question
+        would put the two modes in one code path.
+
+        Returns:
+            What the daemon offers, which decides the process's gating mode.
+        """
         ...
 
     def wake_up(self) -> None:

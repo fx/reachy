@@ -348,28 +348,28 @@ makes the stock-robot route real end to end, and registering the spec before its
 requirements have implementations to annotate would be a red traceability job
 waiting on work that does not exist.
 
-- [ ] Task 1 — Degrade to ungated motion on a daemon without torque
-      confirmation (`apps/ha-satellite`)
-  - [ ] Expose the wrapped handle's correlated-torque surface on the
+- [x] Task 1 — Degrade to ungated motion on a daemon without torque
+      confirmation (`apps/ha-satellite`) (PR #35)
+  - [x] Expose the wrapped handle's correlated-torque surface on the
         `RobotHandle` protocol in `adapters/daemon.py` and update the fakes, so
         the probe answers for the object `_ConfirmedRobotHandle` wraps rather
-        than for the wrapper, which always defines all three methods
-  - [ ] Probe it once at composition in `main.py` and build no coordinator when
+        than for the wrapper, which always defines all three methods (PR #35)
+  - [x] Probe it once at composition in `main.py` and build no coordinator when
         the surface is absent, taking the existing ungated command path rather
         than adding a second one; deviate from this shape only with a reason
-        stated in the pull request
-  - [ ] Leave the confirmed path's gating, quiescing, reseeding, ownership and
+        stated in the pull request (PR #35)
+  - [x] Leave the confirmed path's gating, quiescing, reseeding, ownership and
         terminal-release behaviour unchanged, and leave switch registration
-        governed by the unconfirmed-group contract it already has
-  - [ ] Report the mode in force and the reason for it in `/status` and on the
+        governed by the unconfirmed-group contract it already has (PR #35)
+  - [x] Report the mode in force and the reason for it in `/status` and on the
         settings page's health surface, beside the bounded identifier-free motor
-        diagnostics, with no credential or installation identifier
-  - [ ] Cover both modes, a present-but-failing capability, a partially
+        diagnostics, with no credential or installation identifier (PR #35)
+  - [x] Cover both modes, a present-but-failing capability, a partially
         answering capability, motion under the ungated mode, the absence of
         switches under it, and shutdown and safe-hold behaviour in both, with
-        fakes and no hardware
-  - [ ] Run the focused satellite suites and the repository checks required
-        above
+        fakes and no hardware (PR #35)
+  - [x] Run the focused satellite suites and the repository checks required
+        above (PR #35)
 
 - [ ] Task 2 — Start and configure without a shell on the robot
       (`apps/ha-satellite`)

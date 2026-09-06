@@ -75,6 +75,13 @@ URL text control, its live replacement behaviour, the settings page, the voice
 pipeline and the groundstation camera feed are all unaffected — none of them
 touches motor torque.
 
+**Motion is not affected either.** A daemon that cannot report torque has nothing
+to gate, so the satellite commands the head, the body and the antennas directly,
+the way it did before grouped-torque confirmation existed. Which of the two modes
+a robot is running is on the settings page and in `/status`, as `motion_gating`:
+`{"mode": "ungated", "reason": "daemon_confirmation_absent"}` on a stock robot,
+and `"confirmed"` on one carrying the branch above.
+
 ---
 
 ## Two paths, and when each is right
