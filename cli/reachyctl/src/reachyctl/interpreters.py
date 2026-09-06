@@ -21,11 +21,22 @@ in it, and it is decided without a robot.
 interpreter.** The unit's start program qualifies on its *name* — `python`,
 `python3`, `python3.12` — and never on the bare fact that the unit starts it,
 because that is precisely the assumption that produced the second daemon.
-Everything else is derived from a directory layout only an environment has: the
-`bin` beside the `lib/pythonX.Y/site-packages` the daemon's own code was found
-in, or the `bin` the start program itself sits in. A launcher named
-`launcher.sh` is therefore never run, and no ordering of these rules can make it
-run.
+Everything else is derived from something that identifies an *environment*: the
+`VIRTUAL_ENV` the unit declares, or the `bin` beside the
+`lib/pythonX.Y/site-packages` the daemon's own code was found in. A launcher
+named `launcher.sh` is therefore never run, and no ordering of these rules can
+make it run.
+
+**A rule that finds an interpreter is not good enough; it has to find the right
+one.** There is deliberately no rule taking the `bin` directory a start program
+merely *sits in*, because a `bin` alone is not an environment: a console script
+installed at `/usr/local/bin/reachy-mini-daemon` would yield
+`/usr/local/bin/python`, which exists, answers `-V`, and may be nothing to do
+with the environment the daemon's packages are in. Installing into it and then
+verifying against it would agree with itself while both looked at the wrong
+place, which is the failure reachyctl REQ-051 exists to catch — worse than
+failing, because failing is visible. Such a unit resolves nothing and says so,
+and `--python` answers it in one step.
 
 **The order is the order of authority, not of convenience.** What an operator
 supplied comes first, because they are answering the question rather than
@@ -155,7 +166,6 @@ def candidates(
         one, and an empty answer is a real answer: the caller fails with it
         rather than reaching for a path it invented.
     """
-    directory = PurePosixPath(exec_start).parent
     enclosing = _SITE_PACKAGES.match(exec_start)
     virtual_env = environment.get(_VIRTUAL_ENV, "").rstrip("/")
     derived: list[tuple[str, str]] = []
@@ -175,13 +185,6 @@ def candidates(
             (
                 f"{enclosing.group('prefix')}/{_BIN}/{_INTERPRETER}",
                 "the environment the unit's start program is installed in",
-            ),
-        )
-    if exec_start and directory.name == _BIN:
-        derived.append(
-            (
-                f"{directory}/{_INTERPRETER}",
-                "the bin directory the unit's start program is in",
             ),
         )
     # The unit's start program is a candidate on its NAME and on nothing else,

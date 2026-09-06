@@ -167,16 +167,33 @@ async def test_the_environment_the_unit_declares_answers_before_anything_is_deri
 
 
 @pytest.mark.asyncio
-async def test_a_console_script_resolves_the_bin_directory_it_sits_in() -> None:
-    """A unit starting an entry point still names the environment holding it."""
-    robot = FakeRobot(
-        exec_start="/venvs/mini_daemon/bin/reachy-mini-daemon",
-        interpreters={STOCK_INTERPRETER: "3.12.3"},
-    )
-    daemon, _access = daemon_for(robot)
+async def test_a_console_script_resolves_only_the_environment_the_unit_declares() -> (
+    None
+):
+    """A `bin` directory alone is not an environment, so nothing is derived from one.
 
-    assert await daemon.interpreter() == STOCK_INTERPRETER
-    assert robot.wrapper_runs == []
+    `/usr/local/bin/python` would exist and answer `-V` on many robots and be
+    nothing to do with the daemon's packages. What resolves this unit is the
+    unit saying which environment it means.
+    """
+    interpreters = {STOCK_INTERPRETER: "3.12.3"}
+    guessing = FakeRobot(
+        exec_start="/venvs/mini_daemon/bin/reachy-mini-daemon",
+        interpreters=interpreters,
+    )
+    declaring = FakeRobot(
+        exec_start="/venvs/mini_daemon/bin/reachy-mini-daemon",
+        environment={"VIRTUAL_ENV": "/venvs/mini_daemon"},
+        interpreters=interpreters,
+    )
+    unguided, _one = daemon_for(guessing)
+    guided, _two = daemon_for(declaring)
+
+    with pytest.raises(InterpreterResolutionError):
+        await unguided.interpreter()
+
+    assert await guided.interpreter() == STOCK_INTERPRETER
+    assert guessing.wrapper_runs == []
 
 
 @pytest.mark.asyncio

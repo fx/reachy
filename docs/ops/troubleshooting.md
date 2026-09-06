@@ -484,13 +484,22 @@ whole subject. So the tool resolves it from the robot, in this order:
    interpreter — `python`, `python3`, `python3.12`;
 3. the `VIRTUAL_ENV` the unit declares;
 4. the environment the start program is installed in, read off a
-   `…/lib/pythonX.Y/site-packages/…` path;
-5. the `bin` directory the start program sits in.
+   `…/lib/pythonX.Y/site-packages/…` path.
 
 Each candidate is asked `-V` and has to answer with a version line before
 anything else is sent to it. Nothing else is executed, and there is no fallback:
 a path that might not be an interpreter is exactly what this failure exists to
 refuse.
+
+There is deliberately no rule taking the `bin` directory the start program
+merely sits in. A `bin` alone is not an environment — a console script at
+`/usr/local/bin/reachy-mini-daemon` would yield `/usr/local/bin/python`, which
+exists, answers `-V`, and may have nothing to do with the daemon's packages.
+Installing into it and then verifying against it would agree with itself while
+both looked at the wrong place, which is exactly the failure
+[REQ-051](../specs/reachyctl/index.md#req-051-deployment-verifies-its-own-result)
+exists to catch. Such a unit resolves nothing and says so, and `--python`
+answers it in one step.
 
 **What to do.** The message lists every path that was tried and why. Log in to
 the robot and find the interpreter of the environment the daemon's packages are

@@ -40,7 +40,10 @@ that apply here.
   `--python` named, a start program whose *file name* is one CPython gives an
   interpreter, the `VIRTUAL_ENV` the unit declares, the environment the start
   program is installed in — and `reachyctl.daemon` asks each `-V` before any
-  Python source goes near it. There is no fallback: an unresolved interpreter is
+  Python source goes near it. Every rule names an ENVIRONMENT: there is
+  deliberately none taking the `bin` a start program merely sits in, because
+  `/usr/local/bin/python` exists on plenty of robots and is not the daemon's.
+  There is no fallback: an unresolved interpreter is
   `InterpreterResolutionError` and names `--python`. The name gate outranks the
   order and the operator both: the one path `--python` may not name is the
   unit's own start program, when that program's name does not claim an

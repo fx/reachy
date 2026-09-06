@@ -141,12 +141,31 @@ def test_an_operator_may_name_an_interpreter_under_any_other_name() -> None:
     assert found[0].path == "/usr/local/bin/py312"
 
 
-def test_a_console_script_offers_the_bin_directory_it_sits_in() -> None:
-    """A unit starting an entry point still names the environment holding it."""
+def test_a_bin_directory_alone_is_not_an_environment_and_is_not_guessed_at() -> None:
+    """Finding *an* interpreter is not good enough; it has to be the right one.
+
+    A console script installed system-wide would yield `/usr/local/bin/python`,
+    which exists and answers `-V` and may be nothing to do with the environment
+    the daemon's packages are in. Installing into it and verifying against it
+    would agree with itself while both looked at the wrong place, which is the
+    failure reachyctl REQ-051 exists to catch. Failing is visible; that is not.
+    """
+    assert (
+        candidates(
+            configured=None,
+            exec_start="/usr/local/bin/reachy-mini-daemon",
+            environment={},
+        )
+        == ()
+    )
+
+
+def test_a_console_script_inside_a_declared_environment_still_resolves() -> None:
+    """What replaces the guess is the unit saying which environment it means."""
     found = candidates(
         configured=None,
         exec_start="/venvs/mini_daemon/bin/reachy-mini-daemon",
-        environment={},
+        environment={"VIRTUAL_ENV": "/venvs/mini_daemon"},
     )
 
     assert [candidate.path for candidate in found] == [INTERPRETER]
