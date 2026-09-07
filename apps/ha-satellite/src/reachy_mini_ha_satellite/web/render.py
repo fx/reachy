@@ -16,6 +16,12 @@ transformed spelling of a credential for the redactor to have missed.
 from __future__ import annotations
 
 import html
+
+# Imported at run time rather than under `TYPE_CHECKING`, because
+# `_daemon_link_note` asks `isinstance` of it: the status mapping arrives as
+# `object` and the nested report has to be proved to be a mapping before it is
+# read.
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Literal, get_args, get_origin
 
@@ -32,9 +38,10 @@ from reachy_mini_ha_satellite.config import (
     identity_is_resolved,
     local_detection_clause,
 )
+from reachy_mini_ha_satellite.daemon_link import DaemonLinkState
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     from reachy_mini_ha_satellite.config import Resolution, SettingReport
 
@@ -420,6 +427,43 @@ def _groundstation_note(settings: Settings) -> str:
     )
 
 
+def _daemon_link_note(status: Mapping[str, object]) -> str:
+    """Say the robot cannot reach its own daemon, when that is what is wrong.
+
+    The page renders every status key in the summary line already, and that is
+    not enough for this one: an operator opens this page because the robot has
+    stopped moving, and `daemon_link` sorted between `controller` and `gaze` in
+    a run-on list is not being told. It leads the notes because every other
+    thing this page could say is true and irrelevant while it holds — the
+    identity is fine, the groundstation is fine, and nothing is moving.
+
+    Args:
+        status: What the application reports about itself, or a page with no
+            application behind it, which reports no link and gets no note.
+
+    Returns:
+        The note, or nothing at all while the daemon is answering.
+    """
+    link = status.get("daemon_link")
+    if not isinstance(link, Mapping):
+        return ""
+    if link.get("state") != DaemonLinkState.DOWN.value:
+        return ""
+    return (
+        '<div class="note hazard">The link to the robot daemon is '
+        "<strong>down</strong>: the last command this application sent was "
+        "refused, so nothing it asks for is reaching the motors and the robot "
+        "will not move, however this page is configured. <strong>The "
+        "application is still running</strong> and needs no restart — it "
+        "commands the daemon again on its own and this goes back to "
+        "<code>up</code> as soon as one lands. How soon depends on what the "
+        "robot is doing: with face tracking on it re-checks every tick, and "
+        "with tracking off it finds out at the next thing that moves the robot, "
+        "so this can stay showing an outage that has already ended. If it does "
+        "not come back, restart the daemon's own service on the robot.</div>"
+    )
+
+
 def _resolved_table(report: Sequence[SettingReport]) -> str:
     """Render the resolved configuration, defaults included.
 
@@ -561,6 +605,7 @@ def render_settings_page(
         f'<p class="lede">'
         f"{_lede(settings, resolved_identity=resolved_identity, announced_identity=announced_identity)}"
         f" {state}</p>"
+        f"{_daemon_link_note(status)}"
         f"{_identity_note(resolved_identity=resolved_identity, announcing=announcing, renamed=renamed)}"
         f"{_groundstation_note(settings)}"
         f"{''.join(notes)}{ignored}{unread}"

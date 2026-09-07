@@ -182,6 +182,46 @@ deployment can get irreversibly wrong.
   mode and its bounded reason are `status()["motion_gating"]`, which is on
   `/status` and the settings page for every process, including the stock robot
   that has no `motors` key to put them under.
+- **A lost daemon link is its own condition, and it never ends the process.**
+  The SDK's websocket can stop carrying commands while the daemon itself is
+  running and everything else in this application is healthy; `WSClient` then
+  raises `ConnectionError` from every command it is asked to send. That is
+  `daemon_link.DAEMON_LINK_ERRORS`, one `DaemonLink` per process created in
+  `main.run` before the controlled wake, and `MotionFault.LINK` at the motion
+  boundary. **Do not widen an `except` tuple to swallow `ConnectionError`**: a
+  command the gate refused and a command the daemon never heard are different
+  answers, and the second one means nothing is moving and nothing later will.
+  **Every call that reaches the daemon's websocket reports on the link**, and
+  what it does next is decided by who is waiting for the answer.
+  `attempt_daemon_call` records and steps over, for a caller with no answer of
+  its own to give: `ReachyMotion._command` (the one place a motion command
+  leaves the adapter on either gating mode, and which catches the fault *inside*
+  the coordinator's reservation), `_assert_body_policy`, `release`, and the
+  controlled wake in `main.run`. `report_daemon_call` records and re-raises, for
+  a caller that already has a containing failure path which must still run:
+  every motor-group lifecycle phase, and `MotorGroupCoordinator._set`/`_read`,
+  whose `failed()` keeps a gate shut over torque nobody confirmed. A method that
+  already has its own `except` and its own answer catches `DAEMON_LINK_ERRORS`
+  in place instead — `acquire`, `observe` and `calibrate`, which respectively
+  defer the ownership write, report a `MotionFault.LINK` measurement, and reject
+  a calibration *without* caching it. **Adding a daemon call that does none of
+  the three is the gap this rule exists to close**: the application survives it
+  and `/status` says `up` while the robot stands still.
+  `reachy-mini-ha-app.service` is `Type=oneshot`, so an application that exits
+  stays exited and the robot is silent until a person intervenes — which is why
+  the wake sequence steps over a refusal rather than dying on one, and why
+  acquisition does too. Nothing here reconnects, because the SDK connects once
+  and never again: recovery is the next command the daemon takes. With gaze
+  acquired that is `_assert_body_policy`, the outstanding ownership write
+  doubling as the only liveness probe available, so recovery is noticed within a
+  tick; with gaze off nothing may be sent to ask a question and the state is
+  what the last command observed, returning to `up` at the next voice-pipeline
+  move. **Say that difference wherever the recovery is described** — the module
+  docstring, the settings page and the runbook all do, because "it recovers by
+  itself" without it is advice an operator would act on wrongly. `/status`
+  carries `daemon_link`, whose two counts saturate at
+  `daemon_link.COUNTER_LIMIT` so the payload cannot grow with uptime, and the
+  settings page leads with a hazard note while the link is down.
 - **Controller fault and lifecycle are independent.** Stable fault categories
   derive `safe_hold`; they are never encoded as tracking modes. One validated
   `ControllerConfig` instance is shared by behavior and the production motion

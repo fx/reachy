@@ -614,7 +614,9 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        async def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(
+            resolution: object, handle: object, **_kwargs: object
+        ) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -652,7 +654,9 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        async def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(
+            resolution: object, handle: object, **_kwargs: object
+        ) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -688,7 +692,9 @@ class TestControlledWakeBeforeStartup:
         async def _offload(work: Callable[[], object]) -> object:
             return work()
 
-        async def _build(resolution: object, handle: object) -> SatelliteApplication:
+        async def _build(
+            resolution: object, handle: object, **_kwargs: object
+        ) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
             raise AssertionError("normal services were composed after stop")
@@ -735,7 +741,9 @@ class TestControlledWakeBeforeStartup:
                 del stop
                 events.append("application.run")
 
-        async def _build(resolution: object, handle: object) -> _Application:
+        async def _build(
+            resolution: object, handle: object, **_kwargs: object
+        ) -> _Application:
             """Record composition without constructing any real service."""
             del resolution
             assert handle is robot
@@ -787,6 +795,7 @@ class TestControlledWakeBeforeStartup:
         async def _must_not_build(
             resolution: object,
             handle: object,
+            **_kwargs: object,
         ) -> SatelliteApplication:
             del resolution, handle
             events.append("build_application")
@@ -830,7 +839,9 @@ async def test_a_stop_during_composition_abandons_it_before_anything_starts(
     async def _offload(work: Callable[[], object]) -> object:
         return work()
 
-    async def _build(resolution: object, handle: object) -> SatelliteApplication:
+    async def _build(
+        resolution: object, handle: object, **_kwargs: object
+    ) -> SatelliteApplication:
         """Stand where initial motor confirmation blocks, and never finish."""
         del resolution, handle
         events.append("build_application")
@@ -881,7 +892,9 @@ async def test_a_stop_landing_with_a_finished_assembly_closes_it_unstarted(
             """Record the only correct thing left to do with this application."""
             events.append("application.aclose")
 
-    async def _build(resolution: object, handle: object) -> _Application:
+    async def _build(
+        resolution: object, handle: object, **_kwargs: object
+    ) -> _Application:
         """Finish composing at the same moment the daemon asks for shutdown."""
         del resolution, handle
         events.append("build_application")
@@ -1141,6 +1154,7 @@ class TestTheLoop:
             "remote",
             "controller",
             "motion_gating",
+            "daemon_link",
         }
         assert status["controller"] == {
             "mode": "unknown",
