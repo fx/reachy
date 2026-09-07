@@ -261,7 +261,8 @@ artifacts are only ever deployed as a set, and a shared version makes "which app
 goes with which groundstation" answerable from a tag instead of a compatibility
 matrix.
 
-Distribution is entirely through GitHub:
+Every built artifact is published through GitHub, and GitHub Releases is the
+artifact of record for both wheels:
 
 | Artifact | Destination |
 |---|---|
@@ -269,11 +270,23 @@ Distribution is entirely through GitHub:
 | Robot app wheel | GitHub Releases |
 | `reachyctl` wheel | GitHub Releases |
 
-There is deliberately no Hugging Face Space. The Reachy Mini daemon can install
-apps from a Space, but it discovers them through a standard Python entry point,
-so a wheel installed into the robot's application environment is sufficient.
-Publishing to a Space is a possible later addition and nothing in this layout
-forecloses it.
+One further artifact is published elsewhere, and it carries no code. The
+satellite's application source is a Hugging Face Space consisting of a manifest
+naming the released robot app wheel above, the Space's card, and a static page.
+The Reachy Mini daemon downloads that directory and installs it into the robot's
+shared application environment, which installs the wheel the manifest names, and
+then discovers the application through the same standard Python entry point a
+hand-installed wheel declares. One artifact, reached two ways; nothing is
+published to a Python package index.
+
+The earlier position recorded here was that no Space was needed, on the grounds
+that a wheel installed into the robot's application environment is sufficient.
+That reasoning held only for somebody who already had a shell on the robot: on a
+stock one, getting the wheel there is a file copy and a package install typed at
+a prompt, which is exactly what a stock installation excludes. The daemon's own
+installation path removes the copying, and
+[stock-robot-installation REQ-104](../stock-robot-installation/index.md#req-104-the-application-installs-through-the-daemons-own-path)
+is what now owns the published source that feeds it.
 
 ### Testing conventions
 
@@ -425,3 +438,4 @@ those boundaries are for.
 | Date | Change | Document |
 |------|--------|----------|
 | 2026-08-20 | Initial spec created | — |
+| 2026-09-07 | Corrected the distribution note: a published application source exists and reaches the same wheel through the daemon's own install path | — |
