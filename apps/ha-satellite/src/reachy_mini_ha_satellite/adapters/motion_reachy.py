@@ -6,17 +6,23 @@ observation without moving, removes query-time ego rotation at capture time, and
 returns an absolute world-gaze anchor to the pure behavior layer.
 
 **Every call in this file that reaches the daemon reports on the shared
-`DaemonLink`, and which of the two helpers it uses is decided by who is waiting
+`DaemonLink`, and what it then does with the fault is decided by who is waiting
 for the answer.** A lost SDK websocket is a condition of its own —
 `MotionFault.LINK`, never folded into `COMMAND` — because the two say different
 things about the robot; `daemon_link` records why, and why an application that
 exits over one is the failure that matters.
 
-The **behaviour loop's** calls take `attempt_daemon_call` and never raise out of
-this adapter: `_command`, which every motion command goes through on both gating
-modes, plus `observe`, `calibrate`, `acquire` and `release`. Nothing there
-retries on its own — the loop above commands again on the next tick and the
-first command the daemon takes marks the link up.
+**Nothing the behaviour loop calls raises a link fault out of this adapter**, and
+that is the whole of the guarantee it gets. Three of those methods —
+`acquire`, `observe`, `calibrate` — catch `DAEMON_LINK_ERRORS` where they stand,
+because each has its own `except` already and each answers with something of its
+own: a deferred ownership write, a `MotionFault.LINK` measurement, an uncached
+rejection. `_command`, `_assert_body_policy` and `release` have no such answer to
+give and take `attempt_daemon_call`, which records and steps over. Every one of
+them still propagates what is *not* a link fault — `acquire` rolls its
+acquisition back and re-raises, and a bad pose is still a bad pose. Nothing
+retries on its own: the loop above commands again on the next tick, and the first
+command the daemon takes marks the link up.
 
 A **motor-group lifecycle phase** takes `report_daemon_call` instead, which
 records and re-raises: `_ReachyMotionLifecycle.prepare_worker`, `_sample_reseed`
