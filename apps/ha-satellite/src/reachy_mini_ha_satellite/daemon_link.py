@@ -32,14 +32,16 @@ returns. What it does have is a one-second liveness poll — a background thread
 sets `_is_alive` from whether any message arrived in the last second, and
 `send_command` raises `ConnectionError` while that is false. So a daemon that
 stops publishing for longer than a second and then resumes takes the link down
-and brings it back up **by itself**, with no reconnect and nothing for this
-application to do but keep trying. A socket that is actually closed never
-recovers, and the robot needs its daemon restarted.
+and brings it back up **by itself**, with nothing for this application to
+reconnect. A socket that is actually closed never recovers, and the robot needs
+its daemon restarted.
 
 Those two look identical from here, which is why nothing in this module tries to
-tell them apart. The first command the daemon carries marks the link up again,
-and the surface says which of the two states is in force so that an operator can
-decide whether to restart the daemon.
+tell them apart. The first command the daemon carries marks the link up again —
+which is what makes recovery free of anybody's intervention, and also what makes
+it depend on there being a next command. The surface says which of the two
+states is in force so that an operator can decide whether to restart the daemon,
+and the paragraph below says how quickly it will notice it need not.
 
 **How soon that happens depends on what the robot is doing, and the surfaces say
 so rather than promising otherwise.** With gaze acquired — face tracking on —
