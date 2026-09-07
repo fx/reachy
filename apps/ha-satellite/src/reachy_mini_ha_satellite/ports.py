@@ -417,8 +417,11 @@ class MotionFault(StrEnum):
     says the application asked for something the gate or the sample refused —
     a statement about what was asked. `LINK` says the daemon did not take the
     command at all, which says nothing about what was asked and everything
-    about the robot: nothing is moving, no later command will move it, and the
-    fix is at the daemon rather than in the sample. See `daemon_link`.
+    about the robot: nothing is moving, nothing else this application sends
+    will move it for as long as that holds, and the fix is at the daemon rather
+    than in the sample. It is not a terminal state — the outage may be seconds
+    long, and `daemon_link` has both how the application comes out of one and
+    how soon it notices.
     """
 
     NONE = "none"

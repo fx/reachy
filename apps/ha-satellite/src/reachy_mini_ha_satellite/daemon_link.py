@@ -187,8 +187,9 @@ class DaemonLink:
                 self._outages = min(self._outages + 1, COUNTER_LIMIT)
         if lost:
             _LOGGER.error(
-                "satellite.daemon_link lost; the application stays up and keeps "
-                "trying. Restart the robot's daemon service if it does not return",
+                "satellite.daemon_link lost; the application stays up and "
+                "commands the daemon again on its own. Restart the robot's "
+                "daemon service if it does not return",
             )
         return lost
 
