@@ -267,8 +267,19 @@ what it announces is not.
 
 The wheel is published on GitHub Releases and installed into the robot's shared
 application environment, where the daemon discovers it through its entry point
-mechanism. There is no Hugging Face Space involved; the daemon's Space-based
-installation path is one way to deliver a wheel, not the only one.
+mechanism. Two routes reach that installation and they end at the same wheel.
+One installs it directly, which needs a shell on the robot. The other is the
+daemon's own Space-based application-install path, fed by a published
+application source that carries no code and whose manifest names that same
+wheel: installing the source installs the wheel, and REQ-041's entry point is
+what the daemon discovers either way.
+
+The earlier position recorded here was that the daemon's Space-based path was
+one way to deliver a wheel rather than one worth publishing a source for,
+because a direct install is sufficient. It is sufficient for somebody with a
+shell, and a stock robot is defined by nobody having opened one — which is why
+[stock-robot-installation REQ-104](../stock-robot-installation/index.md#req-104-the-application-installs-through-the-daemons-own-path)
+now requires the published source and owns what it has to contain.
 
 The daemon runs one application at a time and supplies it with a connected robot
 handle and a stop signal. The application inherits the daemon's environment,
@@ -341,3 +352,4 @@ workflow.
 |------|--------|----------|
 | 2026-08-20 | Initial spec created | — |
 | 2026-08-24 | Delegated predictive gaze and coordinated motion details | [0019-predictive-gaze-and-coordinated-motion](../../changes/0019-predictive-gaze-and-coordinated-motion.md) |
+| 2026-09-07 | Corrected the packaging note: the daemon's own install path is a published route to the same wheel | — |
