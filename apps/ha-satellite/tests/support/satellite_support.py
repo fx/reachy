@@ -1327,11 +1327,15 @@ class FakeRobot:
     `link_down` models the one failure mode this fake could not express before:
     `reachy_mini.io.ws_client.WSClient` raises `ConnectionError` from every
     *command* it is asked to send while its liveness poll is false, and answers
-    every *read* out of the cache its receive loop already filled. So the four
-    methods below that send raise while it is set, and the three that read go
-    on returning their scripted values — which is what makes a robot with a dead
-    link look, from inside the application, like one that is perfectly well and
-    simply never moves.
+    every *read* out of the cache its receive loop already filled. So every
+    method below that sends — motor enable, the two confirmed torque writes and
+    the torque read, the controlled wake, `set_target` and the body-yaw policy —
+    calls `_refuse_while_down` first, and the pose, joint and image-query reads
+    go on returning their scripted values. That split is what makes a robot with
+    a dead link look, from inside the application, like one that is perfectly
+    well and simply never moves. Adding a sending method here means adding that
+    call to it; a new one without it is a fake that answers when the real SDK
+    would not.
 
     It is a plain attribute rather than a script so that a test can put the link
     back: setting it to `False` mid-run is exactly what a daemon resuming its
