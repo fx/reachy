@@ -533,9 +533,13 @@ waiting on work that does not exist.
   committed source and a robot installing it, and `just publish-app-source`
   refuses on both rather than letting either be discovered on the robot: a token,
   and a **release carrying the wheel the source names** — this repository has
-  published no release yet, so the second refusal is the current state and is
-  transcribed in
+  never cut one, so the second refusal is the current state and is transcribed in
   [the deployment reference](../ops/satellite-deployment.md#publishing-the-application-source).
+  That second one is not this change's to clear: there are no tags at all, and
+  release-please has been aborting before it opens a release pull request ever
+  since a merged one went untagged. [`docs/tasks.md`](../tasks.md) carries the
+  evidence and owns the fix, which blocks every wheel and image this repository
+  is supposed to publish rather than only the Space.
 
 - **Every step of the stock-robot route is therefore marked pending.** What the
   daemon does with a published source is read out of the released daemon's own

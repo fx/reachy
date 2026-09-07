@@ -44,8 +44,9 @@ Catch-all task list for work not tracked in a specific [change document](changes
         yet, because publishing it needs a Hugging Face account this repository
         deliberately holds no token for, and no release carries the wheel the
         source names yet — `just publish-app-source --dry-run` refuses on exactly
-        that today. Then the install, the upgrade, and what the daemon's
-        Uninstall leaves behind
+        that today. **The second of those is blocked by the release-please item
+        below and cannot be done first.** Then the install, the upgrade, and what
+        the daemon's Uninstall leaves behind
       - It starts, appears in the daemon's application list, and the dashboard
         links to its settings page (ha-satellite REQ-049)
       - `/config`, `/status` and the settings page answer
@@ -210,6 +211,47 @@ Catch-all task list for work not tracked in a specific [change document](changes
       document explicitly authorised the sentence and a changelog row, and
       nothing else under that directory. That is the narrow exception rather than
       a precedent: the eight above are still their own `/spec-writer` proposal.
+
+- [ ] **No release has ever been cut, and release-please is stuck on an
+      untagged one.** Nothing this repository builds has ever been published:
+      there are no tags, there are no releases, and `release.yml`'s
+      `Publish the wheels` job has reported `skipped` on every run it has ever
+      made, because it is gated on a version tag that has never existed.
+
+      The evidence, gathered on 2026-09-07:
+
+      - `git ls-remote --tags origin` returns nothing at all.
+      - `gh release list` is empty.
+      - `chore: release main` (#29) merged on 2026-08-25 and still carries the
+        label `autorelease: pending`. It was never advanced to
+        `autorelease: tagged`.
+      - Every `Release please` run since then ends the same way. The most recent
+        logs `looking for tagName: v0.2.0`, then `No latest release found for
+        path: .`, then `Found pull request #29: 'chore: release main'`, and then
+        **`There are untagged, merged release PRs outstanding - aborting`**. So
+        it opens no new release pull request, and every conventional commit
+        merged since — all of change 0021 included — accumulates without one.
+
+      **Start with that label.** The abort is release-please refusing to open a
+      second release pull request while a merged one it believes it has not
+      tagged is outstanding, so the question is why #29's tag was never created:
+      whether the tagging step failed at the time, whether it lacked the
+      permission or the token to create a tag or a release, or whether the label
+      was changed by hand. Until that is answered, nothing else about the release
+      pipeline can be observed, because the pipeline never reaches its second
+      job.
+
+      **What it blocks here.** The published application source pins a **GitHub
+      release asset** by version, so the Hugging Face Space cannot be published
+      until a release exists and carries the wheel —
+      [`just publish-app-source`](ops/satellite-deployment.md#publishing-the-application-source)
+      refuses on exactly that today, correctly, and the stock-robot installation
+      route above cannot be executed end to end until it stops. It equally blocks
+      every wheel and every image the release workflow is supposed to publish; the
+      Space is only the newest consumer.
+
+      Its own change: fixing release automation is not something an unrelated
+      pull request should reach into.
 
 - [ ] **`provisioning/ansible` has the `ExecStart` defect
       [#36](https://github.com/fx/reachy/pull/36) fixed in `reachyctl`, and its

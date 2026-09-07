@@ -389,6 +389,17 @@ there, and the robot finds out several minutes into an install. `just wheels`
 and the release workflow produce the wheel; publish after the release carrying
 it exists.
 
+> ⛔ **This repository has no releases at all today, so the Space cannot be
+> published yet.** There are no tags, `gh release list` is empty, and the
+> release workflow's publishing job has been skipped on every run it has ever
+> made, because it is gated on a tag that has never existed. The cause is
+> release automation rather than anything on this page — a merged release pull
+> request that was never tagged, which makes release-please abort before
+> opening another — and it is recorded with its evidence in
+> [`docs/tasks.md`](../tasks.md). **Nothing below is wrong; it simply cannot
+> complete until that is fixed**, and the third refusal in the next section is
+> exactly what trying produces.
+
 ```
 export HF_TOKEN=<a Hugging Face token with write access>
 export REACHY_APP_SPACE_ID=<owner>/reachy-mini-ha-satellite
@@ -439,9 +450,10 @@ Those are transcripts, with the owner, the repository and the version replaced
 by their placeholders, the token that was passed replaced by the word
 `<placeholder>` — it never was one, and no request carrying it was made — and
 `just`'s own echo of the command it runs cut. **The third one is the current
-state of this repository**: no release has been published yet, so the wheel the
+state of this repository**: no release has ever been cut, so the wheel the
 committed source names does not exist and publishing is correctly refused until
-one does.
+one does. Why there is no release is a fault in release automation rather than
+in anything here, and it is [`docs/tasks.md`](../tasks.md)'s to fix.
 
 > **⏳ PENDING HARDWARE VERIFICATION.** A successful publish has never been run,
 > and strictly what is missing is an account rather than hardware: no output for
