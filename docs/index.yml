@@ -193,5 +193,5 @@ changes:
     path: changes/0021-stock-robot-installation.md
     description: Ungated motion on a released daemon, browser-reachable bootstrap configuration, a daemon interpreter that is asked rather than assumed, and an installable application source
     spec: stock-robot-installation
-    status: draft
+    status: complete
     depends_on: ["0020"]

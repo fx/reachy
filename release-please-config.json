@@ -15,6 +15,14 @@
           "jsonpath": "$.project.version"
         },
         {
+          "type": "generic",
+          "path": "apps/ha-satellite/app-source/pyproject.toml"
+        },
+        {
+          "type": "generic",
+          "path": "apps/ha-satellite/app-source/README.md"
+        },
+        {
           "type": "toml",
           "path": "packages/reachy-checks/pyproject.toml",
           "jsonpath": "$.project.version"

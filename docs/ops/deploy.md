@@ -192,6 +192,14 @@ in memory and the model files are in the image.
 
 ## Updating the robot
 
+**This section upgrades a robot you have a shell on**, with `reachyctl deploy`
+and a wheel. A robot the satellite was installed on **from its own dashboard** is
+upgraded a different way and never appears here: publish the newer application
+source and install it again through the daemon, which is
+[Upgrading an installation made this way](satellite-deployment.md#upgrading-an-installation-made-this-way).
+Everything below about the announced identity, the motor switches and proving
+the chain afterwards applies to both.
+
 ### ⚠️ Upgrading the satellite does not bring the motor switches with it
 
 The three Home Assistant motor switches — head, body and antennas — need a

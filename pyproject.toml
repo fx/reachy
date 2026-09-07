@@ -71,6 +71,23 @@ provisioning = [
     "ansible-lint>=25.0,<27",
 ]
 
+# The Hugging Face client the one publish command needs, and nothing else.
+# `just publish-app-source` uploads `apps/ha-satellite/app-source/` to the Space
+# the robot's daemon installs the application from — stock-robot-installation
+# REQ-104.
+#
+# A group of its own, and deliberately outside `default-groups` below, for the
+# reason Ansible is: a lint, a type check and a test run have no use for a
+# Hugging Face client. Every refusal the publish helper makes happens before the
+# client is imported at all, which is what lets its tests cover them in an
+# environment that has never asked for this group.
+publish = [
+    # Bounded above at the major, which is where a client library moves its
+    # repository API. `create_repo` and `upload_folder` are the whole of what is
+    # called.
+    "huggingface-hub>=1.17,<2",
+]
+
 # The reference implementation the YuNet parity test measures against, and
 # nothing else. Perception REQ-036 requires the hand-written decoding be checked
 # against an independent reference, and the Reachy Mini SDK's own detector is
@@ -139,6 +156,11 @@ members = [
     "bench",
     "tools/repo-hygiene",
 ]
+# The published application source is a project and is not a member of this
+# workspace: it is metadata naming one released wheel, built by the robot's
+# daemon out of a Hugging Face Space rather than by anything here. Excluding it
+# says so, rather than leaving a reader — or a later glob — to infer it.
+exclude = ["apps/ha-satellite/app-source"]
 
 # Members resolve to each other by path, never by version range, so there is no
 # published version of one member that a sibling could be resolved against.

@@ -29,14 +29,14 @@
 # EVERY IMPLEMENTED SPEC IS REGISTERED. THIS IS THE STATE THIS COMMENT HAS BEEN
 # DESCRIBING AS THE GOAL SINCE BEFORE ANY CODE EXISTED.
 #
-# `docs/specs/` holds 10 specs. All ten are implemented, carry 98 requirements
-# between them and are registered below, so `duvet query -c implementation` and
-# `duvet report --ci` cover every implemented requirement. There is no
-# unregistered proposal left: change 0020 implemented REQ-093–098 and registered
-# the spec that owns them in the same pull request, which is the rule the rest of
-# this comment states.
+# `docs/specs/` holds 11 specs. All eleven are implemented, carry 106
+# requirements between them and are registered below, so
+# `duvet query -c implementation` and `duvet report --ci` cover every implemented
+# requirement. There is no unregistered proposal left: change 0021 implemented
+# REQ-099–106 and registered the spec that owns them with its final pull request,
+# which is the rule the rest of this comment states.
 #
-# The ten implemented and registered specs are:
+# The eleven implemented and registered specs are:
 #
 #   - perception, whose 8 requirements are implemented and annotated by
 #     docs/changes/0005-perception-capability.md;
@@ -91,7 +91,19 @@
 #     depends on a `reachy-mini` torque-confirmation API no released version
 #     carries — `README.md` records which build the robot runs and why — and the
 #     annotations describe what the application does when it is absent, which is
-#     announce no switch at all rather than invent one.
+#     announce no switch at all rather than invent one;
+#   - stock-robot-installation, whose 8 — REQ-099 to REQ-106 — are implemented
+#     across change 0021's four reviewed tasks and registered by the last of
+#     them. Registering earlier would have been a red job: the first task's
+#     composition-time probe makes REQ-099 and REQ-100 true, the second's
+#     unresolved identity REQ-101 to REQ-103, the third's interpreter resolution
+#     REQ-105 and REQ-106, and only the fourth publishes the application source
+#     REQ-104 is about. REQ-104 is additionally the third requirement in this
+#     repository cited from a file that is neither Python nor a workflow — the
+#     `Justfile` recipe that publishes the source — because the source directory
+#     itself is a manifest, a Space card and a static page, in none of the
+#     comment syntaxes duvet is pointed at, and the recipe plus the
+#     contract test over the committed bytes are the mechanism.
 #
 # The rule that governed the order also governs anything added later: a new spec
 # is registered by the change that completes it, not by the change that writes
@@ -218,6 +230,25 @@ format = "markdown"
 # which is exactly what REQ-093 requires of an unconfirmed group.
 [[specification]]
 source = "docs/specs/home-assistant-configuration-and-camera-feed/index.md"
+format = "markdown"
+
+# --- Stock robot installation: implemented across change 0021 ----------------
+# Registered by 0021's fourth and final task, which is the one that completes
+# the spec. REQ-099 and REQ-100 were annotated when the motor degradation landed,
+# REQ-101 to REQ-103 when the application learned to start unconfigured, and
+# REQ-105 and REQ-106 when the interpreter stopped being assumed; the final task
+# publishes the application source REQ-104 is about, so there was no earlier
+# point at which every requirement had an implementation to annotate.
+#
+# REQ-104 is cited from the `Justfile` and from the contract test over the
+# committed source. The published source is a project manifest, a Space card and
+# a static page, in none of the comment syntaxes duvet is pointed at here, and
+# adding a `[[source]]` block for a directory whose files carry no annotations
+# would register a pattern that can never match. The recipe that publishes it and
+# the test that holds its bytes to the wheel it names are the mechanism, and they
+# are where it is cited.
+[[specification]]
+source = "docs/specs/stock-robot-installation/index.md"
 format = "markdown"
 
 # Files that may carry annotations. At least one block is MANDATORY: duvet parses

@@ -810,6 +810,54 @@ wheel-verify out_dir="dist":
     fi
     {{ uv }} python scripts/verify_satellite_wheel.py "${satellite[0]}"
 
+# The publish path's own environment. `huggingface-hub` is a dependency group of
+# its own and deliberately outside `default-groups`, for the reason Ansible is:
+# a lint, a type check and a test run have no use for a Hugging Face client, and
+# the one command that does asks for it by name. The same `uv.lock` resolves it.
+publish := "uv run --locked --all-packages --group publish"
+
+# Publish the committed application source as a Hugging Face Space.
+#
+#     REACHY_APP_SPACE_ID=<owner>/reachy-mini-ha-satellite HF_TOKEN=… \
+#         just publish-app-source --dry-run
+#
+# `apps/ha-satellite/app-source/` is what the robot's daemon downloads and
+# installs when an operator installs this satellite from the robot's own
+# surfaces — no shell on the robot, no file copied onto it, no shipped file
+# edited. It names one released wheel; this makes it fetchable.
+#
+# The target Space and the token are environment variables rather than committed
+# defaults because they name somebody's account and this repository is public.
+# Every refusal — no token; a Space whose name the daemon will not find its own
+# metadata under; a source that has drifted from this checkout; a modified,
+# deleted or untracked file under it; a wheel from a repository other than the
+# one this checkout releases from; a release that does not carry the wheel yet —
+# happens before the Space is created or written to, and all but one of them
+# before anything at all is contacted. That one asks the release asset with
+# `HEAD` — following GitHub's redirect as a `HEAD` too, so a dry run can never
+# download the wheel it is asking about — and it is the only network any refusal
+# touches. `--dry-run` runs all of it and stops before creating or writing to
+# the Space.
+#
+# What is uploaded is what git tracks, and nothing else: `upload_folder` reads no
+# `.gitignore`, so a build tree left by installing the source locally would
+# otherwise be published to a public Space along with it. That is also why an
+# ignored file is not one of the refusals above — it cannot reach the Space, and
+# a refusal about something harmless is noise. The one remote file the upload
+# cannot remove is the `.gitattributes` the Hub writes into every repository it
+# creates, which the robot's downloader ignores explicitly.
+#
+# Publishing follows a release rather than preceding it: the source names a
+# release asset, and a Space published first points at a wheel that is not
+# there. The runbook is `docs/ops/satellite-deployment.md`.
+#
+#:= docs/specs/stock-robot-installation/index.md#req-104-the-application-installs-through-the-daemon-s-own-path
+#:% The satellite MUST be installable onto an unmodified robot through the daemon's
+#:% own application-installation path, without copying files onto the robot, opening
+#:% a shell on it, or editing any file its image ships.
+publish-app-source *args:
+    {{ publish }} python scripts/publish_app_source.py {{ args }}
+
 # Redraw the committed perception fixture images.
 #
 # They are drawn rather than photographed, so their provenance is the script and

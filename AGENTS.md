@@ -20,7 +20,7 @@ one-line import of this file and holds no content of its own.
 | `packages/reachy-contracts/` | Shared wire types and golden fixtures (`reachy_contracts`) |
 | `packages/reachy-checks/` | The one definition of what a healthy installation is (`reachy_checks`) |
 | `packages/reachy-session-client/` | The one client half of the robot link (`reachy_session_client`) |
-| `apps/ha-satellite/` | Robot-side ESPHome voice satellite (`reachy_mini_ha_satellite`) |
+| `apps/ha-satellite/` | Robot-side ESPHome voice satellite (`reachy_mini_ha_satellite`). Its `app-source/` is the published application source the robot's own daemon installs — a manifest naming the released wheel, the Space's card and a static page, and no second copy of the code |
 | `services/groundstation/` | Off-robot capability host (`reachy_groundstation`) |
 | `cli/reachyctl/` | Command-line tool (`reachyctl`) |
 | `bench/` | Performance suite, the committed baseline and the regression gate (`reachy_bench`); a member, never published |
@@ -132,7 +132,10 @@ and so needs nothing here.
 `just sync`, `just coverage-diff`, `just duvet`, `just leak-scan`,
 `just secret-scan`, `just contracts`, `just contracts-check`,
 `just lint-boundary`, `just lint-behaviour-boundary`,
-`just lint-capability-boundary`, `just check-assets`, `just vendored-drift`, the
+`just lint-capability-boundary`, `just check-assets`, `just vendored-drift`,
+`just publish-app-source` — the one command that reaches an account rather than
+a robot, and the one whose refusals are all decided before the Space is written
+to — the
 wheel trio `just wheels`, `just wheel-size` and `just wheel-verify`, the
 benchmark set `just bench`, `just bench-compare`, `just bench-sizes` and
 `just bench-record`, and the provisioning set `just provision-lint`,
@@ -355,7 +358,7 @@ its step.
 | `hygiene.yml` | pull requests, pushes to `main` | `Leak scan` (diff, paths and commit messages), `Secret scan` | `just leak-scan`, `just secret-scan` |
 | `images.yml` | pull requests, pushes to `main`, version tags | `Verify <variant> on <architecture>`, one per published combination; `Publish` on a version tag only | `just image`, `just image-verify`, `just image-size` |
 | `release.yml` | pushes to `main`, version tags | Version derivation and tag creation on `main`; on a tag, every released wheel — the `reachyctl` set and the robot application — built, installed into an empty environment, verified, measured, and attached to the release | `just wheels`, `just wheel-verify`, `just wheel-size` |
-| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — all ten implemented specs and all 98 implemented requirements; proposed specs register on completion | `just duvet` |
+| `duvet.yml` | pull requests, pushes to `main` | Requirements traceability — all eleven implemented specs and all 106 implemented requirements; proposed specs register on completion | `just duvet` |
 | `provisioning.yml` | pull requests, pushes to `main` | `Provisioning lint`; `Idempotency`, which applies the playbook twice against a container target and fails on any changed step in the second application | `just provision-lint`, `just provision-idempotency` |
 | `bench.yml` | pull requests, pushes to `main` | `Benchmark` — the hardware-free suite, judged against the committed baseline | `just bench`, `just bench-compare` |
 
@@ -374,13 +377,17 @@ time. It no longer does — see below — so it belongs in the required set now.
 
 ## Requirements traceability
 
-**All ten specs are implemented, registered and traced: 98 requirements, none
-outstanding.** There is no unregistered proposal left —
+**All eleven specs are implemented, registered and traced: 106 requirements,
+none outstanding.** There is no unregistered proposal left —
+[change 0021](docs/changes/0021-stock-robot-installation.md) implemented
+REQ-099–106 across four pull requests and registered
+[Stock Robot Installation](docs/specs/stock-robot-installation/) with the last
+of them, exactly as
 [change 0020](docs/changes/0020-home-assistant-configuration-and-camera-feed.md)
-implemented REQ-093–098 and registered
+did for
 [Home Assistant Configuration and Camera Feed](docs/specs/home-assistant-configuration-and-camera-feed/)
-in the same pull request. A green "Requirements traceability" run is therefore
-evidence about the whole requirement set.
+before it. A green "Requirements traceability" run is therefore evidence about
+the whole requirement set.
 
 A spec is registered by the change that **completes** it, in that change's pull
 request, alongside the annotations that make it pass — never by the change that
@@ -401,11 +408,15 @@ operational fact about the robot rather than a gap in the implementation. The
 header comment in `.duvet/config.toml` records which change registered which spec
 and why.
 
-Two requirements are cited from files that are neither Python nor a workflow, and
-both have a `[[source]]` block of their own: REQ-001 from the `Justfile`, whose
-`--locked` installs are what continuous integration actually runs, and REQ-003
-from `.gitignore`, whose ignore rules and their tracked `.example` siblings are
-the mechanism the requirement describes.
+Three requirements are cited from files that are neither Python nor a workflow,
+and the two files involved have a `[[source]]` block of their own: REQ-001 from
+the `Justfile`, whose `--locked` installs are what continuous integration
+actually runs; REQ-003 from `.gitignore`, whose ignore rules and their tracked
+`.example` siblings are the mechanism the requirement describes; and REQ-104 from
+the `Justfile` again, because the mechanism it describes is a published
+application source and a recipe that publishes it — the source directory itself
+carries no annotatable comment syntax duvet is pointed at, so the recipe and the
+contract test over the committed bytes are what cite it.
 
 Annotations already in the tree still resolve, and they are written `#:=` for the
 meta line and `#:%` for the quoted requirement — not duvet's documented `#=` and

@@ -10,7 +10,7 @@ not start a second daemon, and then the installable application source, its
 release wiring, the runbooks and final traceability.
 
 **Spec:** [Stock Robot Installation](../specs/stock-robot-installation/)
-**Status:** draft
+**Status:** complete
 **Depends On:** 0020
 
 ## Approval
@@ -412,40 +412,40 @@ waiting on work that does not exist.
   - [x] Update the troubleshooting entries for the affected checks
   - [x] Run the focused CLI suites and the repository checks required above
 
-- [ ] Task 4 — Publish the installable application source and complete the
+- [x] Task 4 — Publish the installable application source and complete the
       change (**FINAL**, depends on tasks 1, 2 and 3)
-  - [ ] Add the application-source directory to `apps/ha-satellite/`, naming the
+  - [x] Add the application-source directory to `apps/ha-satellite/`, naming the
         released wheel by version and carrying no credential, address or
         identity
-  - [ ] Add the `Justfile` recipe that publishes it and the release wiring that
+  - [x] Add the `Justfile` recipe that publishes it and the release wiring that
         moves its version with everything else, adding it to
         `release-please-config.json` if it declares one
-  - [ ] Cover the source's contents and the recipe's refusals without a network,
+  - [x] Cover the source's contents and the recipe's refusals without a network,
         an account or a token
-  - [ ] Add the stock-robot route to the setup and operations runbooks — install
+  - [x] Add the stock-robot route to the setup and operations runbooks — install
         through the daemon, resolve the identity in a browser, then the
         groundstation — marking every step that needs a real robot pending
         hardware verification rather than inventing output
-  - [ ] Correct the "no application source is published" claim in
+  - [x] Correct the "no application source is published" claim in
         `docs/ops/satellite-deployment.md` and `README.md`, and record that the
         two design notes under `docs/specs/` say otherwise and need their own
         proposal
-  - [ ] Record how to detect and recover from a second daemon started by an
+  - [x] Record how to detect and recover from a second daemon started by an
         earlier diagnosis
-  - [ ] Add exact annotations for REQ-099 through REQ-106, register
+  - [x] Add exact annotations for REQ-099 through REQ-106, register
         `docs/specs/stock-robot-installation/index.md` in `.duvet/config.toml`
         with `format = "markdown"`, regenerate the snapshot from the repository
         root and run `just duvet`
-  - [ ] Correct the spec Overview's "proposed and not yet implemented" sentence
+  - [x] Correct the spec Overview's "proposed and not yet implemented" sentence
         and add its `## Changelog` row. **This document authorises exactly those
         two edits under `docs/specs/stock-robot-installation/` and nothing
         else** — leaving the sentence stale is the defect
         [`docs/tasks.md`](../tasks.md) already tracks across eight specs, and
         repeating it here deliberately would be worse than the narrow exception
-  - [ ] Update the spec and requirement counts in `AGENTS.md`, `REVIEW.md`, the
+  - [x] Update the spec and requirement counts in `AGENTS.md`, `REVIEW.md`, the
         member `AGENTS.md` files and `.duvet/config.toml`'s header, mark 0021
         complete and synchronise `docs/index.yml` and `docs/index.md`
-  - [ ] Run the repository checks required above
+  - [x] Run the repository checks required above
 
 ## Verification Stages
 
@@ -470,6 +470,113 @@ waiting on work that does not exist.
 6. **Evidence:** scrub every recorded outcome per the repository's runbook
    convention, and leave unrun hardware steps marked pending rather than giving
    them invented output.
+
+## Completion notes
+
+- **`complete` here means implemented, reviewed, traced and gated — and, for
+  once, partly measured on real hardware.** Verification stages 1 to 4 are
+  complete and deterministic: the motor acceptance across an absent, a present
+  and a present-but-failing capability; the configuration acceptance across
+  unresolved, invalid and resolved identities with the announcement embargo; the
+  CLI acceptance over a wrapper-started unit, an interpreter-started one and an
+  unresolvable environment; and the packaging acceptance over the committed
+  application source and the publish recipe's refusals. Stage 5, the staged live
+  verification of the whole route, was **not** run — see the next two notes for
+  what was and what was not.
+
+- **What a real Reachy Mini did answer.** Against ReachyMiniOS v0.2.3 running
+  `reachy-mini` 1.9.0, with a hand-installed satellite:
+
+  - `reachyctl doctor --robot` reported nine checks, **7 passed, 0 failed, 2
+    skipped**, the two skips being `configuration.effective` and
+    `home-assistant.identity`, which need an `--intent` declaration. Before the
+    third task those same checks reported a robot that was working as broken.
+  - **Exactly one daemon process** across three separate `doctor` runs, which is
+    [REQ-106](../specs/stock-robot-installation/index.md#req-106-diagnosis-and-deployment-start-no-second-daemon)
+    holding rather than being argued.
+  - **The robot moved.** `/status` reported `motion_gating` as
+    `{"mode": "ungated", "reason": "daemon_confirmation_absent"}`, controller
+    fault `none` and safe hold `false`, every one of 128 diagnostic events
+    recorded the command as accepted, and head yaw and its velocity changed
+    continuously under tracking. Before the first task the same robot tracked a
+    face for 780 frames and never moved at all.
+  - **The announcement embargo held both ways.** With the identity cleared from
+    the settings page the application reported `identity: unresolved`,
+    `announcing: false`, `announced_as: null`, and **nothing was listening on TCP
+    6053 at all** while its settings page went on answering 200 and saying the
+    robot was not configured yet. Restored from the browser, it announced under
+    the same name and 6053 was listening again — no shell, no reinstall.
+  - **The groundstation feed's three refusals** were observed against a live
+    deployment: 503 with no robot, 409 with two, and 429 for a fifth viewer with
+    the first four at 200. That belongs to
+    [0020](./0020-home-assistant-configuration-and-camera-feed.md) and is
+    recorded here because this is the session that ran it.
+
+  No transcript of any of that is reproduced anywhere in this repository. Every
+  line of them carries the robot's account name, its address, its hardware
+  address or a path with an account in it, and the readings above are the whole
+  of what they say that is not specific to one installation.
+
+- **What was executed off the robot.** The committed source was installed into an
+  empty virtual environment the way the daemon installs it — `uv pip install`
+  over the directory — and it built, installed, and reported
+  `Requires: reachy-mini-ha-satellite`. Only the requirement's resolution needs
+  the release that does not exist yet; the packaging half of REQ-104 is
+  therefore evidence rather than expectation, and what remains untested is the
+  download and the robot.
+
+- **The application source is published from here and has not been published.**
+  That is the recorded prerequisite rather than a gap discovered late: there is
+  no Hugging Face account or token in this development environment, so the
+  deliverable is the source in-repo, a one-command publish path and a runbook,
+  and the one-time authentication is the operator's. Two things stand between the
+  committed source and a robot installing it, and `just publish-app-source`
+  refuses on both rather than letting either be discovered on the robot: a token,
+  and a **release carrying the wheel the source names** — this repository has
+  never cut one, so the second refusal is the current state and is transcribed in
+  [the deployment reference](../ops/satellite-deployment.md#publishing-the-application-source).
+  That second one is not this change's to clear: there are no tags at all, and
+  release-please has been aborting before it opens a release pull request ever
+  since a merged one went untagged. [`docs/tasks.md`](../tasks.md) carries the
+  evidence and owns the fix, which blocks every wheel and image this repository
+  is supposed to publish rather than only the Space.
+
+- **Every step of the stock-robot route is therefore marked pending.** What the
+  daemon does with a published source is read out of the released daemon's own
+  code — `reachy_mini/apps/sources/local_common_venv.py` and its application
+  router, at 1.9.0 — rather than observed:
+  [Route A](../ops/satellite-deployment.md#route-a-install-from-the-robots-own-surfaces)
+  and [Path C](../setup/robot.md#path-c-install-from-the-robots-own-dashboard)
+  say so at the top. [`docs/tasks.md`](../tasks.md) carries the outstanding run.
+
+- **Two design notes still contradict this contract and were not edited.** The
+  [architecture](../specs/architecture/index.md#versioning-and-distribution) and
+  [HA Satellite](../specs/ha-satellite/index.md#packaging-and-deployment) specs
+  both still say no application source is published. An implementing change may
+  not edit a spec, so reconciling them is a separate `/spec-writer` proposal; the
+  conflict is recorded in the stock-robot-installation spec's Background and,
+  where an operator would otherwise believe the old sentence, at the top of
+  [`docs/ops/satellite-deployment.md`](../ops/satellite-deployment.md).
+
+- **The version appears in the published source four times and release-please
+  rewrites at most one per line.** Its generic updater is line-based, and its
+  version pattern treats what follows a `-` as a pre-release tag, so a wheel file
+  name and its version on one line would be rewritten into a file name no release
+  produces. The source is laid out so each version sits on a line of its own, and
+  `apps/ha-satellite/tests/test_satellite_app_source.py` replays that updater
+  over the committed bytes so the layout cannot quietly stop working.
+
+- **Four findings this work turned up are recorded in
+  [`docs/tasks.md`](../tasks.md) rather than fixed here**: the same `ExecStart`
+  assumption the third task fixed in `reachyctl` still lives in
+  `provisioning/ansible`, where the idempotency gate's container target cannot
+  see it; two `cli/reachyctl` provision tests monkeypatch lookups that were
+  already captured as default arguments, so they pass on a runner and fail on
+  every local worktree including a clean `main`; the benchmark tolerances are
+  marginal across the suite, and widening the one that fires is the wrong fix;
+  and `REACHY_SATELLITE_WEB_ENABLED=false` on a robot with no identity leaves no
+  configuration surface at all, with the setting that did it reachable only from
+  the environment.
 
 ## Open Questions
 

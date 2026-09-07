@@ -12,8 +12,10 @@ It extends the [HA Satellite](../ha-satellite/),
 [Home Assistant Configuration and Camera Feed](../home-assistant-configuration-and-camera-feed/)
 and [reachyctl](../reachyctl/) contracts without changing the announced entity
 model, the robot-link wire format, the deployment topology or the shape of the
-robot's durable machine state. The behavior described here is proposed and not
-yet implemented.
+robot's durable machine state. The behavior described here is implemented:
+[change 0021](../../changes/0021-stock-robot-installation.md) delivered all
+eight requirements across four pull requests, and the last of them registered
+this specification for requirements traceability.
 
 ## Background
 
@@ -422,3 +424,4 @@ fail independently and the second is the one an operator notices.
 |------|--------|----------|
 | 2026-09-06 | Initial spec created | [0021-stock-robot-installation](../../changes/0021-stock-robot-installation.md) |
 | 2026-09-06 | REQ-102's adoption scenario made restart-bound, and the Design section given the reason | [0021-stock-robot-installation](../../changes/0021-stock-robot-installation.md) |
+| 2026-09-06 | All eight requirements implemented and the spec registered for traceability; the Overview's "proposed and not yet implemented" corrected | [0021-stock-robot-installation](../../changes/0021-stock-robot-installation.md) |
